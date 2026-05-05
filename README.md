@@ -3,6 +3,26 @@
 Authoritative server for Project Dawn. See `docs/server_design.md` for the
 full architecture contract.
 
+## Quick start
+
+First time on a clean clone (Windows / PowerShell or any POSIX shell):
+
+```sh
+cd F:\Projects\server
+cp .env.example .env
+cargo run -p projectdawn-server
+```
+
+That's it — `rustup` auto-installs the pinned 1.95.0 toolchain on first
+build, `sqlx` auto-applies migrations on first boot, and the auth
+service starts listening on `0.0.0.0:8765`.
+
+To run the test suite (5 tests, ~30 s including build):
+
+```sh
+cargo test
+```
+
 ## Status
 
 Pre-alpha. Currently provides the auth WebSocket service only:

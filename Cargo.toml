@@ -1,0 +1,61 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/projectdawn-server",
+    "crates/shared",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "Proprietary"
+publish = false
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.41.1", features = ["full"] }
+tokio-tungstenite = "0.24.0"
+futures-util = "0.3.31"
+
+# Serialization
+serde = { version = "1.0.215", features = ["derive"] }
+serde_json = "1.0.133"
+bincode = { version = "2.0.1", features = ["serde"] }
+
+# Database
+sqlx = { version = "0.8.2", features = [
+    "runtime-tokio",
+    "sqlite",
+    "macros",
+    "migrate",
+    "chrono",
+] }
+
+# Crypto
+argon2 = "0.5.3"
+rand = "0.8.5"
+hex = "0.4.3"
+
+# Logging
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+
+# Errors
+anyhow = "1.0.93"
+thiserror = "2.0.3"
+
+# Config
+toml = "0.8.19"
+
+# Time
+chrono = { version = "0.4.38", features = ["serde"] }
+
+# Internal
+protocol = { path = "crates/protocol" }
+shared   = { path = "crates/shared" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

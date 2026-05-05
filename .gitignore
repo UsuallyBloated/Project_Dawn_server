@@ -1,0 +1,17 @@
+/target/
+/**/target/
+
+# SQLite databases (created at runtime / per-test)
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Local config / secrets
+.env
+config.toml
+
+# Editor
+.vscode/
+.idea/
+*.swp

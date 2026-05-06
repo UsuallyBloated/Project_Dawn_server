@@ -18,6 +18,7 @@ async fn start_server() -> (String, TempDir) {
 
     let cfg = Config {
         auth_bind: "127.0.0.1:0".into(),
+        world_bind: "127.0.0.1:0".into(),
         world_endpoint: "127.0.0.1:7777".into(),
         database_url: url.clone(),
         min_client_version: projectdawn_server::config::semver::Version {
@@ -25,6 +26,9 @@ async fn start_server() -> (String, TempDir) {
             minor: 1,
             patch: 0,
         },
+        // Fixed bytes — auth tests never actually mint a token, so the
+        // value doesn't matter; we just need *some* 32-byte array.
+        netcode_private_key: [0xA5; 32],
     };
 
     let pool = db::open(&url).await.expect("open pool");

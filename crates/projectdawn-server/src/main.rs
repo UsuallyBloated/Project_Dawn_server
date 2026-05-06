@@ -2,7 +2,7 @@
 //! library crate.
 
 use anyhow::Context;
-use projectdawn_server::{auth, db, Config};
+use projectdawn_server::{auth, db, world, Config};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -16,9 +16,13 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // `Config::load` enforces PROJECTDAWN_NETCODE_KEY presence — we'll fail
+    // loud here before binding any sockets if it's missing or malformed.
     let cfg = Config::load().context("loading server config")?;
     tracing::info!(
         auth_bind = %cfg.auth_bind,
+        world_bind = %cfg.world_bind,
+        world_endpoint = %cfg.world_endpoint,
         db = %cfg.database_url,
         min_client = %cfg.min_client_version,
         "starting projectdawn-server"
@@ -28,7 +32,14 @@ async fn main() -> anyhow::Result<()> {
     db::migrate(&pool).await?;
 
     let cfg_arc = std::sync::Arc::new(cfg);
-    auth::serve(cfg_arc, pool).await?;
+
+    // Run auth (WS) and world (UDP) concurrently. The first to error wins.
+    // For graceful shutdown we'd intercept Ctrl-C and tell both to drain;
+    // alpha-stage is fine with abrupt termination since DB writes are
+    // per-mutation atomic and the 60 s checkpoint bounds position loss.
+    let auth_fut = auth::serve(cfg_arc.clone(), pool.clone());
+    let world_fut = world::serve(cfg_arc, pool);
+    tokio::try_join!(auth_fut, world_fut)?;
     Ok(())
 }
 

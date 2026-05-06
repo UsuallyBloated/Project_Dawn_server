@@ -308,3 +308,116 @@ pub async fn delete_character(
     }
     Ok(())
 }
+
+/// Confirm `char_id` belongs to `account_id` and is not soft-deleted.
+/// Used by the auth handler before minting a world ConnectToken — without
+/// this a logged-in player could request a token for *any* character.
+pub async fn verify_char_owned(
+    pool: &SqlitePool,
+    account_id: i64,
+    char_id: i64,
+) -> AuthResult<()> {
+    let row = sqlx::query(
+        "SELECT 1 FROM characters
+         WHERE id = ?1 AND account_id = ?2 AND deleted_at IS NULL",
+    )
+    .bind(char_id)
+    .bind(account_id)
+    .fetch_optional(pool)
+    .await?;
+    if row.is_none() {
+        return Err(AuthError::NotFound);
+    }
+    Ok(())
+}
+
+/// Loaded snapshot of the persistent fields the world server cares about
+/// at character spawn. Inventory / equipment / skills land later.
+#[derive(Debug, Clone)]
+pub struct CharacterSpawn {
+    pub char_id: i64,
+    pub account_id: i64,
+    pub name: String,
+    pub level: i32,
+    pub hp: f32,
+    pub mp: f32,
+    pub stamina: f32,
+    pub zone: Option<String>,
+    pub pos: (f32, f32, f32),
+    pub yaw: f32,
+}
+
+#[derive(FromRow)]
+struct SpawnRow {
+    id: i64,
+    account_id: i64,
+    name: String,
+    level: i32,
+    hp: f32,
+    mp: f32,
+    stamina: f32,
+    zone: Option<String>,
+    pos_x: Option<f32>,
+    pos_y: Option<f32>,
+    pos_z: Option<f32>,
+    yaw: Option<f32>,
+}
+
+pub async fn load_character(
+    pool: &SqlitePool,
+    char_id: i64,
+) -> AuthResult<CharacterSpawn> {
+    let row: Option<SpawnRow> = sqlx::query_as(
+        "SELECT id, account_id, name, level, hp, mp, stamina,
+                zone, pos_x, pos_y, pos_z, yaw
+         FROM characters
+         WHERE id = ?1 AND deleted_at IS NULL",
+    )
+    .bind(char_id)
+    .fetch_optional(pool)
+    .await?;
+    let row = row.ok_or(AuthError::NotFound)?;
+    Ok(CharacterSpawn {
+        char_id: row.id,
+        account_id: row.account_id,
+        name: row.name,
+        level: row.level,
+        hp: row.hp,
+        mp: row.mp,
+        stamina: row.stamina,
+        zone: row.zone,
+        pos: (
+            row.pos_x.unwrap_or(0.0),
+            row.pos_y.unwrap_or(0.0),
+            row.pos_z.unwrap_or(0.0),
+        ),
+        yaw: row.yaw.unwrap_or(0.0),
+    })
+}
+
+/// Periodic checkpoint — called by the world server every ~60 s and on
+/// disconnect. Single-row UPDATE; cheap with WAL. We intentionally do NOT
+/// touch HP/MP/stamina here — those have their own paths once combat lands.
+pub async fn checkpoint_position(
+    pool: &SqlitePool,
+    char_id: i64,
+    zone: Option<&str>,
+    pos: (f32, f32, f32),
+    yaw: f32,
+) -> AuthResult<()> {
+    sqlx::query(
+        "UPDATE characters
+         SET zone = ?1, pos_x = ?2, pos_y = ?3, pos_z = ?4, yaw = ?5,
+             last_played_at = CURRENT_TIMESTAMP
+         WHERE id = ?6 AND deleted_at IS NULL",
+    )
+    .bind(zone)
+    .bind(pos.0)
+    .bind(pos.1)
+    .bind(pos.2)
+    .bind(yaw)
+    .bind(char_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}

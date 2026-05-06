@@ -37,6 +37,15 @@ pub enum ClientAuthMsg {
     Logout {
         session_token: String,
     },
+    /// Launcher → auth, after the user picks Play. Auth validates the
+    /// session and char ownership, then mints a renet `ConnectToken`
+    /// signed with the shared netcode private key. The launcher hands
+    /// the returned bytes to the game .exe (via temp file, not CLI arg —
+    /// CLI args are visible in `ps`/Task Manager).
+    RequestWorldToken {
+        session_token: String,
+        char_id: i64,
+    },
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────
@@ -72,6 +81,15 @@ pub enum ServerAuthMsg {
     },
     CharDeleted,
     LogoutOk,
+    /// Reply to `RequestWorldToken`. `token_bytes` is the serialized renet
+    /// `ConnectToken` (single-use, expires in ~30 s). `world_endpoint` is
+    /// where the game .exe should aim its UDP socket. `expires_at_unix`
+    /// lets the launcher abort early if it sat on the token too long.
+    WorldConnectToken {
+        token_bytes: Vec<u8>,
+        world_endpoint: String,
+        expires_at_unix: i64,
+    },
     Error {
         code: ErrorCode,
         msg: String,

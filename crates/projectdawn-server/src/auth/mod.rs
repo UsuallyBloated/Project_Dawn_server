@@ -7,7 +7,7 @@
 use crate::{
     db,
     error::{AuthError, AuthResult},
-    Config,
+    world, Config,
 };
 use futures_util::{SinkExt, StreamExt};
 use protocol::auth::{ClientAuthMsg, ServerAuthMsg};
@@ -199,6 +199,25 @@ async fn dispatch(
         ClientAuthMsg::Logout { session_token } => {
             db::revoke_session(pool, &session_token).await?;
             Ok(ServerAuthMsg::LogoutOk)
+        }
+        ClientAuthMsg::RequestWorldToken {
+            session_token,
+            char_id,
+        } => {
+            let account_id = db::touch_session(pool, &session_token).await?;
+            db::verify_char_owned(pool, account_id, char_id).await?;
+            let (token_bytes, expires_at_unix) = world::mint_connect_token(
+                cfg,
+                &cfg.world_endpoint,
+                char_id as u64,
+                account_id,
+            )
+            .map_err(AuthError::Internal)?;
+            Ok(ServerAuthMsg::WorldConnectToken {
+                token_bytes,
+                world_endpoint: cfg.world_endpoint.clone(),
+                expires_at_unix,
+            })
         }
     }
 }

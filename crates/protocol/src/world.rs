@@ -9,6 +9,10 @@
 
 use serde::{Deserialize, Serialize};
 
+/// renet `protocol_id` — bumped on any wire-format break.
+/// Auth-minted ConnectTokens are signed with this; mismatch ⇒ token rejected.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3031; // "PD_W0001"
+
 pub type EntityId = u64;
 pub type Sequence = u32;
 

@@ -24,6 +24,10 @@ serde = { version = "1.0.215", features = ["derive"] }
 serde_json = "1.0.133"
 bincode = { version = "2.0.1", features = ["serde"] }
 
+# Networking — pinned with `=` so an incidental 2.0.x bump can't change wire behavior.
+renet         = "=2.0.0"
+renet_netcode = "=2.0.0"
+
 # Database
 sqlx = { version = "0.8.2", features = [
     "runtime-tokio",

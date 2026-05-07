@@ -4,6 +4,15 @@ members = [
     "crates/protocol",
     "crates/projectdawn-server",
     "crates/shared",
+    "crates/gdext-net",
+]
+# `cargo build` / `cargo test` from the workspace root only touch the server-side
+# crates. The GDExtension is opted in explicitly via `cargo build -p gdext-net
+# --release` so a stray `cargo build` doesn't pull the gdext toolchain.
+default-members = [
+    "crates/protocol",
+    "crates/projectdawn-server",
+    "crates/shared",
 ]
 
 [workspace.package]

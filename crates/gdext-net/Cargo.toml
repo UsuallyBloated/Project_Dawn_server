@@ -1,0 +1,34 @@
+[package]
+name = "gdext-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# cdylib output is what Godot's GDExtension loader links against.
+# `name = "gdext_net"` makes the artifact `gdext_net.dll` / `libgdext_net.so` /
+# `libgdext_net.dylib` exactly — that's what `gdext_net.gdextension` references.
+[lib]
+crate-type = ["cdylib"]
+name = "gdext_net"
+
+[dependencies]
+# Godot 4 Rust bindings (gdext). Pinned with `=` so an incidental upgrade can't
+# silently change codegen. `api-4-4` ties bindings to the editor version we
+# actually run; remove/replace when the project bumps Godot.
+godot = { version = "=0.5.2", features = ["api-4-4"] }
+
+# renet client + Secure-mode netcode transport. Pinned identically to the
+# server crate (workspace dep) so the wire format can't drift.
+renet         = { workspace = true }
+renet_netcode = { workspace = true }
+
+# bincode + serde for ClientWorldMsg / ServerWorldMsg encode/decode. Same
+# bincode 2 + `serde` feature as the server uses.
+bincode = { workspace = true }
+serde   = { workspace = true }
+
+# Wire-format types — shared verbatim with the server. This is the entire
+# point of having a Rust workspace: no hand-mirrored protocol drift.
+protocol = { workspace = true }

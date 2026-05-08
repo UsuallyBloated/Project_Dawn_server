@@ -85,6 +85,29 @@ pub async fn run(
                 }
                 ServerEvent::ClientDisconnected { client_id, reason } => {
                     tracing::info!(%client_id, ?reason, "client disconnected (transport)");
+
+                    // Drain any pending app-layer messages before removing the
+                    // connection. Without this, if the client sent
+                    // ClientWorldMsg::Disconnect and then tore down the
+                    // transport in the same UDP burst, the message is silently
+                    // lost because this event handler runs before the
+                    // message-drain phase below — and that phase skips clients
+                    // not in `connections`. Outcome is ignored; we're already
+                    // disconnecting.
+                    if let Some(conn) = connections.get_mut(&client_id) {
+                        for &channel in &[CHANNEL_SYSTEM, CHANNEL_POSITION] {
+                            while let Some(bytes) =
+                                server.receive_message(client_id, channel)
+                            {
+                                if let Some(msg) = handlers::decode_client(&bytes) {
+                                    let _ = handlers::handle_message(
+                                        &mut server, conn, client_id, msg, now,
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     if let Some(mut conn) = connections.remove(&client_id) {
                         // One last save for the road. Failure is non-fatal —
                         // worst case the player rolls back to the last 60 s

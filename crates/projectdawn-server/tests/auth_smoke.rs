@@ -45,7 +45,7 @@ async fn rpc(
     >,
     payload: serde_json::Value,
 ) -> serde_json::Value {
-    ws.send(Message::Text(payload.to_string().into()))
+    ws.send(Message::Text(payload.to_string()))
         .await
         .expect("send");
     let frame = ws.next().await.expect("frame").expect("ok frame");

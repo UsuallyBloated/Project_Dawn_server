@@ -126,7 +126,7 @@ async fn handle_connection(
         };
 
         write
-            .send(Message::Text(serde_json::to_string(&response)?.into()))
+            .send(Message::Text(serde_json::to_string(&response)?))
             .await?;
     }
 
@@ -230,7 +230,7 @@ where
         code: err.code(),
         msg: err.user_msg(),
     };
-    sink.send(Message::Text(serde_json::to_string(&resp)?.into()))
+    sink.send(Message::Text(serde_json::to_string(&resp)?))
         .await?;
     Ok(())
 }

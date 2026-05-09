@@ -41,7 +41,7 @@ pub mod semver {
             // Ignore pre-release / build metadata.
             let patch_field = parts.next().unwrap_or("0");
             let patch_str = patch_field
-                .split(|c: char| c == '-' || c == '+')
+                .split(['-', '+'])
                 .next()
                 .unwrap_or("0");
             let patch = patch_str.parse().ok()?;

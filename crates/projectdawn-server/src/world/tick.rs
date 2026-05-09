@@ -3,9 +3,10 @@
 //! pipeline.
 
 use super::{
-    connection::PerConnection,
+    connection::{PerConnection, Vec3f},
     handlers::{self, Outcome},
-    persistence, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL, TICK_DT,
+    persistence, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL, MAX_MOVE_SPEED,
+    STALE_MOVE_THRESHOLD, TICK_DT,
 };
 use crate::{db, Config};
 use protocol::world::KickCode;
@@ -178,7 +179,27 @@ pub async fn run(
             server.disconnect(client_id);
         }
 
-        // 5. Broadcast position to each ready client. Slice 1 has no AOI
+        // 5. Integrate movement intent exactly once per tick. The Move
+        //    handler stores the latest direction on the connection; we
+        //    advance position here so the rate is bound to wall-clock
+        //    ticks rather than client message arrival rate. Stale-move
+        //    threshold: if no Move has arrived in STALE_MOVE_THRESHOLD,
+        //    integrate zero — protects against a crashed client visually
+        //    running forward until the heartbeat timeout.
+        let dt = TICK_DT.as_secs_f32();
+        for conn in connections.values_mut().filter(|c| c.ready) {
+            let dir = match conn.last_move_received {
+                Some(t) if now.duration_since(t) < STALE_MOVE_THRESHOLD => {
+                    conn.latest_direction
+                }
+                _ => Vec3f::ZERO,
+            };
+            conn.pos.x += dir.x * MAX_MOVE_SPEED * dt;
+            conn.pos.y += dir.y * MAX_MOVE_SPEED * dt;
+            conn.pos.z += dir.z * MAX_MOVE_SPEED * dt;
+        }
+
+        // 6. Broadcast position to each ready client. Slice 1 has no AOI
         //    (one player) so this is just an echo back to the owner.
         for (client_id, conn) in connections.iter_mut() {
             if !conn.ready {
@@ -187,14 +208,14 @@ pub async fn run(
             handlers::broadcast_position(&mut server, *client_id, conn);
         }
 
-        // 6. Periodic checkpoint.
+        // 7. Periodic checkpoint.
         if now.duration_since(last_checkpoint) >= CHECKPOINT_INTERVAL {
             let mut dirty: Vec<&mut PerConnection> = connections.values_mut().collect();
             persistence::checkpoint_dirty(&pool, &mut dirty).await;
             last_checkpoint = now;
         }
 
-        // 7. Push outbound packets to the network.
+        // 8. Push outbound packets to the network.
         transport.send_packets(&mut server);
 
     }

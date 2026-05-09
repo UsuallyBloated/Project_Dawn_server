@@ -12,7 +12,6 @@ pub struct Vec3f {
 }
 
 impl Vec3f {
-    #[allow(dead_code)] // standard zero constant; reaches first reader when AOI lands
     pub const ZERO: Self = Self { x: 0.0, y: 0.0, z: 0.0 };
 
     pub fn from_tuple(t: (f32, f32, f32)) -> Self {
@@ -63,6 +62,16 @@ pub struct PerConnection {
     /// Highest move sequence we've accepted from this client. Out-of-order
     /// packets get dropped (unreliable channel, so reorder is expected).
     pub last_move_seq: u32,
+    /// Most recent movement intent (unit vector, or zero for "stop").
+    /// Updated when a Move message is accepted; integrated once per
+    /// tick by the tick loop, NOT per-message. Per-message integration
+    /// would 3× speed under typical client send rates.
+    pub latest_direction: Vec3f,
+    /// Wall-clock time of the most recent accepted Move. The tick loop
+    /// stops integrating `latest_direction` once this gets older than
+    /// [`super::STALE_MOVE_THRESHOLD`] so a crashed client doesn't keep
+    /// visually moving until heartbeat timeout.
+    pub last_move_received: Option<Instant>,
 }
 
 impl PerConnection {
@@ -81,6 +90,8 @@ impl PerConnection {
             last_persisted_yaw: spawn.yaw,
             ready: false,
             last_move_seq: 0,
+            latest_direction: Vec3f::ZERO,
+            last_move_received: None,
         }
     }
 

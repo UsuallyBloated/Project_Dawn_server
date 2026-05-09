@@ -44,6 +44,13 @@ pub const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);
 /// Server-side speed cap for movement intents (m/s). Anything faster
 /// than this gets clamped — server-authoritative, no exceptions.
 pub const MAX_MOVE_SPEED: f32 = 7.5;
+/// How long we keep integrating the last received direction after the
+/// most recent Move message. Beyond this window, the connection is
+/// treated as idle and integration stops — protects against a crashed
+/// client visually running forward until the 10 s heartbeat timeout
+/// fires. A single missed tick (50 ms) won't trigger this; ~10 missed
+/// ticks (500 ms) will.
+pub const STALE_MOVE_THRESHOLD: Duration = Duration::from_millis(500);
 /// `ConnectToken` validity window. The launcher must hand off to the
 /// game .exe and have it connect inside this many seconds.
 pub const CONNECT_TOKEN_EXPIRE_SECS: u64 = 30;

@@ -4,7 +4,7 @@
 
 use super::{
     connection::{PerConnection, Vec3f},
-    CHANNEL_POSITION, CHANNEL_SYSTEM, MAX_MOVE_SPEED, TICK_DT,
+    CHANNEL_POSITION, CHANNEL_SYSTEM,
 };
 use bincode::config::standard as bincode_cfg;
 use protocol::world::{ClientWorldMsg, KickCode, ServerWorldMsg, Vec3};
@@ -81,14 +81,15 @@ pub fn handle_message(
             }
             conn.last_move_seq = sequence;
 
+            // Store the latest intent for the tick loop to integrate exactly
+            // once per tick. Integrating here would advance pos N times when
+            // N Moves arrive between ticks — at typical client send rates
+            // that's a ~3× speedup. Server-authoritative speed cap is
+            // enforced by clamping the direction to unit length; the tick
+            // loop multiplies by MAX_MOVE_SPEED × TICK_DT.
             let dir = Vec3f { x: direction.x, y: direction.y, z: direction.z };
-            // Server-authoritative speed cap. The client sends a unit
-            // direction; we multiply by max speed × tick dt.
-            let dir = dir.clamp_length(1.0);
-            let dt = TICK_DT.as_secs_f32();
-            conn.pos.x += dir.x * MAX_MOVE_SPEED * dt;
-            conn.pos.y += dir.y * MAX_MOVE_SPEED * dt;
-            conn.pos.z += dir.z * MAX_MOVE_SPEED * dt;
+            conn.latest_direction = dir.clamp_length(1.0);
+            conn.last_move_received = Some(now);
             Outcome::Continue
         }
 

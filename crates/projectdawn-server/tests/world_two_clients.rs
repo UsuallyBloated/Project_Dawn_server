@@ -193,6 +193,26 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Disconnect);
     }
 
+    fn send_resource_update(
+        &mut self,
+        hp: f32,
+        max_hp: f32,
+        mp: f32,
+        max_mp: f32,
+        stamina: f32,
+        max_stamina: f32,
+    ) {
+        let msg = ClientWorldMsg::ResourceUpdate {
+            hp,
+            max_hp,
+            mp,
+            max_mp,
+            stamina,
+            max_stamina,
+        };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
     async fn wait_for(
         &mut self,
         channel: u8,
@@ -299,6 +319,85 @@ async fn two_clients_see_each_other() {
     })
     .await
     .expect("A receives EntityDespawn for B");
+}
+
+/// Track 4 sub-task 1: resource bar replication. When the owning client
+/// broadcasts a `ResourceUpdate`, the server fans out three separate
+/// ServerWorldMsg variants (HealthUpdate / ManaUpdate / StaminaUpdate) to
+/// every other ready peer. The owner does NOT receive its own broadcast
+/// (it's the authority — it already has the values).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_clients_resource_fanout() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "gamma", "Gam", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "delta", "Del", "Elf", "Cleric").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+
+    // Drain any pending spawn / position broadcasts that landed before our
+    // first ResourceUpdate so the wait_for below doesn't latch onto stale
+    // pre-update state.
+    let _ = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(200), |m| {
+            matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == b_char_id as u64)
+        })
+        .await;
+
+    // A broadcasts resources. B should see all three variants for A.
+    a.send_resource_update(73.0, 100.0, 42.0, 80.0, 55.0, 100.0);
+
+    // Pump A so the queued ResourceUpdate actually reaches the wire.
+    // `wait_for` on B doesn't tick A; without this nudge the bytes sit
+    // in A's outgoing buffer forever.
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let h_at_b = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_char_id as u64)
+        })
+        .await
+        .expect("B receives HealthUpdate for A");
+    if let ServerWorldMsg::HealthUpdate { hp, max_hp, .. } = h_at_b {
+        assert!((hp - 73.0).abs() < 0.01, "hp roundtrip: {hp}");
+        assert!((max_hp - 100.0).abs() < 0.01, "max_hp roundtrip: {max_hp}");
+    }
+
+    let m_at_b = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == a_char_id as u64)
+        })
+        .await
+        .expect("B receives ManaUpdate for A");
+    if let ServerWorldMsg::ManaUpdate { mp, max_mp, .. } = m_at_b {
+        assert!((mp - 42.0).abs() < 0.01, "mp roundtrip: {mp}");
+        assert!((max_mp - 80.0).abs() < 0.01, "max_mp roundtrip: {max_mp}");
+    }
+
+    let s_at_b = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::StaminaUpdate { id, .. } if *id == a_char_id as u64)
+        })
+        .await
+        .expect("B receives StaminaUpdate for A");
+    if let ServerWorldMsg::StaminaUpdate { stamina, max, .. } = s_at_b {
+        assert!((stamina - 55.0).abs() < 0.01, "stamina roundtrip: {stamina}");
+        assert!((max - 100.0).abs() < 0.01, "max stamina roundtrip: {max}");
+    }
+
+    // Owner should NOT receive its own HealthUpdate back.
+    let echoed = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
+            matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_char_id as u64)
+        })
+        .await;
+    assert!(echoed.is_none(), "A should not receive own HealthUpdate echo");
 }
 
 fn tick_one(client: &mut RenetClient, transport: &mut NetcodeClientTransport) {

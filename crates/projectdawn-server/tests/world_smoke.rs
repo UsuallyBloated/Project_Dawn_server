@@ -230,7 +230,7 @@ async fn world_connect_move_position_disconnect() {
     .await
     .expect("ConnectOk arrived");
     let player_id = match connect_ok {
-        ServerWorldMsg::ConnectOk { player_id } => player_id,
+        ServerWorldMsg::ConnectOk { player_id, .. } => player_id,
         _ => unreachable!(),
     };
     assert_eq!(

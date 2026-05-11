@@ -22,6 +22,11 @@ pub enum Outcome {
     /// loop owes the new client an EntitySpawn for every existing ready peer,
     /// and every existing ready peer an EntitySpawn for the new client.
     JustConnected,
+    /// Client broadcast its current resources. The handler has already
+    /// updated `conn.last_*`; the tick loop fans out to every other ready
+    /// peer in a post-dispatch sweep so a single sender's update isn't
+    /// duplicated across multiple ResourceUpdate messages in one tick.
+    ResourceFanOut,
 }
 
 pub fn handle_message(
@@ -101,6 +106,29 @@ pub fn handle_message(
             Outcome::Continue
         }
 
+        ClientWorldMsg::ResourceUpdate {
+            hp,
+            max_hp,
+            mp,
+            max_mp,
+            stamina,
+            max_stamina,
+        } => {
+            if !conn.ready {
+                // Client started broadcasting before completing the
+                // handshake — drop silently rather than caching garbage.
+                return Outcome::Continue;
+            }
+            conn.last_hp = hp;
+            conn.last_max_hp = max_hp;
+            conn.last_mp = mp;
+            conn.last_max_mp = max_mp;
+            conn.last_stamina = stamina;
+            conn.last_max_stamina = max_stamina;
+            conn.resource_state_set = true;
+            Outcome::ResourceFanOut
+        }
+
         // The other ~30 ClientWorldMsg variants land in later tracks.
         // Unknown-but-decoded messages: ignore, don't kick. Unknown-and-
         // failed-to-decode messages don't reach here (decode error is
@@ -166,9 +194,57 @@ pub fn send_entity_despawn(
     }
 }
 
+/// Fan out `conn`'s cached resources to every recipient as three separate
+/// ServerWorldMsg variants (HealthUpdate / ManaUpdate / StaminaUpdate).
+/// Each variant is encoded once and the bytes cloned per recipient —
+/// matches the Position fan-out pattern.
+///
+/// No-op if the connection has never broadcast a `ResourceUpdate` (we
+/// have nothing meaningful to send and don't want to broadcast zeros).
+pub fn fan_out_resources(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    conn: &PerConnection,
+) {
+    if !conn.resource_state_set || recipients.is_empty() {
+        return;
+    }
+    let id = conn.char_id as u64;
+    let h = encode(&ServerWorldMsg::HealthUpdate {
+        id,
+        hp: conn.last_hp,
+        max_hp: conn.last_max_hp,
+    });
+    let m = encode(&ServerWorldMsg::ManaUpdate {
+        id,
+        mp: conn.last_mp,
+        max_mp: conn.last_max_mp,
+    });
+    let s = encode(&ServerWorldMsg::StaminaUpdate {
+        id,
+        stamina: conn.last_stamina,
+        max: conn.last_max_stamina,
+    });
+    for recipient in recipients {
+        if let Some(b) = &h {
+            server.send_message(*recipient, CHANNEL_SYSTEM, b.clone());
+        }
+        if let Some(b) = &m {
+            server.send_message(*recipient, CHANNEL_SYSTEM, b.clone());
+        }
+        if let Some(b) = &s {
+            server.send_message(*recipient, CHANNEL_SYSTEM, b.clone());
+        }
+    }
+}
+
 fn send_connect_ok(server: &mut RenetServer, client_id: ClientId, conn: &PerConnection) {
     let msg = ServerWorldMsg::ConnectOk {
         player_id: conn.char_id as u64,
+        name: conn.name.clone(),
+        race: conn.race.clone(),
+        class: conn.class.clone(),
+        level: conn.level.max(0) as u32,
     };
     if let Some(bytes) = encode(&msg) {
         server.send_message(client_id, CHANNEL_SYSTEM, bytes);

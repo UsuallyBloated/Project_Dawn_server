@@ -74,6 +74,18 @@ pub struct PerConnection {
     /// [`super::STALE_MOVE_THRESHOLD`] so a crashed client doesn't keep
     /// visually moving until heartbeat timeout.
     pub last_move_received: Option<Instant>,
+
+    /// Last resources broadcast by this client (Track 4). Cached so newly
+    /// joining peers can be sent the current resources in step 4a alongside
+    /// EntitySpawn. `resource_state_set` flips true on first
+    /// `ResourceUpdate` — until then we have nothing to forward.
+    pub last_hp: f32,
+    pub last_max_hp: f32,
+    pub last_mp: f32,
+    pub last_max_mp: f32,
+    pub last_stamina: f32,
+    pub last_max_stamina: f32,
+    pub resource_state_set: bool,
 }
 
 impl PerConnection {
@@ -96,6 +108,13 @@ impl PerConnection {
             last_move_seq: 0,
             latest_direction: Vec3f::ZERO,
             last_move_received: None,
+            last_hp: 0.0,
+            last_max_hp: 0.0,
+            last_mp: 0.0,
+            last_max_mp: 0.0,
+            last_stamina: 0.0,
+            last_max_stamina: 0.0,
+            resource_state_set: false,
         }
     }
 

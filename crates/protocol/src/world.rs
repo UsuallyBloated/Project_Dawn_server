@@ -11,7 +11,11 @@ use serde::{Deserialize, Serialize};
 
 /// renet `protocol_id` — bumped on any wire-format break.
 /// Auth-minted ConnectTokens are signed with this; mismatch ⇒ token rejected.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3032; // "PD_W0002"
+///
+/// PD_W0003 covers the Track 4 batch: `ResourceUpdate` (plus the cast/buff/
+/// combat/death broadcast variants added in the same session). One bump per
+/// track; individual sub-task commits append new variants under this id.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3033; // "PD_W0003"
 
 pub type EntityId = u64;
 pub type Sequence = u32;
@@ -200,6 +204,20 @@ pub enum ClientWorldMsg {
     GmCommand {
         line: String,
     },
+
+    // Track 4: owning-client → server broadcast of current resources. Server
+    // fans out to peers as three separate ServerWorldMsg variants
+    // (HealthUpdate / ManaUpdate / StaminaUpdate) so the existing typed
+    // signals on the client can stay unchanged. Throttled client-side to
+    // ~4 Hz under quiet conditions; fires immediately on >5% delta of max.
+    ResourceUpdate {
+        hp: f32,
+        max_hp: f32,
+        mp: f32,
+        max_mp: f32,
+        stamina: f32,
+        max_stamina: f32,
+    },
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────
@@ -223,8 +241,18 @@ pub enum QuestStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerWorldMsg {
     // Connection
+    /// Sent once after the app-layer `Connect` handshake completes. Carries
+    /// the local player's identity (name/race/class/level) so the game can
+    /// initialize PlayerStats before changing to the world scene — without
+    /// this, launcher-mode characters spawn classless and can't cast or use
+    /// skills. The server is authoritative on these fields (loaded from DB
+    /// in `CharacterSpawn`); the launcher doesn't need to relay them.
     ConnectOk {
         player_id: EntityId,
+        name: String,
+        race: String,
+        class: String,
+        level: u32,
     },
     Kick {
         reason: String,

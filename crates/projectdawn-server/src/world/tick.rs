@@ -165,6 +165,9 @@ pub async fn run(
         let client_ids: Vec<ClientId> = server.clients_id_iter().collect();
         let mut to_disconnect: Vec<ClientId> = Vec::new();
         let mut newly_connected: Vec<ClientId> = Vec::new();
+        // Senders whose resources changed this tick. Dedup-on-insert so a
+        // burst of ResourceUpdates inside one tick produces a single fan-out.
+        let mut resource_fanouts: Vec<ClientId> = Vec::new();
         for client_id in client_ids {
             // Skip clients whose Connected event is in the queue but whose
             // PerConnection row hasn't been built yet (load_character failed
@@ -181,6 +184,11 @@ pub async fn run(
                     match handlers::handle_message(&mut server, conn, client_id, msg, now) {
                         Outcome::Disconnect => to_disconnect.push(client_id),
                         Outcome::JustConnected => newly_connected.push(client_id),
+                        Outcome::ResourceFanOut => {
+                            if !resource_fanouts.contains(&client_id) {
+                                resource_fanouts.push(client_id);
+                            }
+                        }
                         Outcome::Continue => {}
                     }
                 }
@@ -233,8 +241,40 @@ pub async fn run(
             for peer_id in &peer_ids {
                 if let Some(peer_conn) = connections.get(peer_id) {
                     handlers::send_entity_spawn(&mut server, *new_id, peer_conn);
+                    // Seed the new client with each existing peer's last-
+                    // known resources (Track 4). No-op for peers that
+                    // haven't broadcast yet; their values land naturally on
+                    // the next ResourceUpdate fan-out.
+                    handlers::fan_out_resources(
+                        &mut server,
+                        std::slice::from_ref(new_id),
+                        peer_conn,
+                    );
                 }
             }
+        }
+
+        // 4b. Resource fan-out — owning client → every other ready peer.
+        //     Runs after step 4a so the new-joiner seed above already covered
+        //     the JustConnected case; this loop only handles ongoing updates.
+        let ready_for_fanout: Vec<ClientId> = connections
+            .iter()
+            .filter(|(_, c)| c.ready)
+            .map(|(id, _)| *id)
+            .collect();
+        for sender_id in &resource_fanouts {
+            if to_disconnect.contains(sender_id) {
+                continue;
+            }
+            let Some(sender) = connections.get(sender_id) else {
+                continue;
+            };
+            let recipients: Vec<ClientId> = ready_for_fanout
+                .iter()
+                .filter(|id| *id != sender_id)
+                .copied()
+                .collect();
+            handlers::fan_out_resources(&mut server, &recipients, sender);
         }
 
         // 5. Integrate movement intent exactly once per tick. The Move

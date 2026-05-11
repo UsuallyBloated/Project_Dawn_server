@@ -6,10 +6,11 @@
 //! drift would surface at compile time, not at runtime.
 //!
 //! Handled message types are decoded into typed signals: `ConnectOk`,
-//! `Heartbeat`, `Kick`, `Position`, `EntitySpawn`, `EntityDespawn`. Other
-//! variants get bubbled up via `unhandled_server_message(channel, bytes)`
-//! for forward-compat — when their handlers land, add a typed `match` arm
-//! in `classify` and a matching emit in `fire`.
+//! `Heartbeat`, `Kick`, `Position`, `EntitySpawn`, `EntityDespawn`,
+//! `HealthUpdate`, `ManaUpdate`, `StaminaUpdate`. Other variants get bubbled
+//! up via `unhandled_server_message(channel, bytes)` for forward-compat —
+//! when their handlers land, add a typed `match` arm in `classify` and a
+//! matching emit in `fire`.
 
 // EntitySpawn signal carries 7 identity fields by design; godot-rust's
 // `#[godot_api]` proc-macro expands declarations into 8-arg fns (self + args),
@@ -72,9 +73,18 @@ impl NetClient {
     #[signal]
     fn transport_disconnected(reason: GString);
 
-    /// Server accepted the app-layer `Connect`; `player_id` is the entity id.
+    /// Server accepted the app-layer `Connect`. Carries the local player's
+    /// identity so the game can initialize PlayerStats before world entry.
+    /// Source of truth is the server's CharacterSpawn (DB-loaded); launcher
+    /// doesn't need to relay these.
     #[signal]
-    fn connect_ok(player_id: i64);
+    fn connect_ok(
+        player_id: i64,
+        name: GString,
+        race: GString,
+        class: GString,
+        level: i64,
+    );
 
     /// Server sent a `Kick`. `code` is the `KickCode` variant name.
     #[signal]
@@ -103,6 +113,18 @@ impl NetClient {
     /// player entities; future: out-of-range, despawn timer, etc.).
     #[signal]
     fn entity_despawn(id: i64);
+
+    /// Track 4 resource bars — relayed from the owning client's broadcast.
+    /// The owning client is the authority on the value; the server is a
+    /// fan-out relay until Track 6 lifts authority server-side.
+    #[signal]
+    fn health_update(id: i64, hp: f32, max_hp: f32);
+
+    #[signal]
+    fn mana_update(id: i64, mp: f32, max_mp: f32);
+
+    #[signal]
+    fn stamina_update(id: i64, stamina: f32, max: f32);
 
     /// Server-initiated app-layer Heartbeat (informational).
     #[signal]
@@ -254,6 +276,30 @@ impl NetClient {
         };
         self.send_app(CHANNEL_POSITION, &msg)
     }
+
+    /// Track 4: broadcast current resources. Reliable system channel so
+    /// momentary loss can't desync peer bars. Throttling lives client-side
+    /// (see autoloads/net_combat_broadcaster.gd); this just relays.
+    #[func]
+    fn send_resource_update(
+        &mut self,
+        hp: f32,
+        max_hp: f32,
+        mp: f32,
+        max_mp: f32,
+        stamina: f32,
+        max_stamina: f32,
+    ) -> bool {
+        let msg = ClientWorldMsg::ResourceUpdate {
+            hp,
+            max_hp,
+            mp,
+            max_mp,
+            stamina,
+            max_stamina,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
 }
 
 /// Pending side-effects from a single `tick_renet` call. We collect these
@@ -269,6 +315,10 @@ struct Pending {
 enum Incoming {
     ConnectOk {
         player_id: i64,
+        name: String,
+        race: String,
+        class: String,
+        level: u32,
     },
     Heartbeat,
     Kick {
@@ -293,6 +343,21 @@ enum Incoming {
     },
     EntityDespawn {
         id: i64,
+    },
+    HealthUpdate {
+        id: i64,
+        hp: f32,
+        max_hp: f32,
+    },
+    ManaUpdate {
+        id: i64,
+        mp: f32,
+        max_mp: f32,
+    },
+    StaminaUpdate {
+        id: i64,
+        stamina: f32,
+        max: f32,
     },
     Raw {
         channel: u8,
@@ -383,9 +448,23 @@ impl NetClient {
         }
         for ev in p.incoming {
             match ev {
-                Incoming::ConnectOk { player_id } => {
-                    self.base_mut()
-                        .emit_signal("connect_ok", &[player_id.to_variant()]);
+                Incoming::ConnectOk {
+                    player_id,
+                    name,
+                    race,
+                    class,
+                    level,
+                } => {
+                    self.base_mut().emit_signal(
+                        "connect_ok",
+                        &[
+                            player_id.to_variant(),
+                            GString::from(name.as_str()).to_variant(),
+                            GString::from(race.as_str()).to_variant(),
+                            GString::from(class.as_str()).to_variant(),
+                            (level as i64).to_variant(),
+                        ],
+                    );
                 }
                 Incoming::Heartbeat => {
                     self.base_mut().emit_signal("heartbeat", &[]);
@@ -443,6 +522,36 @@ impl NetClient {
                     self.base_mut()
                         .emit_signal("entity_despawn", &[id.to_variant()]);
                 }
+                Incoming::HealthUpdate { id, hp, max_hp } => {
+                    self.base_mut().emit_signal(
+                        "health_update",
+                        &[
+                            id.to_variant(),
+                            hp.to_variant(),
+                            max_hp.to_variant(),
+                        ],
+                    );
+                }
+                Incoming::ManaUpdate { id, mp, max_mp } => {
+                    self.base_mut().emit_signal(
+                        "mana_update",
+                        &[
+                            id.to_variant(),
+                            mp.to_variant(),
+                            max_mp.to_variant(),
+                        ],
+                    );
+                }
+                Incoming::StaminaUpdate { id, stamina, max } => {
+                    self.base_mut().emit_signal(
+                        "stamina_update",
+                        &[
+                            id.to_variant(),
+                            stamina.to_variant(),
+                            max.to_variant(),
+                        ],
+                    );
+                }
                 Incoming::Raw { channel, bytes } => {
                     let pba = packed_byte_array_from(&bytes);
                     self.base_mut().emit_signal(
@@ -457,8 +566,18 @@ impl NetClient {
 
 fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
     match msg {
-        ServerWorldMsg::ConnectOk { player_id } => Incoming::ConnectOk {
+        ServerWorldMsg::ConnectOk {
+            player_id,
+            name,
+            race,
+            class,
+            level,
+        } => Incoming::ConnectOk {
             player_id: player_id as i64,
+            name,
+            race,
+            class,
+            level,
         },
         ServerWorldMsg::Heartbeat => Incoming::Heartbeat,
         ServerWorldMsg::Kick { reason, code, .. } => Incoming::Kick {
@@ -496,7 +615,22 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             yaw,
         },
         ServerWorldMsg::EntityDespawn { id } => Incoming::EntityDespawn { id: id as i64 },
-        // Other variants (HealthUpdate, BuffApplied, ChatMessage, ...) get
+        ServerWorldMsg::HealthUpdate { id, hp, max_hp } => Incoming::HealthUpdate {
+            id: id as i64,
+            hp,
+            max_hp,
+        },
+        ServerWorldMsg::ManaUpdate { id, mp, max_mp } => Incoming::ManaUpdate {
+            id: id as i64,
+            mp,
+            max_mp,
+        },
+        ServerWorldMsg::StaminaUpdate { id, stamina, max } => Incoming::StaminaUpdate {
+            id: id as i64,
+            stamina,
+            max,
+        },
+        // Other variants (BuffApplied, CastStart, ChatMessage, ...) get
         // bubbled up raw. As their handlers land, add typed `match` arms here.
         _ => Incoming::Raw {
             channel,

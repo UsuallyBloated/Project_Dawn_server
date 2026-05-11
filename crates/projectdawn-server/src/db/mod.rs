@@ -338,6 +338,8 @@ pub struct CharacterSpawn {
     pub char_id: i64,
     pub account_id: i64,
     pub name: String,
+    pub race: String,
+    pub class: String,
     pub level: i32,
     pub hp: f32,
     pub mp: f32,
@@ -352,6 +354,8 @@ struct SpawnRow {
     id: i64,
     account_id: i64,
     name: String,
+    race: String,
+    class: String,
     level: i32,
     hp: f32,
     mp: f32,
@@ -368,7 +372,7 @@ pub async fn load_character(
     char_id: i64,
 ) -> AuthResult<CharacterSpawn> {
     let row: Option<SpawnRow> = sqlx::query_as(
-        "SELECT id, account_id, name, level, hp, mp, stamina,
+        "SELECT id, account_id, name, race, class, level, hp, mp, stamina,
                 zone, pos_x, pos_y, pos_z, yaw
          FROM characters
          WHERE id = ?1 AND deleted_at IS NULL",
@@ -381,6 +385,8 @@ pub async fn load_character(
         char_id: row.id,
         account_id: row.account_id,
         name: row.name,
+        race: row.race,
+        class: row.class,
         level: row.level,
         hp: row.hp,
         mp: row.mp,

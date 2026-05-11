@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// renet `protocol_id` — bumped on any wire-format break.
 /// Auth-minted ConnectTokens are signed with this; mismatch ⇒ token rejected.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3031; // "PD_W0001"
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3032; // "PD_W0002"
 
 pub type EntityId = u64;
 pub type Sequence = u32;
@@ -236,6 +236,18 @@ pub enum ServerWorldMsg {
     // Entity replication
     EntityDespawn {
         id: EntityId,
+    },
+    /// Identity payload for a player (or in future, any entity) appearing in
+    /// the recipient's AOI. Sent on the reliable system channel; ongoing
+    /// `Position` broadcasts stay lean.
+    EntitySpawn {
+        id: EntityId,
+        name: String,
+        race: String,
+        class: String,
+        level: u32,
+        pos: Vec3,
+        yaw: f32,
     },
     Position {
         id: EntityId,

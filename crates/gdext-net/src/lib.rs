@@ -5,11 +5,11 @@
 //! `crates/projectdawn-server` exactly via the shared `protocol` crate; any
 //! drift would surface at compile time, not at runtime.
 //!
-//! Slice 1 only handles the four message types the world server currently
-//! emits: `ConnectOk`, `Heartbeat`, `Kick`, `Position`. Other variants get
-//! bubbled up via `unhandled_server_message(channel, bytes)` for forward-
-//! compat — when their handlers land, switch the catch-all arm to typed
-//! signals, no GDScript change required for already-handled ones.
+//! Handled message types are decoded into typed signals: `ConnectOk`,
+//! `Heartbeat`, `Kick`, `Position`, `EntitySpawn`, `EntityDespawn`. Other
+//! variants get bubbled up via `unhandled_server_message(channel, bytes)`
+//! for forward-compat — when their handlers land, add a typed `match` arm
+//! in `classify` and a matching emit in `fire`.
 
 use bincode::config::standard as bincode_cfg;
 use godot::classes::{INode, Node};
@@ -76,6 +76,25 @@ impl NetClient {
     /// Server position broadcast. `sequence` echoes the last accepted Move seq.
     #[signal]
     fn position(id: i64, pos: Vector3, vel: Vector3, yaw: f32, sequence: i64);
+
+    /// Server announces a new entity in the recipient's AOI (slice 3: same
+    /// zone, no spatial filter). Carries identity fields the client needs on
+    /// first sight; ongoing Positions stay lean.
+    #[signal]
+    fn entity_spawn(
+        id: i64,
+        name: GString,
+        race: GString,
+        class: GString,
+        level: i64,
+        pos: Vector3,
+        yaw: f32,
+    );
+
+    /// Server announces an entity left the recipient's AOI (disconnect for
+    /// player entities; future: out-of-range, despawn timer, etc.).
+    #[signal]
+    fn entity_despawn(id: i64);
 
     /// Server-initiated app-layer Heartbeat (informational).
     #[signal]
@@ -255,6 +274,18 @@ enum Incoming {
         yaw: f32,
         sequence: u32,
     },
+    EntitySpawn {
+        id: i64,
+        name: String,
+        race: String,
+        class: String,
+        level: u32,
+        pos: WireVec3,
+        yaw: f32,
+    },
+    EntityDespawn {
+        id: i64,
+    },
     Raw {
         channel: u8,
         bytes: Vec<u8>,
@@ -378,6 +409,32 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::EntitySpawn {
+                    id,
+                    name,
+                    race,
+                    class,
+                    level,
+                    pos,
+                    yaw,
+                } => {
+                    self.base_mut().emit_signal(
+                        "entity_spawn",
+                        &[
+                            id.to_variant(),
+                            GString::from(name.as_str()).to_variant(),
+                            GString::from(race.as_str()).to_variant(),
+                            GString::from(class.as_str()).to_variant(),
+                            (level as i64).to_variant(),
+                            Vector3::new(pos.x, pos.y, pos.z).to_variant(),
+                            yaw.to_variant(),
+                        ],
+                    );
+                }
+                Incoming::EntityDespawn { id } => {
+                    self.base_mut()
+                        .emit_signal("entity_despawn", &[id.to_variant()]);
+                }
                 Incoming::Raw { channel, bytes } => {
                     let pba = packed_byte_array_from(&bytes);
                     self.base_mut().emit_signal(
@@ -413,6 +470,24 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             yaw,
             sequence,
         },
+        ServerWorldMsg::EntitySpawn {
+            id,
+            name,
+            race,
+            class,
+            level,
+            pos,
+            yaw,
+        } => Incoming::EntitySpawn {
+            id: id as i64,
+            name,
+            race,
+            class,
+            level,
+            pos,
+            yaw,
+        },
+        ServerWorldMsg::EntityDespawn { id } => Incoming::EntityDespawn { id: id as i64 },
         // Other variants (HealthUpdate, BuffApplied, ChatMessage, ...) get
         // bubbled up raw. As their handlers land, add typed `match` arms here.
         _ => Incoming::Raw {

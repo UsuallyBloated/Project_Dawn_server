@@ -11,6 +11,13 @@
 //! for forward-compat — when their handlers land, add a typed `match` arm
 //! in `classify` and a matching emit in `fire`.
 
+// EntitySpawn signal carries 7 identity fields by design; godot-rust's
+// `#[godot_api]` proc-macro expands declarations into 8-arg fns (self + args),
+// tripping clippy's default 7-arg threshold. The lint fires on the macro
+// invocation line, where `#[allow]` on the impl block doesn't reach. Suppress
+// crate-wide.
+#![allow(clippy::too_many_arguments)]
+
 use bincode::config::standard as bincode_cfg;
 use godot::classes::{INode, Node};
 use godot::prelude::*;
@@ -79,7 +86,8 @@ impl NetClient {
 
     /// Server announces a new entity in the recipient's AOI (slice 3: same
     /// zone, no spatial filter). Carries identity fields the client needs on
-    /// first sight; ongoing Positions stay lean.
+    /// first sight; ongoing Positions stay lean. 7 args — clippy threshold
+    /// is 7, godot-rust prepends self → 8; allow at impl-block level.
     #[signal]
     fn entity_spawn(
         id: i64,

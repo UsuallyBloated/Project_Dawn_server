@@ -109,6 +109,29 @@ pub async fn run(
                         }
                     }
 
+                    // Broadcast EntityDespawn to every other ready peer before
+                    // removing the conn from the map. Skip if the leaver never
+                    // app-connected (no EntitySpawn was ever sent for them, so
+                    // a despawn would land at peers who never had a record).
+                    let despawn_id = connections
+                        .get(&client_id)
+                        .filter(|c| c.ready)
+                        .map(|c| c.char_id as u64);
+                    if let Some(entity_id) = despawn_id {
+                        let peer_ids: Vec<ClientId> = connections
+                            .iter()
+                            .filter(|(id, c)| **id != client_id && c.ready)
+                            .map(|(id, _)| *id)
+                            .collect();
+                        for peer_id in peer_ids {
+                            handlers::send_entity_despawn(
+                                &mut server,
+                                peer_id,
+                                entity_id,
+                            );
+                        }
+                    }
+
                     if let Some(mut conn) = connections.remove(&client_id) {
                         // One last save for the road. Failure is non-fatal —
                         // worst case the player rolls back to the last 60 s
@@ -141,6 +164,7 @@ pub async fn run(
         // 3. Drain incoming application messages on each channel for each client.
         let client_ids: Vec<ClientId> = server.clients_id_iter().collect();
         let mut to_disconnect: Vec<ClientId> = Vec::new();
+        let mut newly_connected: Vec<ClientId> = Vec::new();
         for client_id in client_ids {
             // Skip clients whose Connected event is in the queue but whose
             // PerConnection row hasn't been built yet (load_character failed
@@ -154,10 +178,10 @@ pub async fn run(
                         continue;
                     };
                     let conn = connections.get_mut(&client_id).expect("checked above");
-                    if let Outcome::Disconnect =
-                        handlers::handle_message(&mut server, conn, client_id, msg, now)
-                    {
-                        to_disconnect.push(client_id);
+                    match handlers::handle_message(&mut server, conn, client_id, msg, now) {
+                        Outcome::Disconnect => to_disconnect.push(client_id),
+                        Outcome::JustConnected => newly_connected.push(client_id),
+                        Outcome::Continue => {}
                     }
                 }
             }
@@ -175,8 +199,42 @@ pub async fn run(
             }
         }
 
-        for client_id in to_disconnect {
-            server.disconnect(client_id);
+        for client_id in &to_disconnect {
+            server.disconnect(*client_id);
+        }
+
+        // 4a. EntitySpawn fan-out for clients that just completed the
+        //     app-layer Connect handshake. Each new client gets an
+        //     EntitySpawn for every already-ready peer; each already-ready
+        //     peer gets an EntitySpawn for the new client. Subject itself
+        //     skipped — `ConnectOk` is the new client's own-spawn signal.
+        //     Reliable channel ⇒ no race-induced lost spawns.
+        for new_id in &newly_connected {
+            // Skip if the new client got disconnected in this same tick
+            // (handle_message returned Disconnect on a later message).
+            if to_disconnect.contains(new_id) {
+                continue;
+            }
+            if !connections.contains_key(new_id) {
+                continue;
+            }
+            let peer_ids: Vec<ClientId> = connections
+                .iter()
+                .filter(|(id, c)| *id != new_id && c.ready)
+                .map(|(id, _)| *id)
+                .collect();
+            // New client → existing peers.
+            if let Some(new_conn) = connections.get(new_id) {
+                for peer_id in &peer_ids {
+                    handlers::send_entity_spawn(&mut server, *peer_id, new_conn);
+                }
+            }
+            // Existing peers → new client.
+            for peer_id in &peer_ids {
+                if let Some(peer_conn) = connections.get(peer_id) {
+                    handlers::send_entity_spawn(&mut server, *new_id, peer_conn);
+                }
+            }
         }
 
         // 5. Integrate movement intent exactly once per tick. The Move
@@ -199,13 +257,30 @@ pub async fn run(
             conn.pos.z += dir.z * MAX_MOVE_SPEED * dt;
         }
 
-        // 6. Broadcast position to each ready client. Slice 1 has no AOI
-        //    (one player) so this is just an echo back to the owner.
-        for (client_id, conn) in connections.iter_mut() {
-            if !conn.ready {
+        // 6. Position fan-out. Track 3: every ready client's position goes
+        //    to every ready client INCLUDING themselves — Track 2's
+        //    snap-or-lerp depends on the owner receiving their own
+        //    broadcasts. No AOI yet (slice 3 is "everyone in zone sees
+        //    everyone"); spatial filtering is a future track.
+        //
+        //    Encode each sender once, clone bytes per recipient. At
+        //    MAX_CLIENTS=64 and ~50 B per Position, worst case is
+        //    64×64×50 = 200 KB/tick of memcpy ≈ 4 MB/s. Trivial.
+        let ready_ids: Vec<ClientId> = connections
+            .iter()
+            .filter(|(_, c)| c.ready)
+            .map(|(id, _)| *id)
+            .collect();
+        for sender_id in &ready_ids {
+            let Some(sender) = connections.get(sender_id) else {
                 continue;
+            };
+            let Some(bytes) = handlers::build_position_msg(sender) else {
+                continue;
+            };
+            for recipient_id in &ready_ids {
+                server.send_message(*recipient_id, CHANNEL_POSITION, bytes.clone());
             }
-            handlers::broadcast_position(&mut server, *client_id, conn);
         }
 
         // 7. Periodic checkpoint.

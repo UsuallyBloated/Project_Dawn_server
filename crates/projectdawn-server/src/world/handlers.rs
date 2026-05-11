@@ -12,10 +12,16 @@ use renet::{ClientId, RenetServer};
 use std::time::Instant;
 
 /// Outcome of dispatching a single decoded `ClientWorldMsg`. The tick loop
-/// uses this to decide whether to keep the connection or tear it down.
+/// uses this to decide whether to keep the connection, tear it down, or
+/// follow up with multi-client side effects (EntitySpawn fan-out for a
+/// newly app-connected client).
 pub enum Outcome {
     Continue,
     Disconnect,
+    /// `conn.ready` transitioned from false to true this dispatch. The tick
+    /// loop owes the new client an EntitySpawn for every existing ready peer,
+    /// and every existing ready peer an EntitySpawn for the new client.
+    JustConnected,
 }
 
 pub fn handle_message(
@@ -54,7 +60,9 @@ pub fn handle_message(
             // Initial position so the client has something to render against
             // before the first broadcast tick.
             send_position(server, client_id, conn);
-            Outcome::Continue
+            // Tick loop runs the EntitySpawn fan-out (which needs the full
+            // connections map, not just this conn).
+            Outcome::JustConnected
         }
 
         ClientWorldMsg::Disconnect => {
@@ -101,14 +109,10 @@ pub fn handle_message(
     }
 }
 
-/// Broadcast the client's current position on the unreliable channel. For
-/// slice 1 with one player this is just an echo back to the owner; once
-/// area-of-interest lands it'll fan out to nearby players too.
-pub fn broadcast_position(server: &mut RenetServer, client_id: ClientId, conn: &PerConnection) {
-    send_position(server, client_id, conn);
-}
-
-fn send_position(server: &mut RenetServer, client_id: ClientId, conn: &PerConnection) {
+/// Encode a Position broadcast for `conn`. Returned bytes can be cloned and
+/// sent to multiple recipients per tick; the tick loop calls this once per
+/// sender and reuses the bytes across the fan-out.
+pub fn build_position_msg(conn: &PerConnection) -> Option<Vec<u8>> {
     let msg = ServerWorldMsg::Position {
         id: conn.char_id as u64,
         pos: Vec3 { x: conn.pos.x, y: conn.pos.y, z: conn.pos.z },
@@ -116,8 +120,49 @@ fn send_position(server: &mut RenetServer, client_id: ClientId, conn: &PerConnec
         yaw: conn.yaw,
         sequence: conn.last_move_seq,
     };
-    if let Some(bytes) = encode(&msg) {
+    encode(&msg)
+}
+
+fn send_position(server: &mut RenetServer, client_id: ClientId, conn: &PerConnection) {
+    if let Some(bytes) = build_position_msg(conn) {
         server.send_message(client_id, CHANNEL_POSITION, bytes);
+    }
+}
+
+/// Send an EntitySpawn for `conn` to a single recipient. Used both for the
+/// "new client → existing peers" and "existing peers → new client" sides of
+/// the connection handshake fan-out, plus any future per-recipient AOI
+/// transitions.
+pub fn send_entity_spawn(
+    server: &mut RenetServer,
+    recipient_id: ClientId,
+    conn: &PerConnection,
+) {
+    let msg = ServerWorldMsg::EntitySpawn {
+        id: conn.char_id as u64,
+        name: conn.name.clone(),
+        race: conn.race.clone(),
+        class: conn.class.clone(),
+        level: conn.level.max(0) as u32,
+        pos: Vec3 { x: conn.pos.x, y: conn.pos.y, z: conn.pos.z },
+        yaw: conn.yaw,
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// Send an EntityDespawn for `entity_id` to a single recipient. Reliable
+/// system channel so the despawn is guaranteed to arrive even if the
+/// preceding Position broadcasts are dropped on the unreliable channel.
+pub fn send_entity_despawn(
+    server: &mut RenetServer,
+    recipient_id: ClientId,
+    entity_id: u64,
+) {
+    let msg = ServerWorldMsg::EntityDespawn { id: entity_id };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
     }
 }
 

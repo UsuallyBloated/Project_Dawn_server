@@ -256,6 +256,14 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::Disconnect)
     }
 
+    /// Track 4 follow-up E: client signals it has left the lobby. Server
+    /// gates EntitySpawn / Position fan-out on this so peers don't see
+    /// ghost bodies while the local player is at the Enter World screen.
+    #[func]
+    fn send_enter_world(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::EnterWorld)
+    }
+
     #[func]
     fn send_heartbeat(&mut self) -> bool {
         self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::Heartbeat)

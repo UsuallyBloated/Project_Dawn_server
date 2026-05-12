@@ -109,18 +109,19 @@ pub async fn run(
                         }
                     }
 
-                    // Broadcast EntityDespawn to every other ready peer before
-                    // removing the conn from the map. Skip if the leaver never
-                    // app-connected (no EntitySpawn was ever sent for them, so
-                    // a despawn would land at peers who never had a record).
+                    // Broadcast EntityDespawn to every other in_world peer
+                    // before removing the conn from the map. Skip if the
+                    // leaver never entered the world (no EntitySpawn was
+                    // ever sent for them, so a despawn would land at peers
+                    // who never had a record).
                     let despawn_id = connections
                         .get(&client_id)
-                        .filter(|c| c.ready)
+                        .filter(|c| c.in_world)
                         .map(|c| c.char_id as u64);
                     if let Some(entity_id) = despawn_id {
                         let peer_ids: Vec<ClientId> = connections
                             .iter()
-                            .filter(|(id, c)| **id != client_id && c.ready)
+                            .filter(|(id, c)| **id != client_id && c.in_world)
                             .map(|(id, _)| *id)
                             .collect();
                         for peer_id in peer_ids {
@@ -164,7 +165,7 @@ pub async fn run(
         // 3. Drain incoming application messages on each channel for each client.
         let client_ids: Vec<ClientId> = server.clients_id_iter().collect();
         let mut to_disconnect: Vec<ClientId> = Vec::new();
-        let mut newly_connected: Vec<ClientId> = Vec::new();
+        let mut newly_in_world: Vec<ClientId> = Vec::new();
         // Senders whose resources changed this tick. Dedup-on-insert so a
         // burst of ResourceUpdates inside one tick produces a single fan-out.
         let mut resource_fanouts: Vec<ClientId> = Vec::new();
@@ -183,7 +184,7 @@ pub async fn run(
                     let conn = connections.get_mut(&client_id).expect("checked above");
                     match handlers::handle_message(&mut server, conn, client_id, msg, now) {
                         Outcome::Disconnect => to_disconnect.push(client_id),
-                        Outcome::JustConnected => newly_connected.push(client_id),
+                        Outcome::JustEnteredWorld => newly_in_world.push(client_id),
                         Outcome::ResourceFanOut => {
                             if !resource_fanouts.contains(&client_id) {
                                 resource_fanouts.push(client_id);
@@ -211,13 +212,13 @@ pub async fn run(
             server.disconnect(*client_id);
         }
 
-        // 4a. EntitySpawn fan-out for clients that just completed the
-        //     app-layer Connect handshake. Each new client gets an
-        //     EntitySpawn for every already-ready peer; each already-ready
-        //     peer gets an EntitySpawn for the new client. Subject itself
-        //     skipped — `ConnectOk` is the new client's own-spawn signal.
-        //     Reliable channel ⇒ no race-induced lost spawns.
-        for new_id in &newly_connected {
+        // 4a. EntitySpawn fan-out for clients that just sent `EnterWorld`.
+        //     Each new client gets an EntitySpawn for every in_world peer;
+        //     each in_world peer gets an EntitySpawn for the new client.
+        //     Subject itself skipped — `ConnectOk` is the new client's
+        //     own-spawn signal. Reliable channel ⇒ no race-induced lost
+        //     spawns.
+        for new_id in &newly_in_world {
             // Skip if the new client got disconnected in this same tick
             // (handle_message returned Disconnect on a later message).
             if to_disconnect.contains(new_id) {
@@ -228,7 +229,7 @@ pub async fn run(
             }
             let peer_ids: Vec<ClientId> = connections
                 .iter()
-                .filter(|(id, c)| *id != new_id && c.ready)
+                .filter(|(id, c)| *id != new_id && c.in_world)
                 .map(|(id, _)| *id)
                 .collect();
             // New client → existing peers.
@@ -254,12 +255,17 @@ pub async fn run(
             }
         }
 
-        // 4b. Resource fan-out — owning client → every other ready peer.
+        // 4b. Resource fan-out — owning client → every other in_world peer.
         //     Runs after step 4a so the new-joiner seed above already covered
-        //     the JustConnected case; this loop only handles ongoing updates.
-        let ready_for_fanout: Vec<ClientId> = connections
+        //     the JustEnteredWorld case; this loop only handles ongoing
+        //     updates. Sender does NOT need to be in_world for the fan-out
+        //     to fire (a peer in the lobby still broadcasts apply_character
+        //     resources that get cached) — the receiver filter is what
+        //     matters: peers without in_world have no RemotePlayer node to
+        //     render to.
+        let in_world_recipients: Vec<ClientId> = connections
             .iter()
-            .filter(|(_, c)| c.ready)
+            .filter(|(_, c)| c.in_world)
             .map(|(id, _)| *id)
             .collect();
         for sender_id in &resource_fanouts {
@@ -269,7 +275,7 @@ pub async fn run(
             let Some(sender) = connections.get(sender_id) else {
                 continue;
             };
-            let recipients: Vec<ClientId> = ready_for_fanout
+            let recipients: Vec<ClientId> = in_world_recipients
                 .iter()
                 .filter(|id| *id != sender_id)
                 .copied()
@@ -297,28 +303,31 @@ pub async fn run(
             conn.pos.z += dir.z * MAX_MOVE_SPEED * dt;
         }
 
-        // 6. Position fan-out. Track 3: every ready client's position goes
-        //    to every ready client INCLUDING themselves — Track 2's
+        // 6. Position fan-out. Every in_world client's position goes to
+        //    every in_world client INCLUDING themselves — Track 2's
         //    snap-or-lerp depends on the owner receiving their own
-        //    broadcasts. No AOI yet (slice 3 is "everyone in zone sees
-        //    everyone"); spatial filtering is a future track.
+        //    broadcasts. Gated on in_world both ways so lobby-state
+        //    clients don't broadcast static positions and don't receive
+        //    Position broadcasts they couldn't render anyway. No AOI yet
+        //    (slice 3 is "everyone in zone sees everyone"); spatial
+        //    filtering is a future track.
         //
         //    Encode each sender once, clone bytes per recipient. At
         //    MAX_CLIENTS=64 and ~50 B per Position, worst case is
         //    64×64×50 = 200 KB/tick of memcpy ≈ 4 MB/s. Trivial.
-        let ready_ids: Vec<ClientId> = connections
+        let in_world_ids: Vec<ClientId> = connections
             .iter()
-            .filter(|(_, c)| c.ready)
+            .filter(|(_, c)| c.in_world)
             .map(|(id, _)| *id)
             .collect();
-        for sender_id in &ready_ids {
+        for sender_id in &in_world_ids {
             let Some(sender) = connections.get(sender_id) else {
                 continue;
             };
             let Some(bytes) = handlers::build_position_msg(sender) else {
                 continue;
             };
-            for recipient_id in &ready_ids {
+            for recipient_id in &in_world_ids {
                 server.send_message(*recipient_id, CHANNEL_POSITION, bytes.clone());
             }
         }

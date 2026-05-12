@@ -238,6 +238,11 @@ async fn world_connect_move_position_disconnect() {
         "ConnectOk.player_id == requested char_id"
     );
 
+    // Track 4 follow-up E: Position fan-out is gated on EnterWorld. The
+    // real client sends this after the lobby's Enter World button; tests
+    // do it immediately after ConnectOk.
+    send_client_msg(&mut client, CHANNEL_SYSTEM, &ClientWorldMsg::EnterWorld);
+
     // Send a Move intent and wait for the resulting Position broadcast.
     // Direction (1, 0, 0) at MAX_MOVE_SPEED * TICK_DT should produce
     // pos.x ≈ 7.5 * 0.05 = 0.375 m on the very next tick — but the server

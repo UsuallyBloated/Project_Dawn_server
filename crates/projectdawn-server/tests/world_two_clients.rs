@@ -181,6 +181,18 @@ impl WorldClient {
         })
         .await
         .expect("ConnectOk arrived");
+        // Track 4 follow-up E: EntitySpawn / Position fan-out is gated on
+        // EnterWorld. Tests are post-lobby by design, so flip the gate
+        // immediately after ConnectOk. Pump the transport for a few ticks
+        // so the message actually goes out before start() returns —
+        // otherwise the bytes sit in the outgoing buffer until the next
+        // wait_for ticks the client, which may be after the test has
+        // moved on to another client's setup.
+        send_msg(&mut this.client, CHANNEL_SYSTEM, &ClientWorldMsg::EnterWorld);
+        for _ in 0..4 {
+            tick_one(&mut this.client, &mut this.transport);
+            tokio::time::sleep(TICK_DT).await;
+        }
         this
     }
 

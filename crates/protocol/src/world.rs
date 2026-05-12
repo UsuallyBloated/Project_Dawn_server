@@ -218,6 +218,13 @@ pub enum ClientWorldMsg {
         stamina: f32,
         max_stamina: f32,
     },
+
+    // Sent by the client when the player clicks "Enter World" in the lobby
+    // (i.e. the game scene actually loads). Server gates EntitySpawn fan-out
+    // on this — peers don't see a player's body until they've left the
+    // lobby. App-Connect alone is no longer enough to render to peers, but
+    // it's still enough to receive ConnectOk and prepare PlayerStats.
+    EnterWorld,
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────

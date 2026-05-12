@@ -13,17 +13,20 @@ use std::time::Instant;
 
 /// Outcome of dispatching a single decoded `ClientWorldMsg`. The tick loop
 /// uses this to decide whether to keep the connection, tear it down, or
-/// follow up with multi-client side effects (EntitySpawn fan-out for a
-/// newly app-connected client).
+/// follow up with multi-client side effects (EntitySpawn fan-out when a
+/// client enters the world, resource fan-out on ResourceUpdate, etc.).
 pub enum Outcome {
     Continue,
     Disconnect,
-    /// `conn.ready` transitioned from false to true this dispatch. The tick
-    /// loop owes the new client an EntitySpawn for every existing ready peer,
-    /// and every existing ready peer an EntitySpawn for the new client.
-    JustConnected,
+    /// `conn.in_world` transitioned false → true this dispatch (i.e. client
+    /// sent `EnterWorld` after leaving the lobby). The tick loop owes the
+    /// new client EntitySpawns for every existing in_world peer, and every
+    /// existing in_world peer an EntitySpawn for the new client. Peers
+    /// don't see a body until the owner has left the lobby — fixes the
+    /// "A sees B's static capsule while B is at Enter World" artifact.
+    JustEnteredWorld,
     /// Client broadcast its current resources. The handler has already
-    /// updated `conn.last_*`; the tick loop fans out to every other ready
+    /// updated `conn.last_*`; the tick loop fans out to every other in_world
     /// peer in a post-dispatch sweep so a single sender's update isn't
     /// duplicated across multiple ResourceUpdate messages in one tick.
     ResourceFanOut,
@@ -65,9 +68,26 @@ pub fn handle_message(
             // Initial position so the client has something to render against
             // before the first broadcast tick.
             send_position(server, client_id, conn);
-            // Tick loop runs the EntitySpawn fan-out (which needs the full
-            // connections map, not just this conn).
-            Outcome::JustConnected
+            // Fan-out is deferred until the client signals it has left the
+            // lobby (ClientWorldMsg::EnterWorld). Until then peers don't
+            // know about this client.
+            Outcome::Continue
+        }
+
+        ClientWorldMsg::EnterWorld => {
+            if !conn.ready {
+                // Out of order — EnterWorld without a completed Connect.
+                // Drop silently; a misbehaving client doesn't deserve a
+                // kick for this, and a correct client never sends it.
+                return Outcome::Continue;
+            }
+            if conn.in_world {
+                // Duplicate (player went to lobby and back? not supported
+                // yet, but defensive). Ignore.
+                return Outcome::Continue;
+            }
+            conn.in_world = true;
+            Outcome::JustEnteredWorld
         }
 
         ClientWorldMsg::Disconnect => {

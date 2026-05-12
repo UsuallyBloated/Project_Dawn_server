@@ -61,6 +61,10 @@ pub struct PerConnection {
     /// Set after the application-layer Connect handshake completes. Until
     /// then we won't broadcast positions to this client.
     pub ready: bool,
+    /// Set after the client sends `EnterWorld` (i.e. left the lobby). Gates
+    /// EntitySpawn fan-out so peers don't see ghost bodies for clients
+    /// still on the Enter World screen.
+    pub in_world: bool,
     /// Highest move sequence we've accepted from this client. Out-of-order
     /// packets get dropped (unreliable channel, so reorder is expected).
     pub last_move_seq: u32,
@@ -105,6 +109,7 @@ impl PerConnection {
             last_persisted_pos: pos,
             last_persisted_yaw: spawn.yaw,
             ready: false,
+            in_world: false,
             last_move_seq: 0,
             latest_direction: Vec3f::ZERO,
             last_move_received: None,

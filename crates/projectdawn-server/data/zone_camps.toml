@@ -1,0 +1,116 @@
+# Starter-zone spawn camps — server-authoritative source of truth.
+#
+# Ported from `Project_Dawn/data/zone_data.gd` (`STARTER_ZONE_CAMPS`). The
+# game client used to instantiate `EnemySpawner` nodes from that array at
+# scene-ready; that path is now obsolete in launcher mode. The server reads
+# this file at startup, populates `SpawnPoint`s, and is solely responsible
+# for spawning + ticking the mobs.
+#
+# Required mob keys:  name, level, hp, dmg, xp, speed, aggro
+# Optional camp keys: radius (default 3.0), respawn (default 35.0)
+# Optional mob keys:  leash (default = aggro * 2), melee_range (default 1.8),
+#                     attack_interval (default 2.5)
+#
+# Coordinates are world-space (Vector3 in Godot — y is up). Spawn-point
+# offsets at runtime apply a random XZ jitter within `radius`.
+
+default_radius = 3.0
+default_respawn = 35.0
+
+# ── Ring 1 · 18-22 units · lvl 1 ─────────────────────────────────────────
+[[camp]]
+desc = "Bonepile — decrepit skeletons lurking just outside the safe area"
+mob = { name = "Decrepit Skeleton", level = 1, hp = 25.0, dmg = 3, xp = 10, speed = 1.8, aggro = 8.0 }
+spawns = [
+    [20.0, 0.0, 5.0],
+    [8.0, 0.0, 22.0],
+    [-18.0, 0.0, 12.0],
+    [12.0, 0.0, -20.0],
+]
+
+# ── Ring 2 NE · 36-48 units · lvl 3 ──────────────────────────────────────
+[[camp]]
+desc = "Shallow Graves — rotting skeletons clawing out of the earth"
+mob = { name = "Rotting Skeleton", level = 3, hp = 58.0, dmg = 7, xp = 28, speed = 2.2, aggro = 10.0 }
+spawns = [
+    [36.0, 0.0, 28.0],
+    [44.0, 0.0, 22.0],
+    [30.0, 0.0, 40.0],
+]
+
+# ── Ring 2 SW · 35-48 units · lvl 2 ──────────────────────────────────────
+[[camp]]
+desc = "Rat Warrens — fast, skittish plague rats that swarm"
+mob = { name = "Plague Rat", level = 2, hp = 38.0, dmg = 5, xp = 18, speed = 4.2, aggro = 14.0 }
+spawns = [
+    [-35.0, 0.0, -28.0],
+    [-28.0, 0.0, -42.0],
+    [-44.0, 0.0, -22.0],
+    [-20.0, 0.0, -46.0],
+]
+
+# ── Ring 3 NW · 65-72 units · lvl 5 ──────────────────────────────────────
+[[camp]]
+desc = "Bandit Outpost — road cutthroats with actual combat training"
+mob = { name = "Bandit Scout", level = 5, hp = 92.0, dmg = 10, xp = 50, speed = 3.2, aggro = 14.0 }
+spawns = [
+    [-56.0, 0.0, 52.0],
+    [-64.0, 0.0, 60.0],
+    [-50.0, 0.0, 66.0],
+]
+
+# ── Ring 3 SE · 68-78 units · lvl 6 ──────────────────────────────────────
+[[camp]]
+desc = "Festering Mound — bloated ghouls that shamble fast when aggroed"
+mob = { name = "Plagued Ghoul", level = 6, hp = 116.0, dmg = 12, xp = 62, speed = 2.6, aggro = 14.0 }
+spawns = [
+    [58.0, 0.0, -56.0],
+    [70.0, 0.0, -52.0],
+    [55.0, 0.0, -70.0],
+]
+
+# ── Ring 4 N · 112-125 units · lvl 9 ─────────────────────────────────────
+[[camp]]
+desc = "The Broken Crypt — undead champions, armoured and relentless"
+mob = { name = "Undead Champion", level = 9, hp = 188.0, dmg = 20, xp = 92, speed = 2.5, aggro = 12.0 }
+spawns = [
+    [10.0, 0.0, 118.0],
+    [-8.0, 0.0, 124.0],
+    [2.0, 0.0, 112.0],
+]
+radius = 4.0
+respawn = 50.0
+
+# ── Ring 4 S · 112-125 units · lvl 10 ────────────────────────────────────
+[[camp]]
+desc = "Gnoll War Camp — gnoll brutes standing guard over a ruined encampment"
+mob = { name = "Gnoll Brute", level = 10, hp = 215.0, dmg = 22, xp = 102, speed = 3.0, aggro = 16.0 }
+spawns = [
+    [2.0, 0.0, -118.0],
+    [16.0, 0.0, -114.0],
+    [-12.0, 0.0, -124.0],
+]
+radius = 4.0
+respawn = 50.0
+
+# ── Ring 5 W · 162-175 units · lvl 14 ────────────────────────────────────
+[[camp]]
+desc = "Ossuary — bone colossi, rare and long-respawning"
+mob = { name = "Bone Colossus", level = 14, hp = 365.0, dmg = 35, xp = 165, speed = 1.8, aggro = 15.0 }
+spawns = [
+    [-168.0, 0.0, 8.0],
+    [-174.0, 0.0, -14.0],
+]
+radius = 5.0
+respawn = 90.0
+
+# ── Ring 5 E · 172-182 units · lvl 16 ────────────────────────────────────
+[[camp]]
+desc = "Wraith Gate — ancient wraiths patrolling the far eastern edge"
+mob = { name = "Ancient Wraith", level = 16, hp = 328.0, dmg = 40, xp = 205, speed = 4.2, aggro = 22.0 }
+spawns = [
+    [178.0, 0.0, 5.0],
+    [175.0, 0.0, -20.0],
+]
+radius = 5.0
+respawn = 90.0

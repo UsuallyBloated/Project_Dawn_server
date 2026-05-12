@@ -12,10 +12,11 @@ use serde::{Deserialize, Serialize};
 /// renet `protocol_id` — bumped on any wire-format break.
 /// Auth-minted ConnectTokens are signed with this; mismatch ⇒ token rejected.
 ///
-/// PD_W0003 covers the Track 4 batch: `ResourceUpdate` (plus the cast/buff/
-/// combat/death broadcast variants added in the same session). One bump per
+/// PD_W0004 covers the Track 5 batch: server-authoritative enemies — the
+/// `EnemySpawn` / `EntityTarget` `ServerWorldMsg` variants and the
+/// repurposed `ClientWorldMsg::Attack { target_id }` intent. One bump per
 /// track; individual sub-task commits append new variants under this id.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3033; // "PD_W0003"
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3034; // "PD_W0004"
 
 pub type EntityId = u64;
 pub type Sequence = u32;
@@ -469,4 +470,40 @@ pub enum ServerWorldMsg {
     BroadcastMessage {
         msg: String,
     },
+
+    // Track 5: server-authoritative enemies.
+    //
+    // Enemy entities live entirely server-side; the client renders broadcasts
+    // and never invents enemy state. Entity-id namespace is partitioned so
+    // enemy ids never collide with player char_ids: enemies start at
+    // `protocol::world::ENEMY_ID_BASE` (1_000_000_000).
+    //
+    // `EnemySpawn` carries the mob's identity + initial state in one shot,
+    // analogous to `EntitySpawn` for players. Ongoing position/HP updates
+    // reuse the generic `Position` / `HealthUpdate` variants. Death goes
+    // out as `EntityDied` then a delayed `EntityDespawn` after the corpse
+    // linger.
+    EnemySpawn {
+        id: EntityId,
+        mob_name: String,
+        level: u32,
+        max_hp: f32,
+        hp: f32,
+        pos: Vec3,
+        yaw: f32,
+    },
+    /// Server-authoritative aggro replication. Broadcast on target switch
+    /// only (not per tick) — enough for "the mob turned on the healer!"
+    /// awareness without exposing the full aggro table on the wire.
+    /// `target = None` means de-aggro (returning to spawn / leash).
+    EntityTarget {
+        id: EntityId,
+        target: Option<EntityId>,
+    },
 }
+
+/// First entity id reserved for server-spawned enemies. Player char_ids are
+/// minted by the auth service well below this range (current schema uses
+/// i64 row ids starting at 1), so this gives ample headroom for
+/// disambiguating players vs enemies by id alone on the client.
+pub const ENEMY_ID_BASE: EntityId = 1_000_000_000;

@@ -65,6 +65,9 @@ pub enum Outcome {
     EvadeFanOut {
         target: u64,
     },
+    /// Track 4 sub-task 5 — dying client signaled HP-zero. Tick loop fans
+    /// out EntityDied to in_world peers.
+    DeathFanOut,
 }
 
 pub fn handle_message(
@@ -210,6 +213,19 @@ pub fn handle_message(
                 return Outcome::Continue;
             }
             Outcome::EvadeFanOut { target }
+        }
+
+        ClientWorldMsg::DeathBroadcast => {
+            if !conn.ready {
+                return Outcome::Continue;
+            }
+            // Cast cache cleared on death — a corpse isn't mid-cast.
+            // Resource cache is left intact so the next ResourceUpdate
+            // (which the dying client sends on respawn) flows naturally.
+            conn.cast_spell_name.clear();
+            conn.cast_total_duration = 0.0;
+            conn.cast_set_at = None;
+            Outcome::DeathFanOut
         }
 
         ClientWorldMsg::BuffSnapshotBroadcast { buffs } => {
@@ -440,6 +456,21 @@ pub fn fan_out_evade(
         return;
     }
     let msg = ServerWorldMsg::Evade { attacker, target };
+    let Some(bytes) = encode(&msg) else { return };
+    for recipient in recipients {
+        server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+pub fn fan_out_entity_died(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    entity_id: u64,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::EntityDied { id: entity_id };
     let Some(bytes) = encode(&msg) else { return };
     for recipient in recipients {
         server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());

@@ -8,10 +8,11 @@
 //! Handled message types are decoded into typed signals: `ConnectOk`,
 //! `Heartbeat`, `Kick`, `Position`, `EntitySpawn`, `EntityDespawn`,
 //! `HealthUpdate`, `ManaUpdate`, `StaminaUpdate`, `CastStart`,
-//! `CastComplete`, `CastFail`, `BuffSnapshot`, `Hit`, `Miss`, `Evade`.
-//! Other variants get bubbled up via `unhandled_server_message(channel,
-//! bytes)` for forward-compat — when their handlers land, add a typed
-//! `match` arm in `classify` and a matching emit in `fire`.
+//! `CastComplete`, `CastFail`, `BuffSnapshot`, `Hit`, `Miss`, `Evade`,
+//! `EntityDied`. Other variants get bubbled up via
+//! `unhandled_server_message(channel, bytes)` for forward-compat — when
+//! their handlers land, add a typed `match` arm in `classify` and a
+//! matching emit in `fire`.
 
 // EntitySpawn signal carries 7 identity fields by design; godot-rust's
 // `#[godot_api]` proc-macro expands declarations into 8-arg fns (self + args),
@@ -152,6 +153,12 @@ impl NetClient {
 
     #[signal]
     fn evade(attacker: i64, target: i64);
+
+    /// Track 4 sub-task 5 — fired when a peer dies. Receivers play a
+    /// fall-over animation; respawn is implied by the next HealthUpdate
+    /// with hp > 0 (no separate Respawn variant by design).
+    #[signal]
+    fn entity_died(id: i64);
 
     /// Track 4 sub-task 3 buff snapshot. `names` and `durations` are
     /// parallel arrays — entry i is one buff. Empty arrays mean "no
@@ -414,6 +421,13 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// Track 4 sub-task 5 — dying client signals HP-zero. Server relays
+    /// as ServerWorldMsg::EntityDied to in_world peers.
+    #[func]
+    fn send_death_broadcast(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::DeathBroadcast)
+    }
+
     #[func]
     fn send_buff_snapshot_broadcast(
         &mut self,
@@ -520,6 +534,9 @@ enum Incoming {
     Evade {
         attacker: i64,
         target: i64,
+    },
+    EntityDied {
+        id: i64,
     },
     Raw {
         channel: u8,
@@ -779,6 +796,10 @@ impl NetClient {
                         &[attacker.to_variant(), target.to_variant()],
                     );
                 }
+                Incoming::EntityDied { id } => {
+                    self.base_mut()
+                        .emit_signal("entity_died", &[id.to_variant()]);
+                }
                 Incoming::BuffSnapshot { target, buffs } => {
                     let mut names = PackedStringArray::new();
                     let mut durations = PackedFloat32Array::new();
@@ -918,6 +939,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             attacker: attacker as i64,
             target: target as i64,
         },
+        ServerWorldMsg::EntityDied { id } => Incoming::EntityDied { id: id as i64 },
         // Other variants (BuffApplied, ChatMessage, ...) get
         // bubbled up raw. As their handlers land, add typed `match` arms here.
         _ => Incoming::Raw {

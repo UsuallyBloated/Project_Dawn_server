@@ -269,6 +269,13 @@ pub enum ClientWorldMsg {
     EvadeBroadcast {
         target: EntityId,
     },
+
+    // Track 4 sub-task 5: the dying client notifies the server that its
+    // HP hit zero. Server relays as ServerWorldMsg::EntityDied { id =
+    // caster } to in_world peers; respawn lands silently via the next
+    // ResourceUpdate (peer sees HP go from 0 → non-zero and stands the
+    // body back up). No separate Respawn variant.
+    DeathBroadcast,
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────

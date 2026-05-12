@@ -205,6 +205,10 @@ pub async fn run(
         // Track 4 sub-task 4 combat events. Verbatim queue (Hit/Miss/Evade
         // are one-shot visuals, ordered).
         let mut combat_fanouts: Vec<(ClientId, CombatEvent)> = Vec::new();
+        // Track 4 sub-task 5 — dying clients to fan out as EntityDied.
+        // Dedup-on-insert in case the dying client somehow sends Death
+        // twice in one tick.
+        let mut death_fanouts: Vec<ClientId> = Vec::new();
         for client_id in client_ids {
             // Skip clients whose Connected event is in the queue but whose
             // PerConnection row hasn't been built yet (load_character failed
@@ -274,6 +278,11 @@ pub async fn run(
                         }
                         Outcome::EvadeFanOut { target } => {
                             combat_fanouts.push((client_id, CombatEvent::Evade { target }));
+                        }
+                        Outcome::DeathFanOut => {
+                            if !death_fanouts.contains(&client_id) {
+                                death_fanouts.push(client_id);
+                            }
                         }
                         Outcome::Continue => {}
                     }
@@ -497,6 +506,27 @@ pub async fn run(
                     handlers::fan_out_evade(&mut server, &recipients, attacker, target)
                 }
             }
+        }
+
+        // 4f. Death fan-out — EntityDied to in_world peers. Receiver
+        //     RemotePlayer plays a fall-over animation in place; respawn
+        //     is implied by the next ResourceUpdate (peer's HP coming
+        //     back from 0 → non-zero stands them up). No separate Respawn
+        //     variant by design (handoff Q3 option a).
+        for sender_id in &death_fanouts {
+            if to_disconnect.contains(sender_id) {
+                continue;
+            }
+            let Some(sender) = connections.get(sender_id) else {
+                continue;
+            };
+            let entity_id = sender.char_id as u64;
+            let recipients: Vec<ClientId> = in_world_recipients
+                .iter()
+                .filter(|id| *id != sender_id)
+                .copied()
+                .collect();
+            handlers::fan_out_entity_died(&mut server, &recipients, entity_id);
         }
 
         // 5. Integrate movement intent exactly once per tick. The Move

@@ -255,6 +255,10 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
+    fn send_death(&mut self) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::DeathBroadcast);
+    }
+
     async fn wait_for(
         &mut self,
         channel: u8,
@@ -552,6 +556,44 @@ async fn two_clients_hit_fanout() {
         })
         .await;
     assert!(echoed.is_none(), "A should not receive own Hit echo");
+}
+
+/// Track 4 sub-task 5: death fan-out. A broadcasts DeathBroadcast; B
+/// receives ServerWorldMsg::EntityDied { id = A.char_id }. Owner does not
+/// receive own echo.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_clients_death_fanout() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "lambda", "Lam", "Human", "Cleric").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "mumu", "Mumu", "Elf", "Druid").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+
+    a.send_death();
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let died_at_b = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EntityDied { id } if *id == a_char_id as u64)
+        })
+        .await
+        .expect("B receives EntityDied for A");
+    assert!(matches!(died_at_b, ServerWorldMsg::EntityDied { .. }));
+
+    let echoed = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
+            matches!(m, ServerWorldMsg::EntityDied { id } if *id == a_char_id as u64)
+        })
+        .await;
+    assert!(echoed.is_none(), "A should not receive own EntityDied echo");
+    let _ = b_char_id; // silence unused if test order changes
 }
 
 /// Track 4 sub-task 3: buff snapshot replication. A broadcasts a snapshot;

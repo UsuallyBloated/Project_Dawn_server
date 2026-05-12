@@ -4,6 +4,7 @@
 
 use super::{
     connection::{PerConnection, Vec3f},
+    entity::Entity,
     CHANNEL_POSITION, CHANNEL_SYSTEM,
 };
 use bincode::config::standard as bincode_cfg;
@@ -332,6 +333,35 @@ pub fn send_entity_despawn(
     let msg = ServerWorldMsg::EntityDespawn { id: entity_id };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// Fan out `EnemySpawn` for `entity` to every recipient. Encoded once and
+/// cloned per recipient. Used for live spawns (new mob appears → broadcast
+/// to all in_world clients) and late-joiner seed (new client enters world
+/// → server sends every living enemy).
+pub fn fan_out_enemy_spawn(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    entity: &Entity,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::EnemySpawn {
+        id: entity.id,
+        mob_name: entity.mob.name.clone(),
+        level: entity.mob.level,
+        max_hp: entity.max_hp,
+        hp: entity.hp,
+        pos: Vec3 { x: entity.pos.x, y: entity.pos.y, z: entity.pos.z },
+        yaw: entity.yaw,
+    };
+    let Some(bytes) = encode(&msg) else {
+        return;
+    };
+    for &recipient_id in recipients {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes.clone());
     }
 }
 

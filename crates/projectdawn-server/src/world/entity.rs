@@ -15,6 +15,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+/// State machine for an `Entity`. Only `Idle` is observable in 1B (all
+/// enemies stand at their spawn point); 1C drives Chase / Attack / Leash
+/// / Dead, and the `dead_code` allow comes off then.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnemyState {
     /// Standing at spawn; scanning for aggro targets within `aggro_range`.
@@ -33,6 +37,10 @@ pub enum EnemyState {
     Dead,
 }
 
+/// `dead_code` allow on AI fields: 1B wires only the spawn lifecycle, so
+/// `target` / `aggro` / `last_attack_at` are write-only until the state
+/// machine ticks them in 1C. Read by 1C's Chase / Attack handlers.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Entity {
     pub id: EntityId,
@@ -95,6 +103,10 @@ impl Entity {
         !matches!(self.state, EnemyState::Dead)
     }
 
+    // ── 1C consumers below — see module docs. The allows come off as
+    //    each AI helper is wired into the state machine.
+
+    #[allow(dead_code)]
     pub fn transition(&mut self, new_state: EnemyState, now: Instant) {
         if self.state == new_state {
             return;
@@ -103,14 +115,17 @@ impl Entity {
         self.state_entered_at = now;
     }
 
+    #[allow(dead_code)]
     pub fn leash_range(&self) -> f32 {
         self.mob.leash.unwrap_or(self.mob.aggro * 2.0)
     }
 
+    #[allow(dead_code)]
     pub fn melee_range(&self) -> f32 {
         self.mob.melee_range.unwrap_or(1.8)
     }
 
+    #[allow(dead_code)]
     pub fn attack_interval(&self) -> f32 {
         self.mob.attack_interval.unwrap_or(2.5)
     }

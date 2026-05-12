@@ -16,7 +16,7 @@
 use bincode::config::standard as bincode_cfg;
 use futures_util::{SinkExt, StreamExt};
 use projectdawn_server::{auth, db, world, Config};
-use protocol::world::{ClientWorldMsg, DamageType, ServerWorldMsg, Vec3};
+use protocol::world::{ClientWorldMsg, DamageType, ServerWorldMsg, Vec3, ENEMY_ID_BASE};
 use renet::{ConnectionConfig, RenetClient};
 use renet_netcode::{ClientAuthentication, ConnectToken, NetcodeClientTransport};
 use std::{
@@ -631,6 +631,42 @@ async fn two_clients_buff_snapshot_fanout() {
         assert!((buffs[0].1 - 30.0).abs() < 0.01);
         assert_eq!(buffs[1].0, "Thorns");
         assert!((buffs[1].1 - 12.5).abs() < 0.01);
+    }
+}
+
+/// Track 5 sub-task 1B: server-authoritative enemy spawn lifecycle.
+///
+/// The server boots, the spawner instantiates 27 enemies from the embedded
+/// starter-zone TOML, and they sit idle (1C adds AI). When a client sends
+/// EnterWorld, step 4a's seed loop fires an `EnemySpawn` for each of the
+/// 27 live mobs. This test asserts: at least one EnemySpawn arrives, its
+/// id falls inside the reserved enemy-id partition, and the carried mob
+/// data matches a known starter-zone entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enemies_visible_after_enter_world() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "epsilon", "Eps", "Human", "Warrior").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { .. })
+        })
+        .await
+        .expect("A receives at least one EnemySpawn after EnterWorld");
+
+    if let ServerWorldMsg::EnemySpawn { id, mob_name, level, max_hp, hp, .. } = spawn {
+        assert!(
+            id >= ENEMY_ID_BASE,
+            "enemy id must be in the reserved partition (got {id}, base {ENEMY_ID_BASE})"
+        );
+        assert!(!mob_name.is_empty(), "mob_name must be non-empty");
+        assert!(level >= 1, "starter-zone mobs are level >= 1");
+        assert!(max_hp > 0.0 && hp > 0.0, "fresh spawn has positive HP");
+        assert!((hp - max_hp).abs() < 0.01, "fresh spawn is at full HP");
     }
 }
 

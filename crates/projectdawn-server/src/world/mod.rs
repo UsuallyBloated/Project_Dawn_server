@@ -14,17 +14,11 @@
 //! the game .exe (track D will define the temp-file handoff).
 
 mod connection;
+mod entity;
 mod handlers;
 mod persistence;
-mod tick;
-
-// Track 5 sub-task 1 scaffolding. Wired into the tick loop in sub-task 1B;
-// the dead_code allow comes off then.
-#[allow(dead_code)]
-mod entity;
-#[allow(dead_code)]
 mod spawn_points;
-#[allow(dead_code)]
+mod tick;
 mod zones;
 
 use crate::Config;

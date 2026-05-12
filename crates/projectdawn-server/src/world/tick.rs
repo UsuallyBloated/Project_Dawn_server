@@ -4,12 +4,15 @@
 
 use super::{
     connection::{PerConnection, Vec3f},
+    entity::Entity,
     handlers::{self, Outcome},
-    persistence, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL, MAX_MOVE_SPEED,
+    persistence,
+    spawn_points::Spawner,
+    CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL, MAX_MOVE_SPEED,
     STALE_MOVE_THRESHOLD, TICK_DT,
 };
 use crate::{db, Config};
-use protocol::world::KickCode;
+use protocol::world::{EntityId, KickCode};
 use renet::{ClientId, RenetServer, ServerEvent};
 use renet_netcode::NetcodeServerTransport;
 use sqlx::SqlitePool;
@@ -54,6 +57,13 @@ pub async fn run(
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let mut last_checkpoint = Instant::now();
+
+    // Track 5 sub-task 1B — server-authoritative enemies. The spawner owns
+    // respawn timers per authored spawn point; `enemies` holds the live
+    // instances. AI ticking + position/HP fan-out land in 1C; this commit
+    // wires spawn lifecycle + EnemySpawn fan-out only (mobs stand idle).
+    let mut spawner = Spawner::new(Instant::now());
+    let mut enemies: HashMap<EntityId, Entity> = HashMap::new();
 
     loop {
         interval.tick().await;
@@ -376,6 +386,20 @@ pub async fn run(
                     );
                 }
             }
+            // Track 5 sub-task 1B — seed the new joiner with every alive
+            // enemy. Subsequent live spawns fan out via the spawner phase
+            // below; this catches everything that existed before the
+            // joiner arrived.
+            for entity in enemies.values() {
+                if !entity.is_alive() {
+                    continue;
+                }
+                handlers::fan_out_enemy_spawn(
+                    &mut server,
+                    std::slice::from_ref(new_id),
+                    entity,
+                );
+            }
         }
 
         // 4b. Resource fan-out — owning client → every other in_world peer.
@@ -527,6 +551,35 @@ pub async fn run(
                 .copied()
                 .collect();
             handlers::fan_out_entity_died(&mut server, &recipients, entity_id);
+        }
+
+        // 4g. Enemy spawner phase. Tick the respawn timers; for any spawn
+        //     point that fires this frame, instantiate the entity, register
+        //     it in the world map, and fan EnemySpawn out to every in_world
+        //     client. Recipients computed AFTER the spawner tick so a
+        //     client that just sent EnterWorld this tick (and was seeded
+        //     with the prior enemy set in step 4a) also receives the new
+        //     spawn — no duplicate seeds because the seed loop above ran
+        //     against the pre-spawn map.
+        {
+            let newly_spawned = spawner.tick(now);
+            if !newly_spawned.is_empty() {
+                let spawn_recipients: Vec<ClientId> = connections
+                    .iter()
+                    .filter(|(_, c)| c.in_world)
+                    .map(|(id, _)| *id)
+                    .collect();
+                for entity in newly_spawned {
+                    if !spawn_recipients.is_empty() {
+                        handlers::fan_out_enemy_spawn(
+                            &mut server,
+                            &spawn_recipients,
+                            &entity,
+                        );
+                    }
+                    enemies.insert(entity.id, entity);
+                }
+            }
         }
 
         // 5. Integrate movement intent exactly once per tick. The Move

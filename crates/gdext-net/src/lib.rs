@@ -7,9 +7,10 @@
 //!
 //! Handled message types are decoded into typed signals: `ConnectOk`,
 //! `Heartbeat`, `Kick`, `Position`, `EntitySpawn`, `EntityDespawn`,
-//! `HealthUpdate`, `ManaUpdate`, `StaminaUpdate`. Other variants get bubbled
-//! up via `unhandled_server_message(channel, bytes)` for forward-compat —
-//! when their handlers land, add a typed `match` arm in `classify` and a
+//! `HealthUpdate`, `ManaUpdate`, `StaminaUpdate`, `CastStart`,
+//! `CastComplete`, `CastFail`. Other variants get bubbled up via
+//! `unhandled_server_message(channel, bytes)` for forward-compat — when
+//! their handlers land, add a typed `match` arm in `classify` and a
 //! matching emit in `fire`.
 
 // EntitySpawn signal carries 7 identity fields by design; godot-rust's
@@ -125,6 +126,20 @@ impl NetClient {
 
     #[signal]
     fn stamina_update(id: i64, stamina: f32, max: f32);
+
+    /// Track 4 sub-task 2 cast bar — relayed from the owning client's
+    /// broadcast (no server validation in Track 4). `duration` is the
+    /// remaining seconds the receiver should run the bar for; for the
+    /// initial broadcast it equals the full cast time, for a late-joiner
+    /// seed it equals `total - elapsed`.
+    #[signal]
+    fn cast_start(caster: i64, spell_name: GString, duration: f32);
+
+    #[signal]
+    fn cast_complete(caster: i64, spell_name: GString);
+
+    #[signal]
+    fn cast_fail(caster: i64, reason: GString);
 
     /// Server-initiated app-layer Heartbeat (informational).
     #[signal]
@@ -308,6 +323,34 @@ impl NetClient {
         };
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
+
+    /// Track 4 sub-task 2 — owning client tells the server it started
+    /// casting a spell. Server relays as ServerWorldMsg::CastStart to
+    /// in_world peers so they can render a cast bar.
+    #[func]
+    fn send_cast_start_broadcast(&mut self, spell_name: GString, duration: f32) -> bool {
+        let msg = ClientWorldMsg::CastStartBroadcast {
+            spell_name: spell_name.to_string(),
+            duration,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    #[func]
+    fn send_cast_complete_broadcast(&mut self, spell_name: GString) -> bool {
+        let msg = ClientWorldMsg::CastCompleteBroadcast {
+            spell_name: spell_name.to_string(),
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    #[func]
+    fn send_cast_fail_broadcast(&mut self, reason: GString) -> bool {
+        let msg = ClientWorldMsg::CastFailBroadcast {
+            reason: reason.to_string(),
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
 }
 
 /// Pending side-effects from a single `tick_renet` call. We collect these
@@ -366,6 +409,19 @@ enum Incoming {
         id: i64,
         stamina: f32,
         max: f32,
+    },
+    CastStart {
+        caster: i64,
+        spell_name: String,
+        duration: f32,
+    },
+    CastComplete {
+        caster: i64,
+        spell_name: String,
+    },
+    CastFail {
+        caster: i64,
+        reason: String,
     },
     Raw {
         channel: u8,
@@ -560,6 +616,41 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::CastStart {
+                    caster,
+                    spell_name,
+                    duration,
+                } => {
+                    self.base_mut().emit_signal(
+                        "cast_start",
+                        &[
+                            caster.to_variant(),
+                            GString::from(spell_name.as_str()).to_variant(),
+                            duration.to_variant(),
+                        ],
+                    );
+                }
+                Incoming::CastComplete {
+                    caster,
+                    spell_name,
+                } => {
+                    self.base_mut().emit_signal(
+                        "cast_complete",
+                        &[
+                            caster.to_variant(),
+                            GString::from(spell_name.as_str()).to_variant(),
+                        ],
+                    );
+                }
+                Incoming::CastFail { caster, reason } => {
+                    self.base_mut().emit_signal(
+                        "cast_fail",
+                        &[
+                            caster.to_variant(),
+                            GString::from(reason.as_str()).to_variant(),
+                        ],
+                    );
+                }
                 Incoming::Raw { channel, bytes } => {
                     let pba = packed_byte_array_from(&bytes);
                     self.base_mut().emit_signal(
@@ -638,7 +729,27 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             stamina,
             max,
         },
-        // Other variants (BuffApplied, CastStart, ChatMessage, ...) get
+        ServerWorldMsg::CastStart {
+            caster,
+            spell_name,
+            duration,
+        } => Incoming::CastStart {
+            caster: caster as i64,
+            spell_name,
+            duration,
+        },
+        ServerWorldMsg::CastComplete {
+            caster,
+            spell_name,
+        } => Incoming::CastComplete {
+            caster: caster as i64,
+            spell_name,
+        },
+        ServerWorldMsg::CastFail { caster, reason } => Incoming::CastFail {
+            caster: caster as i64,
+            reason,
+        },
+        // Other variants (BuffApplied, ChatMessage, ...) get
         // bubbled up raw. As their handlers land, add typed `match` arms here.
         _ => Incoming::Raw {
             channel,

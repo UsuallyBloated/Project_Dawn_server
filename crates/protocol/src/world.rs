@@ -225,6 +225,23 @@ pub enum ClientWorldMsg {
     // lobby. App-Connect alone is no longer enough to render to peers, but
     // it's still enough to receive ConnectOk and prepare PlayerStats.
     EnterWorld,
+
+    // Track 4 sub-task 2: owning-client → server broadcasts of the local
+    // player's casting state. Server relays as CastStart / CastComplete /
+    // CastFail on the reliable system channel. Targeted peers render a
+    // cast bar in their HUD target frame for the duration. CastFail covers
+    // both cancel-by-interrupt and cancel-by-movement; "reason" is
+    // human-readable but not currently displayed.
+    CastStartBroadcast {
+        spell_name: String,
+        duration: f32,
+    },
+    CastCompleteBroadcast {
+        spell_name: String,
+    },
+    CastFailBroadcast {
+        reason: String,
+    },
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────
@@ -365,17 +382,21 @@ pub enum ServerWorldMsg {
         source: String,
     },
 
-    // Casting
+    // Casting. `spell_name` instead of a numeric id — we don't have a stable
+    // spell-id table on either side yet, and the reliable system channel
+    // makes the string cost negligible. A future track can add a SpellDefinitions
+    // numeric id table and tighten the wire if it ever matters.
     CastStart {
         caster: EntityId,
-        spell_id: u32,
+        spell_name: String,
         duration: f32,
     },
     CastComplete {
         caster: EntityId,
-        spell_id: u32,
+        spell_name: String,
     },
     CastFail {
+        caster: EntityId,
         reason: String,
     },
     Cooldown {

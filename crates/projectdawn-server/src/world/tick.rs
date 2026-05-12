@@ -15,6 +15,15 @@ use renet_netcode::NetcodeServerTransport;
 use sqlx::SqlitePool;
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
+/// Cast lifecycle event collected during message dispatch, fanned out
+/// after the dispatch loop in a single sweep so we don't need to re-fetch
+/// `connections` for each one.
+enum CastEvent {
+    Start { spell_name: String, duration: f32 },
+    Complete { spell_name: String },
+    Fail { reason: String },
+}
+
 pub async fn run(
     cfg: Arc<Config>,
     pool: SqlitePool,
@@ -169,6 +178,10 @@ pub async fn run(
         // Senders whose resources changed this tick. Dedup-on-insert so a
         // burst of ResourceUpdates inside one tick produces a single fan-out.
         let mut resource_fanouts: Vec<ClientId> = Vec::new();
+        // Cast lifecycle events from this tick. Stored verbatim and fanned
+        // out in order — coalescing CastStart + CastComplete from the same
+        // sender would silently drop a fast-cast complete.
+        let mut cast_fanouts: Vec<(ClientId, CastEvent)> = Vec::new();
         for client_id in client_ids {
             // Skip clients whose Connected event is in the queue but whose
             // PerConnection row hasn't been built yet (load_character failed
@@ -189,6 +202,28 @@ pub async fn run(
                             if !resource_fanouts.contains(&client_id) {
                                 resource_fanouts.push(client_id);
                             }
+                        }
+                        Outcome::CastStartFanOut {
+                            spell_name,
+                            duration,
+                        } => {
+                            cast_fanouts.push((
+                                client_id,
+                                CastEvent::Start {
+                                    spell_name,
+                                    duration,
+                                },
+                            ));
+                        }
+                        Outcome::CastCompleteFanOut { spell_name } => {
+                            cast_fanouts.push((
+                                client_id,
+                                CastEvent::Complete { spell_name },
+                            ));
+                        }
+                        Outcome::CastFailFanOut { reason } => {
+                            cast_fanouts
+                                .push((client_id, CastEvent::Fail { reason }));
                         }
                         Outcome::Continue => {}
                     }
@@ -251,6 +286,26 @@ pub async fn run(
                         std::slice::from_ref(new_id),
                         peer_conn,
                     );
+                    // Seed cast bar if a peer is mid-cast. Server estimates
+                    // remaining time from `cast_set_at`; if it's already
+                    // elapsed (peer's CastComplete just hasn't arrived yet,
+                    // or the cast was abandoned without a Fail), skip the
+                    // seed and let the natural broadcasts catch up.
+                    if !peer_conn.cast_spell_name.is_empty() {
+                        if let Some(set_at) = peer_conn.cast_set_at {
+                            let elapsed = now.duration_since(set_at).as_secs_f32();
+                            let remaining = peer_conn.cast_total_duration - elapsed;
+                            if remaining > 0.0 {
+                                handlers::fan_out_cast_start(
+                                    &mut server,
+                                    std::slice::from_ref(new_id),
+                                    peer_conn.char_id as u64,
+                                    peer_conn.cast_spell_name.clone(),
+                                    remaining,
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -281,6 +336,49 @@ pub async fn run(
                 .copied()
                 .collect();
             handlers::fan_out_resources(&mut server, &recipients, sender);
+        }
+
+        // 4c. Cast lifecycle fan-out — owning client → every other in_world
+        //     peer. Events processed in arrival order so CastStart precedes
+        //     CastComplete from the same sender. Sender receives nothing
+        //     back; they already know their own cast state.
+        for (sender_id, event) in cast_fanouts.drain(..) {
+            if to_disconnect.contains(&sender_id) {
+                continue;
+            }
+            let Some(sender) = connections.get(&sender_id) else {
+                continue;
+            };
+            let caster = sender.char_id as u64;
+            let recipients: Vec<ClientId> = in_world_recipients
+                .iter()
+                .filter(|id| **id != sender_id)
+                .copied()
+                .collect();
+            match event {
+                CastEvent::Start {
+                    spell_name,
+                    duration,
+                } => handlers::fan_out_cast_start(
+                    &mut server,
+                    &recipients,
+                    caster,
+                    spell_name,
+                    duration,
+                ),
+                CastEvent::Complete { spell_name } => handlers::fan_out_cast_complete(
+                    &mut server,
+                    &recipients,
+                    caster,
+                    spell_name,
+                ),
+                CastEvent::Fail { reason } => handlers::fan_out_cast_fail(
+                    &mut server,
+                    &recipients,
+                    caster,
+                    reason,
+                ),
+            }
         }
 
         // 5. Integrate movement intent exactly once per tick. The Move

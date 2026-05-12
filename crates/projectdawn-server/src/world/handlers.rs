@@ -30,6 +30,22 @@ pub enum Outcome {
     /// peer in a post-dispatch sweep so a single sender's update isn't
     /// duplicated across multiple ResourceUpdate messages in one tick.
     ResourceFanOut,
+    /// Track 4 sub-task 2 — owning client started casting. Tick loop fans
+    /// out CastStart inline (cast events are infrequent enough that
+    /// per-message fan-out beats coalescing).
+    CastStartFanOut {
+        spell_name: String,
+        duration: f32,
+    },
+    /// Owning client completed a cast. Tick loop fans out CastComplete.
+    CastCompleteFanOut {
+        spell_name: String,
+    },
+    /// Owning client's cast was interrupted / cancelled. Tick loop fans out
+    /// CastFail.
+    CastFailFanOut {
+        reason: String,
+    },
 }
 
 pub fn handle_message(
@@ -124,6 +140,36 @@ pub fn handle_message(
             conn.latest_direction = dir.clamp_length(1.0);
             conn.last_move_received = Some(now);
             Outcome::Continue
+        }
+
+        ClientWorldMsg::CastStartBroadcast { spell_name, duration } => {
+            if !conn.ready {
+                return Outcome::Continue;
+            }
+            conn.cast_spell_name = spell_name.clone();
+            conn.cast_total_duration = duration;
+            conn.cast_set_at = Some(now);
+            Outcome::CastStartFanOut { spell_name, duration }
+        }
+
+        ClientWorldMsg::CastCompleteBroadcast { spell_name } => {
+            if !conn.ready {
+                return Outcome::Continue;
+            }
+            conn.cast_spell_name.clear();
+            conn.cast_total_duration = 0.0;
+            conn.cast_set_at = None;
+            Outcome::CastCompleteFanOut { spell_name }
+        }
+
+        ClientWorldMsg::CastFailBroadcast { reason } => {
+            if !conn.ready {
+                return Outcome::Continue;
+            }
+            conn.cast_spell_name.clear();
+            conn.cast_total_duration = 0.0;
+            conn.cast_set_at = None;
+            Outcome::CastFailFanOut { reason }
         }
 
         ClientWorldMsg::ResourceUpdate {
@@ -221,6 +267,66 @@ pub fn send_entity_despawn(
 ///
 /// No-op if the connection has never broadcast a `ResourceUpdate` (we
 /// have nothing meaningful to send and don't want to broadcast zeros).
+/// Fan out a CastStart for `caster` to every recipient. Encoded once and
+/// cloned per recipient. Used both for live broadcast (sender → other
+/// in_world peers) and late-joiner seed (server → newcomer with remaining
+/// duration).
+pub fn fan_out_cast_start(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    caster: u64,
+    spell_name: String,
+    duration: f32,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::CastStart {
+        caster,
+        spell_name,
+        duration,
+    };
+    let Some(bytes) = encode(&msg) else { return };
+    for recipient in recipients {
+        server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+pub fn fan_out_cast_complete(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    caster: u64,
+    spell_name: String,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::CastComplete {
+        caster,
+        spell_name,
+    };
+    let Some(bytes) = encode(&msg) else { return };
+    for recipient in recipients {
+        server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+pub fn fan_out_cast_fail(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    caster: u64,
+    reason: String,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::CastFail { caster, reason };
+    let Some(bytes) = encode(&msg) else { return };
+    for recipient in recipients {
+        server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
 pub fn fan_out_resources(
     server: &mut RenetServer,
     recipients: &[ClientId],

@@ -90,6 +90,15 @@ pub struct PerConnection {
     pub last_stamina: f32,
     pub last_max_stamina: f32,
     pub resource_state_set: bool,
+
+    /// Track 4 sub-task 2 — last-known casting state, used to seed a peer
+    /// who enters the world mid-cast. `cast_spell_name` is empty when not
+    /// casting. `cast_remaining_at_set` and `cast_set_at` together let the
+    /// server estimate "how much time is left right now" when forwarding
+    /// to a late joiner (clamped to >= 0).
+    pub cast_spell_name: String,
+    pub cast_total_duration: f32,
+    pub cast_set_at: Option<Instant>,
 }
 
 impl PerConnection {
@@ -120,6 +129,9 @@ impl PerConnection {
             last_stamina: 0.0,
             last_max_stamina: 0.0,
             resource_state_set: false,
+            cast_spell_name: String::new(),
+            cast_total_duration: 0.0,
+            cast_set_at: None,
         }
     }
 

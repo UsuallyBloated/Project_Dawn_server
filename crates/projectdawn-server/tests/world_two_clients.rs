@@ -225,6 +225,21 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
+    fn send_cast_start(&mut self, spell_name: &str, duration: f32) {
+        let msg = ClientWorldMsg::CastStartBroadcast {
+            spell_name: spell_name.into(),
+            duration,
+        };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
+    fn send_cast_complete(&mut self, spell_name: &str) {
+        let msg = ClientWorldMsg::CastCompleteBroadcast {
+            spell_name: spell_name.into(),
+        };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
     async fn wait_for(
         &mut self,
         channel: u8,
@@ -410,6 +425,69 @@ async fn two_clients_resource_fanout() {
         })
         .await;
     assert!(echoed.is_none(), "A should not receive own HealthUpdate echo");
+}
+
+/// Track 4 sub-task 2: cast lifecycle replication. A broadcasts CastStart
+/// then CastComplete; B sees both ServerWorldMsg variants carrying A's id
+/// and the spell name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_clients_cast_fanout() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "epsilon", "Eps", "Human", "Wizard").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "zeta", "Zet", "Elf", "Cleric").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+
+    a.send_cast_start("Frostbolt", 2.5);
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let cast_at_b = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::CastStart { caster, .. } if *caster == a_char_id as u64)
+        })
+        .await
+        .expect("B receives CastStart for A");
+    if let ServerWorldMsg::CastStart {
+        spell_name,
+        duration,
+        ..
+    } = cast_at_b
+    {
+        assert_eq!(spell_name, "Frostbolt");
+        assert!((duration - 2.5).abs() < 0.01, "duration roundtrip: {duration}");
+    }
+
+    a.send_cast_complete("Frostbolt");
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let complete_at_b = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::CastComplete { caster, .. } if *caster == a_char_id as u64)
+        })
+        .await
+        .expect("B receives CastComplete for A");
+    if let ServerWorldMsg::CastComplete { spell_name, .. } = complete_at_b {
+        assert_eq!(spell_name, "Frostbolt");
+    }
+
+    // Owner should not receive own cast events back.
+    let echoed = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
+            matches!(m, ServerWorldMsg::CastStart { caster, .. } if *caster == a_char_id as u64)
+                || matches!(m, ServerWorldMsg::CastComplete { caster, .. } if *caster == a_char_id as u64)
+        })
+        .await;
+    assert!(echoed.is_none(), "A should not receive own cast events");
 }
 
 fn tick_one(client: &mut RenetClient, transport: &mut NetcodeClientTransport) {

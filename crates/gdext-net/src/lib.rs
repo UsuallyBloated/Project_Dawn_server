@@ -8,10 +8,10 @@
 //! Handled message types are decoded into typed signals: `ConnectOk`,
 //! `Heartbeat`, `Kick`, `Position`, `EntitySpawn`, `EntityDespawn`,
 //! `HealthUpdate`, `ManaUpdate`, `StaminaUpdate`, `CastStart`,
-//! `CastComplete`, `CastFail`. Other variants get bubbled up via
-//! `unhandled_server_message(channel, bytes)` for forward-compat — when
-//! their handlers land, add a typed `match` arm in `classify` and a
-//! matching emit in `fire`.
+//! `CastComplete`, `CastFail`, `BuffSnapshot`. Other variants get
+//! bubbled up via `unhandled_server_message(channel, bytes)` for
+//! forward-compat — when their handlers land, add a typed `match` arm
+//! in `classify` and a matching emit in `fire`.
 
 // EntitySpawn signal carries 7 identity fields by design; godot-rust's
 // `#[godot_api]` proc-macro expands declarations into 8-arg fns (self + args),
@@ -140,6 +140,17 @@ impl NetClient {
 
     #[signal]
     fn cast_fail(caster: i64, reason: GString);
+
+    /// Track 4 sub-task 3 buff snapshot. `names` and `durations` are
+    /// parallel arrays — entry i is one buff. Empty arrays mean "no
+    /// active buffs". Receiver should replace any previously-tracked
+    /// buff list for `target` with these values.
+    #[signal]
+    fn buff_snapshot(
+        target: i64,
+        names: PackedStringArray,
+        durations: PackedFloat32Array,
+    );
 
     /// Server-initiated app-layer Heartbeat (informational).
     #[signal]
@@ -351,6 +362,26 @@ impl NetClient {
         };
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
+
+    /// Track 4 sub-task 3 — full buff snapshot. `names` and `durations`
+    /// must be the same length; extra entries in either are silently
+    /// truncated to the shorter. Empty inputs mean "no active buffs".
+    #[func]
+    fn send_buff_snapshot_broadcast(
+        &mut self,
+        names: PackedStringArray,
+        durations: PackedFloat32Array,
+    ) -> bool {
+        let names_vec: Vec<GString> = names.to_vec();
+        let durations_vec: Vec<f32> = durations.to_vec();
+        let n = names_vec.len().min(durations_vec.len());
+        let mut buffs: Vec<(String, f32)> = Vec::with_capacity(n);
+        for i in 0..n {
+            buffs.push((names_vec[i].to_string(), durations_vec[i]));
+        }
+        let msg = ClientWorldMsg::BuffSnapshotBroadcast { buffs };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
 }
 
 /// Pending side-effects from a single `tick_renet` call. We collect these
@@ -422,6 +453,10 @@ enum Incoming {
     CastFail {
         caster: i64,
         reason: String,
+    },
+    BuffSnapshot {
+        target: i64,
+        buffs: Vec<(String, f32)>,
     },
     Raw {
         channel: u8,
@@ -651,6 +686,22 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::BuffSnapshot { target, buffs } => {
+                    let mut names = PackedStringArray::new();
+                    let mut durations = PackedFloat32Array::new();
+                    for (n, d) in &buffs {
+                        names.push(&GString::from(n.as_str()));
+                        durations.push(*d);
+                    }
+                    self.base_mut().emit_signal(
+                        "buff_snapshot",
+                        &[
+                            target.to_variant(),
+                            names.to_variant(),
+                            durations.to_variant(),
+                        ],
+                    );
+                }
                 Incoming::Raw { channel, bytes } => {
                     let pba = packed_byte_array_from(&bytes);
                     self.base_mut().emit_signal(
@@ -748,6 +799,10 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
         ServerWorldMsg::CastFail { caster, reason } => Incoming::CastFail {
             caster: caster as i64,
             reason,
+        },
+        ServerWorldMsg::BuffSnapshot { target, buffs } => Incoming::BuffSnapshot {
+            target: target as i64,
+            buffs,
         },
         // Other variants (BuffApplied, ChatMessage, ...) get
         // bubbled up raw. As their handlers land, add typed `match` arms here.

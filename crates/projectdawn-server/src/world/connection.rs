@@ -99,6 +99,12 @@ pub struct PerConnection {
     pub cast_spell_name: String,
     pub cast_total_duration: f32,
     pub cast_set_at: Option<Instant>,
+
+    /// Track 4 sub-task 3 — last buff snapshot the client broadcast.
+    /// Used to seed new joiners; live updates fan out via the
+    /// BuffSnapshotFanOut outcome. Empty Vec = "no active buffs".
+    pub buff_snapshot: Vec<(String, f32)>,
+    pub buff_snapshot_set: bool,
 }
 
 impl PerConnection {
@@ -132,6 +138,8 @@ impl PerConnection {
             cast_spell_name: String::new(),
             cast_total_duration: 0.0,
             cast_set_at: None,
+            buff_snapshot: Vec::new(),
+            buff_snapshot_set: false,
         }
     }
 

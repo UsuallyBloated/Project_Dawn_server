@@ -240,6 +240,11 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
+    fn send_buff_snapshot(&mut self, buffs: Vec<(String, f32)>) {
+        let msg = ClientWorldMsg::BuffSnapshotBroadcast { buffs };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
     async fn wait_for(
         &mut self,
         channel: u8,
@@ -488,6 +493,44 @@ async fn two_clients_cast_fanout() {
         })
         .await;
     assert!(echoed.is_none(), "A should not receive own cast events");
+}
+
+/// Track 4 sub-task 3: buff snapshot replication. A broadcasts a snapshot;
+/// B receives BuffSnapshot for A with the same name/duration pairs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_clients_buff_snapshot_fanout() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "eta", "Eta", "Human", "Cleric").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "theta", "The", "Elf", "Druid").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+
+    a.send_buff_snapshot(vec![
+        ("Bless".into(), 30.0),
+        ("Thorns".into(), 12.5),
+    ]);
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let snap_at_b = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::BuffSnapshot { target, .. } if *target == a_char_id as u64)
+        })
+        .await
+        .expect("B receives BuffSnapshot for A");
+    if let ServerWorldMsg::BuffSnapshot { buffs, .. } = snap_at_b {
+        assert_eq!(buffs.len(), 2);
+        assert_eq!(buffs[0].0, "Bless");
+        assert!((buffs[0].1 - 30.0).abs() < 0.01);
+        assert_eq!(buffs[1].0, "Thorns");
+        assert!((buffs[1].1 - 12.5).abs() < 0.01);
+    }
 }
 
 fn tick_one(client: &mut RenetClient, transport: &mut NetcodeClientTransport) {

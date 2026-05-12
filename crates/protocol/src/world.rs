@@ -242,6 +242,14 @@ pub enum ClientWorldMsg {
     CastFailBroadcast {
         reason: String,
     },
+
+    // Track 4 sub-task 3: full buff list snapshot. Fired on every
+    // BuffManager.buffs_changed. Snapshot rather than add/remove deltas
+    // — simpler logic, can't desync if a message ever drops. ~10 buffs ×
+    // ~30 B each = ~300 B per change on the reliable channel; trivial.
+    BuffSnapshotBroadcast {
+        buffs: Vec<(String, f32)>,
+    },
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────
@@ -380,6 +388,15 @@ pub enum ServerWorldMsg {
         target: EntityId,
         amount: i32,
         source: String,
+    },
+    /// Track 4 sub-task 3: full buff list for `target`. Replaces any
+    /// previous BuffApplied/Removed-style tracking the client had for
+    /// this entity. Empty Vec means "no buffs". Same wire shape as
+    /// ClientWorldMsg::BuffSnapshotBroadcast but with an explicit target
+    /// so the receiver knows which peer to render.
+    BuffSnapshot {
+        target: EntityId,
+        buffs: Vec<(String, f32)>,
     },
 
     // Casting. `spell_name` instead of a numeric id — we don't have a stable

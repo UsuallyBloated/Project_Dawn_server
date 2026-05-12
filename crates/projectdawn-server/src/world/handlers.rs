@@ -46,6 +46,10 @@ pub enum Outcome {
     CastFailFanOut {
         reason: String,
     },
+    /// Track 4 sub-task 3 — owning client broadcast a fresh buff snapshot.
+    /// Cache updated on `conn`; tick loop fans out to in_world peers in
+    /// a post-dispatch sweep, deduped per sender like resources.
+    BuffSnapshotFanOut,
 }
 
 pub fn handle_message(
@@ -160,6 +164,15 @@ pub fn handle_message(
             conn.cast_total_duration = 0.0;
             conn.cast_set_at = None;
             Outcome::CastCompleteFanOut { spell_name }
+        }
+
+        ClientWorldMsg::BuffSnapshotBroadcast { buffs } => {
+            if !conn.ready {
+                return Outcome::Continue;
+            }
+            conn.buff_snapshot = buffs;
+            conn.buff_snapshot_set = true;
+            Outcome::BuffSnapshotFanOut
         }
 
         ClientWorldMsg::CastFailBroadcast { reason } => {
@@ -321,6 +334,29 @@ pub fn fan_out_cast_fail(
         return;
     }
     let msg = ServerWorldMsg::CastFail { caster, reason };
+    let Some(bytes) = encode(&msg) else { return };
+    for recipient in recipients {
+        server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+/// Fan out the cached buff snapshot for `conn` to every recipient. Empty
+/// snapshot is sent if `buff_snapshot_set` is true (means "no buffs" — the
+/// client has positively reported zero); skipped entirely if the cache has
+/// never been populated, so a new joiner doesn't see an empty buff list
+/// before the peer has had a chance to broadcast.
+pub fn fan_out_buff_snapshot(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    conn: &PerConnection,
+) {
+    if !conn.buff_snapshot_set || recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::BuffSnapshot {
+        target: conn.char_id as u64,
+        buffs: conn.buff_snapshot.clone(),
+    };
     let Some(bytes) = encode(&msg) else { return };
     for recipient in recipients {
         server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());

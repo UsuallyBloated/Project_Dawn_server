@@ -182,6 +182,9 @@ pub async fn run(
         // out in order — coalescing CastStart + CastComplete from the same
         // sender would silently drop a fast-cast complete.
         let mut cast_fanouts: Vec<(ClientId, CastEvent)> = Vec::new();
+        // Track 4 sub-task 3 — like resources, dedup per sender so a burst
+        // of buff changes inside one tick produces a single fan-out.
+        let mut buff_fanouts: Vec<ClientId> = Vec::new();
         for client_id in client_ids {
             // Skip clients whose Connected event is in the queue but whose
             // PerConnection row hasn't been built yet (load_character failed
@@ -224,6 +227,11 @@ pub async fn run(
                         Outcome::CastFailFanOut { reason } => {
                             cast_fanouts
                                 .push((client_id, CastEvent::Fail { reason }));
+                        }
+                        Outcome::BuffSnapshotFanOut => {
+                            if !buff_fanouts.contains(&client_id) {
+                                buff_fanouts.push(client_id);
+                            }
                         }
                         Outcome::Continue => {}
                     }
@@ -306,6 +314,15 @@ pub async fn run(
                             }
                         }
                     }
+                    // Seed buff snapshot. Sends empty list if the peer has
+                    // explicitly broadcast "no buffs" (i.e. cleared), so
+                    // the new client doesn't see stale buffs from the
+                    // peer's own cache state.
+                    handlers::fan_out_buff_snapshot(
+                        &mut server,
+                        std::slice::from_ref(new_id),
+                        peer_conn,
+                    );
                 }
             }
         }
@@ -336,6 +353,23 @@ pub async fn run(
                 .copied()
                 .collect();
             handlers::fan_out_resources(&mut server, &recipients, sender);
+        }
+
+        // 4d. Buff snapshot fan-out — owning client → every other in_world
+        //     peer.
+        for sender_id in &buff_fanouts {
+            if to_disconnect.contains(sender_id) {
+                continue;
+            }
+            let Some(sender) = connections.get(sender_id) else {
+                continue;
+            };
+            let recipients: Vec<ClientId> = in_world_recipients
+                .iter()
+                .filter(|id| *id != sender_id)
+                .copied()
+                .collect();
+            handlers::fan_out_buff_snapshot(&mut server, &recipients, sender);
         }
 
         // 4c. Cast lifecycle fan-out — owning client → every other in_world

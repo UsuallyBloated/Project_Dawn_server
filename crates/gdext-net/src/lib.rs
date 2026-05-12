@@ -9,9 +9,9 @@
 //! `Heartbeat`, `Kick`, `Position`, `EntitySpawn`, `EntityDespawn`,
 //! `HealthUpdate`, `ManaUpdate`, `StaminaUpdate`, `CastStart`,
 //! `CastComplete`, `CastFail`, `BuffSnapshot`, `Hit`, `Miss`, `Evade`,
-//! `EntityDied`. Other variants get bubbled up via
-//! `unhandled_server_message(channel, bytes)` for forward-compat — when
-//! their handlers land, add a typed `match` arm in `classify` and a
+//! `EntityDied`, `EnemySpawn`, `EntityTarget`. Other variants get bubbled
+//! up via `unhandled_server_message(channel, bytes)` for forward-compat —
+//! when their handlers land, add a typed `match` arm in `classify` and a
 //! matching emit in `fire`.
 
 // EntitySpawn signal carries 7 identity fields by design; godot-rust's
@@ -159,6 +159,30 @@ impl NetClient {
     /// with hp > 0 (no separate Respawn variant by design).
     #[signal]
     fn entity_died(id: i64);
+
+    /// Track 5 sub-task 2 — server announces a server-spawned enemy at
+    /// `pos`. `id` is in the reserved enemy-id partition
+    /// (`>= ENEMY_ID_BASE`) so the client can disambiguate from player
+    /// EntitySpawns by id alone.
+    #[signal]
+    fn enemy_spawn(
+        id: i64,
+        mob_name: GString,
+        level: i64,
+        max_hp: f32,
+        hp: f32,
+        pos: Vector3,
+        yaw: f32,
+    );
+
+    /// Track 5 sub-task 2 — server-driven aggro replication. Fired when
+    /// an enemy switches target (acquires / drops). `target_id == 0`
+    /// encodes `None` (drop / no target); a non-zero value is the
+    /// targeted entity's id (player char_id or another enemy id).
+    /// Zero is safe because id minting starts at 1 on the server-side
+    /// for both partitions.
+    #[signal]
+    fn entity_target(id: i64, target_id: i64);
 
     /// Track 4 sub-task 3 buff snapshot. `names` and `durations` are
     /// parallel arrays — entry i is one buff. Empty arrays mean "no
@@ -538,6 +562,19 @@ enum Incoming {
     EntityDied {
         id: i64,
     },
+    EnemySpawn {
+        id: i64,
+        mob_name: String,
+        level: u32,
+        max_hp: f32,
+        hp: f32,
+        pos: WireVec3,
+        yaw: f32,
+    },
+    EntityTarget {
+        id: i64,
+        target: Option<i64>,
+    },
     Raw {
         channel: u8,
         bytes: Vec<u8>,
@@ -816,6 +853,38 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::EnemySpawn {
+                    id,
+                    mob_name,
+                    level,
+                    max_hp,
+                    hp,
+                    pos,
+                    yaw,
+                } => {
+                    self.base_mut().emit_signal(
+                        "enemy_spawn",
+                        &[
+                            id.to_variant(),
+                            GString::from(mob_name.as_str()).to_variant(),
+                            (level as i64).to_variant(),
+                            max_hp.to_variant(),
+                            hp.to_variant(),
+                            Vector3::new(pos.x, pos.y, pos.z).to_variant(),
+                            yaw.to_variant(),
+                        ],
+                    );
+                }
+                Incoming::EntityTarget { id, target } => {
+                    // `target == None` encodes as 0 over the wire (see
+                    // signal docs). Mint a non-collision sentinel because
+                    // GDScript Variant doesn't carry an Option type.
+                    let target_id = target.unwrap_or(0);
+                    self.base_mut().emit_signal(
+                        "entity_target",
+                        &[id.to_variant(), target_id.to_variant()],
+                    );
+                }
                 Incoming::Raw { channel, bytes } => {
                     let pba = packed_byte_array_from(&bytes);
                     self.base_mut().emit_signal(
@@ -940,6 +1009,27 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             target: target as i64,
         },
         ServerWorldMsg::EntityDied { id } => Incoming::EntityDied { id: id as i64 },
+        ServerWorldMsg::EnemySpawn {
+            id,
+            mob_name,
+            level,
+            max_hp,
+            hp,
+            pos,
+            yaw,
+        } => Incoming::EnemySpawn {
+            id: id as i64,
+            mob_name,
+            level,
+            max_hp,
+            hp,
+            pos,
+            yaw,
+        },
+        ServerWorldMsg::EntityTarget { id, target } => Incoming::EntityTarget {
+            id: id as i64,
+            target: target.map(|t| t as i64),
+        },
         // Other variants (BuffApplied, ChatMessage, ...) get
         // bubbled up raw. As their handlers land, add typed `match` arms here.
         _ => Incoming::Raw {

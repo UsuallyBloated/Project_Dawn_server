@@ -43,18 +43,15 @@ struct RawCamp {
 /// Fields beyond this set (resistances, caster spell damage, healer
 /// flee threshold) are not represented in the starter camps and will
 /// be added as later zones introduce them.
-///
-/// `dead_code` allow on the combat / AI fields: 1B wires only spawn
-/// lifecycle, so the AI inputs (dmg / speed / aggro / leash / melee
-/// range / attack interval) read-but-do-nothing here. 1C consumes
-/// them and the allow comes off.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct MobTemplate {
     pub name: String,
     pub level: u32,
     pub hp: f32,
     pub dmg: i32,
+    /// Award on kill credit. Read by sub-task 5 when the kill credit
+    /// path lands.
+    #[allow(dead_code)]
     pub xp: i32,
     pub speed: f32,
     pub aggro: f32,

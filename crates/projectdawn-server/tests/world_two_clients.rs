@@ -634,6 +634,82 @@ async fn two_clients_buff_snapshot_fanout() {
     }
 }
 
+/// Track 5 sub-task 1C: AI state machine drives Idle → Chase → Attack
+/// for a server-spawned enemy when a player enters aggro range.
+///
+/// The player walks toward camp 0's first spawn at [20, 0, 5] for ~2 s
+/// (covering ~15 m at MAX_MOVE_SPEED = 7.5 m/s, landing well inside
+/// the Decrepit Skeleton's 8 m aggro radius even with the ±3 m XZ
+/// spawn jitter), then stops. The test asserts:
+///
+///   * an `EntityTarget` broadcast lands targeting the player (Idle →
+///     Chase transition fired server-side);
+///   * a `Hit` broadcast lands targeting the player from an enemy id
+///     (Attack state fired its melee swing).
+///
+/// Death lifecycle (EntityDied + EntityDespawn) is reserved for sub-task
+/// 3, where the player-attacks-enemy path lands enemy HP authoritatively.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enemy_aggros_chases_and_attacks_player() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "zeta", "Zett", "Human", "Warrior").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Unit vector toward camp 0's [20, 0, 5] spawn.
+    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
+    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
+
+    // Walk for ~2 s at 50 ms cadence. Each Move refreshes the server-side
+    // stale-move clock so integration continues until we stop sending.
+    let walk_end = Instant::now() + Duration::from_millis(2_000);
+    let mut seq: u32 = 1;
+    while Instant::now() < walk_end {
+        a.send_move(seq, dir);
+        seq += 1;
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    // Stop. The server's STALE_MOVE_THRESHOLD (500 ms) will park the
+    // player at its current pos within ~10 ticks.
+
+    let target_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(10), |m| {
+            matches!(
+                m,
+                ServerWorldMsg::EntityTarget { target: Some(t), .. } if *t == a_char_id as u64
+            )
+        })
+        .await
+        .expect("an enemy locks onto the player within 10 s");
+    if let ServerWorldMsg::EntityTarget { id, .. } = target_evt {
+        assert!(
+            id >= ENEMY_ID_BASE,
+            "EntityTarget origin must be an enemy id (got {id}, base {ENEMY_ID_BASE})"
+        );
+    }
+
+    let hit_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(10), |m| {
+            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
+        })
+        .await
+        .expect("enemy fires a melee swing on the player within 10 s");
+    if let ServerWorldMsg::Hit { attacker, amount, dmg_type, .. } = hit_evt {
+        assert!(
+            attacker >= ENEMY_ID_BASE,
+            "Hit attacker must be an enemy id (got {attacker}, base {ENEMY_ID_BASE})"
+        );
+        assert!(amount > 0, "enemy hit amount must be positive (got {amount})");
+        assert!(
+            matches!(dmg_type, DamageType::Physical),
+            "enemy melee broadcasts as Physical damage (got {dmg_type:?})"
+        );
+    }
+}
+
 /// Track 5 sub-task 1B: server-authoritative enemy spawn lifecycle.
 ///
 /// The server boots, the spawner instantiates 27 enemies from the embedded

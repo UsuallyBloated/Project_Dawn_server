@@ -4,7 +4,7 @@
 
 use super::{
     connection::{PerConnection, Vec3f},
-    entity::Entity,
+    entity::{Entity, HitIntent},
     handlers::{self, Outcome},
     persistence,
     spawn_points::Spawner,
@@ -12,7 +12,7 @@ use super::{
     STALE_MOVE_THRESHOLD, TICK_DT,
 };
 use crate::{db, Config};
-use protocol::world::{EntityId, KickCode};
+use protocol::world::{DamageType, EntityId, KickCode};
 use renet::{ClientId, RenetServer, ServerEvent};
 use renet_netcode::NetcodeServerTransport;
 use sqlx::SqlitePool;
@@ -582,6 +582,58 @@ pub async fn run(
             }
         }
 
+        // 4h. Enemy AI tick. Each alive enemy evaluates its state machine
+        //     against the snapshot of in_world player positions, advances
+        //     its own pos / target / state, and yields events for the
+        //     post-loop fan-out (target switch, melee swing). Position
+        //     broadcasts ride the same step-6 fan-out as players.
+        let dt = TICK_DT.as_secs_f32();
+        let in_world_recipients_now: Vec<ClientId> = connections
+            .iter()
+            .filter(|(_, c)| c.in_world)
+            .map(|(id, _)| *id)
+            .collect();
+        if !enemies.is_empty() && !in_world_recipients_now.is_empty() {
+            let player_snapshots: Vec<(EntityId, Vec3f)> = connections
+                .values()
+                .filter(|c| c.in_world)
+                .map(|c| (c.char_id as u64, c.pos))
+                .collect();
+            let mut target_changes: Vec<(EntityId, Option<EntityId>)> = Vec::new();
+            let mut enemy_hits: Vec<(EntityId, HitIntent)> = Vec::new();
+            for entity in enemies.values_mut() {
+                if !entity.is_alive() {
+                    continue;
+                }
+                let events = entity.tick_ai(&player_snapshots, dt, now);
+                if let Some(new_target) = events.target_changed {
+                    target_changes.push((entity.id, new_target));
+                }
+                if let Some(hit) = events.hit {
+                    enemy_hits.push((entity.id, hit));
+                }
+            }
+            for (id, target) in target_changes {
+                handlers::fan_out_entity_target(
+                    &mut server,
+                    &in_world_recipients_now,
+                    id,
+                    target,
+                );
+            }
+            for (attacker, hit) in enemy_hits {
+                handlers::fan_out_hit(
+                    &mut server,
+                    &in_world_recipients_now,
+                    attacker,
+                    hit.target,
+                    hit.amount,
+                    false,
+                    DamageType::Physical,
+                );
+            }
+        }
+
         // 5. Integrate movement intent exactly once per tick. The Move
         //    handler stores the latest direction on the connection; we
         //    advance position here so the rate is bound to wall-clock
@@ -589,7 +641,7 @@ pub async fn run(
         //    threshold: if no Move has arrived in STALE_MOVE_THRESHOLD,
         //    integrate zero — protects against a crashed client visually
         //    running forward until the heartbeat timeout.
-        let dt = TICK_DT.as_secs_f32();
+        // dt was computed above for the AI tick; reuse.
         for conn in connections.values_mut().filter(|c| c.ready) {
             let dir = match conn.last_move_received {
                 Some(t) if now.duration_since(t) < STALE_MOVE_THRESHOLD => {
@@ -628,6 +680,32 @@ pub async fn run(
             };
             for recipient_id in &in_world_ids {
                 server.send_message(*recipient_id, CHANNEL_POSITION, bytes.clone());
+            }
+        }
+
+        // 6b. Enemy Position fan-out. Every alive enemy → every in_world
+        //     client. Idle / Attack / Dead enemies don't move so their
+        //     `events.moved` from step 4h gates whether they enter this
+        //     loop. Sequence increments per broadcast so the client can
+        //     drop out-of-order Position arrivals on the unreliable
+        //     channel (same role as PerConnection.last_move_seq).
+        if !in_world_ids.is_empty() {
+            for entity in enemies.values_mut() {
+                if !entity.is_alive() {
+                    continue;
+                }
+                // Always broadcast for now — moving enemies need the live
+                // updates, stationary ones need the seed for a late
+                // joiner. A later optimisation can dedup with a per-entity
+                // `last_broadcast_pos` check; bandwidth at 27 × 20 Hz is
+                // trivial.
+                entity.seq = entity.seq.wrapping_add(1);
+                let Some(bytes) = handlers::build_enemy_position_msg(entity) else {
+                    continue;
+                };
+                for recipient_id in &in_world_ids {
+                    server.send_message(*recipient_id, CHANNEL_POSITION, bytes.clone());
+                }
             }
         }
 

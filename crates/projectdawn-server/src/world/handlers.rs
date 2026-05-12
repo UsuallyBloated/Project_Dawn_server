@@ -336,6 +336,40 @@ pub fn send_entity_despawn(
     }
 }
 
+/// Build a Position message for `entity`. Returns encoded bytes for
+/// the caller to clone-and-send per recipient — same pattern as
+/// `build_position_msg` for players.
+pub fn build_enemy_position_msg(entity: &Entity) -> Option<Vec<u8>> {
+    let msg = ServerWorldMsg::Position {
+        id: entity.id,
+        pos: Vec3 { x: entity.pos.x, y: entity.pos.y, z: entity.pos.z },
+        vel: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
+        yaw: entity.yaw,
+        sequence: entity.seq,
+    };
+    encode(&msg)
+}
+
+/// Fan out an `EntityTarget` to every recipient. Used on enemy aggro-
+/// target switch. Encoded once, cloned per recipient.
+pub fn fan_out_entity_target(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    id: protocol::world::EntityId,
+    target: Option<protocol::world::EntityId>,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::EntityTarget { id, target };
+    let Some(bytes) = encode(&msg) else {
+        return;
+    };
+    for &recipient_id in recipients {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
 /// Fan out `EnemySpawn` for `entity` to every recipient. Encoded once and
 /// cloned per recipient. Used for live spawns (new mob appears → broadcast
 /// to all in_world clients) and late-joiner seed (new client enters world

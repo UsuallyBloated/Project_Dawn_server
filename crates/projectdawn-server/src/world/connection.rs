@@ -37,6 +37,44 @@ impl Vec3f {
             self
         }
     }
+
+    pub fn sub(self, other: Self) -> Self {
+        Self { x: self.x - other.x, y: self.y - other.y, z: self.z - other.z }
+    }
+
+    pub fn distance_to(self, other: Self) -> f32 {
+        self.sub(other).length()
+    }
+
+    /// Returns `self / length` for non-zero vectors, else `ZERO`. Avoids
+    /// NaN propagation when the AI computes a direction to a coincident
+    /// target.
+    pub fn normalize_or_zero(self) -> Self {
+        let len = self.length();
+        if len > 0.0 {
+            Self { x: self.x / len, y: self.y / len, z: self.z / len }
+        } else {
+            Self::ZERO
+        }
+    }
+
+    /// Step `self` toward `target` by at most `step` units. The y axis is
+    /// preserved on `self` (enemies don't fly toward a player who's on a
+    /// raised mesh; matches the GDScript `_move_at_speed` behaviour).
+    pub fn step_toward(self, target: Self, step: f32) -> Self {
+        let delta = target.sub(self);
+        let dist = delta.length();
+        if dist <= step || dist <= f32::EPSILON {
+            Self { x: target.x, y: self.y, z: target.z }
+        } else {
+            let dir = delta.normalize_or_zero();
+            Self {
+                x: self.x + dir.x * step,
+                y: self.y,
+                z: self.z + dir.z * step,
+            }
+        }
+    }
 }
 
 #[derive(Debug)]

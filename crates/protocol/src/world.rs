@@ -250,6 +250,25 @@ pub enum ClientWorldMsg {
     BuffSnapshotBroadcast {
         buffs: Vec<(String, f32)>,
     },
+
+    // Track 4 sub-task 4: attacker broadcasts a hit/miss/evade result so
+    // peers can render floating damage / "MISS" / "EVADE" text over the
+    // target. Combat math stays client-local (the attacker computes the
+    // outcome); these messages are pure visualization fan-out. PvP damage
+    // application is Track 6 — for now the target's HP doesn't change as
+    // a result of receiving these.
+    HitBroadcast {
+        target: EntityId,
+        amount: i32,
+        crit: bool,
+        dmg_type: DamageType,
+    },
+    MissBroadcast {
+        target: EntityId,
+    },
+    EvadeBroadcast {
+        target: EntityId,
+    },
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────

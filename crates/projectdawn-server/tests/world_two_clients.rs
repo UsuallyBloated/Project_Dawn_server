@@ -16,7 +16,7 @@
 use bincode::config::standard as bincode_cfg;
 use futures_util::{SinkExt, StreamExt};
 use projectdawn_server::{auth, db, world, Config};
-use protocol::world::{ClientWorldMsg, ServerWorldMsg, Vec3};
+use protocol::world::{ClientWorldMsg, DamageType, ServerWorldMsg, Vec3};
 use renet::{ConnectionConfig, RenetClient};
 use renet_netcode::{ClientAuthentication, ConnectToken, NetcodeClientTransport};
 use std::{
@@ -242,6 +242,16 @@ impl WorldClient {
 
     fn send_buff_snapshot(&mut self, buffs: Vec<(String, f32)>) {
         let msg = ClientWorldMsg::BuffSnapshotBroadcast { buffs };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
+    fn send_hit(&mut self, target: u64, amount: i32, crit: bool, dmg_type: DamageType) {
+        let msg = ClientWorldMsg::HitBroadcast {
+            target,
+            amount,
+            crit,
+            dmg_type,
+        };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
@@ -493,6 +503,55 @@ async fn two_clients_cast_fanout() {
         })
         .await;
     assert!(echoed.is_none(), "A should not receive own cast events");
+}
+
+/// Track 4 sub-task 4: combat hit fan-out. A broadcasts a hit on B; B (the
+/// target) and any other observer should receive ServerWorldMsg::Hit
+/// carrying the attacker/target ids and the damage payload. Owner does not
+/// receive own echo.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_clients_hit_fanout() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "iota", "Iot", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "kappa", "Kap", "Elf", "Wizard").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+
+    a.send_hit(b_char_id as u64, 42, true, DamageType::Fire);
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let hit_at_b = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
+                if *attacker == a_char_id as u64 && *target == b_char_id as u64)
+        })
+        .await
+        .expect("B receives Hit from A");
+    if let ServerWorldMsg::Hit {
+        amount,
+        crit,
+        dmg_type,
+        ..
+    } = hit_at_b
+    {
+        assert_eq!(amount, 42);
+        assert!(crit);
+        assert_eq!(dmg_type, DamageType::Fire);
+    }
+
+    let echoed = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == a_char_id as u64)
+        })
+        .await;
+    assert!(echoed.is_none(), "A should not receive own Hit echo");
 }
 
 /// Track 4 sub-task 3: buff snapshot replication. A broadcasts a snapshot;

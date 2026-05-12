@@ -50,6 +50,21 @@ pub enum Outcome {
     /// Cache updated on `conn`; tick loop fans out to in_world peers in
     /// a post-dispatch sweep, deduped per sender like resources.
     BuffSnapshotFanOut,
+    /// Track 4 sub-task 4 — combat outcome from the attacker's POV. Pure
+    /// visual fan-out; payload travels verbatim in the matching server
+    /// variant.
+    HitFanOut {
+        target: u64,
+        amount: i32,
+        crit: bool,
+        dmg_type: protocol::world::DamageType,
+    },
+    MissFanOut {
+        target: u64,
+    },
+    EvadeFanOut {
+        target: u64,
+    },
 }
 
 pub fn handle_message(
@@ -164,6 +179,37 @@ pub fn handle_message(
             conn.cast_total_duration = 0.0;
             conn.cast_set_at = None;
             Outcome::CastCompleteFanOut { spell_name }
+        }
+
+        ClientWorldMsg::HitBroadcast {
+            target,
+            amount,
+            crit,
+            dmg_type,
+        } => {
+            if !conn.ready {
+                return Outcome::Continue;
+            }
+            Outcome::HitFanOut {
+                target,
+                amount,
+                crit,
+                dmg_type,
+            }
+        }
+
+        ClientWorldMsg::MissBroadcast { target } => {
+            if !conn.ready {
+                return Outcome::Continue;
+            }
+            Outcome::MissFanOut { target }
+        }
+
+        ClientWorldMsg::EvadeBroadcast { target } => {
+            if !conn.ready {
+                return Outcome::Continue;
+            }
+            Outcome::EvadeFanOut { target }
         }
 
         ClientWorldMsg::BuffSnapshotBroadcast { buffs } => {
@@ -334,6 +380,66 @@ pub fn fan_out_cast_fail(
         return;
     }
     let msg = ServerWorldMsg::CastFail { caster, reason };
+    let Some(bytes) = encode(&msg) else { return };
+    for recipient in recipients {
+        server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+/// Fan out a combat hit. The attacker's `caster` id, the target's id,
+/// and the damage payload travel verbatim. Encoded once, cloned per
+/// recipient — same pattern as the other fan-outs.
+pub fn fan_out_hit(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    attacker: u64,
+    target: u64,
+    amount: i32,
+    crit: bool,
+    dmg_type: protocol::world::DamageType,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::Hit {
+        attacker,
+        target,
+        amount,
+        crit,
+        dmg_type,
+    };
+    let Some(bytes) = encode(&msg) else { return };
+    for recipient in recipients {
+        server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+pub fn fan_out_miss(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    attacker: u64,
+    target: u64,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::Miss { attacker, target };
+    let Some(bytes) = encode(&msg) else { return };
+    for recipient in recipients {
+        server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+pub fn fan_out_evade(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    attacker: u64,
+    target: u64,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::Evade { attacker, target };
     let Some(bytes) = encode(&msg) else { return };
     for recipient in recipients {
         server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());

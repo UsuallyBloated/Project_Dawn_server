@@ -24,6 +24,23 @@ enum CastEvent {
     Fail { reason: String },
 }
 
+/// Track 4 sub-task 4 combat event. Same shape as CastEvent — one-shot
+/// per arrival, not coalesced, ordered.
+enum CombatEvent {
+    Hit {
+        target: u64,
+        amount: i32,
+        crit: bool,
+        dmg_type: protocol::world::DamageType,
+    },
+    Miss {
+        target: u64,
+    },
+    Evade {
+        target: u64,
+    },
+}
+
 pub async fn run(
     cfg: Arc<Config>,
     pool: SqlitePool,
@@ -185,6 +202,9 @@ pub async fn run(
         // Track 4 sub-task 3 — like resources, dedup per sender so a burst
         // of buff changes inside one tick produces a single fan-out.
         let mut buff_fanouts: Vec<ClientId> = Vec::new();
+        // Track 4 sub-task 4 combat events. Verbatim queue (Hit/Miss/Evade
+        // are one-shot visuals, ordered).
+        let mut combat_fanouts: Vec<(ClientId, CombatEvent)> = Vec::new();
         for client_id in client_ids {
             // Skip clients whose Connected event is in the queue but whose
             // PerConnection row hasn't been built yet (load_character failed
@@ -232,6 +252,28 @@ pub async fn run(
                             if !buff_fanouts.contains(&client_id) {
                                 buff_fanouts.push(client_id);
                             }
+                        }
+                        Outcome::HitFanOut {
+                            target,
+                            amount,
+                            crit,
+                            dmg_type,
+                        } => {
+                            combat_fanouts.push((
+                                client_id,
+                                CombatEvent::Hit {
+                                    target,
+                                    amount,
+                                    crit,
+                                    dmg_type,
+                                },
+                            ));
+                        }
+                        Outcome::MissFanOut { target } => {
+                            combat_fanouts.push((client_id, CombatEvent::Miss { target }));
+                        }
+                        Outcome::EvadeFanOut { target } => {
+                            combat_fanouts.push((client_id, CombatEvent::Evade { target }));
                         }
                         Outcome::Continue => {}
                     }
@@ -412,6 +454,48 @@ pub async fn run(
                     caster,
                     reason,
                 ),
+            }
+        }
+
+        // 4e. Combat event fan-out (Hit / Miss / Evade). Same in_world
+        //     recipient filter as the cast / buff paths. The target's
+        //     own client also receives the broadcast — RemotePlayerManager
+        //     filters target == own_id and routes through the
+        //     incoming-damage UI path (different render from outgoing).
+        for (sender_id, event) in combat_fanouts.drain(..) {
+            if to_disconnect.contains(&sender_id) {
+                continue;
+            }
+            let Some(sender) = connections.get(&sender_id) else {
+                continue;
+            };
+            let attacker = sender.char_id as u64;
+            let recipients: Vec<ClientId> = in_world_recipients
+                .iter()
+                .filter(|id| **id != sender_id)
+                .copied()
+                .collect();
+            match event {
+                CombatEvent::Hit {
+                    target,
+                    amount,
+                    crit,
+                    dmg_type,
+                } => handlers::fan_out_hit(
+                    &mut server,
+                    &recipients,
+                    attacker,
+                    target,
+                    amount,
+                    crit,
+                    dmg_type,
+                ),
+                CombatEvent::Miss { target } => {
+                    handlers::fan_out_miss(&mut server, &recipients, attacker, target)
+                }
+                CombatEvent::Evade { target } => {
+                    handlers::fan_out_evade(&mut server, &recipients, attacker, target)
+                }
             }
         }
 

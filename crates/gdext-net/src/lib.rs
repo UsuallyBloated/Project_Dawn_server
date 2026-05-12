@@ -8,10 +8,10 @@
 //! Handled message types are decoded into typed signals: `ConnectOk`,
 //! `Heartbeat`, `Kick`, `Position`, `EntitySpawn`, `EntityDespawn`,
 //! `HealthUpdate`, `ManaUpdate`, `StaminaUpdate`, `CastStart`,
-//! `CastComplete`, `CastFail`, `BuffSnapshot`. Other variants get
-//! bubbled up via `unhandled_server_message(channel, bytes)` for
-//! forward-compat — when their handlers land, add a typed `match` arm
-//! in `classify` and a matching emit in `fire`.
+//! `CastComplete`, `CastFail`, `BuffSnapshot`, `Hit`, `Miss`, `Evade`.
+//! Other variants get bubbled up via `unhandled_server_message(channel,
+//! bytes)` for forward-compat — when their handlers land, add a typed
+//! `match` arm in `classify` and a matching emit in `fire`.
 
 // EntitySpawn signal carries 7 identity fields by design; godot-rust's
 // `#[godot_api]` proc-macro expands declarations into 8-arg fns (self + args),
@@ -140,6 +140,18 @@ impl NetClient {
 
     #[signal]
     fn cast_fail(caster: i64, reason: GString);
+
+    /// Track 4 sub-task 4 combat events. `dmg_type` is the u8
+    /// discriminant of `protocol::world::DamageType` (mirror of
+    /// NetProtocol.DamageType on the GDScript side).
+    #[signal]
+    fn hit(attacker: i64, target: i64, amount: i64, crit: bool, dmg_type: i64);
+
+    #[signal]
+    fn miss(attacker: i64, target: i64);
+
+    #[signal]
+    fn evade(attacker: i64, target: i64);
 
     /// Track 4 sub-task 3 buff snapshot. `names` and `durations` are
     /// parallel arrays — entry i is one buff. Empty arrays mean "no
@@ -366,6 +378,42 @@ impl NetClient {
     /// Track 4 sub-task 3 — full buff snapshot. `names` and `durations`
     /// must be the same length; extra entries in either are silently
     /// truncated to the shorter. Empty inputs mean "no active buffs".
+    /// Track 4 sub-task 4 combat broadcasts. `dmg_type` is the u8
+    /// discriminant of protocol::world::DamageType (clamped to the
+    /// known range; out-of-range falls back to Physical).
+    #[func]
+    fn send_hit_broadcast(
+        &mut self,
+        target: i64,
+        amount: i64,
+        crit: bool,
+        dmg_type: i64,
+    ) -> bool {
+        let msg = ClientWorldMsg::HitBroadcast {
+            target: target as u64,
+            amount: amount as i32,
+            crit,
+            dmg_type: damage_type_from_u8(dmg_type as u8),
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    #[func]
+    fn send_miss_broadcast(&mut self, target: i64) -> bool {
+        let msg = ClientWorldMsg::MissBroadcast {
+            target: target as u64,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    #[func]
+    fn send_evade_broadcast(&mut self, target: i64) -> bool {
+        let msg = ClientWorldMsg::EvadeBroadcast {
+            target: target as u64,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
     #[func]
     fn send_buff_snapshot_broadcast(
         &mut self,
@@ -457,6 +505,21 @@ enum Incoming {
     BuffSnapshot {
         target: i64,
         buffs: Vec<(String, f32)>,
+    },
+    Hit {
+        attacker: i64,
+        target: i64,
+        amount: i32,
+        crit: bool,
+        dmg_type: u8,
+    },
+    Miss {
+        attacker: i64,
+        target: i64,
+    },
+    Evade {
+        attacker: i64,
+        target: i64,
     },
     Raw {
         channel: u8,
@@ -686,6 +749,36 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::Hit {
+                    attacker,
+                    target,
+                    amount,
+                    crit,
+                    dmg_type,
+                } => {
+                    self.base_mut().emit_signal(
+                        "hit",
+                        &[
+                            attacker.to_variant(),
+                            target.to_variant(),
+                            (amount as i64).to_variant(),
+                            crit.to_variant(),
+                            (dmg_type as i64).to_variant(),
+                        ],
+                    );
+                }
+                Incoming::Miss { attacker, target } => {
+                    self.base_mut().emit_signal(
+                        "miss",
+                        &[attacker.to_variant(), target.to_variant()],
+                    );
+                }
+                Incoming::Evade { attacker, target } => {
+                    self.base_mut().emit_signal(
+                        "evade",
+                        &[attacker.to_variant(), target.to_variant()],
+                    );
+                }
                 Incoming::BuffSnapshot { target, buffs } => {
                     let mut names = PackedStringArray::new();
                     let mut durations = PackedFloat32Array::new();
@@ -804,12 +897,69 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             target: target as i64,
             buffs,
         },
+        ServerWorldMsg::Hit {
+            attacker,
+            target,
+            amount,
+            crit,
+            dmg_type,
+        } => Incoming::Hit {
+            attacker: attacker as i64,
+            target: target as i64,
+            amount,
+            crit,
+            dmg_type: damage_type_to_u8(dmg_type),
+        },
+        ServerWorldMsg::Miss { attacker, target } => Incoming::Miss {
+            attacker: attacker as i64,
+            target: target as i64,
+        },
+        ServerWorldMsg::Evade { attacker, target } => Incoming::Evade {
+            attacker: attacker as i64,
+            target: target as i64,
+        },
         // Other variants (BuffApplied, ChatMessage, ...) get
         // bubbled up raw. As their handlers land, add typed `match` arms here.
         _ => Incoming::Raw {
             channel,
             bytes: raw.to_vec(),
         },
+    }
+}
+
+/// DamageType u8-discriminant conversion. Kept inside this crate so the
+/// wire enum can grow without touching call sites. Unknown values fall
+/// back to Physical — same direction the existing GDScript mirror
+/// (NetProtocol.DamageType) assumes.
+fn damage_type_to_u8(t: protocol::world::DamageType) -> u8 {
+    use protocol::world::DamageType as DT;
+    match t {
+        DT::Physical => 0,
+        DT::Fire => 1,
+        DT::Ice => 2,
+        DT::Lightning => 3,
+        DT::Arcane => 4,
+        DT::Holy => 5,
+        DT::Nature => 6,
+        DT::Spirit => 7,
+        DT::Shadow => 8,
+        DT::Poison => 9,
+    }
+}
+
+fn damage_type_from_u8(n: u8) -> protocol::world::DamageType {
+    use protocol::world::DamageType as DT;
+    match n {
+        1 => DT::Fire,
+        2 => DT::Ice,
+        3 => DT::Lightning,
+        4 => DT::Arcane,
+        5 => DT::Holy,
+        6 => DT::Nature,
+        7 => DT::Spirit,
+        8 => DT::Shadow,
+        9 => DT::Poison,
+        _ => DT::Physical,
     }
 }
 

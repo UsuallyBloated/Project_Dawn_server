@@ -705,11 +705,13 @@ pub async fn run(
                 // ClientId is renet's u64 alias and we minted it as char_id,
                 // so the attacker's char_id (also u64 on the wire) is the
                 // map key directly.
-                let Some(attacker_conn) = connections.get(&(intent.attacker as ClientId)) else {
+                let attacker_cid = intent.attacker as ClientId;
+                let Some(attacker_conn) = connections.get(&attacker_cid) else {
                     // Attacker disconnected between sending and apply.
                     continue;
                 };
                 let attacker_pos = attacker_conn.pos;
+                let attacker_zone = attacker_conn.zone.clone();
                 // Track 6 sub-task 2: server computes the damage roll.
                 // Client-supplied amount is ignored — even a malicious
                 // client can't claim 999 damage anymore.
@@ -718,6 +720,109 @@ pub async fn run(
                     &intent.weapon_path,
                     intent.is_offhand,
                 );
+
+                // Track 6 sub-task 3: player-target branch (PvP). The
+                // attack-id partition has player char_ids below
+                // ENEMY_ID_BASE; anything in that range is a peer. We
+                // resolve, gate via combat::can_attack (which today
+                // requires both sides flipped /pvp on), apply HP delta,
+                // and fan Hit + HealthUpdate. Self-attack guarded;
+                // dying via PvP routes through the regular client-side
+                // PlayerDeath flow (which fires DeathBroadcast on its
+                // own) until sub-task 4 lifts death detection server-
+                // authoritative.
+                if intent.target_id < protocol::world::ENEMY_ID_BASE {
+                    if intent.target_id == intent.attacker {
+                        continue;
+                    }
+                    let target_cid = intent.target_id as ClientId;
+                    let target_zone = connections
+                        .get(&target_cid)
+                        .and_then(|c| c.zone.clone());
+                    let allowed_pvp = match (
+                        connections.get(&attacker_cid),
+                        connections.get(&target_cid),
+                    ) {
+                        (Some(a), Some(t)) => combat::can_attack(
+                            a, t,
+                            attacker_zone.as_deref(),
+                            target_zone.as_deref(),
+                        ),
+                        _ => false,
+                    };
+                    let target_in_range_alive = connections
+                        .get(&target_cid)
+                        .map(|t| {
+                            t.in_world
+                                && t.hp > 0.0
+                                && t.pos.distance_to(attacker_pos) <= match items::lookup(
+                                    &intent.weapon_path,
+                                ) {
+                                    Some(w) if w.is_ranged => RANGED_ATTACK_RANGE,
+                                    _ => 3.0 * ATTACK_RANGE_TOLERANCE,
+                                }
+                        })
+                        .unwrap_or(false);
+                    if !allowed_pvp || !target_in_range_alive {
+                        if !allowed_pvp {
+                            tracing::debug!(
+                                attacker = intent.attacker,
+                                target = intent.target_id,
+                                "PvP not authorized, fanning Miss"
+                            );
+                        }
+                        handlers::fan_out_miss(
+                            &mut server,
+                            &in_world_recipients_now,
+                            intent.attacker,
+                            intent.target_id,
+                        );
+                        continue;
+                    }
+                    // Apply damage. Armor reduction matches the
+                    // GDScript Combat.receive_player_damage:
+                    //   reduction = armor / (armor + ARMOR_DR_DIVISOR)
+                    // with ARMOR_DR_DIVISOR = 100. The reduced amount
+                    // is clamped to at least 1 — same as the client
+                    // so unarmoured swings still tick HP.
+                    let raw_swing = swing.amount;
+                    let (new_hp, max_hp, amount, target_armor) = {
+                        let target_conn = connections.get_mut(&target_cid).expect("checked");
+                        let armor = target_conn.equipped_armor.max(0) as f32;
+                        let reduction = armor / (armor + 100.0);
+                        let amount = ((swing.amount as f32 * (1.0 - reduction)) as i32).max(1);
+                        target_conn.hp = (target_conn.hp - amount as f32).max(0.0);
+                        regen::mark_dirty(target_conn);
+                        (target_conn.hp, target_conn.max_hp, amount, target_conn.equipped_armor)
+                    };
+                    tracing::info!(
+                        attacker = intent.attacker,
+                        target = intent.target_id,
+                        raw_swing,
+                        target_armor,
+                        applied = amount,
+                        target_hp = new_hp,
+                        "PvP attack applied"
+                    );
+                    handlers::fan_out_hit(
+                        &mut server,
+                        &in_world_recipients_now,
+                        intent.attacker,
+                        intent.target_id,
+                        amount,
+                        swing.crit,
+                        intent.dmg_type,
+                    );
+                    handlers::fan_out_health_update(
+                        &mut server,
+                        &in_world_recipients_now,
+                        intent.target_id,
+                        new_hp,
+                        max_hp,
+                    );
+                    continue;
+                }
+
                 let Some(entity) = enemies.get_mut(&intent.target_id) else {
                     handlers::fan_out_miss(
                         &mut server,
@@ -886,29 +991,37 @@ pub async fn run(
                 // is a char_id we can look up directly. Bigger ids
                 // (other enemies, loot bags) shouldn't happen here
                 // (enemy AI never targets non-players) but the
-                // partition guards against it. PvP / armor / evasion
-                // are not yet modelled on the server; the client's
-                // own armor / evade roll runs in the legacy local path
-                // until sub-task 3 ports it. The amount the enemy AI
-                // produced rides through unchanged.
+                // partition guards against it. Sub-task 3 applies the
+                // same armor reduction the player-target branch uses.
+                // The fan_out_hit amount tracks the post-reduction
+                // value so the floating number matches the bar drop.
                 let mut damaged_player: Option<u64> = None;
-                if hit.target < protocol::world::ENEMY_ID_BASE {
+                let final_amount = if hit.target < protocol::world::ENEMY_ID_BASE {
                     let target_cid = hit.target as ClientId;
                     if let Some(target_conn) = connections.get_mut(&target_cid) {
                         if target_conn.in_world && target_conn.hp > 0.0 {
-                            let new_hp = (target_conn.hp - hit.amount as f32).max(0.0);
-                            target_conn.hp = new_hp;
+                            let armor = target_conn.equipped_armor.max(0) as f32;
+                            let reduction = armor / (armor + 100.0);
+                            let reduced = ((hit.amount as f32 * (1.0 - reduction)) as i32).max(1);
+                            target_conn.hp = (target_conn.hp - reduced as f32).max(0.0);
                             regen::mark_dirty(target_conn);
                             damaged_player = Some(hit.target);
+                            reduced
+                        } else {
+                            hit.amount
                         }
+                    } else {
+                        hit.amount
                     }
-                }
+                } else {
+                    hit.amount
+                };
                 handlers::fan_out_hit(
                     &mut server,
                     &in_world_recipients_now,
                     attacker,
                     hit.target,
-                    hit.amount,
+                    final_amount,
                     false,
                     DamageType::Physical,
                 );

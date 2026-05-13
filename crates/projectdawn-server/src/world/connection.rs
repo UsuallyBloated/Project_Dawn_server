@@ -154,6 +154,19 @@ pub struct PerConnection {
     /// intents; multiplies regen rate per `regen::SITTING_HP_MULT` etc.
     pub is_sitting: bool,
 
+    /// Track 6 sub-task 3 — sum of armor_class across equipped armor.
+    /// Updated by `EquipUpdate` intents; consumed by the damage formula
+    /// (combat::receive_damage) to compute the AC/(AC+ARMOR_DR_DIVISOR)
+    /// reduction matching `autoloads/combat.gd`. Zero until the client
+    /// sends its first EquipUpdate.
+    pub equipped_armor: i32,
+
+    /// Track 6 sub-task 3 — dev /pvp toggle. Both attacker and target
+    /// must have this flipped on for `combat::can_attack` to allow PvP
+    /// damage. Future duel-acceptance / PvP-zone / PvP-server rules
+    /// will layer atop the same flag.
+    pub pvp_override_on: bool,
+
     /// Track 6: fractional regen accumulator. The 20 Hz tick produces
     /// sub-integer amounts; we accumulate and only mutate `hp`/`mp`/
     /// `stamina` (and fan out) when the integer part bumps. Reset to 0.0
@@ -232,6 +245,8 @@ impl PerConnection {
             charisma: spawn.charisma,
             constitution: spawn.constitution,
             is_sitting: false,
+            equipped_armor: 0,
+            pvp_override_on: false,
             regen_hp_acc: 0.0,
             regen_mp_acc: 0.0,
             regen_stamina_acc: 0.0,

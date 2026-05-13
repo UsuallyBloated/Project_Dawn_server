@@ -261,6 +261,64 @@ pub fn handle_message(
             Outcome::DeathFanOut
         }
 
+        ClientWorldMsg::EquipUpdate { armor } => {
+            if !conn.ready {
+                return Outcome::Continue;
+            }
+            conn.equipped_armor = armor.max(0);
+            tracing::info!(
+                char_id = conn.char_id,
+                armor = conn.equipped_armor,
+                "equipment update — armor cached"
+            );
+            Outcome::Continue
+        }
+
+        ClientWorldMsg::PvpToggle { on } => {
+            if !conn.ready {
+                return Outcome::Continue;
+            }
+            conn.pvp_override_on = on;
+            tracing::info!(
+                char_id = conn.char_id,
+                on,
+                "dev PvP override toggled"
+            );
+            Outcome::Continue
+        }
+
+        ClientWorldMsg::DamageSelf { amount } => {
+            if !conn.in_world || conn.hp <= 0.0 {
+                return Outcome::Continue;
+            }
+            let delta = amount.max(0) as f32;
+            conn.hp = (conn.hp - delta).max(0.0);
+            super::regen::mark_dirty(conn);
+            tracing::info!(
+                char_id = conn.char_id,
+                amount = delta,
+                new_hp = conn.hp,
+                "dev damage self"
+            );
+            Outcome::Continue
+        }
+
+        ClientWorldMsg::HealSelf { amount } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            let delta = amount.max(0) as f32;
+            conn.hp = (conn.hp + delta).min(conn.max_hp);
+            super::regen::mark_dirty(conn);
+            tracing::info!(
+                char_id = conn.char_id,
+                amount = delta,
+                new_hp = conn.hp,
+                "dev heal self"
+            );
+            Outcome::Continue
+        }
+
         ClientWorldMsg::Respawn => {
             if !conn.ready {
                 return Outcome::Continue;

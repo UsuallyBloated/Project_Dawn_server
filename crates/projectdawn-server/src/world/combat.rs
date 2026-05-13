@@ -20,6 +20,36 @@ use super::connection::PerConnection;
 use super::items;
 use rand::Rng;
 
+/// Track 6 sub-task 3 — PvP authorization chokepoint. Returns whether
+/// `attacker` can damage `target` right now. Always false in Track 6;
+/// the design surface for the eventual rules is documented here so the
+/// final shape is obvious when it lands:
+///
+///   1. **Duel state** — per-pair consent. A `HashMap<(ClientId,
+///      ClientId), DuelState>` keyed by canonical order; both sides
+///      must have accepted. Drives /duel commands.
+///   2. **PvP zones** — `zone path -> bool` lookup table. The
+///      `attacker_zone` / `target_zone` args are read here.
+///   3. **PvP server** — a server-wide flag (probably loaded from
+///      `Config`) flipping every check to true. The dedicated-shard
+///      story.
+///
+/// The chokepoint exists so combat.rs is the single integration point
+/// for those rules. Sub-task 3 also adds a `pvp_override_on` flag on
+/// `PerConnection` (set by the /pvp dev command) so duels can be
+/// verified end-to-end without the duel-state infrastructure shipping
+/// first.
+pub fn can_attack(
+    attacker: &PerConnection,
+    target: &PerConnection,
+    _attacker_zone: Option<&str>,
+    _target_zone: Option<&str>,
+) -> bool {
+    // Dev override: both sides must have flipped /pvp on. Future
+    // /duel handshakes layer over the same flag.
+    attacker.pvp_override_on && target.pvp_override_on
+}
+
 // Mirrors of `autoloads/combat.gd` constants. Keep in lockstep.
 const CRIT_PER_DEX: f32 = 0.003;
 const CRIT_MAX: f32 = 0.30;

@@ -297,6 +297,46 @@ pub enum ClientWorldMsg {
     /// (PvP death + timer-driven revive), at which point this becomes
     /// either an ACK or goes away.
     Respawn,
+
+    /// Track 6 sub-task 3 — client tells the server its current total
+    /// armor class (AGI/4 + sum of equipped armor with skill bonuses)
+    /// whenever equipment changes. Server caches per-PerConnection and
+    /// applies AC/(AC+100) reduction to incoming damage in the same
+    /// shape `autoloads/combat.gd::receive_player_damage` uses. Cheaty
+    /// (client can claim 9999 armor) but matches Track 6's transitional
+    /// trust model; full server-side equipment + skill tracking lands
+    /// with inventory authority.
+    EquipUpdate {
+        armor: i32,
+    },
+
+    /// Track 6 sub-task 3 — dev /pvp toggle. Flips the
+    /// `pvp_override_on` flag on the sender's PerConnection. Two
+    /// players with the flag on can damage each other via the
+    /// `combat::can_attack` chokepoint; otherwise PvP attacks fan Miss.
+    /// Future duel-accept / PvP-zone / PvP-server rules will layer over
+    /// the same flag.
+    PvpToggle {
+        on: bool,
+    },
+
+    /// Track 6 sub-task 3 dev intent — client requests the server to
+    /// subtract `amount` from its own HP. Routes through the same
+    /// damage path PvP and (future) spell-damage use so the regen
+    /// fan-out + death detection are exercised end-to-end. Cheaty by
+    /// definition; existing only behind the /damage chat command.
+    DamageSelf {
+        amount: i32,
+    },
+
+    /// Track 6 sub-task 3 dev intent — client requests the server to
+    /// add `amount` to its own HP (capped at max_hp). Mirror of
+    /// `DamageSelf` for verifying that server-applied heals stick. Will
+    /// be replaced by proper `CastSpell` handling once the spell table
+    /// is server-side.
+    HealSelf {
+        amount: i32,
+    },
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────

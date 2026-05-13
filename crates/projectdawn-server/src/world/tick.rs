@@ -336,10 +336,43 @@ pub async fn run(
                 .filter(|(id, c)| *id != new_id && c.in_world)
                 .map(|(id, _)| *id)
                 .collect();
-            // New client → existing peers.
+            // New client → existing peers. Mirror of the "Existing peers
+            // → new client" loop below: each existing peer needs EntitySpawn
+            // PLUS the new joiner's last-known resource / cast / buff state.
+            // Without the cached-state half, a peer who's already in_world
+            // when the new client's first ResourceUpdate fans out (step 4b)
+            // drops the broadcast (no spawn data yet), and the new client
+            // looks like 0/0 HP/MP/Stamina on the existing peer's target
+            // frame until the next natural broadcast. Seed at EnterWorld
+            // closes that race.
             if let Some(new_conn) = connections.get(new_id) {
                 for peer_id in &peer_ids {
                     handlers::send_entity_spawn(&mut server, *peer_id, new_conn);
+                    handlers::fan_out_resources(
+                        &mut server,
+                        std::slice::from_ref(peer_id),
+                        new_conn,
+                    );
+                    if !new_conn.cast_spell_name.is_empty() {
+                        if let Some(set_at) = new_conn.cast_set_at {
+                            let elapsed = now.duration_since(set_at).as_secs_f32();
+                            let remaining = new_conn.cast_total_duration - elapsed;
+                            if remaining > 0.0 {
+                                handlers::fan_out_cast_start(
+                                    &mut server,
+                                    std::slice::from_ref(peer_id),
+                                    new_conn.char_id as u64,
+                                    new_conn.cast_spell_name.clone(),
+                                    remaining,
+                                );
+                            }
+                        }
+                    }
+                    handlers::fan_out_buff_snapshot(
+                        &mut server,
+                        std::slice::from_ref(peer_id),
+                        new_conn,
+                    );
                 }
             }
             // Existing peers → new client.

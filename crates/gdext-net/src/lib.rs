@@ -383,28 +383,31 @@ impl NetClient {
         self.send_app(CHANNEL_POSITION, &msg)
     }
 
-    /// Track 4: broadcast current resources. Reliable system channel so
-    /// momentary loss can't desync peer bars. Throttling lives client-side
-    /// (see autoloads/net_combat_broadcaster.gd); this just relays.
+    // (Track 6 removed `send_resource_update`. Resources are now
+    // server-authoritative: HP/MP/Stamina come from the DB at spawn and
+    // mutate via server-side regen + combat. The client receives
+    // HealthUpdate / ManaUpdate / StaminaUpdate as the source of truth.)
+
+    /// Track 6 — owning client transitions to seated. Server uses this to
+    /// scale regen rates server-side; movement auto-stands on either side.
     #[func]
-    fn send_resource_update(
-        &mut self,
-        hp: f32,
-        max_hp: f32,
-        mp: f32,
-        max_mp: f32,
-        stamina: f32,
-        max_stamina: f32,
-    ) -> bool {
-        let msg = ClientWorldMsg::ResourceUpdate {
-            hp,
-            max_hp,
-            mp,
-            max_mp,
-            stamina,
-            max_stamina,
-        };
-        self.send_app(CHANNEL_SYSTEM, &msg)
+    fn send_sit(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::Sit)
+    }
+
+    /// Track 6 — owning client stands up. Pair to `send_sit`.
+    #[func]
+    fn send_stand(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::Stand)
+    }
+
+    /// Track 6 — owning client respawned (local death-timer elapsed).
+    /// Server resets conn.hp/mp/stamina to max and fans HealthUpdate /
+    /// ManaUpdate / StaminaUpdate so peer RemotePlayer bars stand back
+    /// up. Pair to send_death_broadcast.
+    #[func]
+    fn send_respawn(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::Respawn)
     }
 
     /// Track 4 sub-task 2 — owning client tells the server it started

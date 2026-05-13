@@ -808,6 +808,18 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     .await
     .expect("EntityDied arrives for the killed enemy");
 
+    // Track 5 sub-task 5 — kill credit. Decrepit Skeleton's authored
+    // xp is 10. Sole attacker → sole top damager → private XpGained.
+    let xp_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::XpGained { .. })
+        })
+        .await
+        .expect("XpGained arrives for the kill-credit recipient");
+    if let ServerWorldMsg::XpGained { amount, .. } = xp_evt {
+        assert_eq!(amount, 10, "Decrepit Skeleton authored xp is 10");
+    }
+
     // CORPSE_LINGER_SECS is 5 s; budget extra for tick jitter and
     // parallel contention.
     a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(15), |m| {

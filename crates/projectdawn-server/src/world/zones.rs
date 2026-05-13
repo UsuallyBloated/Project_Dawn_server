@@ -49,9 +49,8 @@ pub struct MobTemplate {
     pub level: u32,
     pub hp: f32,
     pub dmg: i32,
-    /// Award on kill credit. Read by sub-task 5 when the kill credit
-    /// path lands.
-    #[allow(dead_code)]
+    /// Award on kill credit. Read by the enemy-death branch in
+    /// `tick.rs` to compute the private `XpGained` for the top damager.
     pub xp: i32,
     pub speed: f32,
     pub aggro: f32,

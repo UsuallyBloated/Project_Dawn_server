@@ -424,6 +424,22 @@ pub fn send_loot_granted(
     }
 }
 
+/// Private XP grant to the kill-credit recipient. Mirrors
+/// `send_loot_granted`'s single-recipient shape on the reliable system
+/// channel. `current` / `to_next` are placeholders — the server doesn't
+/// track player XP state in Track 5 (still client-authoritative); Track 6
+/// will populate them.
+pub fn send_xp_gained(server: &mut RenetServer, recipient_id: ClientId, amount: i32) {
+    let msg = ServerWorldMsg::XpGained {
+        amount,
+        current: 0,
+        to_next: 0,
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
 /// Fan out a `LootBagSpawn` for `bag` to every recipient. Used for the
 /// initial spawn fan-out on enemy death and (sub-task 4B) re-snapshots
 /// when items are removed. Bag despawn rides the generic

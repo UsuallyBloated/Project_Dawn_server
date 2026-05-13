@@ -782,6 +782,36 @@ pub async fn run(
                         &in_world_recipients_now,
                         entity.id,
                     );
+                    // Kill credit: pick the top damager from the aggro
+                    // table and send a private XpGained. Solo-only
+                    // semantics — the legacy enet GroupManager path
+                    // splits XP locally and is out of scope for the
+                    // server's renet view. HashMap iteration order is
+                    // non-deterministic, so max_by with the partial_cmp
+                    // tiebreak is stable enough for the single-attacker
+                    // case (only one entry).
+                    if let Some((&credit_id, _)) = entity
+                        .aggro
+                        .iter()
+                        .max_by(|a, b| {
+                            a.1.partial_cmp(b.1)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                    {
+                        let xp = entity.mob.xp;
+                        if xp > 0 {
+                            let cid = credit_id as ClientId;
+                            if connections.contains_key(&cid) {
+                                handlers::send_xp_gained(&mut server, cid, xp);
+                                tracing::info!(
+                                    killer = credit_id,
+                                    mob = %entity.mob.name,
+                                    xp,
+                                    "kill credit granted"
+                                );
+                            }
+                        }
+                    }
                     // Roll loot from the mob's archetype table; spawn
                     // a server-owned bag at the death pos if any
                     // stacks landed. Empty rolls produce no bag at all

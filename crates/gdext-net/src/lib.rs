@@ -484,24 +484,24 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::DeathBroadcast)
     }
 
-    /// Track 5 sub-task 3 — player → server attack intent against a
-    /// specific entity (typically a server-spawned enemy). Server
-    /// validates target liveness + range, applies damage, broadcasts
-    /// Hit/Miss + HealthUpdate (+ EntityDied on kill). The client's
-    /// locally-computed `amount` is trusted for the Track 5 transitional
-    /// period; Track 6 will lift to server-authoritative combat math.
+    /// Track 6 sub-task 2 — player → server attack intent against a
+    /// specific entity. Carries the equipped weapon's resource path
+    /// (empty string for bare-handed) and a main-hand vs offhand flag;
+    /// the server runs the damage formula. Server validates target
+    /// liveness + range, broadcasts Hit/Miss + HealthUpdate (+
+    /// EntityDied on kill).
     #[func]
     fn send_attack(
         &mut self,
         target_id: i64,
-        amount: i64,
-        crit: bool,
+        weapon_path: GString,
+        is_offhand: bool,
         dmg_type: i64,
     ) -> bool {
         let msg = ClientWorldMsg::Attack {
             target_id: target_id as u64,
-            amount: amount as i32,
-            crit,
+            weapon_path: weapon_path.to_string(),
+            is_offhand,
             dmg_type: damage_type_from_u8(dmg_type as u8),
         };
         self.send_app(CHANNEL_SYSTEM, &msg)

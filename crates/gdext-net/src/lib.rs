@@ -10,7 +10,7 @@
 //! `HealthUpdate`, `ManaUpdate`, `StaminaUpdate`, `CastStart`,
 //! `CastComplete`, `CastFail`, `BuffSnapshot`, `Hit`, `Miss`, `Evade`,
 //! `EntityDied`, `EnemySpawn`, `EntityTarget`, `LootBagSpawn`,
-//! `LootGranted`. Other variants get bubbled up via
+//! `LootGranted`, `XpGained`. Other variants get bubbled up via
 //! `unhandled_server_message(channel, bytes)` for forward-compat — when
 //! their handlers land, add a typed `match` arm in `classify` and a
 //! matching emit in `fire`.
@@ -205,6 +205,13 @@ impl NetClient {
     /// Inventory.add_item.
     #[signal]
     fn loot_granted(item_path: GString, count: i64);
+
+    /// Track 5 sub-task 5 — private kill-credit XP grant. `current`
+    /// and `to_next` are placeholders from the server (Track 5 keeps
+    /// player XP state client-authoritative); the GDScript handler
+    /// calls PlayerStats.gain_xp(amount) and ignores them.
+    #[signal]
+    fn xp_gained(amount: i64, current: i64, to_next: i64);
 
     /// Track 4 sub-task 3 buff snapshot. `names` and `durations` are
     /// parallel arrays — entry i is one buff. Empty arrays mean "no
@@ -652,6 +659,11 @@ enum Incoming {
         item_path: String,
         count: u32,
     },
+    XpGained {
+        amount: i32,
+        current: i32,
+        to_next: i32,
+    },
     Raw {
         channel: u8,
         bytes: Vec<u8>,
@@ -988,6 +1000,16 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::XpGained { amount, current, to_next } => {
+                    self.base_mut().emit_signal(
+                        "xp_gained",
+                        &[
+                            (amount as i64).to_variant(),
+                            (current as i64).to_variant(),
+                            (to_next as i64).to_variant(),
+                        ],
+                    );
+                }
                 Incoming::Raw { channel, bytes } => {
                     let pba = packed_byte_array_from(&bytes);
                     self.base_mut().emit_signal(
@@ -1141,6 +1163,11 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
         ServerWorldMsg::LootGranted { item_path, count } => Incoming::LootGranted {
             item_path,
             count,
+        },
+        ServerWorldMsg::XpGained { amount, current, to_next } => Incoming::XpGained {
+            amount,
+            current,
+            to_next,
         },
         // Other variants (BuffApplied, ChatMessage, ...) get
         // bubbled up raw. As their handlers land, add typed `match` arms here.

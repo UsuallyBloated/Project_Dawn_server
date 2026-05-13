@@ -512,6 +512,27 @@ pub enum ServerWorldMsg {
         id: EntityId,
         target: Option<EntityId>,
     },
+
+    // Track 5 sub-task 4 — loot bag fan-out. Server owns the loot table
+    // and rolls on enemy death; broadcasts the bag's identity + items +
+    // pos. Re-broadcast on every state change (item removed) so the
+    // wire shape stays snapshot-style (matches BuffSnapshot). Bag ids
+    // live in their own partition above the enemy range so the client
+    // can route by id alone. EntityDespawn handles the despawn side.
+    LootBagSpawn {
+        bag_id: EntityId,
+        pos: Vec3,
+        items: Vec<(String, u32)>,
+    },
+    /// Private message — sent only to the client whose `LootItem` /
+    /// `LootAll` intent landed. Carries one stack the looter just claimed
+    /// so the client adds it to local inventory. Bag-wide state changes
+    /// go out as `LootBagSpawn` (full snapshot) to every in_world peer
+    /// simultaneously.
+    LootGranted {
+        item_path: String,
+        count: u32,
+    },
 }
 
 /// First entity id reserved for server-spawned enemies. Player char_ids are
@@ -519,3 +540,7 @@ pub enum ServerWorldMsg {
 /// i64 row ids starting at 1), so this gives ample headroom for
 /// disambiguating players vs enemies by id alone on the client.
 pub const ENEMY_ID_BASE: EntityId = 1_000_000_000;
+/// First entity id reserved for server-spawned loot bags. Above the enemy
+/// partition so the client can route a Position / EntityDespawn by id
+/// alone: < ENEMY_ID_BASE → player, < LOOT_BAG_ID_BASE → enemy, else bag.
+pub const LOOT_BAG_ID_BASE: EntityId = 2_000_000_000;

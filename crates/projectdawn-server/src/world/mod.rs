@@ -16,6 +16,7 @@
 mod connection;
 mod entity;
 mod handlers;
+mod loot;
 mod persistence;
 mod spawn_points;
 mod tick;
@@ -74,6 +75,11 @@ pub const CORPSE_LINGER_SECS: f32 = 5.0;
 /// client room to be slightly behind without rejecting legitimate
 /// swings.
 pub const ATTACK_RANGE_TOLERANCE: f32 = 1.5;
+/// How long a loot bag stays on the ground before EntityDespawn fires
+/// and the server drops it. Mirrors the GDScript LootBag's
+/// `despawn_timer.wait_time = 120` so existing loot-pickup behaviour
+/// stays familiar.
+pub const LOOT_BAG_LINGER_SECS: f32 = 120.0;
 
 /// Channel ids — kept in lockstep with `protocol/src/world.rs`. Slice 1
 /// uses just two; the other two from `server_design.md` §3 (combat events,

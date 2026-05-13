@@ -5,6 +5,7 @@
 use super::{
     connection::{PerConnection, Vec3f},
     entity::Entity,
+    loot::LootBag,
     CHANNEL_POSITION, CHANNEL_SYSTEM,
 };
 use bincode::config::standard as bincode_cfg;
@@ -366,6 +367,31 @@ pub fn send_entity_despawn(
     let msg = ServerWorldMsg::EntityDespawn { id: entity_id };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// Fan out a `LootBagSpawn` for `bag` to every recipient. Used for the
+/// initial spawn fan-out on enemy death and (sub-task 4B) re-snapshots
+/// when items are removed. Bag despawn rides the generic
+/// `EntityDespawn` since the id partition lets the client route by id.
+pub fn fan_out_loot_bag_spawn(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    bag: &LootBag,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::LootBagSpawn {
+        bag_id: bag.id,
+        pos: Vec3 { x: bag.pos.x, y: bag.pos.y, z: bag.pos.z },
+        items: bag.snapshot(),
+    };
+    let Some(bytes) = encode(&msg) else {
+        return;
+    };
+    for &recipient_id in recipients {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes.clone());
     }
 }
 

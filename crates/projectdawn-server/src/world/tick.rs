@@ -6,10 +6,11 @@ use super::{
     connection::{PerConnection, Vec3f},
     entity::{Entity, EnemyState, HitIntent},
     handlers::{self, Outcome},
+    loot::{self, LootBag},
     persistence,
     spawn_points::Spawner,
     ATTACK_RANGE_TOLERANCE, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL,
-    CORPSE_LINGER_SECS, MAX_MOVE_SPEED, STALE_MOVE_THRESHOLD, TICK_DT,
+    CORPSE_LINGER_SECS, LOOT_BAG_LINGER_SECS, MAX_MOVE_SPEED, STALE_MOVE_THRESHOLD, TICK_DT,
 };
 use crate::{db, Config};
 use protocol::world::{DamageType, EntityId, KickCode};
@@ -79,6 +80,11 @@ pub async fn run(
     // wires spawn lifecycle + EnemySpawn fan-out only (mobs stand idle).
     let mut spawner = Spawner::new(Instant::now());
     let mut enemies: HashMap<EntityId, Entity> = HashMap::new();
+    // Track 5 sub-task 4 — server-owned loot bags. Rolled and spawned
+    // in step 4h's on-death branch; expire after LOOT_BAG_LINGER_SECS
+    // in step 4k. 4B will add the LootItem / LootAll handlers that
+    // remove items mid-life.
+    let mut loot_bags: HashMap<EntityId, LootBag> = HashMap::new();
 
     loop {
         interval.tick().await;
@@ -468,6 +474,17 @@ pub async fn run(
                     entity,
                 );
             }
+            // Track 5 sub-task 4 — seed the new joiner with every live
+            // loot bag. Bags persist across player joins (until the
+            // 120 s linger expires), so a late joiner can still see
+            // unlooted drops from earlier kills.
+            for bag in loot_bags.values() {
+                handlers::fan_out_loot_bag_spawn(
+                    &mut server,
+                    std::slice::from_ref(new_id),
+                    bag,
+                );
+            }
         }
 
         // 4b. Resource fan-out — owning client → every other in_world peer.
@@ -732,6 +749,29 @@ pub async fn run(
                         &in_world_recipients_now,
                         entity.id,
                     );
+                    // Roll loot from the mob's archetype table; spawn
+                    // a server-owned bag at the death pos if any
+                    // stacks landed. Empty rolls produce no bag at all
+                    // (matches the GDScript behaviour where the local
+                    // Loot autoload simply returns without instantiating
+                    // a node).
+                    if let Some(items) = loot::roll_for_mob(&entity.mob.name) {
+                        let stacks_for_log = items.len();
+                        let bag = LootBag::new(entity.pos, items, now);
+                        let bag_id = bag.id;
+                        handlers::fan_out_loot_bag_spawn(
+                            &mut server,
+                            &in_world_recipients_now,
+                            &bag,
+                        );
+                        loot_bags.insert(bag.id, bag);
+                        tracing::info!(
+                            mob = %entity.mob.name,
+                            bag_id,
+                            stacks = stacks_for_log,
+                            "loot bag spawned"
+                        );
+                    }
                 }
             }
         }
@@ -806,6 +846,26 @@ pub async fn run(
                 handlers::send_entity_despawn(&mut server, recipient, entity.id);
             }
             spawner.on_enemy_died(entity.spawn_point_idx, now);
+        }
+
+        // 4k. Loot bag expiry. Bags linger LOOT_BAG_LINGER_SECS so
+        //     players have time to walk over and click; afterwards we
+        //     fan out EntityDespawn and drop the bag. Sub-task 4B
+        //     adds a second path: bags going empty mid-life despawn
+        //     immediately via the same EntityDespawn broadcast.
+        let bag_linger = Duration::from_secs_f32(LOOT_BAG_LINGER_SECS);
+        let mut expired_bags: Vec<EntityId> = Vec::new();
+        for bag in loot_bags.values() {
+            if now.duration_since(bag.spawned_at) >= bag_linger {
+                expired_bags.push(bag.id);
+            }
+        }
+        for id in expired_bags {
+            if loot_bags.remove(&id).is_some() {
+                for &recipient in &in_world_recipients_now {
+                    handlers::send_entity_despawn(&mut server, recipient, id);
+                }
+            }
         }
 
         // 5. Integrate movement intent exactly once per tick. The Move

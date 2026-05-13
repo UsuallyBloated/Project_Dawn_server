@@ -10,7 +10,8 @@ use super::{
     persistence,
     spawn_points::Spawner,
     ATTACK_RANGE_TOLERANCE, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL,
-    CORPSE_LINGER_SECS, LOOT_BAG_LINGER_SECS, MAX_MOVE_SPEED, STALE_MOVE_THRESHOLD, TICK_DT,
+    CORPSE_LINGER_SECS, LOOT_BAG_LINGER_SECS, LOOT_PICKUP_RANGE, MAX_MOVE_SPEED,
+    STALE_MOVE_THRESHOLD, TICK_DT,
 };
 use crate::{db, Config};
 use protocol::world::{DamageType, EntityId, KickCode};
@@ -41,6 +42,16 @@ struct AttackIntent {
     amount: i32,
     crit: bool,
     dmg_type: protocol::world::DamageType,
+}
+
+/// Track 5 sub-task 4 — buffered loot pickup intent. `Slot(None)` is
+/// the "take everything" variant; `Slot(Some(idx))` is the
+/// "take one specific slot" variant. Same buffering rationale as
+/// AttackIntent.
+struct LootIntent {
+    looter: u64,
+    bag_id: protocol::world::EntityId,
+    slot: Option<u32>,
 }
 
 /// Track 4 sub-task 4 combat event. Same shape as CastEvent — one-shot
@@ -245,6 +256,10 @@ pub async fn run(
         // a distinct event; coalescing would silently drop multi-hit
         // combos).
         let mut attack_intents: Vec<AttackIntent> = Vec::new();
+        // Track 5 sub-task 4 — player → server loot pickup intents.
+        // Verbatim queue; sub-task 4 is FFA loot so order matters for
+        // contested bags (first arrival wins the slot).
+        let mut loot_intents: Vec<LootIntent> = Vec::new();
         for client_id in client_ids {
             // Skip clients whose Connected event is in the queue but whose
             // PerConnection row hasn't been built yet (load_character failed
@@ -333,6 +348,24 @@ pub async fn run(
                                 amount,
                                 crit,
                                 dmg_type,
+                            });
+                        }
+                        Outcome::LootItemIntent {
+                            looter,
+                            bag_id,
+                            slot,
+                        } => {
+                            loot_intents.push(LootIntent {
+                                looter,
+                                bag_id,
+                                slot: Some(slot),
+                            });
+                        }
+                        Outcome::LootAllIntent { looter, bag_id } => {
+                            loot_intents.push(LootIntent {
+                                looter,
+                                bag_id,
+                                slot: None,
                             });
                         }
                         Outcome::Continue => {}
@@ -848,11 +881,73 @@ pub async fn run(
             spawner.on_enemy_died(entity.spawn_point_idx, now);
         }
 
+        // 4ka. Apply loot pickup intents. For each: validate bag, slot
+        //      bounds, and looter range. On success drain the relevant
+        //      stack(s), send LootGranted privately to the looter, and
+        //      either re-broadcast LootBagSpawn (bag still has items)
+        //      or EntityDespawn (bag is empty) to every in_world peer.
+        //      Out-of-range / unknown-bag / out-of-slot intents drop
+        //      silently — the GDScript UI already gates the click on
+        //      LOOT_RANGE so a legitimate user can't trip this.
+        if !loot_intents.is_empty() {
+            for intent in loot_intents.drain(..) {
+                let Some(looter_conn) = connections.get(&(intent.looter as ClientId)) else {
+                    continue;
+                };
+                let looter_pos = looter_conn.pos;
+                let Some(bag) = loot_bags.get_mut(&intent.bag_id) else {
+                    continue;
+                };
+                if bag.pos.distance_to(looter_pos) > LOOT_PICKUP_RANGE {
+                    continue;
+                }
+                let mut granted: Vec<(String, u32)> = Vec::new();
+                match intent.slot {
+                    Some(idx) => {
+                        let i = idx as usize;
+                        if i >= bag.items.len() {
+                            continue;
+                        }
+                        let stack = bag.items.remove(i);
+                        granted.push((stack.item_path, stack.count));
+                    }
+                    None => {
+                        let drained: Vec<_> = bag.items.drain(..).collect();
+                        for stack in drained {
+                            granted.push((stack.item_path, stack.count));
+                        }
+                    }
+                }
+                for (path, count) in granted {
+                    handlers::send_loot_granted(
+                        &mut server,
+                        intent.looter as ClientId,
+                        path,
+                        count,
+                    );
+                }
+                if bag.items.is_empty() {
+                    let bag_id = bag.id;
+                    loot_bags.remove(&bag_id);
+                    for &recipient in &in_world_recipients_now {
+                        handlers::send_entity_despawn(&mut server, recipient, bag_id);
+                    }
+                } else {
+                    handlers::fan_out_loot_bag_spawn(
+                        &mut server,
+                        &in_world_recipients_now,
+                        bag,
+                    );
+                }
+            }
+        }
+
         // 4k. Loot bag expiry. Bags linger LOOT_BAG_LINGER_SECS so
         //     players have time to walk over and click; afterwards we
-        //     fan out EntityDespawn and drop the bag. Sub-task 4B
-        //     adds a second path: bags going empty mid-life despawn
-        //     immediately via the same EntityDespawn broadcast.
+        //     fan out EntityDespawn and drop the bag. Bags emptied
+        //     mid-life by the apply phase above already despawned via
+        //     EntityDespawn there — this loop only catches bags that
+        //     ran out the clock without being looted.
         let bag_linger = Duration::from_secs_f32(LOOT_BAG_LINGER_SECS);
         let mut expired_bags: Vec<EntityId> = Vec::new();
         for bag in loot_bags.values() {

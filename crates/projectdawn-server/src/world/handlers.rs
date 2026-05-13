@@ -82,6 +82,23 @@ pub enum Outcome {
         crit: bool,
         dmg_type: protocol::world::DamageType,
     },
+    /// Track 5 sub-task 4 — player → server pickup intent for one slot
+    /// of a loot bag. The tick loop validates bag existence + slot
+    /// index + pickup range, removes the stack, sends `LootGranted`
+    /// privately, and either re-broadcasts the bag (still has items)
+    /// or EntityDespawns it (empty now).
+    LootItemIntent {
+        looter: u64,
+        bag_id: protocol::world::EntityId,
+        slot: u32,
+    },
+    /// Player → server "take everything in the bag" intent. Behaves
+    /// like a LootItemIntent for every remaining slot, ordered by the
+    /// bag's current item list.
+    LootAllIntent {
+        looter: u64,
+        bag_id: protocol::world::EntityId,
+    },
 }
 
 pub fn handle_message(
@@ -305,6 +322,27 @@ pub fn handle_message(
             }
         }
 
+        ClientWorldMsg::LootItem { bag_id, slot } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::LootItemIntent {
+                looter: conn.char_id as u64,
+                bag_id,
+                slot,
+            }
+        }
+
+        ClientWorldMsg::LootAll { bag_id } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::LootAllIntent {
+                looter: conn.char_id as u64,
+                bag_id,
+            }
+        }
+
         // The other ~30 ClientWorldMsg variants land in later tracks.
         // Unknown-but-decoded messages: ignore, don't kick. Unknown-and-
         // failed-to-decode messages don't reach here (decode error is
@@ -365,6 +403,22 @@ pub fn send_entity_despawn(
     entity_id: u64,
 ) {
     let msg = ServerWorldMsg::EntityDespawn { id: entity_id };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// Private `LootGranted` to a single recipient — the looter whose
+/// `LootItem` / `LootAll` intent landed. The client adds the stack
+/// to local inventory; the bag's wire-side state goes out separately
+/// to every in_world peer as a fresh `LootBagSpawn` snapshot.
+pub fn send_loot_granted(
+    server: &mut RenetServer,
+    recipient_id: ClientId,
+    item_path: String,
+    count: u32,
+) {
+    let msg = ServerWorldMsg::LootGranted { item_path, count };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
     }

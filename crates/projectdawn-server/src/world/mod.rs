@@ -80,6 +80,12 @@ pub const ATTACK_RANGE_TOLERANCE: f32 = 1.5;
 /// `despawn_timer.wait_time = 120` so existing loot-pickup behaviour
 /// stays familiar.
 pub const LOOT_BAG_LINGER_SECS: f32 = 120.0;
+/// Maximum distance between the looter's server-cached position and
+/// the bag for a `LootItem` / `LootAll` intent to be honoured. Matches
+/// the GDScript LootBag.LOOT_RANGE constant; the click-to-loot UI on
+/// the client already enforces the same range so a legitimate user
+/// can't trip this check by accident.
+pub const LOOT_PICKUP_RANGE: f32 = 6.0;
 
 /// Channel ids — kept in lockstep with `protocol/src/world.rs`. Slice 1
 /// uses just two; the other two from `server_design.md` §3 (combat events,

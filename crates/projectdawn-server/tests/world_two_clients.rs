@@ -685,15 +685,21 @@ async fn enemy_aggros_chases_and_attacks_player() {
     // Stop. The server's STALE_MOVE_THRESHOLD (500 ms) will park the
     // player at its current pos within ~10 ticks.
 
+    // Generous timeouts because `cargo test --release` runs the whole
+    // world_two_clients.rs file's tests in parallel by default — under
+    // CPU contention the AI tick + position fan-out can fall behind by
+    // several seconds while still being functionally correct. Run this
+    // test in isolation (`cargo test ... enemy_aggros...`) and it
+    // completes in ~3-4 s.
     let target_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(10), |m| {
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(20), |m| {
             matches!(
                 m,
                 ServerWorldMsg::EntityTarget { target: Some(t), .. } if *t == a_char_id as u64
             )
         })
         .await
-        .expect("an enemy locks onto the player within 10 s");
+        .expect("an enemy locks onto the player");
     if let ServerWorldMsg::EntityTarget { id, .. } = target_evt {
         assert!(
             id >= ENEMY_ID_BASE,
@@ -702,11 +708,11 @@ async fn enemy_aggros_chases_and_attacks_player() {
     }
 
     let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(10), |m| {
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(20), |m| {
             matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
         })
         .await
-        .expect("enemy fires a melee swing on the player within 10 s");
+        .expect("enemy fires a melee swing on the player");
     if let ServerWorldMsg::Hit { attacker, amount, dmg_type, .. } = hit_evt {
         assert!(
             attacker >= ENEMY_ID_BASE,
@@ -761,13 +767,14 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
 
     // Wait for an enemy hit on the player — proves the AI walked an
     // enemy into melee with us. The Hit carries the attacker id (in
-    // the enemy partition).
+    // the enemy partition). Generous timeout because parallel tests
+    // in this file contend for CPU; isolated runtime is ~5 s.
     let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(10), |m| {
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(20), |m| {
             matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
         })
         .await
-        .expect("an enemy locks on and swings within 10 s");
+        .expect("an enemy locks on and swings");
     let enemy_id: u64 = match hit_evt {
         ServerWorldMsg::Hit { attacker, .. } => attacker,
         _ => unreachable!(),
@@ -785,7 +792,7 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     }
 
     let hu = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
             matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. }
                 if *id == enemy_id && *hp <= 0.0)
         })
@@ -795,14 +802,15 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
         assert!(hp <= 0.0, "killed enemy must broadcast hp <= 0 (got {hp})");
     }
 
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
         matches!(m, ServerWorldMsg::EntityDied { id } if *id == enemy_id)
     })
     .await
     .expect("EntityDied arrives for the killed enemy");
 
-    // CORPSE_LINGER_SECS is 5 s; allow a couple ticks of jitter.
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(7), |m| {
+    // CORPSE_LINGER_SECS is 5 s; budget extra for tick jitter and
+    // parallel contention.
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(15), |m| {
         matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id)
     })
     .await

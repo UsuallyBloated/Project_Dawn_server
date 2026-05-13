@@ -410,6 +410,42 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::Respawn)
     }
 
+    /// Track 6 sub-task 3 — client tells the server its current total
+    /// armor class. Server applies AC/(AC+100) reduction to incoming
+    /// damage in tick step 4h.
+    #[func]
+    fn send_equip_update(&mut self, armor: i64) -> bool {
+        let msg = ClientWorldMsg::EquipUpdate { armor: armor as i32 };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// Track 6 sub-task 3 — dev /pvp toggle. Both attacker and target
+    /// must have this on for `combat::can_attack` to permit PvP damage.
+    #[func]
+    fn send_pvp_toggle(&mut self, on: bool) -> bool {
+        let msg = ClientWorldMsg::PvpToggle { on };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// Track 6 sub-task 3 dev intent — server-side self damage.
+    /// Verifies server-driven HP fan-out without waiting on the
+    /// CastSpell port. Mirror of send_heal_self.
+    #[func]
+    fn send_damage_self(&mut self, amount: i64) -> bool {
+        let msg = ClientWorldMsg::DamageSelf { amount: amount as i32 };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// Track 6 sub-task 3 dev intent — server-side self heal.
+    /// Closes the heal regression for testing without needing the full
+    /// CastSpell port. Will be removed (or gated to GM only) once the
+    /// spell table lives server-side.
+    #[func]
+    fn send_heal_self(&mut self, amount: i64) -> bool {
+        let msg = ClientWorldMsg::HealSelf { amount: amount as i32 };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
     /// Track 4 sub-task 2 — owning client tells the server it started
     /// casting a spell. Server relays as ServerWorldMsg::CastStart to
     /// in_world peers so they can render a cast bar.

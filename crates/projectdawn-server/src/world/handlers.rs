@@ -65,16 +65,16 @@ pub enum Outcome {
     /// Track 4 sub-task 5 — dying client signaled HP-zero. Tick loop fans
     /// out EntityDied to in_world peers.
     DeathFanOut,
-    /// Track 5 sub-task 3 — player → server attack intent. The handler
+    /// Track 6 sub-task 2 — player → server attack intent. The handler
     /// has already validated `conn.in_world` and the message decoded
-    /// cleanly; the tick loop validates the target (alive, in range)
-    /// and applies the damage. `attacker` is the issuing client's
-    /// char_id.
+    /// cleanly; the tick loop runs `combat::calc_swing` against the
+    /// attacker's PerConnection + weapon path, then validates the
+    /// target (alive, in range) and applies the resulting damage.
     AttackIntent {
         attacker: u64,
         target_id: protocol::world::EntityId,
-        amount: i32,
-        crit: bool,
+        weapon_path: String,
+        is_offhand: bool,
         dmg_type: protocol::world::DamageType,
     },
     /// Track 5 sub-task 4 — player → server pickup intent for one slot
@@ -325,8 +325,8 @@ pub fn handle_message(
 
         ClientWorldMsg::Attack {
             target_id,
-            amount,
-            crit,
+            weapon_path,
+            is_offhand,
             dmg_type,
         } => {
             if !conn.in_world {
@@ -338,8 +338,8 @@ pub fn handle_message(
             Outcome::AttackIntent {
                 attacker: conn.char_id as u64,
                 target_id,
-                amount,
-                crit,
+                weapon_path,
+                is_offhand,
                 dmg_type,
             }
         }

@@ -3,16 +3,18 @@
 //! pipeline.
 
 use super::{
+    combat,
     connection::{PerConnection, Vec3f},
     entity::{Entity, EnemyState, HitIntent},
     handlers::{self, Outcome},
+    items,
     loot::{self, LootBag},
     persistence,
     regen,
     spawn_points::Spawner,
     ATTACK_RANGE_TOLERANCE, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL,
     CORPSE_LINGER_SECS, LOOT_BAG_LINGER_SECS, LOOT_PICKUP_RANGE, MAX_MOVE_SPEED,
-    STALE_MOVE_THRESHOLD, TICK_DT,
+    RANGED_ATTACK_RANGE, STALE_MOVE_THRESHOLD, TICK_DT,
 };
 use crate::{db, Config};
 use protocol::world::{DamageType, EntityId, KickCode};
@@ -34,14 +36,15 @@ enum CastEvent {
     Fail { reason: String },
 }
 
-/// Track 5 sub-task 3 — buffered attack intent. Decoded by the handler,
-/// applied by the post-dispatch sweep against the enemies map (which
-/// the handler can't borrow).
+/// Track 6 sub-task 2 — buffered attack intent. Decoded by the handler;
+/// the post-dispatch sweep below runs `combat::calc_swing` (server
+/// authority on damage roll) and applies the resulting damage to the
+/// target — both enemies and (sub-task 3) players.
 struct AttackIntent {
     attacker: u64,
     target_id: protocol::world::EntityId,
-    amount: i32,
-    crit: bool,
+    weapon_path: String,
+    is_offhand: bool,
     dmg_type: protocol::world::DamageType,
 }
 
@@ -331,15 +334,15 @@ pub async fn run(
                         Outcome::AttackIntent {
                             attacker,
                             target_id,
-                            amount,
-                            crit,
+                            weapon_path,
+                            is_offhand,
                             dmg_type,
                         } => {
                             attack_intents.push(AttackIntent {
                                 attacker,
                                 target_id,
-                                amount,
-                                crit,
+                                weapon_path,
+                                is_offhand,
                                 dmg_type,
                             });
                         }
@@ -690,11 +693,13 @@ pub async fn run(
             .collect();
 
         // 4h. Apply player → server attack intents. The handler queued
-        //     these without touching the enemies map; here we look each
-        //     target up, validate, apply damage, and fan out
-        //     Hit/Miss + HealthUpdate + (if HP hit zero) EntityDied. A
-        //     range mismatch or dead target produces a Miss broadcast so
-        //     the attacker sees their swing landed even if cheaty.
+        //     these without touching the enemies map; here we run the
+        //     server-authoritative damage formula against the attacker's
+        //     PerConnection + weapon path, validate the target (alive,
+        //     in range), apply damage, and fan out Hit/Miss + HealthUpdate
+        //     + (if HP hit zero) EntityDied. A range mismatch or dead
+        //     target produces a Miss broadcast so the attacker sees
+        //     their swing landed even if cheaty.
         if !attack_intents.is_empty() && !in_world_recipients_now.is_empty() {
             for intent in attack_intents.drain(..) {
                 // ClientId is renet's u64 alias and we minted it as char_id,
@@ -705,6 +710,14 @@ pub async fn run(
                     continue;
                 };
                 let attacker_pos = attacker_conn.pos;
+                // Track 6 sub-task 2: server computes the damage roll.
+                // Client-supplied amount is ignored — even a malicious
+                // client can't claim 999 damage anymore.
+                let swing = combat::calc_swing(
+                    attacker_conn,
+                    &intent.weapon_path,
+                    intent.is_offhand,
+                );
                 let Some(entity) = enemies.get_mut(&intent.target_id) else {
                     handlers::fan_out_miss(
                         &mut server,
@@ -724,8 +737,24 @@ pub async fn run(
                     continue;
                 }
                 let dist = entity.pos.distance_to(attacker_pos);
-                let allowed = entity.melee_range() * ATTACK_RANGE_TOLERANCE;
+                // Track 6 sub-task 2 (fix): ranged weapons use a much
+                // larger range. Without this branch, bows at >2.7m
+                // produce silent Miss broadcasts even though the swing
+                // visually fired. Lookup is by weapon_path; an empty or
+                // unknown path uses the melee envelope.
+                let allowed = match items::lookup(&intent.weapon_path) {
+                    Some(w) if w.is_ranged => RANGED_ATTACK_RANGE,
+                    _ => entity.melee_range() * ATTACK_RANGE_TOLERANCE,
+                };
                 if dist > allowed {
+                    tracing::debug!(
+                        attacker = intent.attacker,
+                        target = intent.target_id,
+                        dist,
+                        allowed,
+                        weapon = %intent.weapon_path,
+                        "attack out of range, fanning Miss"
+                    );
                     handlers::fan_out_miss(
                         &mut server,
                         &in_world_recipients_now,
@@ -734,7 +763,7 @@ pub async fn run(
                     );
                     continue;
                 }
-                let amount = intent.amount.max(0);
+                let amount = swing.amount.max(0);
                 entity.hp = (entity.hp - amount as f32).max(0.0);
                 *entity.aggro.entry(intent.attacker).or_insert(0.0) += amount as f32;
                 handlers::fan_out_hit(
@@ -743,7 +772,7 @@ pub async fn run(
                     intent.attacker,
                     intent.target_id,
                     amount,
-                    intent.crit,
+                    swing.crit,
                     intent.dmg_type,
                 );
                 handlers::fan_out_health_update(

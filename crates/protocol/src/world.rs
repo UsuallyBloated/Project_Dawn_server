@@ -101,17 +101,19 @@ pub enum ClientWorldMsg {
     SetTarget {
         target_id: Option<EntityId>,
     },
-    /// Track 5 sub-task 3 — player → server attack intent. The client
-    /// computes its damage roll (STR bonus, weapon range, skill multipliers,
-    /// crit) and ships the result here; the server validates target /
-    /// range / alive / not-stunned and applies. Cheaty but matches Track
-    /// 4's trust model for a transitional period; Track 6 lifts to fully
-    /// server-authoritative combat math. The `dmg_type` rides through to
-    /// the Hit fan-out unchanged.
+    /// Track 6 sub-task 2 — player → server attack intent. The client
+    /// no longer computes the damage roll; it picks the target and
+    /// reports which weapon is equipped (so the server can read
+    /// damage_min/max + skill from its items table) and whether the
+    /// swing came from the main hand or offhand. The server runs the
+    /// full formula (STR/DEX bonus + weapon range + crit + offhand
+    /// multiplier) and fans `Hit` with the authoritative amount. An
+    /// empty `weapon_path` or unknown path falls back to bare-handed
+    /// damage (1-4 + STR bonus).
     Attack {
         target_id: EntityId,
-        amount: i32,
-        crit: bool,
+        weapon_path: String,
+        is_offhand: bool,
         dmg_type: DamageType,
     },
     CastSpell {

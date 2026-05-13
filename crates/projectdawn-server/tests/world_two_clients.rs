@@ -239,11 +239,11 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::DeathBroadcast);
     }
 
-    fn send_attack(&mut self, target_id: u64, amount: i32, crit: bool, dmg_type: DamageType) {
+    fn send_attack(&mut self, target_id: u64, weapon_path: &str, is_offhand: bool, dmg_type: DamageType) {
         let msg = ClientWorldMsg::Attack {
             target_id,
-            amount,
-            crit,
+            weapon_path: weapon_path.into(),
+            is_offhand,
             dmg_type,
         };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
@@ -387,6 +387,10 @@ async fn two_clients_server_authoritative_resources() {
         tokio::time::sleep(TICK_DT).await;
     }
 
+    // Track 6 sub-task 2 — A is Human Warrior, so char_data::compute
+    // gives max_hp=200 (BASE_HP 100 + Warrior 50 + CON-bonus 50),
+    // max_mp=100 (BASE_MP 100 + 0), max_stamina=120 (BASE_ST 100 +
+    // Warrior 20). `create_character` seeds current = max.
     let h_at_b = b
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_char_id as u64)
@@ -394,10 +398,8 @@ async fn two_clients_server_authoritative_resources() {
         .await
         .expect("B receives HealthUpdate for A via DB-seeded fan-out");
     if let ServerWorldMsg::HealthUpdate { hp, max_hp, .. } = h_at_b {
-        // `create_character` seeds hp=mp=stamina=100; base_max_* default
-        // to 100 in 0001_init.sql.
-        assert!((hp - 100.0).abs() < 0.01, "DB-seeded hp: {hp}");
-        assert!((max_hp - 100.0).abs() < 0.01, "DB-seeded max_hp: {max_hp}");
+        assert!((hp - 200.0).abs() < 0.01, "Warrior hp: {hp}");
+        assert!((max_hp - 200.0).abs() < 0.01, "Warrior max_hp: {max_hp}");
     }
 
     let m_at_b = b
@@ -407,8 +409,8 @@ async fn two_clients_server_authoritative_resources() {
         .await
         .expect("B receives ManaUpdate for A via DB-seeded fan-out");
     if let ServerWorldMsg::ManaUpdate { mp, max_mp, .. } = m_at_b {
-        assert!((mp - 100.0).abs() < 0.01, "DB-seeded mp: {mp}");
-        assert!((max_mp - 100.0).abs() < 0.01, "DB-seeded max_mp: {max_mp}");
+        assert!((mp - 100.0).abs() < 0.01, "Warrior mp: {mp}");
+        assert!((max_mp - 100.0).abs() < 0.01, "Warrior max_mp: {max_mp}");
     }
 
     let s_at_b = b
@@ -418,8 +420,8 @@ async fn two_clients_server_authoritative_resources() {
         .await
         .expect("B receives StaminaUpdate for A via DB-seeded fan-out");
     if let ServerWorldMsg::StaminaUpdate { stamina, max, .. } = s_at_b {
-        assert!((stamina - 100.0).abs() < 0.01, "DB-seeded stamina: {stamina}");
-        assert!((max - 100.0).abs() < 0.01, "DB-seeded max stamina: {max}");
+        assert!((stamina - 120.0).abs() < 0.01, "Warrior stamina: {stamina}");
+        assert!((max - 120.0).abs() < 0.01, "Warrior max stamina: {max}");
     }
 }
 
@@ -751,9 +753,16 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
         "attacker id must be an enemy id (got {enemy_id}, base {ENEMY_ID_BASE})"
     );
 
-    // One-shot the Decrepit Skeleton (25 HP at level 1).
-    a.send_attack(enemy_id, 999, false, DamageType::Physical);
-    for _ in 0..4 {
+    // Track 6 sub-task 2: server runs the damage formula now — the
+    // client can't claim 999 anymore. A bare-handed Human Warrior
+    // lands ~5-8/swing (1-4 + STR/5 with STR 22). Decrepit Skeleton has
+    // 25 HP; ~5 swings cover worst case. Burst 10 to absorb the
+    // 50% miss-on-edge if the server-side fan-out drops an Attack on
+    // the unreliable boundary, then drain.
+    for _ in 0..10 {
+        a.send_attack(enemy_id, "", false, DamageType::Physical);
+    }
+    for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }

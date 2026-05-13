@@ -3,6 +3,7 @@
 //! entrypoint is in `main.rs`.
 
 pub mod auth;
+pub mod char_data;
 pub mod config;
 pub mod db;
 pub mod error;

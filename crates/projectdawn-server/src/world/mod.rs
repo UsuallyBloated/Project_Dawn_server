@@ -13,9 +13,11 @@
 //! the shared `netcode_private_key`. The launcher delivers those bytes to
 //! the game .exe (track D will define the temp-file handoff).
 
+mod combat;
 mod connection;
 mod entity;
 mod handlers;
+mod items;
 mod loot;
 mod persistence;
 mod regen;
@@ -76,6 +78,12 @@ pub const CORPSE_LINGER_SECS: f32 = 5.0;
 /// client room to be slightly behind without rejecting legitimate
 /// swings.
 pub const ATTACK_RANGE_TOLERANCE: f32 = 1.5;
+/// Maximum distance a ranged attack (`weapon.is_ranged == true`) can
+/// connect at. Mirrors the GDScript `Combat.RANGED_RANGE = 25.0` so
+/// bows / crossbows feel the same on server-authoritative combat. The
+/// melee-tolerance multiplier isn't applied; ranged already has its
+/// own headroom.
+pub const RANGED_ATTACK_RANGE: f32 = 25.0;
 /// How long a loot bag stays on the ground before EntityDespawn fires
 /// and the server drops it. Mirrors the GDScript LootBag's
 /// `despawn_timer.wait_time = 120` so existing loot-pickup behaviour

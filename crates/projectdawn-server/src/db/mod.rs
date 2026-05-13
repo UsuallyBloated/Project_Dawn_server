@@ -270,14 +270,48 @@ pub async fn create_character(
         ));
     }
 
+    // Track 6 sub-task 2: compute race/class-derived base stats at
+    // character creation. Without this, every fresh character starts
+    // with the schema-default stats of 10 and max_hp=100, and the
+    // server's HealthUpdate fan-out (now authoritative on the client)
+    // would override the client's own apply_character with the wrong
+    // values. Mirror of GDScript `PlayerStats.apply_character(race,
+    // class, level=1)`.
+    let computed = crate::char_data::compute(race, class, 1);
+
     let res = sqlx::query(
-        "INSERT INTO characters (account_id, name, race, class, hp, mp, stamina)
-         VALUES (?1, ?2, ?3, ?4, 100, 100, 100)",
+        "INSERT INTO characters (
+            account_id, name, race, class, level, xp_to_next,
+            base_strength, base_dexterity, base_agility,
+            base_intelligence, base_wisdom, base_charisma,
+            base_constitution,
+            base_max_hp, base_max_mp, base_max_stamina,
+            hp, mp, stamina
+         ) VALUES (
+            ?1, ?2, ?3, ?4, 1, ?5,
+            ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+            ?13, ?14, ?15,
+            ?16, ?17, ?18
+         )",
     )
     .bind(account_id)
     .bind(trimmed)
     .bind(race)
     .bind(class)
+    .bind(computed.xp_to_next)
+    .bind(computed.stats.strength)
+    .bind(computed.stats.dexterity)
+    .bind(computed.stats.agility)
+    .bind(computed.stats.intelligence)
+    .bind(computed.stats.wisdom)
+    .bind(computed.stats.charisma)
+    .bind(computed.stats.constitution)
+    .bind(computed.max_hp)
+    .bind(computed.max_mp)
+    .bind(computed.max_stamina)
+    .bind(computed.max_hp)
+    .bind(computed.max_mp)
+    .bind(computed.max_stamina)
     .execute(pool)
     .await;
 
@@ -413,6 +447,21 @@ pub async fn load_character(
     .fetch_optional(pool)
     .await?;
     let row = row.ok_or(AuthError::NotFound)?;
+
+    // Track 6 sub-task 2: always recompute stats + max resources from
+    // race/class/level via `char_data`. The DB columns capture
+    // intrinsic-stat-redistribution + gear-bonus persistence in a
+    // future feature; until then they're write-only at create_character
+    // time and the formula is the source of truth. This silently
+    // upgrades any pre-sub-task-2 character row (created with schema
+    // defaults of stat=10, max_hp=100) on next login. Current hp/mp/
+    // stamina are clamped against the freshly-computed max.
+    let computed = crate::char_data::compute(&row.race, &row.class, row.level);
+    let _ = (row.base_strength, row.base_dexterity, row.base_agility,
+             row.base_intelligence, row.base_wisdom, row.base_charisma,
+             row.base_constitution, row.base_max_hp, row.base_max_mp,
+             row.base_max_stamina);
+
     Ok(CharacterSpawn {
         char_id: row.id,
         account_id: row.account_id,
@@ -422,19 +471,19 @@ pub async fn load_character(
         level: row.level,
         xp: row.xp,
         xp_to_next: row.xp_to_next,
-        strength: row.base_strength,
-        dexterity: row.base_dexterity,
-        agility: row.base_agility,
-        intelligence: row.base_intelligence,
-        wisdom: row.base_wisdom,
-        charisma: row.base_charisma,
-        constitution: row.base_constitution,
-        max_hp: row.base_max_hp,
-        max_mp: row.base_max_mp,
-        max_stamina: row.base_max_stamina,
-        hp: row.hp,
-        mp: row.mp,
-        stamina: row.stamina,
+        strength: computed.stats.strength,
+        dexterity: computed.stats.dexterity,
+        agility: computed.stats.agility,
+        intelligence: computed.stats.intelligence,
+        wisdom: computed.stats.wisdom,
+        charisma: computed.stats.charisma,
+        constitution: computed.stats.constitution,
+        max_hp: computed.max_hp,
+        max_mp: computed.max_mp,
+        max_stamina: computed.max_stamina,
+        hp: row.hp.min(computed.max_hp),
+        mp: row.mp.min(computed.max_mp),
+        stamina: row.stamina.min(computed.max_stamina),
         coins: row.coins,
         zone: row.zone,
         pos: (

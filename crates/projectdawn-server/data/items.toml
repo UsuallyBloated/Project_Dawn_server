@@ -1,0 +1,76 @@
+# Track 6 sub-task 2 — server-authoritative weapon stats.
+#
+# Mirrors the per-item .tres resources at
+# `Project_Dawn/data/loot/items/*.tres`. Only weapons that need
+# server-side damage_min/max are included; ammo, armor, consumables
+# stay client-side until inventory becomes server-authoritative.
+#
+# `path` is the Godot resource path the client sends in
+# `ClientWorldMsg::Attack.weapon_path`. Keep these 1:1 with the .tres
+# locations so the lookup is a single HashMap hit.
+#
+# `skill` mirrors `ItemData.weapon_skill` — used by the damage formula
+# port for skill-multiplier lookup once `WeaponSkillDefinitions` lands.
+
+[[weapon]]
+path = "res://data/loot/items/iron_short_sword.tres"
+name = "Iron Short Sword"
+damage_min = 7
+damage_max = 15
+weapon_delay = 2.5
+skill = "1h_slashing"
+is_ranged = false
+
+[[weapon]]
+path = "res://data/loot/items/iron_dagger.tres"
+name = "Iron Dagger"
+damage_min = 5
+damage_max = 11
+weapon_delay = 1.8
+skill = "piercing"
+is_ranged = false
+
+[[weapon]]
+path = "res://data/loot/items/copper_short_sword.tres"
+name = "Copper Short Sword"
+damage_min = 4
+damage_max = 9
+weapon_delay = 2.5
+skill = "1h_slashing"
+is_ranged = false
+
+[[weapon]]
+path = "res://data/loot/items/copper_dagger.tres"
+name = "Copper Dagger"
+damage_min = 3
+damage_max = 7
+weapon_delay = 1.8
+skill = "piercing"
+is_ranged = false
+
+[[weapon]]
+path = "res://data/loot/items/carved_staff.tres"
+name = "Carved Staff"
+damage_min = 4
+damage_max = 11
+weapon_delay = 3.0
+skill = "2h_blunt"
+is_ranged = false
+
+[[weapon]]
+path = "res://data/loot/items/hunters_shortbow.tres"
+name = "Hunter's Shortbow"
+damage_min = 6
+damage_max = 14
+weapon_delay = 3.0
+skill = "archery"
+is_ranged = true
+
+[[weapon]]
+path = "res://data/loot/items/flamebrand.tres"
+name = "Flamebrand"
+damage_min = 8
+damage_max = 18
+weapon_delay = 2.5
+skill = "1h_slashing"
+is_ranged = false

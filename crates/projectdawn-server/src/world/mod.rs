@@ -60,6 +60,20 @@ pub const CONNECT_TOKEN_EXPIRE_SECS: u64 = 30;
 /// renet's per-connection idle timeout (server-side). Independent of
 /// our app-layer `HEARTBEAT_TIMEOUT` — covers transport-level loss too.
 pub const NETCODE_TIMEOUT_SECS: i32 = 15;
+/// Track 5 sub-task 3 — how long a dead enemy holds at its death pos
+/// before EntityDespawn fires and the spawn point's respawn timer
+/// arms. The GDScript `enemy.gd` uses 3s for normal mobs and 30s for
+/// skinnable ones; server-authoritative version splits the difference
+/// (sub-task 4's skinning support, when it lands, can branch on
+/// MobTemplate.is_skinnable).
+pub const CORPSE_LINGER_SECS: f32 = 5.0;
+/// Slack factor on the server-side range check for player attack
+/// intents. The client computes its own player-to-target distance,
+/// which can disagree with the server's view by snapshot-interpolation
+/// lag and movement integration timing. 1.5× melee range gives the
+/// client room to be slightly behind without rejecting legitimate
+/// swings.
+pub const ATTACK_RANGE_TOLERANCE: f32 = 1.5;
 
 /// Channel ids — kept in lockstep with `protocol/src/world.rs`. Slice 1
 /// uses just two; the other two from `server_design.md` §3 (combat events,

@@ -4,19 +4,23 @@
 
 use super::{
     connection::{PerConnection, Vec3f},
-    entity::{Entity, HitIntent},
+    entity::{Entity, EnemyState, HitIntent},
     handlers::{self, Outcome},
     persistence,
     spawn_points::Spawner,
-    CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL, MAX_MOVE_SPEED,
-    STALE_MOVE_THRESHOLD, TICK_DT,
+    ATTACK_RANGE_TOLERANCE, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL,
+    CORPSE_LINGER_SECS, MAX_MOVE_SPEED, STALE_MOVE_THRESHOLD, TICK_DT,
 };
 use crate::{db, Config};
 use protocol::world::{DamageType, EntityId, KickCode};
 use renet::{ClientId, RenetServer, ServerEvent};
 use renet_netcode::NetcodeServerTransport;
 use sqlx::SqlitePool;
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 /// Cast lifecycle event collected during message dispatch, fanned out
 /// after the dispatch loop in a single sweep so we don't need to re-fetch
@@ -25,6 +29,17 @@ enum CastEvent {
     Start { spell_name: String, duration: f32 },
     Complete { spell_name: String },
     Fail { reason: String },
+}
+
+/// Track 5 sub-task 3 — buffered attack intent. Decoded by the handler,
+/// applied by the post-dispatch sweep against the enemies map (which
+/// the handler can't borrow).
+struct AttackIntent {
+    attacker: u64,
+    target_id: protocol::world::EntityId,
+    amount: i32,
+    crit: bool,
+    dmg_type: protocol::world::DamageType,
 }
 
 /// Track 4 sub-task 4 combat event. Same shape as CastEvent — one-shot
@@ -219,6 +234,11 @@ pub async fn run(
         // Dedup-on-insert in case the dying client somehow sends Death
         // twice in one tick.
         let mut death_fanouts: Vec<ClientId> = Vec::new();
+        // Track 5 sub-task 3 — player → server attack intents queued for
+        // the apply phase after dispatch. Verbatim queue (each swing is
+        // a distinct event; coalescing would silently drop multi-hit
+        // combos).
+        let mut attack_intents: Vec<AttackIntent> = Vec::new();
         for client_id in client_ids {
             // Skip clients whose Connected event is in the queue but whose
             // PerConnection row hasn't been built yet (load_character failed
@@ -293,6 +313,21 @@ pub async fn run(
                             if !death_fanouts.contains(&client_id) {
                                 death_fanouts.push(client_id);
                             }
+                        }
+                        Outcome::AttackIntent {
+                            attacker,
+                            target_id,
+                            amount,
+                            crit,
+                            dmg_type,
+                        } => {
+                            attack_intents.push(AttackIntent {
+                                attacker,
+                                target_id,
+                                amount,
+                                crit,
+                                dmg_type,
+                            });
                         }
                         Outcome::Continue => {}
                     }
@@ -615,17 +650,97 @@ pub async fn run(
             }
         }
 
-        // 4h. Enemy AI tick. Each alive enemy evaluates its state machine
-        //     against the snapshot of in_world player positions, advances
-        //     its own pos / target / state, and yields events for the
-        //     post-loop fan-out (target switch, melee swing). Position
-        //     broadcasts ride the same step-6 fan-out as players.
+        // Recipients snapshot for the enemy-related fan-outs below. Held
+        // by the apply / AI / cleanup phases; recomputed here because
+        // step 4g (spawner) may have added new in_world states... no, it
+        // only adds enemies. Still useful to hoist this once.
         let dt = TICK_DT.as_secs_f32();
         let in_world_recipients_now: Vec<ClientId> = connections
             .iter()
             .filter(|(_, c)| c.in_world)
             .map(|(id, _)| *id)
             .collect();
+
+        // 4h. Apply player → server attack intents. The handler queued
+        //     these without touching the enemies map; here we look each
+        //     target up, validate, apply damage, and fan out
+        //     Hit/Miss + HealthUpdate + (if HP hit zero) EntityDied. A
+        //     range mismatch or dead target produces a Miss broadcast so
+        //     the attacker sees their swing landed even if cheaty.
+        if !attack_intents.is_empty() && !in_world_recipients_now.is_empty() {
+            for intent in attack_intents.drain(..) {
+                // ClientId is renet's u64 alias and we minted it as char_id,
+                // so the attacker's char_id (also u64 on the wire) is the
+                // map key directly.
+                let Some(attacker_conn) = connections.get(&(intent.attacker as ClientId)) else {
+                    // Attacker disconnected between sending and apply.
+                    continue;
+                };
+                let attacker_pos = attacker_conn.pos;
+                let Some(entity) = enemies.get_mut(&intent.target_id) else {
+                    handlers::fan_out_miss(
+                        &mut server,
+                        &in_world_recipients_now,
+                        intent.attacker,
+                        intent.target_id,
+                    );
+                    continue;
+                };
+                if !entity.is_alive() {
+                    handlers::fan_out_miss(
+                        &mut server,
+                        &in_world_recipients_now,
+                        intent.attacker,
+                        intent.target_id,
+                    );
+                    continue;
+                }
+                let dist = entity.pos.distance_to(attacker_pos);
+                let allowed = entity.melee_range() * ATTACK_RANGE_TOLERANCE;
+                if dist > allowed {
+                    handlers::fan_out_miss(
+                        &mut server,
+                        &in_world_recipients_now,
+                        intent.attacker,
+                        intent.target_id,
+                    );
+                    continue;
+                }
+                let amount = intent.amount.max(0);
+                entity.hp = (entity.hp - amount as f32).max(0.0);
+                *entity.aggro.entry(intent.attacker).or_insert(0.0) += amount as f32;
+                handlers::fan_out_hit(
+                    &mut server,
+                    &in_world_recipients_now,
+                    intent.attacker,
+                    intent.target_id,
+                    amount,
+                    intent.crit,
+                    intent.dmg_type,
+                );
+                handlers::fan_out_health_update(
+                    &mut server,
+                    &in_world_recipients_now,
+                    entity.id,
+                    entity.hp,
+                    entity.max_hp,
+                );
+                if entity.hp <= 0.0 {
+                    entity.transition(EnemyState::Dead, now);
+                    handlers::fan_out_entity_died(
+                        &mut server,
+                        &in_world_recipients_now,
+                        entity.id,
+                    );
+                }
+            }
+        }
+
+        // 4i. Enemy AI tick. Each alive enemy evaluates its state machine
+        //     against the snapshot of in_world player positions, advances
+        //     its own pos / target / state, and yields events for the
+        //     post-loop fan-out (target switch, melee swing). Position
+        //     broadcasts ride the same step-6 fan-out as players.
         if !enemies.is_empty() && !in_world_recipients_now.is_empty() {
             let player_snapshots: Vec<(EntityId, Vec3f)> = connections
                 .values()
@@ -665,6 +780,32 @@ pub async fn run(
                     DamageType::Physical,
                 );
             }
+        }
+
+        // 4j. Corpse cleanup. Dead enemies hold at their death pos for
+        //     CORPSE_LINGER_SECS so the client can play the fall-over
+        //     animation; afterwards we fan out EntityDespawn, arm the
+        //     spawn point's respawn timer, and drop the row from the
+        //     world map. Collect ids in a first pass to avoid borrowing
+        //     `enemies` mutably twice in the same loop.
+        let corpse_linger = Duration::from_secs_f32(CORPSE_LINGER_SECS);
+        let mut expired_ids: Vec<EntityId> = Vec::new();
+        for entity in enemies.values() {
+            if entity.is_alive() {
+                continue;
+            }
+            if now.duration_since(entity.state_entered_at) >= corpse_linger {
+                expired_ids.push(entity.id);
+            }
+        }
+        for id in expired_ids {
+            let Some(entity) = enemies.remove(&id) else {
+                continue;
+            };
+            for &recipient in &in_world_recipients_now {
+                handlers::send_entity_despawn(&mut server, recipient, entity.id);
+            }
+            spawner.on_enemy_died(entity.spawn_point_idx, now);
         }
 
         // 5. Integrate movement intent exactly once per tick. The Move

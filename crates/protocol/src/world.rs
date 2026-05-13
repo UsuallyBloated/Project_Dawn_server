@@ -99,7 +99,19 @@ pub enum ClientWorldMsg {
     SetTarget {
         target_id: Option<EntityId>,
     },
-    Attack,
+    /// Track 5 sub-task 3 — player → server attack intent. The client
+    /// computes its damage roll (STR bonus, weapon range, skill multipliers,
+    /// crit) and ships the result here; the server validates target /
+    /// range / alive / not-stunned and applies. Cheaty but matches Track
+    /// 4's trust model for a transitional period; Track 6 lifts to fully
+    /// server-authoritative combat math. The `dmg_type` rides through to
+    /// the Hit fan-out unchanged.
+    Attack {
+        target_id: EntityId,
+        amount: i32,
+        crit: bool,
+        dmg_type: DamageType,
+    },
     CastSpell {
         spell_id: u32,
         target_id: Option<EntityId>,

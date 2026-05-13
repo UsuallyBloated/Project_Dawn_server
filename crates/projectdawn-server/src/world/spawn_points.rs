@@ -94,7 +94,6 @@ impl Spawner {
 
     /// Notify the spawner that an enemy bound to `spawn_point_idx` has
     /// died — start its respawn timer.
-    #[allow(dead_code)] // wired in 1C (death handling)
     pub fn on_enemy_died(&mut self, spawn_point_idx: usize, now: Instant) {
         if let Some(point) = self.points.get_mut(spawn_point_idx) {
             point.respawn_at = Some(now);

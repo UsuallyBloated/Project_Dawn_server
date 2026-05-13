@@ -69,6 +69,18 @@ pub enum Outcome {
     /// Track 4 sub-task 5 — dying client signaled HP-zero. Tick loop fans
     /// out EntityDied to in_world peers.
     DeathFanOut,
+    /// Track 5 sub-task 3 — player → server attack intent. The handler
+    /// has already validated `conn.in_world` and the message decoded
+    /// cleanly; the tick loop validates the target (alive, in range)
+    /// and applies the damage. `attacker` is the issuing client's
+    /// char_id.
+    AttackIntent {
+        attacker: u64,
+        target_id: protocol::world::EntityId,
+        amount: i32,
+        crit: bool,
+        dmg_type: protocol::world::DamageType,
+    },
 }
 
 pub fn handle_message(
@@ -271,6 +283,27 @@ pub fn handle_message(
             Outcome::ResourceFanOut
         }
 
+        ClientWorldMsg::Attack {
+            target_id,
+            amount,
+            crit,
+            dmg_type,
+        } => {
+            if !conn.in_world {
+                // Pre-EnterWorld clients can't engage in combat; drop
+                // silently rather than kick (lobby could race with
+                // legitimate UI interactions).
+                return Outcome::Continue;
+            }
+            Outcome::AttackIntent {
+                attacker: conn.char_id as u64,
+                target_id,
+                amount,
+                crit,
+                dmg_type,
+            }
+        }
+
         // The other ~30 ClientWorldMsg variants land in later tracks.
         // Unknown-but-decoded messages: ignore, don't kick. Unknown-and-
         // failed-to-decode messages don't reach here (decode error is
@@ -333,6 +366,27 @@ pub fn send_entity_despawn(
     let msg = ServerWorldMsg::EntityDespawn { id: entity_id };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// Fan out a HealthUpdate for any entity id (player char_id or enemy
+/// id). Encoded once and cloned per recipient.
+pub fn fan_out_health_update(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    id: protocol::world::EntityId,
+    hp: f32,
+    max_hp: f32,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::HealthUpdate { id, hp, max_hp };
+    let Some(bytes) = encode(&msg) else {
+        return;
+    };
+    for &recipient_id in recipients {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes.clone());
     }
 }
 

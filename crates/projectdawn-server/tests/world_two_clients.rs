@@ -259,6 +259,16 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::DeathBroadcast);
     }
 
+    fn send_attack(&mut self, target_id: u64, amount: i32, crit: bool, dmg_type: DamageType) {
+        let msg = ClientWorldMsg::Attack {
+            target_id,
+            amount,
+            crit,
+            dmg_type,
+        };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
     async fn wait_for(
         &mut self,
         channel: u8,
@@ -708,6 +718,95 @@ async fn enemy_aggros_chases_and_attacks_player() {
             "enemy melee broadcasts as Physical damage (got {dmg_type:?})"
         );
     }
+}
+
+/// Track 5 sub-task 3: player → server Attack intent, enemy HP authority,
+/// death lifecycle.
+///
+/// The player walks into camp 0's aggro radius so the AI engages, waits
+/// for an enemy-originated Hit broadcast (confirming the player and one
+/// enemy are now within 1.2 × melee_range of each other), then sends an
+/// `Attack` with enough damage to one-shot the Decrepit Skeleton
+/// (25 HP). Asserts:
+///
+///   * `HealthUpdate { id = enemy_id, hp = 0.0 }` arrives;
+///   * `EntityDied { id = enemy_id }` arrives;
+///   * `EntityDespawn { id = enemy_id }` arrives after the corpse linger
+///     (CORPSE_LINGER_SECS = 5 s server-side).
+///
+/// Respawn cadence (35 s default for camp 0) is covered by the
+/// `death_notification_arms_respawn_timer` unit test in
+/// `spawn_points.rs`; replicating it here would balloon the test
+/// runtime past 35 s for marginal value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn player_attack_kills_enemy_and_corpse_despawns() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "eta", "Etta", "Human", "Warrior").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Walk toward camp 0's [20, 0, 5] for ~2 s.
+    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
+    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
+    let walk_end = Instant::now() + Duration::from_millis(2_000);
+    let mut seq: u32 = 1;
+    while Instant::now() < walk_end {
+        a.send_move(seq, dir);
+        seq += 1;
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Wait for an enemy hit on the player — proves the AI walked an
+    // enemy into melee with us. The Hit carries the attacker id (in
+    // the enemy partition).
+    let hit_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(10), |m| {
+            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
+        })
+        .await
+        .expect("an enemy locks on and swings within 10 s");
+    let enemy_id: u64 = match hit_evt {
+        ServerWorldMsg::Hit { attacker, .. } => attacker,
+        _ => unreachable!(),
+    };
+    assert!(
+        enemy_id >= ENEMY_ID_BASE,
+        "attacker id must be an enemy id (got {enemy_id}, base {ENEMY_ID_BASE})"
+    );
+
+    // One-shot the Decrepit Skeleton (25 HP at level 1).
+    a.send_attack(enemy_id, 999, false, DamageType::Physical);
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let hu = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. }
+                if *id == enemy_id && *hp <= 0.0)
+        })
+        .await
+        .expect("HealthUpdate(hp=0) arrives for the killed enemy");
+    if let ServerWorldMsg::HealthUpdate { hp, .. } = hu {
+        assert!(hp <= 0.0, "killed enemy must broadcast hp <= 0 (got {hp})");
+    }
+
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::EntityDied { id } if *id == enemy_id)
+    })
+    .await
+    .expect("EntityDied arrives for the killed enemy");
+
+    // CORPSE_LINGER_SECS is 5 s; allow a couple ticks of jitter.
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(7), |m| {
+        matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id)
+    })
+    .await
+    .expect("EntityDespawn arrives after the corpse linger window");
 }
 
 /// Track 5 sub-task 1B: server-authoritative enemy spawn lifecycle.

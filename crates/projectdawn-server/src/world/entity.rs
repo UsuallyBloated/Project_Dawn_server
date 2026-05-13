@@ -15,10 +15,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-/// State machine for an `Entity`. `Dead` is reserved for sub-task 3 (the
-/// player-attacks-enemy path lands enemy HP and the death lifecycle); 1C
-/// only drives Idle / Chase / Attack / Leash.
-#[allow(dead_code)] // Dead variant lands in sub-task 3
+/// State machine for an `Entity`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnemyState {
     /// Standing at spawn; scanning for aggro targets within `aggro_range`.
@@ -42,7 +39,6 @@ pub struct Entity {
     pub id: EntityId,
     /// Index into the world's `spawn_points` vec. Used so the spawn
     /// point can be notified on death and start its respawn timer.
-    #[allow(dead_code)] // wired in sub-task 3 (death → respawn timer)
     pub spawn_point_idx: usize,
     /// Authored archetype data (display name, base stats, speeds). Cloned
     /// from the spawn point on instantiation so resists / overrides are
@@ -60,15 +56,13 @@ pub struct Entity {
     pub target: Option<EntityId>,
     /// Aggro table — accumulated damage per attacker, used on target
     /// switch evaluation. Cleared on death.
-    #[allow(dead_code)] // populated by sub-task 3 when players damage enemies
     pub aggro: HashMap<EntityId, f32>,
 
     /// Time of last melee swing. Compared against
     /// `mob.attack_interval` to gate attack firing.
     pub last_attack_at: Option<Instant>,
-    /// Time the entity entered its current state. Useful for corpse
-    /// linger and stuck-state diagnostics.
-    #[allow(dead_code)] // wired in sub-task 3 (corpse linger window)
+    /// Time the entity entered its current state. Gates the corpse-
+    /// linger window before EntityDespawn fires.
     pub state_entered_at: Instant,
 
     /// Monotonic sequence for Position broadcasts. Same role as

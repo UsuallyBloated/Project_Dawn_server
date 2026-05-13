@@ -9,9 +9,10 @@
 //! `Heartbeat`, `Kick`, `Position`, `EntitySpawn`, `EntityDespawn`,
 //! `HealthUpdate`, `ManaUpdate`, `StaminaUpdate`, `CastStart`,
 //! `CastComplete`, `CastFail`, `BuffSnapshot`, `Hit`, `Miss`, `Evade`,
-//! `EntityDied`, `EnemySpawn`, `EntityTarget`. Other variants get bubbled
-//! up via `unhandled_server_message(channel, bytes)` for forward-compat —
-//! when their handlers land, add a typed `match` arm in `classify` and a
+//! `EntityDied`, `EnemySpawn`, `EntityTarget`, `LootBagSpawn`,
+//! `LootGranted`. Other variants get bubbled up via
+//! `unhandled_server_message(channel, bytes)` for forward-compat — when
+//! their handlers land, add a typed `match` arm in `classify` and a
 //! matching emit in `fire`.
 
 // EntitySpawn signal carries 7 identity fields by design; godot-rust's
@@ -183,6 +184,27 @@ impl NetClient {
     /// for both partitions.
     #[signal]
     fn entity_target(id: i64, target_id: i64);
+
+    /// Track 5 sub-task 4 — server-owned loot bag landed in the AOI.
+    /// `items` is parallel arrays of (path, count) so the FFI stays
+    /// flat (PackedStringArray + PackedInt32Array for the count
+    /// column). `bag_id` is in the LOOT_BAG_ID_BASE partition so the
+    /// client routes ongoing EntityDespawn by id alone.
+    #[signal]
+    fn loot_bag_spawn(
+        bag_id: i64,
+        pos: Vector3,
+        item_paths: PackedStringArray,
+        item_counts: PackedInt32Array,
+    );
+
+    /// Track 5 sub-task 4 — private confirmation that the local
+    /// player's LootItem / LootAll intent landed and the server has
+    /// transferred `count` of `item_path` into our inventory. The
+    /// GDScript handler loads the path → ItemData and calls
+    /// Inventory.add_item.
+    #[signal]
+    fn loot_granted(item_path: GString, count: i64);
 
     /// Track 4 sub-task 3 buff snapshot. `names` and `durations` are
     /// parallel arrays — entry i is one buff. Empty arrays mean "no
@@ -475,6 +497,29 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// Track 5 sub-task 4 — player → server intent to claim one slot
+    /// of a server-owned loot bag. Server validates range + slot
+    /// bounds, sends LootGranted privately on success and re-broadcasts
+    /// the bag's snapshot to all in_world peers.
+    #[func]
+    fn send_loot_item(&mut self, bag_id: i64, slot: i64) -> bool {
+        let msg = ClientWorldMsg::LootItem {
+            bag_id: bag_id as u64,
+            slot: slot as u32,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// "Take everything in this bag" intent. Acts like one LootItem
+    /// per remaining slot. Bag despawns when emptied.
+    #[func]
+    fn send_loot_all(&mut self, bag_id: i64) -> bool {
+        let msg = ClientWorldMsg::LootAll {
+            bag_id: bag_id as u64,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
     #[func]
     fn send_buff_snapshot_broadcast(
         &mut self,
@@ -597,6 +642,15 @@ enum Incoming {
     EntityTarget {
         id: i64,
         target: Option<i64>,
+    },
+    LootBagSpawn {
+        bag_id: i64,
+        pos: WireVec3,
+        items: Vec<(String, u32)>,
+    },
+    LootGranted {
+        item_path: String,
+        count: u32,
     },
     Raw {
         channel: u8,
@@ -908,6 +962,32 @@ impl NetClient {
                         &[id.to_variant(), target_id.to_variant()],
                     );
                 }
+                Incoming::LootBagSpawn { bag_id, pos, items } => {
+                    let mut paths = PackedStringArray::new();
+                    let mut counts = PackedInt32Array::new();
+                    for (path, count) in &items {
+                        paths.push(&GString::from(path.as_str()));
+                        counts.push(*count as i32);
+                    }
+                    self.base_mut().emit_signal(
+                        "loot_bag_spawn",
+                        &[
+                            bag_id.to_variant(),
+                            Vector3::new(pos.x, pos.y, pos.z).to_variant(),
+                            paths.to_variant(),
+                            counts.to_variant(),
+                        ],
+                    );
+                }
+                Incoming::LootGranted { item_path, count } => {
+                    self.base_mut().emit_signal(
+                        "loot_granted",
+                        &[
+                            GString::from(item_path.as_str()).to_variant(),
+                            (count as i64).to_variant(),
+                        ],
+                    );
+                }
                 Incoming::Raw { channel, bytes } => {
                     let pba = packed_byte_array_from(&bytes);
                     self.base_mut().emit_signal(
@@ -1052,6 +1132,15 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
         ServerWorldMsg::EntityTarget { id, target } => Incoming::EntityTarget {
             id: id as i64,
             target: target.map(|t| t as i64),
+        },
+        ServerWorldMsg::LootBagSpawn { bag_id, pos, items } => Incoming::LootBagSpawn {
+            bag_id: bag_id as i64,
+            pos,
+            items,
+        },
+        ServerWorldMsg::LootGranted { item_path, count } => Incoming::LootGranted {
+            item_path,
+            count,
         },
         // Other variants (BuffApplied, ChatMessage, ...) get
         // bubbled up raw. As their handlers land, add typed `match` arms here.

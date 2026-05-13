@@ -18,6 +18,7 @@ mod entity;
 mod handlers;
 mod loot;
 mod persistence;
+mod regen;
 mod spawn_points;
 mod tick;
 mod zones;

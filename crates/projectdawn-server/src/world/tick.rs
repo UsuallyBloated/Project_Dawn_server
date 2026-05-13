@@ -8,6 +8,7 @@ use super::{
     handlers::{self, Outcome},
     loot::{self, LootBag},
     persistence,
+    regen,
     spawn_points::Spawner,
     ATTACK_RANGE_TOLERANCE, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL,
     CORPSE_LINGER_SECS, LOOT_BAG_LINGER_SECS, LOOT_PICKUP_RANGE, MAX_MOVE_SPEED,
@@ -234,9 +235,6 @@ pub async fn run(
         let client_ids: Vec<ClientId> = server.clients_id_iter().collect();
         let mut to_disconnect: Vec<ClientId> = Vec::new();
         let mut newly_in_world: Vec<ClientId> = Vec::new();
-        // Senders whose resources changed this tick. Dedup-on-insert so a
-        // burst of ResourceUpdates inside one tick produces a single fan-out.
-        let mut resource_fanouts: Vec<ClientId> = Vec::new();
         // Cast lifecycle events from this tick. Stored verbatim and fanned
         // out in order — coalescing CastStart + CastComplete from the same
         // sender would silently drop a fast-cast complete.
@@ -276,11 +274,6 @@ pub async fn run(
                     match handlers::handle_message(&mut server, conn, client_id, msg, now) {
                         Outcome::Disconnect => to_disconnect.push(client_id),
                         Outcome::JustEnteredWorld => newly_in_world.push(client_id),
-                        Outcome::ResourceFanOut => {
-                            if !resource_fanouts.contains(&client_id) {
-                                resource_fanouts.push(client_id);
-                            }
-                        }
                         Outcome::CastStartFanOut {
                             spell_name,
                             duration,
@@ -520,33 +513,18 @@ pub async fn run(
             }
         }
 
-        // 4b. Resource fan-out — owning client → every other in_world peer.
-        //     Runs after step 4a so the new-joiner seed above already covered
-        //     the JustEnteredWorld case; this loop only handles ongoing
-        //     updates. Sender does NOT need to be in_world for the fan-out
-        //     to fire (a peer in the lobby still broadcasts apply_character
-        //     resources that get cached) — the receiver filter is what
-        //     matters: peers without in_world have no RemotePlayer node to
-        //     render to.
+        // 4b. (Track 6 removed the client-driven ResourceUpdate fan-out.
+        //     Resources are now server-authoritative: regen mutates
+        //     `conn.hp` / `conn.mp` / `conn.stamina` in step 4l below and
+        //     fans `HealthUpdate` / `ManaUpdate` / `StaminaUpdate` to all
+        //     in_world clients including the owner. Step 4a still uses
+        //     `fan_out_resources` to seed new joiners with the current
+        //     value.)
         let in_world_recipients: Vec<ClientId> = connections
             .iter()
             .filter(|(_, c)| c.in_world)
             .map(|(id, _)| *id)
             .collect();
-        for sender_id in &resource_fanouts {
-            if to_disconnect.contains(sender_id) {
-                continue;
-            }
-            let Some(sender) = connections.get(sender_id) else {
-                continue;
-            };
-            let recipients: Vec<ClientId> = in_world_recipients
-                .iter()
-                .filter(|id| *id != sender_id)
-                .copied()
-                .collect();
-            handlers::fan_out_resources(&mut server, &recipients, sender);
-        }
 
         // 4d. Buff snapshot fan-out — owning client → every other in_world
         //     peer.
@@ -873,6 +851,29 @@ pub async fn run(
                 );
             }
             for (attacker, hit) in enemy_hits {
+                // Track 6: apply HP delta server-side when the enemy's
+                // target is a player. The target_id space encodes
+                // players below ENEMY_ID_BASE — anything in that range
+                // is a char_id we can look up directly. Bigger ids
+                // (other enemies, loot bags) shouldn't happen here
+                // (enemy AI never targets non-players) but the
+                // partition guards against it. PvP / armor / evasion
+                // are not yet modelled on the server; the client's
+                // own armor / evade roll runs in the legacy local path
+                // until sub-task 3 ports it. The amount the enemy AI
+                // produced rides through unchanged.
+                let mut damaged_player: Option<u64> = None;
+                if hit.target < protocol::world::ENEMY_ID_BASE {
+                    let target_cid = hit.target as ClientId;
+                    if let Some(target_conn) = connections.get_mut(&target_cid) {
+                        if target_conn.in_world && target_conn.hp > 0.0 {
+                            let new_hp = (target_conn.hp - hit.amount as f32).max(0.0);
+                            target_conn.hp = new_hp;
+                            regen::mark_dirty(target_conn);
+                            damaged_player = Some(hit.target);
+                        }
+                    }
+                }
                 handlers::fan_out_hit(
                     &mut server,
                     &in_world_recipients_now,
@@ -882,6 +883,21 @@ pub async fn run(
                     false,
                     DamageType::Physical,
                 );
+                if let Some(target_id) = damaged_player {
+                    // Server's regen broadcast loop (step 4l) would catch
+                    // this within MAX_BROADCAST_GAP, but a fresh HP fan-out
+                    // *now* keeps the target's HUD in lockstep with the Hit
+                    // floating-number landing on the same tick.
+                    if let Some(target_conn) = connections.get(&(target_id as ClientId)) {
+                        handlers::fan_out_health_update(
+                            &mut server,
+                            &in_world_recipients_now,
+                            target_id,
+                            target_conn.hp,
+                            target_conn.max_hp,
+                        );
+                    }
+                }
             }
         }
 
@@ -1008,9 +1024,45 @@ pub async fn run(
                 }
                 _ => Vec3f::ZERO,
             };
+            // Track 6: any non-zero move auto-stands the connection. The
+            // client side of regen.gd already does this for the local
+            // player; the server mirrors it so a Sit intent dropped on
+            // the wire doesn't leave the server thinking the player is
+            // seated while they're running around.
+            if dir.x != 0.0 || dir.z != 0.0 {
+                conn.is_sitting = false;
+            }
             conn.pos.x += dir.x * MAX_MOVE_SPEED * dt;
             conn.pos.y += dir.y * MAX_MOVE_SPEED * dt;
             conn.pos.z += dir.z * MAX_MOVE_SPEED * dt;
+        }
+
+        // 5b. Track 6 regen tick — HP/MP/Stamina recovery, then fan
+        //     `HealthUpdate` / `ManaUpdate` / `StaminaUpdate` for any
+        //     connection whose values crossed the broadcast threshold.
+        //     Runs for every ready connection (regardless of in_world)
+        //     so a player in the lobby keeps regenerating between
+        //     sessions, but only in_world peers receive the fan-outs.
+        let mut regen_fanouts: Vec<u64> = Vec::new();
+        for conn in connections.values_mut().filter(|c| c.ready) {
+            let result = regen::tick_one(conn, dt, now);
+            if result.hp_fanout || result.mp_fanout || result.stamina_fanout {
+                regen_fanouts.push(conn.char_id as u64);
+            }
+        }
+        if !regen_fanouts.is_empty() {
+            let recipients: Vec<ClientId> = connections
+                .iter()
+                .filter(|(_, c)| c.in_world)
+                .map(|(id, _)| *id)
+                .collect();
+            if !recipients.is_empty() {
+                for id in regen_fanouts {
+                    if let Some(conn) = connections.get(&(id as ClientId)) {
+                        handlers::fan_out_resources(&mut server, &recipients, conn);
+                    }
+                }
+            }
         }
 
         // 6. Position fan-out. Every in_world client's position goes to

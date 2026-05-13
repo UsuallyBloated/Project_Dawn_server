@@ -332,7 +332,8 @@ pub async fn verify_char_owned(
 }
 
 /// Loaded snapshot of the persistent fields the world server cares about
-/// at character spawn. Inventory / equipment / skills land later.
+/// at character spawn. Track 6 promoted resources + stats + xp to load-time
+/// (server is authoritative on these now); inventory / equipment land later.
 #[derive(Debug, Clone)]
 pub struct CharacterSpawn {
     pub char_id: i64,
@@ -341,9 +342,22 @@ pub struct CharacterSpawn {
     pub race: String,
     pub class: String,
     pub level: i32,
+    pub xp: i32,
+    pub xp_to_next: i32,
+    pub strength: i32,
+    pub dexterity: i32,
+    pub agility: i32,
+    pub intelligence: i32,
+    pub wisdom: i32,
+    pub charisma: i32,
+    pub constitution: i32,
+    pub max_hp: f32,
+    pub max_mp: f32,
+    pub max_stamina: f32,
     pub hp: f32,
     pub mp: f32,
     pub stamina: f32,
+    pub coins: i64,
     pub zone: Option<String>,
     pub pos: (f32, f32, f32),
     pub yaw: f32,
@@ -357,9 +371,22 @@ struct SpawnRow {
     race: String,
     class: String,
     level: i32,
+    xp: i32,
+    xp_to_next: i32,
+    base_strength: i32,
+    base_dexterity: i32,
+    base_agility: i32,
+    base_intelligence: i32,
+    base_wisdom: i32,
+    base_charisma: i32,
+    base_constitution: i32,
+    base_max_hp: f32,
+    base_max_mp: f32,
+    base_max_stamina: f32,
     hp: f32,
     mp: f32,
     stamina: f32,
+    coins: i64,
     zone: Option<String>,
     pos_x: Option<f32>,
     pos_y: Option<f32>,
@@ -372,7 +399,12 @@ pub async fn load_character(
     char_id: i64,
 ) -> AuthResult<CharacterSpawn> {
     let row: Option<SpawnRow> = sqlx::query_as(
-        "SELECT id, account_id, name, race, class, level, hp, mp, stamina,
+        "SELECT id, account_id, name, race, class, level, xp, xp_to_next,
+                base_strength, base_dexterity, base_agility,
+                base_intelligence, base_wisdom, base_charisma,
+                base_constitution,
+                base_max_hp, base_max_mp, base_max_stamina,
+                hp, mp, stamina, coins,
                 zone, pos_x, pos_y, pos_z, yaw
          FROM characters
          WHERE id = ?1 AND deleted_at IS NULL",
@@ -388,9 +420,22 @@ pub async fn load_character(
         race: row.race,
         class: row.class,
         level: row.level,
+        xp: row.xp,
+        xp_to_next: row.xp_to_next,
+        strength: row.base_strength,
+        dexterity: row.base_dexterity,
+        agility: row.base_agility,
+        intelligence: row.base_intelligence,
+        wisdom: row.base_wisdom,
+        charisma: row.base_charisma,
+        constitution: row.base_constitution,
+        max_hp: row.base_max_hp,
+        max_mp: row.base_max_mp,
+        max_stamina: row.base_max_stamina,
         hp: row.hp,
         mp: row.mp,
         stamina: row.stamina,
+        coins: row.coins,
         zone: row.zone,
         pos: (
             row.pos_x.unwrap_or(0.0),
@@ -401,9 +446,10 @@ pub async fn load_character(
     })
 }
 
-/// Periodic checkpoint — called by the world server every ~60 s and on
-/// disconnect. Single-row UPDATE; cheap with WAL. We intentionally do NOT
-/// touch HP/MP/stamina here — those have their own paths once combat lands.
+/// Periodic position checkpoint. Track 6 split the resources path into its
+/// own `checkpoint_resources` since the server now mutates HP/MP/Stamina
+/// on every regen tick — checkpointing them separately keeps the position
+/// path cheap (single-row UPDATE).
 pub async fn checkpoint_position(
     pool: &SqlitePool,
     char_id: i64,
@@ -422,6 +468,38 @@ pub async fn checkpoint_position(
     .bind(pos.1)
     .bind(pos.2)
     .bind(yaw)
+    .bind(char_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Track 6 periodic checkpoint for the resources the server now owns:
+/// current HP/MP/Stamina + accumulated XP. Called alongside
+/// `checkpoint_position` on the 60 s cadence and on disconnect so a power
+/// loss only rolls back ~60 s of regen / kill credit.
+pub async fn checkpoint_resources(
+    pool: &SqlitePool,
+    char_id: i64,
+    hp: f32,
+    mp: f32,
+    stamina: f32,
+    xp: i32,
+    xp_to_next: i32,
+    level: i32,
+) -> AuthResult<()> {
+    sqlx::query(
+        "UPDATE characters
+         SET hp = ?1, mp = ?2, stamina = ?3, xp = ?4, xp_to_next = ?5,
+             level = ?6
+         WHERE id = ?7 AND deleted_at IS NULL",
+    )
+    .bind(hp)
+    .bind(mp)
+    .bind(stamina)
+    .bind(xp)
+    .bind(xp_to_next)
+    .bind(level)
     .bind(char_id)
     .execute(pool)
     .await?;

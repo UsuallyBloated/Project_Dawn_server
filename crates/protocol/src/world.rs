@@ -12,11 +12,13 @@ use serde::{Deserialize, Serialize};
 /// renet `protocol_id` — bumped on any wire-format break.
 /// Auth-minted ConnectTokens are signed with this; mismatch ⇒ token rejected.
 ///
-/// PD_W0004 covers the Track 5 batch: server-authoritative enemies — the
-/// `EnemySpawn` / `EntityTarget` `ServerWorldMsg` variants and the
-/// repurposed `ClientWorldMsg::Attack { target_id }` intent. One bump per
-/// track; individual sub-task commits append new variants under this id.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3034; // "PD_W0004"
+/// PD_W0005 covers the Track 6 batch: server-authoritative player stats. The
+/// server now owns HP/MP/Stamina (loaded from DB at spawn, mutated by regen
+/// + combat + PvP, fanned out as `HealthUpdate` / `ManaUpdate` /
+/// `StaminaUpdate`); `ClientWorldMsg::ResourceUpdate` is removed because the
+/// authority flips and the client no longer broadcasts resources. One bump
+/// per track; individual sub-task commits append new variants under this id.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3035; // "PD_W0005"
 
 pub type EntityId = u64;
 pub type Sequence = u32;
@@ -218,19 +220,12 @@ pub enum ClientWorldMsg {
         line: String,
     },
 
-    // Track 4: owning-client → server broadcast of current resources. Server
-    // fans out to peers as three separate ServerWorldMsg variants
-    // (HealthUpdate / ManaUpdate / StaminaUpdate) so the existing typed
-    // signals on the client can stay unchanged. Throttled client-side to
-    // ~4 Hz under quiet conditions; fires immediately on >5% delta of max.
-    ResourceUpdate {
-        hp: f32,
-        max_hp: f32,
-        mp: f32,
-        max_mp: f32,
-        stamina: f32,
-        max_stamina: f32,
-    },
+    // (Track 6 removed `ResourceUpdate`. The server now owns HP/MP/Stamina:
+    // resources load from DB at character spawn, regen ticks on the server,
+    // damage / heals route through Attack / CastSpell / UseSkill intents.
+    // Server fans out `HealthUpdate` / `ManaUpdate` / `StaminaUpdate` on
+    // every threshold-crossing change. Clients render only — the typed
+    // signals on the client are unchanged.)
 
     // Sent by the client when the player clicks "Enter World" in the lobby
     // (i.e. the game scene actually loads). Server gates EntitySpawn fan-out
@@ -283,12 +278,23 @@ pub enum ClientWorldMsg {
         target: EntityId,
     },
 
-    // Track 4 sub-task 5: the dying client notifies the server that its
-    // HP hit zero. Server relays as ServerWorldMsg::EntityDied { id =
-    // caster } to in_world peers; respawn lands silently via the next
-    // ResourceUpdate (peer sees HP go from 0 → non-zero and stands the
-    // body back up). No separate Respawn variant.
+    // Track 4 sub-task 5 / Track 6: the dying client notifies the server
+    // that its HP hit zero. Server zeroes conn.hp (fans HealthUpdate(0)
+    // so peer HUDs / RemotePlayer bars drop) and fans EntityDied to
+    // in_world peers. The respawning client follows up with `Respawn`
+    // once its local respawn timer elapses (Track 6 split the variants
+    // because the resource-fanout-on-respawn used to ride ResourceUpdate
+    // and that's removed now).
     DeathBroadcast,
+    /// Track 6: the dying client's local respawn timer has elapsed and
+    /// it's alive again. Server resets conn.hp/mp/stamina to the
+    /// authoritative max values from the DB and fans HealthUpdate /
+    /// ManaUpdate / StaminaUpdate so peer RemotePlayer bars stand back
+    /// up. No payload — the server owns the max values and the timing.
+    /// Sub-task 3 will lift death/respawn detection fully server-side
+    /// (PvP death + timer-driven revive), at which point this becomes
+    /// either an ACK or goes away.
+    Respawn,
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────

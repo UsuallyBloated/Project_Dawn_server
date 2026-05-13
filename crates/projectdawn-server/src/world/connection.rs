@@ -78,7 +78,7 @@ impl Vec3f {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)] // account_id/name/level land in audit + chat + stat scaling next slice
+#[allow(dead_code)] // account_id/charisma land in audit + chat once those paths exist
 pub struct PerConnection {
     pub char_id: i64,
     pub account_id: i64,
@@ -96,6 +96,14 @@ pub struct PerConnection {
     /// when nothing has moved.
     pub last_persisted_pos: Vec3f,
     pub last_persisted_yaw: f32,
+    /// Last persisted snapshot of resources (Track 6). Compared against
+    /// live values in the 60 s checkpoint pass to skip writes when nothing
+    /// has changed. Distinct from the broadcast-throttle baseline below.
+    pub last_persisted_hp: f32,
+    pub last_persisted_mp: f32,
+    pub last_persisted_stamina: f32,
+    pub last_persisted_xp: i32,
+    pub last_persisted_level: i32,
     /// Set after the application-layer Connect handshake completes. Until
     /// then we won't broadcast positions to this client.
     pub ready: bool,
@@ -117,17 +125,53 @@ pub struct PerConnection {
     /// visually moving until heartbeat timeout.
     pub last_move_received: Option<Instant>,
 
-    /// Last resources broadcast by this client (Track 4). Cached so newly
-    /// joining peers can be sent the current resources in step 4a alongside
-    /// EntitySpawn. `resource_state_set` flips true on first
-    /// `ResourceUpdate` — until then we have nothing to forward.
-    pub last_hp: f32,
-    pub last_max_hp: f32,
-    pub last_mp: f32,
-    pub last_max_mp: f32,
-    pub last_stamina: f32,
-    pub last_max_stamina: f32,
-    pub resource_state_set: bool,
+    /// Track 6: authoritative resources. Seeded from DB at spawn, mutated
+    /// by the regen tick + future combat / heal / damage paths, fanned out
+    /// as `HealthUpdate` / `ManaUpdate` / `StaminaUpdate` whenever a
+    /// threshold-crossing change lands.
+    pub hp: f32,
+    pub max_hp: f32,
+    pub mp: f32,
+    pub max_mp: f32,
+    pub stamina: f32,
+    pub max_stamina: f32,
+    pub xp: i32,
+    pub xp_to_next: i32,
+    pub coins: i64,
+
+    /// Track 6: authoritative base stats. The damage formula port (sub-task
+    /// 2) reads these; for now sub-task 1 just loads them so the values are
+    /// available downstream.
+    pub strength: i32,
+    pub dexterity: i32,
+    pub agility: i32,
+    pub intelligence: i32,
+    pub wisdom: i32,
+    pub charisma: i32,
+    pub constitution: i32,
+
+    /// Track 6: sitting state. Flipped by the `Sit` / `Stand` client
+    /// intents; multiplies regen rate per `regen::SITTING_HP_MULT` etc.
+    pub is_sitting: bool,
+
+    /// Track 6: fractional regen accumulator. The 20 Hz tick produces
+    /// sub-integer amounts; we accumulate and only mutate `hp`/`mp`/
+    /// `stamina` (and fan out) when the integer part bumps. Reset to 0.0
+    /// on reset events (death, zone, etc.).
+    pub regen_hp_acc: f32,
+    pub regen_mp_acc: f32,
+    pub regen_stamina_acc: f32,
+
+    /// Track 6: broadcast-throttle baselines. `HealthUpdate` /
+    /// `ManaUpdate` / `StaminaUpdate` fire when either:
+    ///   • the current value diverged from the last broadcast by >5% of
+    ///     max (big swings land immediately), OR
+    ///   • at least `RESOURCE_MAX_BROADCAST_GAP` elapsed since the last
+    ///     fan-out (slow regen still ticks the UI on a clock).
+    pub last_bcast_hp: f32,
+    pub last_bcast_mp: f32,
+    pub last_bcast_stamina: f32,
+    pub last_bcast_at: Option<Instant>,
 
     /// Track 4 sub-task 2 — last-known casting state, used to seed a peer
     /// who enters the world mid-cast. `cast_spell_name` is empty when not
@@ -161,18 +205,40 @@ impl PerConnection {
             last_packet: now,
             last_persisted_pos: pos,
             last_persisted_yaw: spawn.yaw,
+            last_persisted_hp: spawn.hp,
+            last_persisted_mp: spawn.mp,
+            last_persisted_stamina: spawn.stamina,
+            last_persisted_xp: spawn.xp,
+            last_persisted_level: spawn.level,
             ready: false,
             in_world: false,
             last_move_seq: 0,
             latest_direction: Vec3f::ZERO,
             last_move_received: None,
-            last_hp: 0.0,
-            last_max_hp: 0.0,
-            last_mp: 0.0,
-            last_max_mp: 0.0,
-            last_stamina: 0.0,
-            last_max_stamina: 0.0,
-            resource_state_set: false,
+            hp: spawn.hp,
+            max_hp: spawn.max_hp,
+            mp: spawn.mp,
+            max_mp: spawn.max_mp,
+            stamina: spawn.stamina,
+            max_stamina: spawn.max_stamina,
+            xp: spawn.xp,
+            xp_to_next: spawn.xp_to_next,
+            coins: spawn.coins,
+            strength: spawn.strength,
+            dexterity: spawn.dexterity,
+            agility: spawn.agility,
+            intelligence: spawn.intelligence,
+            wisdom: spawn.wisdom,
+            charisma: spawn.charisma,
+            constitution: spawn.constitution,
+            is_sitting: false,
+            regen_hp_acc: 0.0,
+            regen_mp_acc: 0.0,
+            regen_stamina_acc: 0.0,
+            last_bcast_hp: spawn.hp,
+            last_bcast_mp: spawn.mp,
+            last_bcast_stamina: spawn.stamina,
+            last_bcast_at: None,
             cast_spell_name: String::new(),
             cast_total_duration: 0.0,
             cast_set_at: None,
@@ -203,5 +269,26 @@ impl PerConnection {
     pub fn mark_persisted(&mut self) {
         self.last_persisted_pos = self.pos;
         self.last_persisted_yaw = self.yaw;
+    }
+
+    /// Track 6: resources / xp / level dirty since last
+    /// `checkpoint_resources` write. The 60 s persistence pass uses this
+    /// to skip the write when a connection has been idle (no regen
+    /// happened, no combat). `level` participates because level-ups
+    /// mutate it server-side now too.
+    pub fn is_dirty_for_resource_persist(&self) -> bool {
+        self.hp != self.last_persisted_hp
+            || self.mp != self.last_persisted_mp
+            || self.stamina != self.last_persisted_stamina
+            || self.xp != self.last_persisted_xp
+            || self.level != self.last_persisted_level
+    }
+
+    pub fn mark_resources_persisted(&mut self) {
+        self.last_persisted_hp = self.hp;
+        self.last_persisted_mp = self.mp;
+        self.last_persisted_stamina = self.stamina;
+        self.last_persisted_xp = self.xp;
+        self.last_persisted_level = self.level;
     }
 }

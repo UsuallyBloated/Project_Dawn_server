@@ -27,11 +27,6 @@ pub enum Outcome {
     /// don't see a body until the owner has left the lobby — fixes the
     /// "A sees B's static capsule while B is at Enter World" artifact.
     JustEnteredWorld,
-    /// Client broadcast its current resources. The handler has already
-    /// updated `conn.last_*`; the tick loop fans out to every other in_world
-    /// peer in a post-dispatch sweep so a single sender's update isn't
-    /// duplicated across multiple ResourceUpdate messages in one tick.
-    ResourceFanOut,
     /// Track 4 sub-task 2 — owning client started casting. Tick loop fans
     /// out CastStart inline (cast events are infrequent enough that
     /// per-message fan-out beats coalescing).
@@ -251,12 +246,41 @@ pub fn handle_message(
                 return Outcome::Continue;
             }
             // Cast cache cleared on death — a corpse isn't mid-cast.
-            // Resource cache is left intact so the next ResourceUpdate
-            // (which the dying client sends on respawn) flows naturally.
+            // Track 6 also zeroes conn.hp + flags the broadcast baseline
+            // dirty so the next regen tick fans HealthUpdate(0). Peer
+            // RemotePlayer.apply_health_update needs that drop-to-zero
+            // before the matching Respawn HealthUpdate(>0) flips
+            // _apply_respawn(). Sub-task 3 will lift death detection
+            // fully server-side; for now the dying client is still the
+            // source of truth for "I died."
             conn.cast_spell_name.clear();
             conn.cast_total_duration = 0.0;
             conn.cast_set_at = None;
+            conn.hp = 0.0;
+            super::regen::mark_dirty(conn);
             Outcome::DeathFanOut
+        }
+
+        ClientWorldMsg::Respawn => {
+            if !conn.ready {
+                return Outcome::Continue;
+            }
+            // The dying client's local respawn timer elapsed. Reset
+            // resources to the weakened post-respawn levels (matching
+            // autoloads/player_death.gd's 25% / 25% / 50% multipliers
+            // so the client's local set_hp doesn't immediately diverge
+            // from the server's view). Sub-task 3 lifts the timer +
+            // multipliers fully server-side. mark_dirty forces a
+            // fan-out on the next regen tick so peer RemotePlayer
+            // bars stand back up.
+            conn.hp = conn.max_hp * 0.25;
+            conn.mp = conn.max_mp * 0.25;
+            conn.stamina = conn.max_stamina * 0.50;
+            conn.regen_hp_acc = 0.0;
+            conn.regen_mp_acc = 0.0;
+            conn.regen_stamina_acc = 0.0;
+            super::regen::mark_dirty(conn);
+            Outcome::Continue
         }
 
         ClientWorldMsg::BuffSnapshotBroadcast { buffs } => {
@@ -278,27 +302,25 @@ pub fn handle_message(
             Outcome::CastFailFanOut { reason }
         }
 
-        ClientWorldMsg::ResourceUpdate {
-            hp,
-            max_hp,
-            mp,
-            max_mp,
-            stamina,
-            max_stamina,
-        } => {
+        ClientWorldMsg::Sit => {
+            // Track 6: regen rate scales while seated. Movement (any Move
+            // with non-zero direction) auto-stands the client via the
+            // GDScript player; the server falls back to flipping the flag
+            // off on movement integration too, in case the Stand intent
+            // dropped on the wire.
             if !conn.ready {
-                // Client started broadcasting before completing the
-                // handshake — drop silently rather than caching garbage.
                 return Outcome::Continue;
             }
-            conn.last_hp = hp;
-            conn.last_max_hp = max_hp;
-            conn.last_mp = mp;
-            conn.last_max_mp = max_mp;
-            conn.last_stamina = stamina;
-            conn.last_max_stamina = max_stamina;
-            conn.resource_state_set = true;
-            Outcome::ResourceFanOut
+            conn.is_sitting = true;
+            Outcome::Continue
+        }
+
+        ClientWorldMsg::Stand => {
+            if !conn.ready {
+                return Outcome::Continue;
+            }
+            conn.is_sitting = false;
+            Outcome::Continue
         }
 
         ClientWorldMsg::Attack {
@@ -714,29 +736,33 @@ pub fn fan_out_buff_snapshot(
     }
 }
 
+/// Fan out the connection's current resources as three separate
+/// ServerWorldMsg variants. Track 6 made these server-authoritative —
+/// the values come straight from `conn.hp` / `conn.mp` / `conn.stamina`
+/// (the DB-loaded snapshot at spawn, mutated by regen + combat).
 pub fn fan_out_resources(
     server: &mut RenetServer,
     recipients: &[ClientId],
     conn: &PerConnection,
 ) {
-    if !conn.resource_state_set || recipients.is_empty() {
+    if recipients.is_empty() {
         return;
     }
     let id = conn.char_id as u64;
     let h = encode(&ServerWorldMsg::HealthUpdate {
         id,
-        hp: conn.last_hp,
-        max_hp: conn.last_max_hp,
+        hp: conn.hp,
+        max_hp: conn.max_hp,
     });
     let m = encode(&ServerWorldMsg::ManaUpdate {
         id,
-        mp: conn.last_mp,
-        max_mp: conn.last_max_mp,
+        mp: conn.mp,
+        max_mp: conn.max_mp,
     });
     let s = encode(&ServerWorldMsg::StaminaUpdate {
         id,
-        stamina: conn.last_stamina,
-        max: conn.last_max_stamina,
+        stamina: conn.stamina,
+        max: conn.max_stamina,
     });
     for recipient in recipients {
         if let Some(b) = &h {

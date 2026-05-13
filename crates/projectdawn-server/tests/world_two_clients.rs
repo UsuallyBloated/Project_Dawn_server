@@ -205,26 +205,6 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Disconnect);
     }
 
-    fn send_resource_update(
-        &mut self,
-        hp: f32,
-        max_hp: f32,
-        mp: f32,
-        max_mp: f32,
-        stamina: f32,
-        max_stamina: f32,
-    ) {
-        let msg = ClientWorldMsg::ResourceUpdate {
-            hp,
-            max_hp,
-            mp,
-            max_mp,
-            stamina,
-            max_stamina,
-        };
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
-    }
-
     fn send_cast_start(&mut self, spell_name: &str, duration: f32) {
         let msg = ClientWorldMsg::CastStartBroadcast {
             spell_name: spell_name.into(),
@@ -377,13 +357,14 @@ async fn two_clients_see_each_other() {
     .expect("A receives EntityDespawn for B");
 }
 
-/// Track 4 sub-task 1: resource bar replication. When the owning client
-/// broadcasts a `ResourceUpdate`, the server fans out three separate
-/// ServerWorldMsg variants (HealthUpdate / ManaUpdate / StaminaUpdate) to
-/// every other ready peer. The owner does NOT receive its own broadcast
-/// (it's the authority — it already has the values).
+/// Track 6 sub-task 1: server-authoritative resources. The server loads
+/// HP/MP/Stamina from the DB at `CharacterSpawn` and fans
+/// HealthUpdate/ManaUpdate/StaminaUpdate to in-world peers at the step-4a
+/// EnterWorld seed (and continuously on regen-tick threshold crossings).
+/// `create_character` seeds each new character with hp=mp=stamina=100; the
+/// test asserts B sees those values for A via the seed path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn two_clients_resource_fanout() {
+async fn two_clients_server_authoritative_resources() {
     let h = start_both().await;
 
     let (a_session, a_char_id, a_token) =
@@ -391,25 +372,17 @@ async fn two_clients_resource_fanout() {
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "delta", "Del", "Elf", "Cleric").await;
 
+    // A connects first; B joins second. The step-4a seed loop runs for
+    // each new joiner: when B sends EnterWorld, the server replays every
+    // existing peer's EntitySpawn + resources to B. So B should observe
+    // A's HealthUpdate / ManaUpdate / StaminaUpdate at the seed step,
+    // even though nothing else has happened in the world.
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
 
-    // Drain any pending spawn / position broadcasts that landed before our
-    // first ResourceUpdate so the wait_for below doesn't latch onto stale
-    // pre-update state.
-    let _ = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(200), |m| {
-            matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == b_char_id as u64)
-        })
-        .await;
-
-    // A broadcasts resources. B should see all three variants for A.
-    a.send_resource_update(73.0, 100.0, 42.0, 80.0, 55.0, 100.0);
-
-    // Pump A so the queued ResourceUpdate actually reaches the wire.
-    // `wait_for` on B doesn't tick A; without this nudge the bytes sit
-    // in A's outgoing buffer forever.
-    for _ in 0..4 {
+    // Pump A a few times so the server's step-4a seed broadcast can land
+    // (this includes the resources from the DB).
+    for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
@@ -419,10 +392,12 @@ async fn two_clients_resource_fanout() {
             matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_char_id as u64)
         })
         .await
-        .expect("B receives HealthUpdate for A");
+        .expect("B receives HealthUpdate for A via DB-seeded fan-out");
     if let ServerWorldMsg::HealthUpdate { hp, max_hp, .. } = h_at_b {
-        assert!((hp - 73.0).abs() < 0.01, "hp roundtrip: {hp}");
-        assert!((max_hp - 100.0).abs() < 0.01, "max_hp roundtrip: {max_hp}");
+        // `create_character` seeds hp=mp=stamina=100; base_max_* default
+        // to 100 in 0001_init.sql.
+        assert!((hp - 100.0).abs() < 0.01, "DB-seeded hp: {hp}");
+        assert!((max_hp - 100.0).abs() < 0.01, "DB-seeded max_hp: {max_hp}");
     }
 
     let m_at_b = b
@@ -430,10 +405,10 @@ async fn two_clients_resource_fanout() {
             matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == a_char_id as u64)
         })
         .await
-        .expect("B receives ManaUpdate for A");
+        .expect("B receives ManaUpdate for A via DB-seeded fan-out");
     if let ServerWorldMsg::ManaUpdate { mp, max_mp, .. } = m_at_b {
-        assert!((mp - 42.0).abs() < 0.01, "mp roundtrip: {mp}");
-        assert!((max_mp - 80.0).abs() < 0.01, "max_mp roundtrip: {max_mp}");
+        assert!((mp - 100.0).abs() < 0.01, "DB-seeded mp: {mp}");
+        assert!((max_mp - 100.0).abs() < 0.01, "DB-seeded max_mp: {max_mp}");
     }
 
     let s_at_b = b
@@ -441,19 +416,11 @@ async fn two_clients_resource_fanout() {
             matches!(m, ServerWorldMsg::StaminaUpdate { id, .. } if *id == a_char_id as u64)
         })
         .await
-        .expect("B receives StaminaUpdate for A");
+        .expect("B receives StaminaUpdate for A via DB-seeded fan-out");
     if let ServerWorldMsg::StaminaUpdate { stamina, max, .. } = s_at_b {
-        assert!((stamina - 55.0).abs() < 0.01, "stamina roundtrip: {stamina}");
-        assert!((max - 100.0).abs() < 0.01, "max stamina roundtrip: {max}");
+        assert!((stamina - 100.0).abs() < 0.01, "DB-seeded stamina: {stamina}");
+        assert!((max - 100.0).abs() < 0.01, "DB-seeded max stamina: {max}");
     }
-
-    // Owner should NOT receive its own HealthUpdate back.
-    let echoed = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
-            matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_char_id as u64)
-        })
-        .await;
-    assert!(echoed.is_none(), "A should not receive own HealthUpdate echo");
 }
 
 /// Track 4 sub-task 2: cast lifecycle replication. A broadcasts CastStart

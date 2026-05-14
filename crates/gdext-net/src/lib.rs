@@ -213,6 +213,24 @@ impl NetClient {
     #[signal]
     fn xp_gained(amount: i64, current: i64, to_next: i64);
 
+    /// Track 6 sub-task 5 — server forwarded a group invite. Client
+    /// shows an accept/reject UI; on accept the GDScript handler
+    /// fires `send_group_accept_invite(from_id)`.
+    #[signal]
+    fn group_invited(from_id: i64, from_name: GString);
+
+    /// Track 6 sub-task 5 — server-authoritative group roster update.
+    /// `member_ids` and `member_names` are parallel arrays. Empty
+    /// arrays signal the group dissolved (last-member or kicked-self
+    /// notification).
+    #[signal]
+    fn group_roster(
+        group_id: i64,
+        leader_id: i64,
+        member_ids: PackedInt64Array,
+        member_names: PackedStringArray,
+    );
+
     /// Track 4 sub-task 3 buff snapshot. `names` and `durations` are
     /// parallel arrays — entry i is one buff. Empty arrays mean "no
     /// active buffs". Receiver should replace any previously-tracked
@@ -543,6 +561,34 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// Track 6 sub-task 5 — group intents. The server's intent sweep
+    /// resolves names against the connections map (NOCASE), so the
+    /// inviter doesn't need the target's char_id. Accept carries the
+    /// inviter's char_id so the server can match against the pending
+    /// invite map.
+    #[func]
+    fn send_group_invite(&mut self, name: GString) -> bool {
+        let msg = ClientWorldMsg::GroupInvite { name: name.to_string() };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    #[func]
+    fn send_group_accept_invite(&mut self, from: i64) -> bool {
+        let msg = ClientWorldMsg::GroupAcceptInvite { from: from as u64 };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    #[func]
+    fn send_group_leave(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::GroupLeave)
+    }
+
+    #[func]
+    fn send_group_kick(&mut self, name: GString) -> bool {
+        let msg = ClientWorldMsg::GroupKick { name: name.to_string() };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
     /// Track 6 sub-task 3b — player → server cast intent. Carries the
     /// canonical spell_name (key into the server's spells.toml) and
     /// the chosen target id. `target_id = 0` encodes "no target" for
@@ -723,6 +769,16 @@ enum Incoming {
         amount: i32,
         current: i32,
         to_next: i32,
+    },
+    GroupInvited {
+        from_id: i64,
+        from_name: String,
+    },
+    GroupRoster {
+        group_id: i64,
+        leader_id: i64,
+        member_ids: Vec<i64>,
+        member_names: Vec<String>,
     },
     Raw {
         channel: u8,
@@ -1070,6 +1126,41 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::GroupInvited { from_id, from_name } => {
+                    self.base_mut().emit_signal(
+                        "group_invited",
+                        &[
+                            from_id.to_variant(),
+                            GString::from(from_name.as_str()).to_variant(),
+                        ],
+                    );
+                }
+                Incoming::GroupRoster {
+                    group_id,
+                    leader_id,
+                    member_ids,
+                    member_names,
+                } => {
+                    let mut ids_arr = PackedInt64Array::new();
+                    ids_arr.resize(member_ids.len());
+                    for (i, v) in member_ids.iter().enumerate() {
+                        ids_arr[i] = *v;
+                    }
+                    let mut names_arr = PackedStringArray::new();
+                    names_arr.resize(member_names.len());
+                    for (i, n) in member_names.iter().enumerate() {
+                        names_arr[i] = GString::from(n.as_str());
+                    }
+                    self.base_mut().emit_signal(
+                        "group_roster",
+                        &[
+                            group_id.to_variant(),
+                            leader_id.to_variant(),
+                            ids_arr.to_variant(),
+                            names_arr.to_variant(),
+                        ],
+                    );
+                }
                 Incoming::Raw { channel, bytes } => {
                     let pba = packed_byte_array_from(&bytes);
                     self.base_mut().emit_signal(
@@ -1229,6 +1320,24 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             current,
             to_next,
         },
+        ServerWorldMsg::GroupInvited { from_id, from_name } => Incoming::GroupInvited {
+            from_id: from_id as i64,
+            from_name,
+        },
+        ServerWorldMsg::GroupRoster { group_id, leader_id, members } => {
+            let mut member_ids = Vec::with_capacity(members.len());
+            let mut member_names = Vec::with_capacity(members.len());
+            for (id, name) in members {
+                member_ids.push(id as i64);
+                member_names.push(name);
+            }
+            Incoming::GroupRoster {
+                group_id: group_id as i64,
+                leader_id: leader_id as i64,
+                member_ids,
+                member_names,
+            }
+        }
         // Other variants (BuffApplied, ChatMessage, ...) get
         // bubbled up raw. As their handlers land, add typed `match` arms here.
         _ => Incoming::Raw {

@@ -17,6 +17,7 @@ mod buffs;
 mod combat;
 mod connection;
 mod entity;
+mod groups;
 mod handlers;
 mod items;
 mod loot;

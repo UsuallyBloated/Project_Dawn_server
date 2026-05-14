@@ -89,6 +89,25 @@ pub enum Outcome {
         spell_name: String,
         target_id: Option<protocol::world::EntityId>,
     },
+
+    /// Track 6 sub-task 5 — player → server group intents. The tick
+    /// loop's post-dispatch sweep resolves them against the
+    /// groups::GroupManager singleton.
+    GroupInviteIntent {
+        inviter: u64,
+        target_name: String,
+    },
+    GroupAcceptIntent {
+        invitee: u64,
+        from: u64,
+    },
+    GroupLeaveIntent {
+        member: u64,
+    },
+    GroupKickIntent {
+        leader: u64,
+        target_name: String,
+    },
     /// Track 5 sub-task 4 — player → server pickup intent for one slot
     /// of a loot bag. The tick loop validates bag existence + slot
     /// index + pickup range, removes the stack, sends `LootGranted`
@@ -429,6 +448,43 @@ pub fn handle_message(
             }
         }
 
+        ClientWorldMsg::GroupInvite { name } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::GroupInviteIntent {
+                inviter: conn.char_id as u64,
+                target_name: name,
+            }
+        }
+
+        ClientWorldMsg::GroupAcceptInvite { from } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::GroupAcceptIntent {
+                invitee: conn.char_id as u64,
+                from,
+            }
+        }
+
+        ClientWorldMsg::GroupLeave => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::GroupLeaveIntent { member: conn.char_id as u64 }
+        }
+
+        ClientWorldMsg::GroupKick { name } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::GroupKickIntent {
+                leader: conn.char_id as u64,
+                target_name: name,
+            }
+        }
+
         ClientWorldMsg::CastSpell { spell_name, target_id } => {
             if !conn.in_world {
                 return Outcome::Continue;
@@ -545,6 +601,45 @@ pub fn send_loot_granted(
     let msg = ServerWorldMsg::LootGranted { item_path, count };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// Track 6 sub-task 5 — forward a pending group invite to the
+/// invitee. Sent on the reliable system channel; client shows an
+/// accept/reject UI.
+pub fn send_group_invited(
+    server: &mut RenetServer,
+    invitee_id: ClientId,
+    from_id: u64,
+    from_name: String,
+) {
+    let msg = ServerWorldMsg::GroupInvited { from_id, from_name };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(invitee_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// Track 6 sub-task 5 — fan the current group roster to every online
+/// member. Empty `members` Vec signals the group dissolved (sent to
+/// the last remaining member so their client clears its display).
+pub fn fan_group_roster(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    group_id: u64,
+    leader_id: u64,
+    members: Vec<(u64, String)>,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::GroupRoster {
+        group_id,
+        leader_id,
+        members,
+    };
+    let Some(bytes) = encode(&msg) else { return };
+    for &recipient in recipients {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes.clone());
     }
 }
 

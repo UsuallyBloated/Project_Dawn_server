@@ -589,6 +589,25 @@ pub enum ServerWorldMsg {
         item_path: String,
         count: u32,
     },
+
+    /// Track 6 sub-task 5 — server forwards a pending group invite
+    /// to the invitee. Client shows an accept/reject dialog. The
+    /// invitee responds with `ClientWorldMsg::GroupAcceptInvite
+    /// { from: from_id }` to join, or just lets the invite expire.
+    GroupInvited {
+        from_id: EntityId,
+        from_name: String,
+    },
+    /// Track 6 sub-task 5 — full group roster update. Fanned to every
+    /// online group member whenever membership changes (invite
+    /// accepted, member left, member kicked, leader changed). Empty
+    /// `members` means the group dissolved (last remaining member
+    /// receives this as their cleanup signal).
+    GroupRoster {
+        group_id: u64,
+        leader_id: EntityId,
+        members: Vec<(EntityId, String)>,
+    },
 }
 
 /// First entity id reserved for server-spawned enemies. Player char_ids are

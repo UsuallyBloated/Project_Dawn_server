@@ -7,6 +7,7 @@ use super::{
     combat,
     connection::{PerConnection, Vec3f},
     entity::{Entity, EnemyState, HitIntent},
+    groups::{self, GroupManager},
     handlers::{self, Outcome},
     items,
     loot::{self, LootBag},
@@ -198,6 +199,10 @@ pub async fn run(
     // in step 4k. 4B will add the LootItem / LootAll handlers that
     // remove items mid-life.
     let mut loot_bags: HashMap<EntityId, LootBag> = HashMap::new();
+    // Track 6 sub-task 5 — server-authoritative group state.
+    // Ephemeral; lives only for the tick loop's lifetime. Disconnect
+    // removes the member; one-member-left groups dissolve.
+    let mut group_manager = GroupManager::new();
 
     loop {
         interval.tick().await;
@@ -303,6 +308,34 @@ pub async fn run(
                         }
                     }
 
+                    // Track 6 sub-task 5 — remove the leaver from
+                    // their group. If the group dissolves (one
+                    // member left), notify them too. The rest of the
+                    // roster gets a fresh GroupRoster.
+                    if let Some((gid, remaining)) = group_manager.leave(client_id) {
+                        if !remaining.is_empty() {
+                            // Re-fetch the group with name lookups
+                            // for the survivor fan-out.
+                            if let Some(g) = group_manager.groups.get(&gid) {
+                                let members_with_names: Vec<(u64, String)> = g.members.iter()
+                                    .filter_map(|m| connections.get(m).map(|c| (*m, c.name.clone())))
+                                    .collect();
+                                let recipients: Vec<ClientId> = g.members.clone();
+                                handlers::fan_group_roster(
+                                    &mut server,
+                                    &recipients,
+                                    gid,
+                                    g.leader,
+                                    members_with_names,
+                                );
+                            }
+                        }
+                        // remaining.is_empty() → group dissolved; no
+                        // one left to notify. (The leaver is the
+                        // disconnecting client; their transport is
+                        // already torn down.)
+                    }
+
                     if let Some(mut conn) = connections.remove(&client_id) {
                         // One last save for the road. Failure is non-fatal —
                         // worst case the player rolls back to the last 60 s
@@ -356,6 +389,18 @@ pub async fn run(
         // combos).
         let mut attack_intents: Vec<AttackIntent> = Vec::new();
         let mut cast_spell_intents: Vec<CastSpellIntent> = Vec::new();
+        // Track 6 sub-task 5 — group intents buffered for the
+        // post-dispatch sweep. The sweep needs the full connections
+        // map (to resolve names to ids + fan rosters to multiple
+        // members), so we can't process inline in handle_message.
+        struct GroupInviteI { inviter: u64, target_name: String }
+        struct GroupAcceptI { invitee: u64, from: u64 }
+        struct GroupLeaveI { member: u64 }
+        struct GroupKickI { leader: u64, target_name: String }
+        let mut group_invite_intents: Vec<GroupInviteI> = Vec::new();
+        let mut group_accept_intents: Vec<GroupAcceptI> = Vec::new();
+        let mut group_leave_intents: Vec<GroupLeaveI> = Vec::new();
+        let mut group_kick_intents: Vec<GroupKickI> = Vec::new();
         // Track 5 sub-task 4 — player → server loot pickup intents.
         // Verbatim queue; sub-task 4 is FFA loot so order matters for
         // contested bags (first arrival wins the slot).
@@ -455,6 +500,18 @@ pub async fn run(
                                 spell_name,
                                 target_id,
                             });
+                        }
+                        Outcome::GroupInviteIntent { inviter, target_name } => {
+                            group_invite_intents.push(GroupInviteI { inviter, target_name });
+                        }
+                        Outcome::GroupAcceptIntent { invitee, from } => {
+                            group_accept_intents.push(GroupAcceptI { invitee, from });
+                        }
+                        Outcome::GroupLeaveIntent { member } => {
+                            group_leave_intents.push(GroupLeaveI { member });
+                        }
+                        Outcome::GroupKickIntent { leader, target_name } => {
+                            group_kick_intents.push(GroupKickI { leader, target_name });
                         }
                         Outcome::LootItemIntent {
                             looter,
@@ -1069,18 +1126,44 @@ pub async fn run(
                                 .unwrap_or(std::cmp::Ordering::Equal)
                         })
                     {
-                        let xp = entity.mob.xp;
-                        if xp > 0 {
-                            let cid = credit_id as ClientId;
-                            if connections.contains_key(&cid) {
-                                handlers::send_xp_gained(&mut server, cid, xp);
-                                tracing::info!(
-                                    killer = credit_id,
-                                    mob = %entity.mob.name,
-                                    xp,
-                                    "kill credit granted"
-                                );
+                        let base_xp = entity.mob.xp;
+                        if base_xp > 0 {
+                            // Track 6 sub-task 5 — group XP split.
+                            // Killer's group (if any): boost base by
+                            // GROUP_XP_BONUS and divide evenly among
+                            // online members. Solo killer: full base
+                            // XP. Mirrors GroupManager.distribute_kill_xp
+                            // semantics from the legacy enet path.
+                            let credit_cid = credit_id as ClientId;
+                            let online_members: Vec<ClientId> =
+                                match group_manager.group_of(credit_cid) {
+                                    Some(g) => g.members.iter()
+                                        .filter(|m| connections.contains_key(m))
+                                        .copied()
+                                        .collect(),
+                                    None => vec![credit_cid],
+                                };
+                            let pool = if online_members.len() > 1 {
+                                ((base_xp as f32) * (1.0 + groups::GROUP_XP_BONUS)) as i32
+                            } else {
+                                base_xp
+                            };
+                            let per_member = pool / online_members.len() as i32;
+                            let per_member = per_member.max(1);
+                            for m in &online_members {
+                                if connections.contains_key(m) {
+                                    handlers::send_xp_gained(&mut server, *m, per_member);
+                                }
                             }
+                            tracing::info!(
+                                killer = credit_id,
+                                mob = %entity.mob.name,
+                                base_xp,
+                                pool,
+                                per_member,
+                                members = online_members.len(),
+                                "kill credit granted"
+                            );
                         }
                     }
                     // Roll loot from the mob's archetype table; spawn
@@ -1640,6 +1723,181 @@ pub async fn run(
                             "spell target_type not yet processed server-side; mana deducted only"
                         );
                     }
+                }
+            }
+        }
+
+        // 4hb. Track 6 sub-task 5 — group-intent processing.
+        //      Invite: resolve target_name → char_id, record pending
+        //      invite, forward GroupInvited to invitee.
+        //      Accept: GroupManager.accept; fan GroupRoster to all
+        //      members on success.
+        //      Leave: GroupManager.leave; fan roster (or empty for
+        //      dissolved) to remaining + the leaver.
+        //      Kick: leader-only action; remove target; fan rosters.
+        // Helper to fan the current roster of a group with names
+        // looked up from the connections map. Empty members = group
+        // dissolved (last-member signal).
+        let fan_roster =
+            |srv: &mut renet::RenetServer,
+             conns: &HashMap<ClientId, PerConnection>,
+             gm: &GroupManager,
+             gid: groups::GroupId,
+             also_notify_dissolved: Option<ClientId>| {
+                if let Some(g) = gm.groups.get(&gid) {
+                    let members_with_names: Vec<(u64, String)> = g.members.iter()
+                        .filter_map(|m| conns.get(m).map(|c| (*m, c.name.clone())))
+                        .collect();
+                    let recipients: Vec<ClientId> = g.members.clone();
+                    handlers::fan_group_roster(
+                        srv,
+                        &recipients,
+                        gid,
+                        g.leader,
+                        members_with_names,
+                    );
+                } else if let Some(last) = also_notify_dissolved {
+                    // Group dissolved — send an empty roster to the
+                    // last member as a "your group dissolved" signal.
+                    handlers::fan_group_roster(
+                        srv,
+                        std::slice::from_ref(&last),
+                        gid,
+                        last,
+                        Vec::new(),
+                    );
+                }
+            };
+
+        for intent in group_invite_intents.drain(..) {
+            // Resolve target by name (case-insensitive). The
+            // characters table has a NOCASE collation on name.
+            let target_cid = connections
+                .iter()
+                .find(|(_, c)| c.name.eq_ignore_ascii_case(&intent.target_name))
+                .map(|(id, _)| *id);
+            let Some(target_cid) = target_cid else {
+                tracing::debug!(
+                    inviter = intent.inviter,
+                    target = %intent.target_name,
+                    "GroupInvite — target offline or unknown"
+                );
+                continue;
+            };
+            if target_cid as u64 == intent.inviter {
+                continue; // can't invite self
+            }
+            let from_name = connections.get(&(intent.inviter as ClientId))
+                .map(|c| c.name.clone())
+                .unwrap_or_default();
+            let _gid = group_manager.record_invite(intent.inviter as ClientId, target_cid);
+            handlers::send_group_invited(
+                &mut server,
+                target_cid,
+                intent.inviter,
+                from_name,
+            );
+            tracing::info!(
+                inviter = intent.inviter,
+                invitee = target_cid as u64,
+                "GroupInvite recorded; GroupInvited forwarded"
+            );
+        }
+
+        for intent in group_accept_intents.drain(..) {
+            let invitee_cid = intent.invitee as ClientId;
+            let from_cid = intent.from as ClientId;
+            if let Some(gid) = group_manager.accept(invitee_cid, from_cid) {
+                tracing::info!(
+                    invitee = intent.invitee,
+                    inviter = intent.from,
+                    gid,
+                    "GroupAccept — invitee joined"
+                );
+                fan_roster(&mut server, &connections, &group_manager, gid, None);
+            } else {
+                tracing::debug!(
+                    invitee = intent.invitee,
+                    inviter = intent.from,
+                    "GroupAccept rejected (no pending invite / already in a group)"
+                );
+            }
+        }
+
+        for intent in group_leave_intents.drain(..) {
+            let cid = intent.member as ClientId;
+            if let Some((gid, remaining)) = group_manager.leave(cid) {
+                tracing::info!(
+                    member = intent.member,
+                    gid,
+                    remaining = remaining.len(),
+                    "GroupLeave processed"
+                );
+                if remaining.is_empty() {
+                    // Group dissolved — also notify the leaver so their
+                    // client clears the display.
+                    handlers::fan_group_roster(
+                        &mut server,
+                        std::slice::from_ref(&cid),
+                        gid,
+                        cid,
+                        Vec::new(),
+                    );
+                } else {
+                    // Notify the leaver too (empty roster from their POV).
+                    handlers::fan_group_roster(
+                        &mut server,
+                        std::slice::from_ref(&cid),
+                        gid,
+                        cid,
+                        Vec::new(),
+                    );
+                    fan_roster(&mut server, &connections, &group_manager, gid, None);
+                }
+            }
+        }
+
+        for intent in group_kick_intents.drain(..) {
+            let leader_cid = intent.leader as ClientId;
+            let Some(group) = group_manager.group_of(leader_cid) else {
+                continue;
+            };
+            if group.leader != leader_cid {
+                continue; // only leader can kick
+            }
+            let gid = group.id;
+            // Resolve target name within the group's roster.
+            let target_cid: Option<ClientId> = group.members.iter().copied()
+                .find(|m| {
+                    connections.get(m)
+                        .map(|c| c.name.eq_ignore_ascii_case(&intent.target_name))
+                        .unwrap_or(false)
+                });
+            let Some(target_cid) = target_cid else {
+                continue;
+            };
+            if target_cid == leader_cid {
+                continue; // leader can't kick self (use /leave)
+            }
+            if let Some((_gid, remaining)) = group_manager.leave(target_cid) {
+                tracing::info!(
+                    leader = intent.leader,
+                    kicked = target_cid as u64,
+                    gid,
+                    remaining = remaining.len(),
+                    "GroupKick processed"
+                );
+                // Notify the kicked member their group dissolved (from
+                // their POV).
+                handlers::fan_group_roster(
+                    &mut server,
+                    std::slice::from_ref(&target_cid),
+                    gid,
+                    target_cid,
+                    Vec::new(),
+                );
+                if !remaining.is_empty() {
+                    fan_roster(&mut server, &connections, &group_manager, gid, None);
                 }
             }
         }

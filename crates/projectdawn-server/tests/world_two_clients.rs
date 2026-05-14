@@ -225,6 +225,14 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
+    fn send_cast_spell(&mut self, spell_name: &str, target_id: Option<u64>) {
+        let msg = ClientWorldMsg::CastSpell {
+            spell_name: spell_name.into(),
+            target_id,
+        };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
     fn send_hit(&mut self, target: u64, amount: i32, crit: bool, dmg_type: DamageType) {
         let msg = ClientWorldMsg::HitBroadcast {
             target,
@@ -575,42 +583,41 @@ async fn two_clients_death_fanout() {
     let _ = b_char_id; // silence unused if test order changes
 }
 
-/// Track 4 sub-task 3: buff snapshot replication. A broadcasts a snapshot;
-/// B receives BuffSnapshot for A with the same name/duration pairs.
+/// Track 6 sub-task 4a: server-authoritative buff state. A casts
+/// Healing Wave on self; server applies the HoT to A's active_buffs
+/// and fans BuffSnapshot to in-world peers. B observes the buff
+/// without A ever sending a BuffSnapshotBroadcast.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_clients_buff_snapshot_fanout() {
     let h = start_both().await;
 
     let (a_session, a_char_id, a_token) =
-        provision_client(&h.auth_url, "eta", "Eta", "Human", "Cleric").await;
+        provision_client(&h.auth_url, "eta", "Eta", "Human", "Shaman").await;
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "theta", "The", "Elf", "Druid").await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
 
-    a.send_buff_snapshot(vec![
-        ("Bless".into(), 30.0),
-        ("Thorns".into(), 12.5),
-    ]);
-    for _ in 0..4 {
+    // A casts Healing Wave (SELF, 15 immediate heal + 4 hps × 18s HoT).
+    // Server applies the HoT to A.active_buffs and fans BuffSnapshot
+    // to all in-world peers including B.
+    a.send_cast_spell("Healing Wave", None);
+    for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
 
-    let snap_at_b = b
+    // Filter for the Healing Wave entry so we don't latch onto the
+    // empty seed snapshot the server fans at step-4a join time.
+    let _ = b
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::BuffSnapshot { target, .. } if *target == a_char_id as u64)
+            matches!(m, ServerWorldMsg::BuffSnapshot { target, buffs }
+                if *target == a_char_id as u64
+                    && buffs.iter().any(|(n, _)| n == "Healing Wave"))
         })
         .await
-        .expect("B receives BuffSnapshot for A");
-    if let ServerWorldMsg::BuffSnapshot { buffs, .. } = snap_at_b {
-        assert_eq!(buffs.len(), 2);
-        assert_eq!(buffs[0].0, "Bless");
-        assert!((buffs[0].1 - 30.0).abs() < 0.01);
-        assert_eq!(buffs[1].0, "Thorns");
-        assert!((buffs[1].1 - 12.5).abs() < 0.01);
-    }
+        .expect("B receives server-driven BuffSnapshot containing Healing Wave");
 }
 
 /// Track 5 sub-task 1C: AI state machine drives Idle → Chase → Attack

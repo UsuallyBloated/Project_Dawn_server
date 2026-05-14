@@ -353,13 +353,13 @@ pub fn handle_message(
             Outcome::Continue
         }
 
-        ClientWorldMsg::BuffSnapshotBroadcast { buffs } => {
-            if !conn.ready {
-                return Outcome::Continue;
-            }
-            conn.buff_snapshot = buffs;
-            conn.buff_snapshot_set = true;
-            Outcome::BuffSnapshotFanOut
+        ClientWorldMsg::BuffSnapshotBroadcast { buffs: _ } => {
+            // Track 6 sub-task 4a: server is now the source of truth
+            // for buff state. The client's snapshot is ignored — the
+            // server-originated fan-out from tick.rs step 5a is the
+            // canonical signal. Variant kept for transitional builds;
+            // sub-task 4b removes the wire variant entirely.
+            Outcome::Continue
         }
 
         ClientWorldMsg::CastFailBroadcast { reason } => {
@@ -815,22 +815,23 @@ pub fn fan_out_entity_died(
     }
 }
 
-/// Fan out the cached buff snapshot for `conn` to every recipient. Empty
-/// snapshot is sent if `buff_snapshot_set` is true (means "no buffs" — the
-/// client has positively reported zero); skipped entirely if the cache has
-/// never been populated, so a new joiner doesn't see an empty buff list
-/// before the peer has had a chance to broadcast.
+/// Fan out the buff snapshot for `conn` to every recipient. Track 6
+/// sub-task 4a: derived from server-authoritative `active_buffs`
+/// instead of the deprecated client-broadcast cache. Sends an empty
+/// snapshot (representing "no buffs") if active_buffs is empty —
+/// new joiners need to know peer state regardless.
 pub fn fan_out_buff_snapshot(
     server: &mut RenetServer,
     recipients: &[ClientId],
     conn: &PerConnection,
 ) {
-    if !conn.buff_snapshot_set || recipients.is_empty() {
+    if recipients.is_empty() {
         return;
     }
+    let payload = super::buffs::snapshot_pairs(&conn.active_buffs);
     let msg = ServerWorldMsg::BuffSnapshot {
         target: conn.char_id as u64,
-        buffs: conn.buff_snapshot.clone(),
+        buffs: payload,
     };
     let Some(bytes) = encode(&msg) else { return };
     for recipient in recipients {

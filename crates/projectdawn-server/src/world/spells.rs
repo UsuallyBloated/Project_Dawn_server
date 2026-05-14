@@ -41,6 +41,26 @@ pub struct Spell {
     pub min_level: i32,
     #[serde(default)]
     pub classes: Vec<String>,
+
+    // Track 6 sub-task 4a — buff fields applied to the target (or
+    // caster for SELF spells) after the immediate damage/heal lands.
+    /// Heal-over-time. `hot_hps` HP/sec for `hot_duration` seconds.
+    #[serde(default)]
+    pub hot_hps: f32,
+    #[serde(default)]
+    pub hot_duration: f32,
+    /// Mana regen buff (Clarity / Breeze / Mana Weave).
+    #[serde(default)]
+    pub mp_regen_hps: f32,
+    #[serde(default)]
+    pub mp_regen_duration: f32,
+    /// Lich Form toggle. When true, applying this spell pushes a
+    /// LichForm buff (infinite duration) that disables HP regen and
+    /// grants `lich_mp_regen` MP/sec. Re-casting clears.
+    #[serde(default)]
+    pub is_lich_form: bool,
+    #[serde(default)]
+    pub lich_mp_regen: f32,
 }
 
 fn default_min_level() -> i32 { 1 }

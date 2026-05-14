@@ -179,6 +179,84 @@ cooldown = 4.0
 min_level = 1
 classes = ["Shaman"]
 
+# Track 6 sub-task 4a — first HoT spells to ride the new server-side
+# buff state. Healing Wave + Regrowth tick HP per second for the
+# stated duration. Other HoTs (Renew, song-driven HoTs) follow once
+# tools/export_spells.gd is re-run.
+[[spell]]
+name = "Healing Wave"
+target_type = "SELF"
+damage_type = "SPIRIT"
+base_damage = 0.0
+heal_amount = 15.0
+mana_cost = 30.0
+cast_time = 1.0
+cooldown = 6.0
+hot_hps = 4.0
+hot_duration = 18.0
+min_level = 4
+classes = ["Shaman"]
+
+[[spell]]
+name = "Regrowth"
+target_type = "SELF"
+damage_type = "NATURE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 25.0
+cast_time = 1.0
+cooldown = 6.0
+hot_hps = 5.0
+hot_duration = 18.0
+min_level = 1
+classes = ["Druid"]
+
+# Track 6 sub-task 4a — MP regen buff. Server adds mp_regen_hps to
+# caster's per-tick mana recovery for the duration.
+[[spell]]
+name = "Clarity"
+target_type = "SELF"
+damage_type = "ARCANE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 30.0
+cast_time = 1.0
+cooldown = 5.0
+mp_regen_hps = 8.0
+mp_regen_duration = 36.0
+min_level = 14
+classes = ["Enchanter"]
+
+[[spell]]
+name = "Breeze"
+target_type = "SELF"
+damage_type = "ARCANE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 20.0
+cast_time = 1.0
+cooldown = 5.0
+mp_regen_hps = 4.0
+mp_regen_duration = 30.0
+min_level = 4
+classes = ["Enchanter"]
+
+# Track 6 sub-task 4a — Lich Form toggle. Disables HP regen + grants
+# 15 MP/s. Re-casting clears (toggle semantics handled server-side).
+[[spell]]
+name = "Lich Form"
+target_type = "SELF"
+damage_type = "SHADOW"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 0.0
+cast_time = 3.0
+cooldown = 5.0
+is_lich_form = true
+lich_mp_regen = 8.0
+min_level = 20
+classes = ["Necromancer"]
+
 [[spell]]
 name = "Spirit Bolt"
 target_type = "ENEMY"

@@ -64,7 +64,10 @@ pub fn tick_one(conn: &mut PerConnection, dt: f32, now: Instant) -> RegenResult 
     let mp_mult = if conn.is_sitting { SITTING_MP_MULT } else { 1.0 };
     let st_mult = if conn.is_sitting { SITTING_ST_MULT } else { 1.0 };
 
-    if conn.hp > 0.0 && conn.hp < conn.max_hp {
+    // Track 6 sub-task 4a: Lich Form disables natural HP regen. The
+    // buff still grants its MP/sec via the buff tick (step 5a).
+    let lich_active = super::buffs::is_lich_form_active(&conn.active_buffs);
+    if conn.hp > 0.0 && conn.hp < conn.max_hp && !lich_active {
         let per_tick = (HP_BASE_REGEN + conn.constitution as f32 * HP_CON_SCALE) * hp_mult;
         conn.regen_hp_acc += per_tick * scale;
         if conn.regen_hp_acc >= 1.0 {
@@ -73,9 +76,7 @@ pub fn tick_one(conn: &mut PerConnection, dt: f32, now: Instant) -> RegenResult 
             conn.hp = (conn.hp + delta).min(conn.max_hp);
         }
     } else {
-        // Don't accumulate while at full HP or while dead — protects
-        // against the seated-at-full-hp case suddenly dumping a buffered
-        // amount the moment the player takes damage.
+        // Don't accumulate while at full HP, dead, or Lich Form active.
         conn.regen_hp_acc = 0.0;
     }
 

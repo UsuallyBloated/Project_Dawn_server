@@ -198,8 +198,19 @@ pub struct PerConnection {
     /// Track 4 sub-task 3 — last buff snapshot the client broadcast.
     /// Used to seed new joiners; live updates fan out via the
     /// BuffSnapshotFanOut outcome. Empty Vec = "no active buffs".
+    /// Track 6 sub-task 4a: this becomes a SERVER-DERIVED cache —
+    /// rebuilt from `active_buffs` whenever buff state changes.
+    /// Clients no longer originate the snapshot (BuffSnapshotBroadcast
+    /// is deprecated; sub-task 4b removes it after the full lift).
     pub buff_snapshot: Vec<(String, f32)>,
     pub buff_snapshot_set: bool,
+
+    /// Track 6 sub-task 4a — server-authoritative active buffs.
+    /// HoT / MP regen / Lich Form for 4a; stat buffs / speed / haste /
+    /// shield / absorb / CC follow in 4b. Ticked every tick;
+    /// expirations + applies refresh buff_snapshot for the
+    /// fan-out path.
+    pub active_buffs: Vec<super::buffs::ActiveBuff>,
 }
 
 impl PerConnection {
@@ -259,6 +270,7 @@ impl PerConnection {
             cast_set_at: None,
             buff_snapshot: Vec::new(),
             buff_snapshot_set: false,
+            active_buffs: Vec::new(),
         }
     }
 

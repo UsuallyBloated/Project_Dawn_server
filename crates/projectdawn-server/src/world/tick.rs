@@ -3,6 +3,7 @@
 //! pipeline.
 
 use super::{
+    buffs::{self, ActiveBuff},
     combat,
     connection::{PerConnection, Vec3f},
     entity::{Entity, EnemyState, HitIntent},
@@ -56,6 +57,60 @@ struct CastSpellIntent {
     caster: u64,
     spell_name: String,
     target_id: Option<protocol::world::EntityId>,
+}
+
+/// Track 6 sub-task 4a — apply an active buff to a connection.
+/// Re-cast of a same-named buff refreshes the duration (matches
+/// `autoloads/buff_manager.gd::add_hot`'s behaviour). Caller is
+/// responsible for fanning a BuffSnapshot afterwards.
+fn apply_buff(conn: &mut PerConnection, buff: ActiveBuff) {
+    if let Some(existing) = conn
+        .active_buffs
+        .iter_mut()
+        .find(|b| b.name == buff.name)
+    {
+        existing.effect = buff.effect;
+        existing.remaining = buff.remaining;
+        existing.tick_acc = 0.0;
+        existing.applied_at = buff.applied_at;
+    } else {
+        conn.active_buffs.push(buff);
+    }
+}
+
+/// Track 6 sub-task 4a fix — apply an MP-regen buff with exclusive
+/// semantics. The client's `BuffManager._mp_regen_buff` is a single
+/// slot, so casting Clarity after Breeze replaces rather than stacks.
+/// Mirror that here by purging any existing MpRegen entry before
+/// pushing the new one. Lich Form's MP regen is a separate
+/// `BuffEffect::LichForm` variant and isn't touched.
+fn apply_mp_regen_exclusive(conn: &mut PerConnection, buff: ActiveBuff) {
+    conn.active_buffs
+        .retain(|b| !matches!(b.effect, buffs::BuffEffect::MpRegen { .. }));
+    conn.active_buffs.push(buff);
+}
+
+/// Track 6 sub-task 4a — rebuild conn.buff_snapshot from
+/// active_buffs and fan a BuffSnapshot to in-world peers. Server is
+/// authoritative on buff state now; the client-driven
+/// BuffSnapshotBroadcast path is deprecated (kept as a no-op for one
+/// release so transitional builds don't crash on the variant).
+fn fan_out_server_buff_snapshot(
+    server: &mut renet::RenetServer,
+    recipients: &[renet::ClientId],
+    conn: &PerConnection,
+) {
+    let payload = buffs::snapshot_pairs(&conn.active_buffs);
+    let msg = protocol::world::ServerWorldMsg::BuffSnapshot {
+        target: conn.char_id as u64,
+        buffs: payload,
+    };
+    let Ok(bytes) = bincode::serde::encode_to_vec(&msg, bincode::config::standard()) else {
+        return;
+    };
+    for &recipient in recipients {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
 }
 
 /// Track 5 sub-task 4 — buffered loot pickup intent. `Slot(None)` is
@@ -1070,6 +1125,61 @@ pub async fn run(
                                 "spell self effect applied"
                             );
                         }
+                        // Track 6 sub-task 4a — apply buffs to caster.
+                        // HoT, MP regen, Lich Form. Push onto
+                        // conn.active_buffs (overwrites same-name to
+                        // refresh duration). Snapshot fans below.
+                        let mut buff_changed = false;
+                        if spell.hot_hps > 0.0 && spell.hot_duration > 0.0 {
+                            apply_buff(
+                                connections.get_mut(&caster_cid).expect("checked"),
+                                ActiveBuff::new_hot(
+                                    spell.name.clone(),
+                                    spell.hot_hps,
+                                    spell.hot_duration,
+                                    now,
+                                ),
+                            );
+                            buff_changed = true;
+                        }
+                        if spell.mp_regen_hps > 0.0 && spell.mp_regen_duration > 0.0 {
+                            apply_mp_regen_exclusive(
+                                connections.get_mut(&caster_cid).expect("checked"),
+                                ActiveBuff::new_mp_regen(
+                                    spell.name.clone(),
+                                    spell.mp_regen_hps,
+                                    spell.mp_regen_duration,
+                                    now,
+                                ),
+                            );
+                            buff_changed = true;
+                        }
+                        if spell.is_lich_form {
+                            // Toggle semantics — second cast clears.
+                            let cc = connections.get_mut(&caster_cid).expect("checked");
+                            let was_active = buffs::is_lich_form_active(&cc.active_buffs);
+                            cc.active_buffs.retain(|b| !matches!(
+                                b.effect,
+                                buffs::BuffEffect::LichForm { .. }
+                            ));
+                            if !was_active {
+                                cc.active_buffs.push(ActiveBuff::new_lich_form(
+                                    spell.name.clone(),
+                                    spell.lich_mp_regen,
+                                    now,
+                                ));
+                            }
+                            buff_changed = true;
+                        }
+                        if buff_changed {
+                            if let Some(cc) = connections.get(&caster_cid) {
+                                fan_out_server_buff_snapshot(
+                                    &mut server,
+                                    &in_world_recipients_now,
+                                    cc,
+                                );
+                            }
+                        }
                     }
                     "ENEMY" => {
                         let Some(target_id) = intent.target_id else {
@@ -1461,6 +1571,89 @@ pub async fn run(
             conn.pos.x += dir.x * MAX_MOVE_SPEED * dt;
             conn.pos.y += dir.y * MAX_MOVE_SPEED * dt;
             conn.pos.z += dir.z * MAX_MOVE_SPEED * dt;
+        }
+
+        // 5a. Track 6 sub-task 4a buff tick — process HoT / MP regen
+        //     for each connection's active_buffs. Decrements
+        //     remaining, applies per-tick effects, removes expired
+        //     buffs, and fans BuffSnapshot when the set changes. Runs
+        //     BEFORE regen so HoT increments land in the same tick as
+        //     the regen-driven HealthUpdate fan-out — one ManaUpdate
+        //     / HealthUpdate per affected resource per tick at most.
+        let mut buff_snapshot_dirty: Vec<u64> = Vec::new();
+        for conn in connections.values_mut().filter(|c| c.ready) {
+            let mut snapshot_changed = false;
+            let mut i = 0;
+            while i < conn.active_buffs.len() {
+                let buff = &mut conn.active_buffs[i];
+                if buff.remaining.is_finite() {
+                    buff.remaining -= dt;
+                }
+                let expired = buff.remaining <= 0.0 && buff.remaining.is_finite();
+                match buff.effect {
+                    buffs::BuffEffect::Hot { hps } => {
+                        if !expired && hps > 0.0 && conn.hp < conn.max_hp {
+                            buff.tick_acc += hps * dt;
+                            if buff.tick_acc >= 1.0 {
+                                let heal = buff.tick_acc.floor();
+                                buff.tick_acc -= heal;
+                                conn.hp = (conn.hp + heal).min(conn.max_hp);
+                                regen::mark_dirty(conn);
+                            }
+                        }
+                    }
+                    buffs::BuffEffect::MpRegen { mps } => {
+                        if !expired && mps > 0.0 && conn.mp < conn.max_mp {
+                            buff.tick_acc += mps * dt;
+                            if buff.tick_acc >= 1.0 {
+                                let gain = buff.tick_acc.floor();
+                                buff.tick_acc -= gain;
+                                conn.mp = (conn.mp + gain).min(conn.max_mp);
+                                regen::mark_dirty(conn);
+                            }
+                        }
+                    }
+                    buffs::BuffEffect::LichForm { lich_mp_regen } => {
+                        // Lich Form is a passive toggle — regen.rs
+                        // skips natural HP regen when this is
+                        // present, and we add the MP/sec here.
+                        if !expired && lich_mp_regen > 0.0 && conn.mp < conn.max_mp {
+                            buff.tick_acc += lich_mp_regen * dt;
+                            if buff.tick_acc >= 1.0 {
+                                let gain = buff.tick_acc.floor();
+                                buff.tick_acc -= gain;
+                                conn.mp = (conn.mp + gain).min(conn.max_mp);
+                                regen::mark_dirty(conn);
+                            }
+                        }
+                    }
+                }
+                if expired {
+                    conn.active_buffs.remove(i);
+                    snapshot_changed = true;
+                } else {
+                    i += 1;
+                }
+            }
+            if snapshot_changed {
+                buff_snapshot_dirty.push(conn.char_id as u64);
+            }
+        }
+        // Fan BuffSnapshot for any connection whose buff set changed
+        // this tick (expirations only — applies fanned inline at the
+        // cast site). Collect first to drop the mut borrow before
+        // re-borrowing immutably.
+        if !buff_snapshot_dirty.is_empty() {
+            let recipients: Vec<ClientId> = connections
+                .iter()
+                .filter(|(_, c)| c.in_world)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in buff_snapshot_dirty {
+                if let Some(conn) = connections.get(&(id as ClientId)) {
+                    fan_out_server_buff_snapshot(&mut server, &recipients, conn);
+                }
+            }
         }
 
         // 5b. Track 6 regen tick — HP/MP/Stamina recovery, then fan

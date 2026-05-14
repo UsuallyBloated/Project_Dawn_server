@@ -543,6 +543,27 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// Track 6 sub-task 3b — player → server cast intent. Carries the
+    /// canonical spell_name (key into the server's spells.toml) and
+    /// the chosen target id. `target_id = 0` encodes "no target" for
+    /// SELF / NONE spells; ENEMY / AOE require a non-zero id.
+    /// Server validates mana cost / target / range and applies
+    /// authoritative damage or heal, fanning HealthUpdate +
+    /// ManaUpdate + (for enemy targets) Hit.
+    #[func]
+    fn send_cast_spell(&mut self, spell_name: GString, target_id: i64) -> bool {
+        let target = if target_id == 0 {
+            None
+        } else {
+            Some(target_id as u64)
+        };
+        let msg = ClientWorldMsg::CastSpell {
+            spell_name: spell_name.to_string(),
+            target_id: target,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
     /// Track 5 sub-task 4 — player → server intent to claim one slot
     /// of a server-owned loot bag. Server validates range + slot
     /// bounds, sends LootGranted privately on success and re-broadcasts

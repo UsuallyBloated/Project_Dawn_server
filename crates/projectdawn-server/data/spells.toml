@@ -242,7 +242,8 @@ min_level = 4
 classes = ["Enchanter"]
 
 # Track 6 sub-task 4a — Lich Form toggle. Disables HP regen + grants
-# 15 MP/s. Re-casting clears (toggle semantics handled server-side).
+# accelerated MP/s. Re-casting clears (toggle semantics handled
+# server-side).
 [[spell]]
 name = "Lich Form"
 target_type = "SELF"
@@ -256,6 +257,97 @@ is_lich_form = true
 lich_mp_regen = 8.0
 min_level = 20
 classes = ["Necromancer"]
+
+# Track 6 sub-task 4b — primary stat buffs. Server adds the listed
+# stat deltas to PerConnection on apply, subtracts on expire. Combat
+# math reads conn.strength/etc directly so buffed values flow through.
+[[spell]]
+name = "Bless"
+target_type = "SELF"
+damage_type = "HOLY"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 20.0
+cast_time = 1.0
+cooldown = 0.0
+wis_buff = 5
+primary_stat_buff_duration = 600.0
+min_level = 4
+classes = ["Cleric", "Paladin"]
+
+[[spell]]
+name = "Valor"
+target_type = "SELF"
+damage_type = "HOLY"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 35.0
+cast_time = 2.0
+cooldown = 0.0
+str_buff = 10
+max_hp_buff = 50.0
+primary_stat_buff_duration = 600.0
+min_level = 10
+classes = ["Cleric"]
+
+[[spell]]
+name = "Spirit of the Bear"
+target_type = "SELF"
+damage_type = "SPIRIT"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 30.0
+cast_time = 2.0
+cooldown = 0.0
+str_buff = 10
+con_buff = 5
+primary_stat_buff_duration = 600.0
+min_level = 10
+classes = ["Shaman"]
+
+[[spell]]
+name = "Gift of Insight"
+target_type = "SELF"
+damage_type = "SPIRIT"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 30.0
+cast_time = 2.0
+cooldown = 0.0
+wis_buff = 8
+int_buff = 5
+primary_stat_buff_duration = 600.0
+min_level = 14
+classes = ["Shaman"]
+
+[[spell]]
+name = "Strength"
+target_type = "SELF"
+damage_type = "ARCANE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 25.0
+cast_time = 1.5
+cooldown = 0.0
+str_buff = 12
+primary_stat_buff_duration = 600.0
+min_level = 8
+classes = ["Enchanter"]
+
+[[spell]]
+name = "Brilliance"
+target_type = "SELF"
+damage_type = "ARCANE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 25.0
+cast_time = 1.5
+cooldown = 0.0
+int_buff = 10
+wis_buff = 5
+primary_stat_buff_duration = 600.0
+min_level = 10
+classes = ["Enchanter"]
 
 [[spell]]
 name = "Spirit Bolt"

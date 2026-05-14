@@ -78,6 +78,39 @@ fn apply_buff(conn: &mut PerConnection, buff: ActiveBuff) {
     }
 }
 
+/// Track 6 sub-task 4b — apply a stat buff, mutating the
+/// connection's effective stats. Refresh semantics for re-cast: undo
+/// the existing same-named buff's deltas, then apply the new ones.
+/// This keeps total stat additions from doubling on refresh.
+fn apply_stat_buff(conn: &mut PerConnection, buff: ActiveBuff) {
+    // Pull deltas out of the incoming buff.
+    let (str_d, agi_d, int_d, wis_d, con_d, hp_d, mp_d) = match buff.effect {
+        buffs::BuffEffect::StatBuff {
+            strength, agility, intelligence, wisdom, constitution,
+            max_hp_delta, max_mp_delta,
+        } => (strength, agility, intelligence, wisdom, constitution, max_hp_delta, max_mp_delta),
+        _ => return,
+    };
+    // If an existing same-named stat buff is present, undo its
+    // deltas before removing it; preserves the invariant that
+    // conn.strength etc. = base + sum(active stat buffs).
+    if let Some(idx) = conn.active_buffs.iter().position(|b| b.name == buff.name) {
+        if let buffs::BuffEffect::StatBuff {
+            strength, agility, intelligence, wisdom, constitution,
+            max_hp_delta, max_mp_delta,
+        } = conn.active_buffs[idx].effect
+        {
+            buffs::undo_stat_deltas(
+                conn, strength, agility, intelligence, wisdom, constitution,
+                max_hp_delta, max_mp_delta,
+            );
+        }
+        conn.active_buffs.remove(idx);
+    }
+    buffs::apply_stat_deltas(conn, str_d, agi_d, int_d, wis_d, con_d, hp_d, mp_d);
+    conn.active_buffs.push(buff);
+}
+
 /// Track 6 sub-task 4a fix — apply an MP-regen buff with exclusive
 /// semantics. The client's `BuffManager._mp_regen_buff` is a single
 /// slot, so casting Clarity after Breeze replaces rather than stacks.
@@ -1171,6 +1204,47 @@ pub async fn run(
                             }
                             buff_changed = true;
                         }
+                        // Track 6 sub-task 4b — primary stat buff. Any
+                        // spell with primary_stat_buff_duration > 0 +
+                        // at least one non-zero stat delta pushes a
+                        // StatBuff. apply_stat_buff handles refresh
+                        // (undo old deltas before applying new ones)
+                        // so re-cast doesn't double-stack.
+                        if spell.primary_stat_buff_duration > 0.0 {
+                            let any_nonzero = spell.str_buff != 0
+                                || spell.agi_buff != 0
+                                || spell.int_buff != 0
+                                || spell.wis_buff != 0
+                                || spell.con_buff != 0
+                                || spell.max_hp_buff != 0.0
+                                || spell.max_mp_buff != 0.0;
+                            if any_nonzero {
+                                let buff = ActiveBuff::new_stat_buff(
+                                    spell.name.clone(),
+                                    spell.str_buff,
+                                    spell.agi_buff,
+                                    spell.int_buff,
+                                    spell.wis_buff,
+                                    spell.con_buff,
+                                    spell.max_hp_buff,
+                                    spell.max_mp_buff,
+                                    spell.primary_stat_buff_duration,
+                                    now,
+                                );
+                                apply_stat_buff(
+                                    connections.get_mut(&caster_cid).expect("checked"),
+                                    buff,
+                                );
+                                // max_hp / max_mp may have changed —
+                                // mark resources dirty so the next
+                                // regen tick fans HealthUpdate /
+                                // ManaUpdate reflecting the new caps.
+                                regen::mark_dirty(
+                                    connections.get_mut(&caster_cid).expect("checked"),
+                                );
+                                buff_changed = true;
+                            }
+                        }
                         if buff_changed {
                             if let Some(cc) = connections.get(&caster_cid) {
                                 fan_out_server_buff_snapshot(
@@ -1627,8 +1701,30 @@ pub async fn run(
                             }
                         }
                     }
+                    buffs::BuffEffect::StatBuff { .. } => {
+                        // Stat buffs are duration-only — no per-tick
+                        // effect. Deltas were applied at cast time
+                        // (apply_stat_buff); the un-apply happens
+                        // below in the expire branch.
+                    }
                 }
                 if expired {
+                    // Track 6 sub-task 4b — stat buffs need their
+                    // deltas undone before the entry is removed.
+                    // Other effect kinds were already accounted for
+                    // by the tick body.
+                    if let buffs::BuffEffect::StatBuff {
+                        strength, agility, intelligence, wisdom, constitution,
+                        max_hp_delta, max_mp_delta,
+                    } = conn.active_buffs[i].effect
+                    {
+                        buffs::undo_stat_deltas(
+                            conn,
+                            strength, agility, intelligence, wisdom, constitution,
+                            max_hp_delta, max_mp_delta,
+                        );
+                        regen::mark_dirty(conn);
+                    }
                     conn.active_buffs.remove(i);
                     snapshot_changed = true;
                 } else {

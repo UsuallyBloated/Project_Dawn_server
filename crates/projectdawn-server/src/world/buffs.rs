@@ -29,6 +29,21 @@ pub enum BuffEffect {
     /// the toggle; duration is `f32::INFINITY` for the "on" entry —
     /// it lingers until re-cast clears).
     LichForm { lich_mp_regen: f32 },
+    /// Track 6 sub-task 4b — primary stat buff. Adds the listed
+    /// deltas to PerConnection stats on apply, subtracts on expire.
+    /// Same model as `autoloads/buff_manager.gd::add_primary_stat_buff`:
+    /// the buff carries the deltas, not the resulting stats. Combat
+    /// math reads conn.strength/etc directly so the buffed value
+    /// participates without an extra lookup.
+    StatBuff {
+        strength: i32,
+        agility: i32,
+        intelligence: i32,
+        wisdom: i32,
+        constitution: i32,
+        max_hp_delta: f32,
+        max_mp_delta: f32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -76,12 +91,97 @@ impl ActiveBuff {
             applied_at: now,
         }
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_stat_buff(
+        name: String,
+        strength: i32,
+        agility: i32,
+        intelligence: i32,
+        wisdom: i32,
+        constitution: i32,
+        max_hp_delta: f32,
+        max_mp_delta: f32,
+        duration: f32,
+        now: Instant,
+    ) -> Self {
+        Self {
+            name,
+            effect: BuffEffect::StatBuff {
+                strength,
+                agility,
+                intelligence,
+                wisdom,
+                constitution,
+                max_hp_delta,
+                max_mp_delta,
+            },
+            remaining: duration,
+            tick_acc: 0.0,
+            applied_at: now,
+        }
+    }
 }
 
 /// Returns true if `conn` currently has Lich Form active. The regen
 /// tick uses this to skip natural HP regeneration.
 pub fn is_lich_form_active(buffs: &[ActiveBuff]) -> bool {
     buffs.iter().any(|b| matches!(b.effect, BuffEffect::LichForm { .. }))
+}
+
+/// Track 6 sub-task 4b — apply a StatBuff's deltas to the connection's
+/// effective stats. Mirror of `PlayerStats.apply_item_bonuses` /
+/// `BuffManager.add_primary_stat_buff`: deltas add directly without
+/// re-deriving CON-based max_hp. `max_hp_delta` and `max_mp_delta` are
+/// authored explicitly per spell to cover any "this buff also raises
+/// max HP" intent.
+pub fn apply_stat_deltas(
+    conn: &mut super::connection::PerConnection,
+    strength: i32,
+    agility: i32,
+    intelligence: i32,
+    wisdom: i32,
+    constitution: i32,
+    max_hp_delta: f32,
+    max_mp_delta: f32,
+) {
+    conn.strength += strength;
+    conn.agility += agility;
+    conn.intelligence += intelligence;
+    conn.wisdom += wisdom;
+    conn.constitution += constitution;
+    conn.max_hp = (conn.max_hp + max_hp_delta).max(1.0);
+    conn.max_mp = (conn.max_mp + max_mp_delta).max(0.0);
+}
+
+/// Track 6 sub-task 4b — reverse a StatBuff's deltas. Called from the
+/// buff tick on expire and from `apply_buff` when refreshing an
+/// existing stat buff. Clamps current hp / mp against the new max_hp /
+/// max_mp so a max-reducing un-apply doesn't leave the player at
+/// hp > max.
+pub fn undo_stat_deltas(
+    conn: &mut super::connection::PerConnection,
+    strength: i32,
+    agility: i32,
+    intelligence: i32,
+    wisdom: i32,
+    constitution: i32,
+    max_hp_delta: f32,
+    max_mp_delta: f32,
+) {
+    conn.strength -= strength;
+    conn.agility -= agility;
+    conn.intelligence -= intelligence;
+    conn.wisdom -= wisdom;
+    conn.constitution -= constitution;
+    conn.max_hp = (conn.max_hp - max_hp_delta).max(1.0);
+    conn.max_mp = (conn.max_mp - max_mp_delta).max(0.0);
+    if conn.hp > conn.max_hp {
+        conn.hp = conn.max_hp;
+    }
+    if conn.mp > conn.max_mp {
+        conn.mp = conn.max_mp;
+    }
 }
 
 /// Snapshot the active buffs for BuffSnapshot fan-out. Returns Vec of

@@ -61,6 +61,30 @@ pub struct Spell {
     pub is_lich_form: bool,
     #[serde(default)]
     pub lich_mp_regen: f32,
+
+    // Track 6 sub-task 4b — primary stat buff deltas. Any spell with a
+    // non-zero primary_stat_buff_duration applies a StatBuff to the
+    // target carrying these deltas. Mirror of GDScript SpellData's
+    // str_buff / agi_buff / int_buff / wis_buff / con_buff /
+    // max_hp_buff / max_mp_buff fields (charisma_buff and dexterity_buff
+    // don't exist in the GDScript data — STR / AGI / INT / WIS / CON
+    // + max_hp / max_mp are the authored set).
+    #[serde(default)]
+    pub str_buff: i32,
+    #[serde(default)]
+    pub agi_buff: i32,
+    #[serde(default)]
+    pub int_buff: i32,
+    #[serde(default)]
+    pub wis_buff: i32,
+    #[serde(default)]
+    pub con_buff: i32,
+    #[serde(default)]
+    pub max_hp_buff: f32,
+    #[serde(default)]
+    pub max_mp_buff: f32,
+    #[serde(default)]
+    pub primary_stat_buff_duration: f32,
 }
 
 fn default_min_level() -> i32 { 1 }

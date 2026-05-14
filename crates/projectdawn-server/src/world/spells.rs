@@ -107,6 +107,24 @@ pub struct Spell {
     pub crit_buff: f32,
     #[serde(default)]
     pub stat_buff_duration: f32,
+
+    // Track 6 sub-task 4d — CC fields.
+    #[serde(default)]
+    pub cc_duration: f32,
+    #[serde(default)]
+    pub root_duration: f32,
+    #[serde(default)]
+    pub slow_amount: f32,
+    #[serde(default)]
+    pub slow_duration: f32,
+    #[serde(default)]
+    pub attack_slow_amount: f32,
+    #[serde(default)]
+    pub attack_slow_duration: f32,
+    #[serde(default)]
+    pub silence_duration: f32,
+    #[serde(default)]
+    pub is_dispel: bool,
 }
 
 fn default_min_level() -> i32 { 1 }

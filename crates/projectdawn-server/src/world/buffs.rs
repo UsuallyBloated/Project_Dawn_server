@@ -71,6 +71,28 @@ pub enum BuffEffect {
     /// attacker.active_buffs and adds to its crit chance + reduces
     /// the miss chance.
     AccuracyCrit { accuracy: f32, crit: f32 },
+    /// Track 6 sub-task 4d — Mesmerize. Target can't move, cast, or
+    /// attack. Server drops Move / CastSpell / Attack intents from a
+    /// mezzed player. (Damage-breaks-mez is NOT modelled in 4d —
+    /// players stay mezzed for the full duration; that's a follow-up.)
+    Mez,
+    /// Track 6 sub-task 4d — Root. Target can't move (can still
+    /// attack + cast). Server drops Move intents from a rooted
+    /// player.
+    Root,
+    /// Track 6 sub-task 4d — Snare / Slow. Target moves slower.
+    /// `amount` is the slowdown fraction (0.5 = 50% slower).
+    /// Movement integration multiplies speed by (1 - amount).
+    /// Stacking takes the highest active amount.
+    Snare { amount: f32 },
+    /// Track 6 sub-task 4d — Attack slow. Target attacks slower.
+    /// Tracked for snapshot completeness but no server-side
+    /// behavioral effect — auto-attack pacing is still client-paced
+    /// (same caveat as Haste in sub-task 4c).
+    AttackSlow { amount: f32 },
+    /// Track 6 sub-task 4d — Silence. Target can't cast spells.
+    /// Server drops CastSpell intents from a silenced player.
+    Silence,
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +191,38 @@ impl ActiveBuff {
         }
     }
 
+    pub fn new_mez(name: String, duration: f32, now: Instant) -> Self {
+        Self { name, effect: BuffEffect::Mez, remaining: duration, tick_acc: 0.0, applied_at: now }
+    }
+
+    pub fn new_root(name: String, duration: f32, now: Instant) -> Self {
+        Self { name, effect: BuffEffect::Root, remaining: duration, tick_acc: 0.0, applied_at: now }
+    }
+
+    pub fn new_snare(name: String, amount: f32, duration: f32, now: Instant) -> Self {
+        Self {
+            name,
+            effect: BuffEffect::Snare { amount },
+            remaining: duration,
+            tick_acc: 0.0,
+            applied_at: now,
+        }
+    }
+
+    pub fn new_attack_slow(name: String, amount: f32, duration: f32, now: Instant) -> Self {
+        Self {
+            name,
+            effect: BuffEffect::AttackSlow { amount },
+            remaining: duration,
+            tick_acc: 0.0,
+            applied_at: now,
+        }
+    }
+
+    pub fn new_silence(name: String, duration: f32, now: Instant) -> Self {
+        Self { name, effect: BuffEffect::Silence, remaining: duration, tick_acc: 0.0, applied_at: now }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new_stat_buff(
         name: String,
@@ -247,6 +301,59 @@ pub fn accuracy_crit_bonus(buffs: &[ActiveBuff]) -> (f32, f32) {
         }
     }
     (acc, crit)
+}
+
+/// Track 6 sub-task 4d — true if the bearer is currently Mezzed.
+/// Server drops Move / CastSpell / Attack intents from a mezzed
+/// player.
+pub fn is_mezzed(buffs: &[ActiveBuff]) -> bool {
+    buffs.iter().any(|b| matches!(b.effect, BuffEffect::Mez))
+}
+
+/// Track 6 sub-task 4d — true if the bearer is currently Rooted.
+/// Server drops Move intents (still allows Attack + CastSpell).
+pub fn is_rooted(buffs: &[ActiveBuff]) -> bool {
+    buffs.iter().any(|b| matches!(b.effect, BuffEffect::Root))
+}
+
+/// Track 6 sub-task 4d — true if the bearer is Silenced. Server
+/// drops CastSpell intents (still allows Move + Attack).
+pub fn is_silenced(buffs: &[ActiveBuff]) -> bool {
+    buffs.iter().any(|b| matches!(b.effect, BuffEffect::Silence))
+}
+
+/// Track 6 sub-task 4d — highest active snare amount (0.0 if none).
+/// Movement integration multiplies effective speed by
+/// (1 - snare_amount), clamped to a 10% floor so the player can
+/// still inch along.
+pub fn snare_amount(buffs: &[ActiveBuff]) -> f32 {
+    let mut max_slow: f32 = 0.0;
+    for b in buffs {
+        if let BuffEffect::Snare { amount } = b.effect {
+            if amount > max_slow {
+                max_slow = amount;
+            }
+        }
+    }
+    max_slow
+}
+
+/// Track 6 sub-task 4d — strip the first active dispellable buff
+/// from the bearer's active list. Returns the name of the stripped
+/// buff (for log + UI feedback) or None if nothing to dispel.
+/// Mirror of GDScript `enemy.strip_one_buff()`. Stat buffs need
+/// their deltas undone before removal so the caller (apply_dispel
+/// in tick.rs) does that.
+pub fn first_dispellable_index(buffs: &[ActiveBuff]) -> Option<usize> {
+    // Anything except CC-debuffs is dispellable: HoT / MP regen /
+    // stat / speed / haste / shield / absorb / accuracy+crit /
+    // Lich. Cc / Snare / Silence / Mez / Root / AttackSlow are
+    // hostile and shouldn't be stripped by a friendly dispel.
+    buffs.iter().position(|b| !matches!(
+        b.effect,
+        BuffEffect::Mez | BuffEffect::Root | BuffEffect::Snare { .. }
+            | BuffEffect::AttackSlow { .. } | BuffEffect::Silence
+    ))
 }
 
 /// Track 6 sub-task 4c — consume up to `incoming` damage from the

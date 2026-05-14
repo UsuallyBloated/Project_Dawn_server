@@ -190,14 +190,25 @@ pub fn handle_message(
             }
             conn.last_move_seq = sequence;
 
+            // Track 6 sub-task 4d — CC gating. Rooted or mezzed players
+            // can't move; store a zero direction so the tick loop holds
+            // their position. The sequence number still increments so
+            // out-of-order detection stays correct.
+            let dir_v = if super::buffs::is_mezzed(&conn.active_buffs)
+                || super::buffs::is_rooted(&conn.active_buffs)
+            {
+                Vec3f::ZERO
+            } else {
+                let v = Vec3f { x: direction.x, y: direction.y, z: direction.z };
+                v.clamp_length(1.0)
+            };
             // Store the latest intent for the tick loop to integrate exactly
             // once per tick. Integrating here would advance pos N times when
             // N Moves arrive between ticks — at typical client send rates
             // that's a ~3× speedup. Server-authoritative speed cap is
             // enforced by clamping the direction to unit length; the tick
             // loop multiplies by MAX_MOVE_SPEED × TICK_DT.
-            let dir = Vec3f { x: direction.x, y: direction.y, z: direction.z };
-            conn.latest_direction = dir.clamp_length(1.0);
+            conn.latest_direction = dir_v;
             conn.last_move_received = Some(now);
             Outcome::Continue
         }
@@ -405,6 +416,10 @@ pub fn handle_message(
                 // legitimate UI interactions).
                 return Outcome::Continue;
             }
+            // Track 6 sub-task 4d — Mez gates Attack.
+            if super::buffs::is_mezzed(&conn.active_buffs) {
+                return Outcome::Continue;
+            }
             Outcome::AttackIntent {
                 attacker: conn.char_id as u64,
                 target_id,
@@ -416,6 +431,12 @@ pub fn handle_message(
 
         ClientWorldMsg::CastSpell { spell_name, target_id } => {
             if !conn.in_world {
+                return Outcome::Continue;
+            }
+            // Track 6 sub-task 4d — Silence and Mez gate CastSpell.
+            if super::buffs::is_mezzed(&conn.active_buffs)
+                || super::buffs::is_silenced(&conn.active_buffs)
+            {
                 return Outcome::Continue;
             }
             Outcome::CastSpellIntent {

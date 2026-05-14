@@ -455,6 +455,130 @@ stat_buff_duration = 30.0
 min_level = 10
 classes = ["Ranger"]
 
+# Track 6 sub-task 4d — CC spells. Target_type ENEMY because they're
+# cast on enemies / hostile players. Server applies the CC buff to
+# the target's active_buffs; intent gating in handlers drops Move /
+# CastSpell / Attack from CC'd players.
+[[spell]]
+name = "Mesmerize"
+target_type = "ENEMY"
+damage_type = "ARCANE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 20.0
+cast_time = 0.0
+cooldown = 12.0
+cc_duration = 12.0
+min_level = 6
+classes = ["Enchanter"]
+
+[[spell]]
+name = "Ensnare"
+target_type = "ENEMY"
+damage_type = "NATURE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 25.0
+cast_time = 0.0
+cooldown = 25.0
+root_duration = 20.0
+min_level = 14
+classes = ["Druid"]
+
+[[spell]]
+name = "Ensnaring Roots"
+target_type = "ENEMY"
+damage_type = "NATURE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 25.0
+cast_time = 0.0
+cooldown = 18.0
+root_duration = 15.0
+min_level = 6
+classes = ["Ranger"]
+
+[[spell]]
+name = "Immobilize"
+target_type = "ENEMY"
+damage_type = "ARCANE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 22.0
+cast_time = 0.0
+cooldown = 20.0
+root_duration = 15.0
+min_level = 8
+classes = ["Enchanter"]
+
+[[spell]]
+name = "Snare"
+target_type = "ENEMY"
+damage_type = "NATURE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 20.0
+cast_time = 0.0
+cooldown = 20.0
+slow_amount = 0.5
+slow_duration = 30.0
+min_level = 4
+classes = ["Druid", "Ranger"]
+
+[[spell]]
+name = "Slow"
+target_type = "ENEMY"
+damage_type = "SPIRIT"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 35.0
+cast_time = 1.0
+cooldown = 30.0
+attack_slow_amount = 0.7
+attack_slow_duration = 30.0
+min_level = 8
+classes = ["Shaman", "Enchanter"]
+
+[[spell]]
+name = "Spellbreak"
+target_type = "ENEMY"
+damage_type = "HOLY"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 20.0
+cast_time = 0.0
+cooldown = 12.0
+silence_duration = 4.0
+min_level = 8
+classes = ["Witch Hunter"]
+
+# Dispel spells. Server strips one buff from the target on cast.
+[[spell]]
+name = "Antimagic Ward"
+target_type = "ENEMY"
+damage_type = "HOLY"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 35.0
+cast_time = 1.0
+cooldown = 45.0
+is_dispel = true
+min_level = 16
+classes = ["Witch Hunter"]
+
+[[spell]]
+name = "Expose"
+target_type = "ENEMY"
+damage_type = "HOLY"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 15.0
+cast_time = 0.0
+cooldown = 6.0
+is_dispel = true
+min_level = 4
+classes = ["Witch Hunter"]
+
 [[spell]]
 name = "Spirit Bolt"
 target_type = "ENEMY"

@@ -1481,6 +1481,75 @@ pub async fn run(
                                     }
                                 }
                             }
+                            // Track 6 sub-task 4d — CC application on
+                            // PvP spell. Mez, Root, Snare, AttackSlow,
+                            // Silence, Dispel land on the target's
+                            // active_buffs after damage. Refresh
+                            // semantics (same-name re-cast renews
+                            // duration via apply_buff).
+                            let mut cc_changed = false;
+                            if spell.cc_duration > 0.0 {
+                                if let Some(tc) = connections.get_mut(&target_cid) {
+                                    apply_buff(tc, ActiveBuff::new_mez(spell.name.clone(), spell.cc_duration, now));
+                                    cc_changed = true;
+                                }
+                            }
+                            if spell.root_duration > 0.0 {
+                                if let Some(tc) = connections.get_mut(&target_cid) {
+                                    apply_buff(tc, ActiveBuff::new_root(spell.name.clone(), spell.root_duration, now));
+                                    cc_changed = true;
+                                }
+                            }
+                            if spell.slow_amount > 0.0 && spell.slow_duration > 0.0 {
+                                if let Some(tc) = connections.get_mut(&target_cid) {
+                                    apply_buff(tc, ActiveBuff::new_snare(spell.name.clone(), spell.slow_amount, spell.slow_duration, now));
+                                    cc_changed = true;
+                                }
+                            }
+                            if spell.attack_slow_amount > 0.0 && spell.attack_slow_duration > 0.0 {
+                                if let Some(tc) = connections.get_mut(&target_cid) {
+                                    apply_buff(tc, ActiveBuff::new_attack_slow(spell.name.clone(), spell.attack_slow_amount, spell.attack_slow_duration, now));
+                                    cc_changed = true;
+                                }
+                            }
+                            if spell.silence_duration > 0.0 {
+                                if let Some(tc) = connections.get_mut(&target_cid) {
+                                    apply_buff(tc, ActiveBuff::new_silence(spell.name.clone(), spell.silence_duration, now));
+                                    cc_changed = true;
+                                }
+                            }
+                            if spell.is_dispel {
+                                // Strip one non-CC buff from target.
+                                // Stat buffs need their deltas undone
+                                // first.
+                                if let Some(tc) = connections.get_mut(&target_cid) {
+                                    if let Some(idx) = buffs::first_dispellable_index(&tc.active_buffs) {
+                                        if let buffs::BuffEffect::StatBuff {
+                                            strength, agility, intelligence, wisdom, constitution,
+                                            max_hp_delta, max_mp_delta,
+                                        } = tc.active_buffs[idx].effect
+                                        {
+                                            buffs::undo_stat_deltas(
+                                                tc,
+                                                strength, agility, intelligence, wisdom, constitution,
+                                                max_hp_delta, max_mp_delta,
+                                            );
+                                            regen::mark_dirty(tc);
+                                        }
+                                        tc.active_buffs.remove(idx);
+                                        cc_changed = true;
+                                    }
+                                }
+                            }
+                            if cc_changed {
+                                if let Some(tc) = connections.get(&target_cid) {
+                                    fan_out_server_buff_snapshot(
+                                        &mut server,
+                                        &in_world_recipients_now,
+                                        tc,
+                                    );
+                                }
+                            }
                             continue;
                         }
                         // Enemy target — apply spell damage to the
@@ -1864,7 +1933,13 @@ pub async fn run(
             }
             // Track 6 sub-task 4c: speed buff (Spirit of Wolf, Selos'
             // Melody) multiplies MAX_MOVE_SPEED.
-            let speed = MAX_MOVE_SPEED * buffs::speed_mult(&conn.active_buffs);
+            // Track 6 sub-task 4d: snare multiplies effective speed
+            // by (1 - snare_amount), floored at 10% so the player
+            // can still inch along.
+            let speed_buff = buffs::speed_mult(&conn.active_buffs);
+            let snare = buffs::snare_amount(&conn.active_buffs);
+            let snare_mult = (1.0 - snare).max(0.1);
+            let speed = MAX_MOVE_SPEED * speed_buff * snare_mult;
             conn.pos.x += dir.x * speed * dt;
             conn.pos.y += dir.y * speed * dt;
             conn.pos.z += dir.z * speed * dt;
@@ -1933,11 +2008,17 @@ pub async fn run(
                     buffs::BuffEffect::Speed { .. }
                     | buffs::BuffEffect::Haste { .. }
                     | buffs::BuffEffect::DamageShield { .. }
-                    | buffs::BuffEffect::AccuracyCrit { .. } => {
-                        // Track 6 sub-task 4c — duration-only buffs.
-                        // Effects applied at read sites (movement
-                        // integration / damage-shield path /
-                        // calc_swing); the tick just decrements.
+                    | buffs::BuffEffect::AccuracyCrit { .. }
+                    | buffs::BuffEffect::Mez
+                    | buffs::BuffEffect::Root
+                    | buffs::BuffEffect::Snare { .. }
+                    | buffs::BuffEffect::AttackSlow { .. }
+                    | buffs::BuffEffect::Silence => {
+                        // Track 6 sub-task 4c/4d — duration-only
+                        // buffs. Effects applied at read sites
+                        // (movement integration / damage-shield
+                        // path / calc_swing / intent gating); the
+                        // tick just decrements remaining.
                     }
                     buffs::BuffEffect::Absorb { pool } => {
                         // Absorb's "duration" is infinite by design

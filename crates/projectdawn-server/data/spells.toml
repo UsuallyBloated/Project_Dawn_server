@@ -349,6 +349,112 @@ primary_stat_buff_duration = 600.0
 min_level = 10
 classes = ["Enchanter"]
 
+# Track 6 sub-task 4c — combat-modifier buffs.
+# Speed buff (Spirit of Wolf). 40% faster move for 60s.
+[[spell]]
+name = "Spirit of Wolf"
+target_type = "SELF"
+damage_type = "SPIRIT"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 25.0
+cast_time = 1.0
+cooldown = 5.0
+move_speed_mult = 1.4
+move_speed_duration = 60.0
+min_level = 12
+classes = ["Druid", "Shaman"]
+
+# Haste — 50% attack-speed boost for 30s. Tracked server-side but the
+# auto-attack timer is client-paced, so no behavioral effect yet.
+[[spell]]
+name = "Haste"
+target_type = "SELF"
+damage_type = "ARCANE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 40.0
+cast_time = 1.5
+cooldown = 5.0
+haste_amount = 0.5
+haste_duration = 30.0
+min_level = 16
+classes = ["Enchanter"]
+
+# Damage shield — Thorns (8 dmg/hit, 600s).
+[[spell]]
+name = "Thorns"
+target_type = "SELF"
+damage_type = "NATURE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 25.0
+cast_time = 1.5
+cooldown = 0.0
+damage_shield_amount = 8.0
+damage_shield_duration = 600.0
+min_level = 10
+classes = ["Druid"]
+
+# Spellshield — 10 arcane dmg/hit for 600s.
+[[spell]]
+name = "Spellshield"
+target_type = "SELF"
+damage_type = "ARCANE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 30.0
+cast_time = 1.5
+cooldown = 0.0
+damage_shield_amount = 10.0
+damage_shield_duration = 600.0
+min_level = 10
+classes = ["Enchanter"]
+
+# Absorb — Rune absorbs 40 HP until consumed.
+[[spell]]
+name = "Rune"
+target_type = "SELF"
+damage_type = "ARCANE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 25.0
+cast_time = 0.0
+cooldown = 8.0
+absorb_amount = 40.0
+min_level = 1
+classes = ["Enchanter"]
+
+# Primal Bond — Beast Master absorb (40 HP until consumed).
+[[spell]]
+name = "Primal Bond"
+target_type = "SELF"
+damage_type = "SPIRIT"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 25.0
+cast_time = 1.5
+cooldown = 30.0
+absorb_amount = 40.0
+min_level = 8
+classes = ["Beast Master"]
+
+# Hunter's Eye — Ranger accuracy + crit buff for 30s.
+[[spell]]
+name = "Hunter's Eye"
+target_type = "SELF"
+damage_type = "NATURE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 22.0
+cast_time = 0.0
+cooldown = 45.0
+accuracy_buff = 0.15
+crit_buff = 0.10
+stat_buff_duration = 30.0
+min_level = 10
+classes = ["Ranger"]
+
 [[spell]]
 name = "Spirit Bolt"
 target_type = "ENEMY"

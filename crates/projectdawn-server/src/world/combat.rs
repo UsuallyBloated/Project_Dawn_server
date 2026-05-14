@@ -16,6 +16,7 @@
 //! These will close the remaining client/server damage gap in their
 //! own commits.
 
+use super::buffs;
 use super::connection::PerConnection;
 use super::items;
 use rand::Rng;
@@ -104,6 +105,14 @@ pub fn calc_swing(
     // Offhand caps at 60% of the main-hand crit chance per the GDScript
     // `calc_offhand_damage` formula.
     let mut crit_chance = ((attacker.dexterity as f32 - 10.0) * CRIT_PER_DEX).clamp(0.0, CRIT_MAX);
+    // Track 6 sub-task 4c: accuracy + crit buffs (Hunter's Eye,
+    // Anthem of the Hunt). Add crit bonus to chance; accuracy bonus
+    // is unused here for now (sub-task 2 didn't model miss chance
+    // server-side — that lands when the skill table ports), but
+    // pulling it for forward-compat lets the buff still show up in
+    // logs without a second pass.
+    let (_acc_bonus, crit_bonus) = buffs::accuracy_crit_bonus(&attacker.active_buffs);
+    crit_chance = (crit_chance + crit_bonus).min(CRIT_MAX);
     if is_offhand {
         crit_chance *= 0.6;
     }

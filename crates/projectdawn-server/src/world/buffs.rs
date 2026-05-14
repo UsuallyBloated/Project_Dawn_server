@@ -44,6 +44,33 @@ pub enum BuffEffect {
         max_hp_delta: f32,
         max_mp_delta: f32,
     },
+    /// Track 6 sub-task 4c — movement speed multiplier. The server's
+    /// Move integration applies the highest active multiplier to
+    /// MAX_MOVE_SPEED. Spirit of Wolf = 1.4, Selos' Melody = 1.35.
+    Speed { mult: f32 },
+    /// Track 6 sub-task 4c — attack speed buff. Tracked for
+    /// snapshot completeness but no server-side behavioral effect:
+    /// auto-attack pacing is still client-driven (the client's
+    /// `combat.gd::_update_attack_interval` reads BuffManager.haste
+    /// locally). Server stores the duration so peers can see "Haste"
+    /// in the target frame's buff bar.
+    Haste { amount: f32 },
+    /// Track 6 sub-task 4c — damage shield (Thorns, Spellshield).
+    /// When this connection takes damage, the attacker takes
+    /// `amount` damage back. Applied in step 4h/4ha after the
+    /// incoming damage lands.
+    DamageShield { amount: f32 },
+    /// Track 6 sub-task 4c — damage absorption pool (Rune, Primal
+    /// Bond). `remaining` is the HP-pool left to absorb; reduced
+    /// when incoming damage hits the bearer; buff removed when
+    /// the pool reaches 0. Duration is `f32::INFINITY` — absorb
+    /// persists until consumed.
+    Absorb { pool: f32 },
+    /// Track 6 sub-task 4c — accuracy + crit boosts (Hunter's Eye,
+    /// Anthem of the Hunt). `combat::calc_swing` reads these from
+    /// attacker.active_buffs and adds to its crit chance + reduces
+    /// the miss chance.
+    AccuracyCrit { accuracy: f32, crit: f32 },
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +119,56 @@ impl ActiveBuff {
         }
     }
 
+    pub fn new_speed(name: String, mult: f32, duration: f32, now: Instant) -> Self {
+        Self {
+            name,
+            effect: BuffEffect::Speed { mult },
+            remaining: duration,
+            tick_acc: 0.0,
+            applied_at: now,
+        }
+    }
+
+    pub fn new_haste(name: String, amount: f32, duration: f32, now: Instant) -> Self {
+        Self {
+            name,
+            effect: BuffEffect::Haste { amount },
+            remaining: duration,
+            tick_acc: 0.0,
+            applied_at: now,
+        }
+    }
+
+    pub fn new_damage_shield(name: String, amount: f32, duration: f32, now: Instant) -> Self {
+        Self {
+            name,
+            effect: BuffEffect::DamageShield { amount },
+            remaining: duration,
+            tick_acc: 0.0,
+            applied_at: now,
+        }
+    }
+
+    pub fn new_absorb(name: String, pool: f32, now: Instant) -> Self {
+        Self {
+            name,
+            effect: BuffEffect::Absorb { pool },
+            remaining: f32::INFINITY,
+            tick_acc: 0.0,
+            applied_at: now,
+        }
+    }
+
+    pub fn new_accuracy_crit(name: String, accuracy: f32, crit: f32, duration: f32, now: Instant) -> Self {
+        Self {
+            name,
+            effect: BuffEffect::AccuracyCrit { accuracy, crit },
+            remaining: duration,
+            tick_acc: 0.0,
+            applied_at: now,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new_stat_buff(
         name: String,
@@ -127,6 +204,72 @@ impl ActiveBuff {
 /// tick uses this to skip natural HP regeneration.
 pub fn is_lich_form_active(buffs: &[ActiveBuff]) -> bool {
     buffs.iter().any(|b| matches!(b.effect, BuffEffect::LichForm { .. }))
+}
+
+/// Track 6 sub-task 4c — highest active Speed multiplier (1.0 if no
+/// Speed buff). Movement integration multiplies MAX_MOVE_SPEED by
+/// this each tick.
+pub fn speed_mult(buffs: &[ActiveBuff]) -> f32 {
+    let mut max_mult: f32 = 1.0;
+    for b in buffs {
+        if let BuffEffect::Speed { mult } = b.effect {
+            if mult > max_mult {
+                max_mult = mult;
+            }
+        }
+    }
+    max_mult
+}
+
+/// Track 6 sub-task 4c — sum of active damage-shield amounts. When
+/// the bearer is hit, the attacker takes this much damage back.
+/// Multiple shields stack additively (matches the GDScript buff
+/// manager's behaviour: only one damage shield slot, but if the
+/// data model is ever extended to allow multiple, this sums them).
+pub fn damage_shield_total(buffs: &[ActiveBuff]) -> f32 {
+    buffs.iter().filter_map(|b| match b.effect {
+        BuffEffect::DamageShield { amount } => Some(amount),
+        _ => None,
+    }).sum()
+}
+
+/// Track 6 sub-task 4c — sum of (accuracy, crit) buff bonuses. Used
+/// by `combat::calc_swing` to push crit chance up and miss chance
+/// down (1 - accuracy_bonus). Both are in 0.0..=1.0 ratio form
+/// (Hunter's Eye: 0.15 accuracy / 0.10 crit).
+pub fn accuracy_crit_bonus(buffs: &[ActiveBuff]) -> (f32, f32) {
+    let mut acc: f32 = 0.0;
+    let mut crit: f32 = 0.0;
+    for b in buffs {
+        if let BuffEffect::AccuracyCrit { accuracy, crit: c } = b.effect {
+            acc += accuracy;
+            crit += c;
+        }
+    }
+    (acc, crit)
+}
+
+/// Track 6 sub-task 4c — consume up to `incoming` damage from the
+/// first active Absorb buff; returns (remaining damage after
+/// absorption, whether the absorb pool is exhausted). The caller
+/// removes the buff if the pool reached zero. Matches GDScript
+/// `consume_absorb`'s single-shield-pool behaviour.
+pub fn consume_absorb(buffs: &mut [ActiveBuff], incoming: i32) -> (i32, bool) {
+    if incoming <= 0 {
+        return (incoming, false);
+    }
+    for b in buffs.iter_mut() {
+        if let BuffEffect::Absorb { ref mut pool } = b.effect {
+            if *pool <= 0.0 {
+                continue;
+            }
+            let absorbed = (incoming as f32).min(*pool);
+            *pool -= absorbed;
+            let remaining = (incoming as f32 - absorbed).max(0.0) as i32;
+            return (remaining, *pool <= 0.0);
+        }
+    }
+    (incoming, false)
 }
 
 /// Track 6 sub-task 4b — apply a StatBuff's deltas to the connection's

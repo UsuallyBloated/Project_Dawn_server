@@ -85,6 +85,28 @@ pub struct Spell {
     pub max_mp_buff: f32,
     #[serde(default)]
     pub primary_stat_buff_duration: f32,
+
+    // Track 6 sub-task 4c — combat-modifier buffs.
+    #[serde(default)]
+    pub move_speed_mult: f32,
+    #[serde(default)]
+    pub move_speed_duration: f32,
+    #[serde(default)]
+    pub haste_amount: f32,
+    #[serde(default)]
+    pub haste_duration: f32,
+    #[serde(default)]
+    pub damage_shield_amount: f32,
+    #[serde(default)]
+    pub damage_shield_duration: f32,
+    #[serde(default)]
+    pub absorb_amount: f32,
+    #[serde(default)]
+    pub accuracy_buff: f32,
+    #[serde(default)]
+    pub crit_buff: f32,
+    #[serde(default)]
+    pub stat_buff_duration: f32,
 }
 
 fn default_min_level() -> i32 { 1 }

@@ -892,19 +892,68 @@ pub async fn run(
                     // Apply damage. Armor reduction matches the
                     // GDScript Combat.receive_player_damage:
                     //   reduction = armor / (armor + ARMOR_DR_DIVISOR)
-                    // with ARMOR_DR_DIVISOR = 100. The reduced amount
-                    // is clamped to at least 1 — same as the client
-                    // so unarmoured swings still tick HP.
+                    // with ARMOR_DR_DIVISOR = 100. Track 6 sub-task
+                    // 4c: absorb pool consumed before HP deduction;
+                    // damage shield reflects damage back to attacker
+                    // after.
                     let raw_swing = swing.amount;
+                    let shield_to_attacker_pvp: f32;
+                    let mut absorb_strip_pvp: Option<usize> = None;
                     let (new_hp, max_hp, amount, target_armor) = {
                         let target_conn = connections.get_mut(&target_cid).expect("checked");
                         let armor = target_conn.equipped_armor.max(0) as f32;
                         let reduction = armor / (armor + 100.0);
-                        let amount = ((swing.amount as f32 * (1.0 - reduction)) as i32).max(1);
+                        let mut amount = ((swing.amount as f32 * (1.0 - reduction)) as i32).max(1);
+                        let (after_absorb, exhausted) =
+                            buffs::consume_absorb(&mut target_conn.active_buffs, amount);
+                        amount = after_absorb;
+                        if exhausted {
+                            absorb_strip_pvp = target_conn.active_buffs.iter().position(|b| {
+                                matches!(b.effect, buffs::BuffEffect::Absorb { .. })
+                            });
+                        }
+                        shield_to_attacker_pvp =
+                            buffs::damage_shield_total(&target_conn.active_buffs);
                         target_conn.hp = (target_conn.hp - amount as f32).max(0.0);
                         regen::mark_dirty(target_conn);
                         (target_conn.hp, target_conn.max_hp, amount, target_conn.equipped_armor)
                     };
+                    // Strip exhausted absorb buff + fan snapshot.
+                    if let Some(idx) = absorb_strip_pvp {
+                        if let Some(tc) = connections.get_mut(&target_cid) {
+                            if idx < tc.active_buffs.len() {
+                                tc.active_buffs.remove(idx);
+                            }
+                        }
+                        if let Some(tc) = connections.get(&target_cid) {
+                            fan_out_server_buff_snapshot(
+                                &mut server,
+                                &in_world_recipients_now,
+                                tc,
+                            );
+                        }
+                    }
+                    // Damage shield reflects damage to the attacker
+                    // (also a player here). Skip if the attacker has
+                    // since disconnected.
+                    if shield_to_attacker_pvp > 0.0 {
+                        if let Some(att) = connections.get_mut(&attacker_cid) {
+                            if att.hp > 0.0 {
+                                let dmg = shield_to_attacker_pvp;
+                                att.hp = (att.hp - dmg).max(0.0);
+                                regen::mark_dirty(att);
+                                let new_att_hp = att.hp;
+                                let att_max = att.max_hp;
+                                handlers::fan_out_health_update(
+                                    &mut server,
+                                    &in_world_recipients_now,
+                                    intent.attacker,
+                                    new_att_hp,
+                                    att_max,
+                                );
+                            }
+                        }
+                    }
                     tracing::info!(
                         attacker = intent.attacker,
                         target = intent.target_id,
@@ -1204,6 +1253,72 @@ pub async fn run(
                             }
                             buff_changed = true;
                         }
+                        // Track 6 sub-task 4c — combat-modifier buffs.
+                        // Speed / Haste / DamageShield / Absorb /
+                        // AccuracyCrit. All apply on the caster (SELF
+                        // target). Refresh same-name on re-cast.
+                        if spell.move_speed_mult > 0.0 && spell.move_speed_duration > 0.0 {
+                            apply_buff(
+                                connections.get_mut(&caster_cid).expect("checked"),
+                                ActiveBuff::new_speed(
+                                    spell.name.clone(),
+                                    spell.move_speed_mult,
+                                    spell.move_speed_duration,
+                                    now,
+                                ),
+                            );
+                            buff_changed = true;
+                        }
+                        if spell.haste_amount > 0.0 && spell.haste_duration > 0.0 {
+                            apply_buff(
+                                connections.get_mut(&caster_cid).expect("checked"),
+                                ActiveBuff::new_haste(
+                                    spell.name.clone(),
+                                    spell.haste_amount,
+                                    spell.haste_duration,
+                                    now,
+                                ),
+                            );
+                            buff_changed = true;
+                        }
+                        if spell.damage_shield_amount > 0.0 && spell.damage_shield_duration > 0.0 {
+                            apply_buff(
+                                connections.get_mut(&caster_cid).expect("checked"),
+                                ActiveBuff::new_damage_shield(
+                                    spell.name.clone(),
+                                    spell.damage_shield_amount,
+                                    spell.damage_shield_duration,
+                                    now,
+                                ),
+                            );
+                            buff_changed = true;
+                        }
+                        if spell.absorb_amount > 0.0 {
+                            apply_buff(
+                                connections.get_mut(&caster_cid).expect("checked"),
+                                ActiveBuff::new_absorb(
+                                    spell.name.clone(),
+                                    spell.absorb_amount,
+                                    now,
+                                ),
+                            );
+                            buff_changed = true;
+                        }
+                        if (spell.accuracy_buff > 0.0 || spell.crit_buff > 0.0)
+                            && spell.stat_buff_duration > 0.0
+                        {
+                            apply_buff(
+                                connections.get_mut(&caster_cid).expect("checked"),
+                                ActiveBuff::new_accuracy_crit(
+                                    spell.name.clone(),
+                                    spell.accuracy_buff,
+                                    spell.crit_buff,
+                                    spell.stat_buff_duration,
+                                    now,
+                                ),
+                            );
+                            buff_changed = true;
+                        }
                         // Track 6 sub-task 4b — primary stat buff. Any
                         // spell with primary_stat_buff_duration > 0 +
                         // at least one non-zero stat delta pushes a
@@ -1286,22 +1401,45 @@ pub async fn run(
                                 );
                                 continue;
                             }
+                            // Track 6 sub-task 4c — absorb pool +
+                            // damage shield apply on PvP spell hit
+                            // too. Armor reduction is skipped for
+                            // spells (matches GDScript wrapping).
+                            let shield_back: f32;
+                            let mut absorb_strip_idx: Option<usize> = None;
                             let (final_hp, max_hp, applied) = {
                                 let tc = connections.get_mut(&target_cid).expect("checked");
                                 if tc.hp <= 0.0 || !tc.in_world {
                                     continue;
                                 }
-                                // Spells skip armor reduction —
-                                // matches GDScript: armor reduces only
-                                // physical melee damage in
-                                // Combat.receive_player_damage's
-                                // wrapping. Spell resists land in a
-                                // later sub-task.
-                                let dmg = spell.base_damage.max(0.0) as i32;
+                                let mut dmg = spell.base_damage.max(0.0) as i32;
+                                let (after_absorb, exhausted) =
+                                    buffs::consume_absorb(&mut tc.active_buffs, dmg);
+                                dmg = after_absorb;
+                                if exhausted {
+                                    absorb_strip_idx = tc.active_buffs.iter().position(|b| {
+                                        matches!(b.effect, buffs::BuffEffect::Absorb { .. })
+                                    });
+                                }
+                                shield_back = buffs::damage_shield_total(&tc.active_buffs);
                                 tc.hp = (tc.hp - dmg as f32).max(0.0);
                                 regen::mark_dirty(tc);
                                 (tc.hp, tc.max_hp, dmg)
                             };
+                            if let Some(idx) = absorb_strip_idx {
+                                if let Some(tc) = connections.get_mut(&target_cid) {
+                                    if idx < tc.active_buffs.len() {
+                                        tc.active_buffs.remove(idx);
+                                    }
+                                }
+                                if let Some(tc) = connections.get(&target_cid) {
+                                    fan_out_server_buff_snapshot(
+                                        &mut server,
+                                        &in_world_recipients_now,
+                                        tc,
+                                    );
+                                }
+                            }
                             handlers::fan_out_hit(
                                 &mut server,
                                 &in_world_recipients_now,
@@ -1325,6 +1463,24 @@ pub async fn run(
                                 applied,
                                 "PvP spell applied"
                             );
+                            // Damage shield reflects to caster.
+                            if shield_back > 0.0 {
+                                if let Some(att) = connections.get_mut(&caster_cid) {
+                                    if att.hp > 0.0 {
+                                        att.hp = (att.hp - shield_back).max(0.0);
+                                        regen::mark_dirty(att);
+                                        let new_att_hp = att.hp;
+                                        let att_max = att.max_hp;
+                                        handlers::fan_out_health_update(
+                                            &mut server,
+                                            &in_world_recipients_now,
+                                            intent.caster,
+                                            new_att_hp,
+                                            att_max,
+                                        );
+                                    }
+                                }
+                            }
                             continue;
                         }
                         // Enemy target — apply spell damage to the
@@ -1464,13 +1620,34 @@ pub async fn run(
                 // The fan_out_hit amount tracks the post-reduction
                 // value so the floating number matches the bar drop.
                 let mut damaged_player: Option<u64> = None;
+                let mut shield_to_attacker: f32 = 0.0;
+                let mut absorb_buff_to_strip: Option<usize> = None;
                 let final_amount = if hit.target < protocol::world::ENEMY_ID_BASE {
                     let target_cid = hit.target as ClientId;
                     if let Some(target_conn) = connections.get_mut(&target_cid) {
                         if target_conn.in_world && target_conn.hp > 0.0 {
                             let armor = target_conn.equipped_armor.max(0) as f32;
                             let reduction = armor / (armor + 100.0);
-                            let reduced = ((hit.amount as f32 * (1.0 - reduction)) as i32).max(1);
+                            let mut reduced = ((hit.amount as f32 * (1.0 - reduction)) as i32).max(1);
+                            // Track 6 sub-task 4c — consume absorb
+                            // pool before applying damage. Returns
+                            // the residual + whether the pool hit 0
+                            // (caller removes the buff).
+                            let (after_absorb, absorb_exhausted) =
+                                buffs::consume_absorb(&mut target_conn.active_buffs, reduced);
+                            reduced = after_absorb;
+                            if absorb_exhausted {
+                                if let Some(idx) = target_conn.active_buffs.iter().position(|b| {
+                                    matches!(b.effect, buffs::BuffEffect::Absorb { .. })
+                                }) {
+                                    absorb_buff_to_strip = Some(idx);
+                                }
+                            }
+                            // Track 6 sub-task 4c — damage shield
+                            // reflects damage back at the attacker.
+                            // Read amount before mutating HP so a
+                            // killing blow still triggers thorns.
+                            shield_to_attacker = buffs::damage_shield_total(&target_conn.active_buffs);
                             target_conn.hp = (target_conn.hp - reduced as f32).max(0.0);
                             regen::mark_dirty(target_conn);
                             damaged_player = Some(hit.target);
@@ -1484,6 +1661,49 @@ pub async fn run(
                 } else {
                     hit.amount
                 };
+                // Strip the exhausted absorb buff after the immutable
+                // borrow chain ends. Fan BuffSnapshot too.
+                if let (Some(target_id), Some(idx)) = (damaged_player, absorb_buff_to_strip) {
+                    let target_cid = target_id as ClientId;
+                    if let Some(tc) = connections.get_mut(&target_cid) {
+                        if idx < tc.active_buffs.len() {
+                            tc.active_buffs.remove(idx);
+                        }
+                    }
+                    if let Some(tc) = connections.get(&target_cid) {
+                        fan_out_server_buff_snapshot(
+                            &mut server,
+                            &in_world_recipients_now,
+                            tc,
+                        );
+                    }
+                }
+                // Apply damage shield to attacker (the enemy entity).
+                // Look up by attacker id in the enemies map; if not
+                // present (attacker died this tick), skip silently.
+                if shield_to_attacker > 0.0 {
+                    if let Some(att_entity) = enemies.get_mut(&attacker) {
+                        if att_entity.is_alive() {
+                            let dmg = shield_to_attacker as i32;
+                            att_entity.hp = (att_entity.hp - dmg as f32).max(0.0);
+                            handlers::fan_out_health_update(
+                                &mut server,
+                                &in_world_recipients_now,
+                                attacker,
+                                att_entity.hp,
+                                att_entity.max_hp,
+                            );
+                            if att_entity.hp <= 0.0 {
+                                att_entity.transition(EnemyState::Dead, now);
+                                handlers::fan_out_entity_died(
+                                    &mut server,
+                                    &in_world_recipients_now,
+                                    attacker,
+                                );
+                            }
+                        }
+                    }
+                }
                 handlers::fan_out_hit(
                     &mut server,
                     &in_world_recipients_now,
@@ -1642,9 +1862,12 @@ pub async fn run(
             if dir.x != 0.0 || dir.z != 0.0 {
                 conn.is_sitting = false;
             }
-            conn.pos.x += dir.x * MAX_MOVE_SPEED * dt;
-            conn.pos.y += dir.y * MAX_MOVE_SPEED * dt;
-            conn.pos.z += dir.z * MAX_MOVE_SPEED * dt;
+            // Track 6 sub-task 4c: speed buff (Spirit of Wolf, Selos'
+            // Melody) multiplies MAX_MOVE_SPEED.
+            let speed = MAX_MOVE_SPEED * buffs::speed_mult(&conn.active_buffs);
+            conn.pos.x += dir.x * speed * dt;
+            conn.pos.y += dir.y * speed * dt;
+            conn.pos.z += dir.z * speed * dt;
         }
 
         // 5a. Track 6 sub-task 4a buff tick — process HoT / MP regen
@@ -1706,6 +1929,31 @@ pub async fn run(
                         // effect. Deltas were applied at cast time
                         // (apply_stat_buff); the un-apply happens
                         // below in the expire branch.
+                    }
+                    buffs::BuffEffect::Speed { .. }
+                    | buffs::BuffEffect::Haste { .. }
+                    | buffs::BuffEffect::DamageShield { .. }
+                    | buffs::BuffEffect::AccuracyCrit { .. } => {
+                        // Track 6 sub-task 4c — duration-only buffs.
+                        // Effects applied at read sites (movement
+                        // integration / damage-shield path /
+                        // calc_swing); the tick just decrements.
+                    }
+                    buffs::BuffEffect::Absorb { pool } => {
+                        // Absorb's "duration" is infinite by design
+                        // (consumed by damage, not by time). If the
+                        // pool reached zero via consume_absorb in
+                        // step 4h / 4ha, the expire branch below
+                        // would have removed it. This match arm is
+                        // a safety check — if a stale entry with
+                        // pool <= 0 lingers, force-expire it here.
+                        if pool <= 0.0 {
+                            // Force the buff to expire by zeroing
+                            // its remaining. Next iteration removes.
+                            buff.remaining = 0.0;
+                            // Avoid the is_finite gate failing the
+                            // expired check.
+                        }
                     }
                 }
                 if expired {

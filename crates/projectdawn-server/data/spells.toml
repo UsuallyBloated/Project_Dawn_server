@@ -1,0 +1,503 @@
+# Track 6 sub-task 3b — server-relevant spell data.
+#
+# Mirror of Project_Dawn/data/spell_definitions.gd's `ALL` array,
+# filtered to server-processable target_types (ENEMY / SELF / AOE /
+# NONE) and the subset of fields the damage / heal pipeline reads.
+#
+# This file should be regenerated when spell tuning changes — see
+# Project_Dawn/tools/export_spells.gd (run via Godot editor:
+# File → Run on that script). The tool writes to this exact path.
+#
+# Sub-task 3b initial commit covers ~30 representative spells (heals
+# + damage across every caster class) so the heal regression closes
+# for the most-cast spells. Re-running the tool will land the
+# remaining ~50 (more damage variants, rank II/III spells).
+#
+# Buffs / HoT / DoT / CC / port / song fields are intentionally
+# absent — those stay client-side until sub-task 4 lifts buff state
+# server-side. The server's CastSpell handler applies base_damage
+# (to ENEMY target) or heal_amount (to SELF) and ignores side
+# effects.
+
+# ── Magician ────────────────────────────────────────────────────────
+[[spell]]
+name = "Fireball"
+target_type = "ENEMY"
+damage_type = "FIRE"
+base_damage = 50.0
+heal_amount = 0.0
+mana_cost = 30.0
+cast_time = 1.5
+cooldown = 8.0
+min_level = 1
+classes = ["Magician"]
+
+[[spell]]
+name = "Frost Bolt"
+target_type = "ENEMY"
+damage_type = "ICE"
+base_damage = 30.0
+heal_amount = 0.0
+mana_cost = 20.0
+cast_time = 0.0
+cooldown = 4.0
+min_level = 1
+classes = ["Magician"]
+
+[[spell]]
+name = "Lightning Strike"
+target_type = "ENEMY"
+damage_type = "LIGHTNING"
+base_damage = 80.0
+heal_amount = 0.0
+mana_cost = 40.0
+cast_time = 2.0
+cooldown = 12.0
+min_level = 6
+classes = ["Magician"]
+
+[[spell]]
+name = "Heal"
+target_type = "SELF"
+damage_type = "NONE"
+base_damage = 0.0
+heal_amount = 40.0
+mana_cost = 25.0
+cast_time = 1.0
+cooldown = 6.0
+min_level = 1
+classes = ["Magician"]
+
+[[spell]]
+name = "Arcane Missile"
+target_type = "ENEMY"
+damage_type = "ARCANE"
+base_damage = 20.0
+heal_amount = 0.0
+mana_cost = 15.0
+cast_time = 0.0
+cooldown = 2.0
+min_level = 1
+classes = ["Magician"]
+
+# ── Cleric ──────────────────────────────────────────────────────────
+[[spell]]
+name = "Healing Light"
+target_type = "SELF"
+damage_type = "HOLY"
+base_damage = 0.0
+heal_amount = 60.0
+mana_cost = 35.0
+cast_time = 1.2
+cooldown = 5.0
+min_level = 1
+classes = ["Cleric"]
+
+[[spell]]
+name = "Greater Heal"
+target_type = "SELF"
+damage_type = "HOLY"
+base_damage = 0.0
+heal_amount = 120.0
+mana_cost = 55.0
+cast_time = 2.5
+cooldown = 12.0
+min_level = 8
+classes = ["Cleric"]
+
+[[spell]]
+name = "Smite"
+target_type = "ENEMY"
+damage_type = "HOLY"
+base_damage = 35.0
+heal_amount = 0.0
+mana_cost = 20.0
+cast_time = 0.0
+cooldown = 3.0
+min_level = 1
+classes = ["Cleric"]
+
+[[spell]]
+name = "Divine Wrath"
+target_type = "ENEMY"
+damage_type = "HOLY"
+base_damage = 75.0
+heal_amount = 0.0
+mana_cost = 40.0
+cast_time = 1.8
+cooldown = 10.0
+min_level = 12
+classes = ["Cleric"]
+
+[[spell]]
+name = "Complete Heal"
+target_type = "SELF"
+damage_type = "HOLY"
+base_damage = 0.0
+heal_amount = 9999.0
+mana_cost = 150.0
+cast_time = 8.0
+cooldown = 6.0
+min_level = 20
+classes = ["Cleric"]
+
+# ── Druid ───────────────────────────────────────────────────────────
+[[spell]]
+name = "Wrath"
+target_type = "ENEMY"
+damage_type = "NATURE"
+base_damage = 25.0
+heal_amount = 0.0
+mana_cost = 20.0
+cast_time = 0.0
+cooldown = 3.5
+min_level = 1
+classes = ["Druid"]
+
+[[spell]]
+name = "Call Lightning"
+target_type = "ENEMY"
+damage_type = "NATURE"
+base_damage = 65.0
+heal_amount = 0.0
+mana_cost = 35.0
+cast_time = 1.5
+cooldown = 9.0
+min_level = 8
+classes = ["Druid"]
+
+# ── Shaman ──────────────────────────────────────────────────────────
+[[spell]]
+name = "Mending"
+target_type = "SELF"
+damage_type = "SPIRIT"
+base_damage = 0.0
+heal_amount = 25.0
+mana_cost = 15.0
+cast_time = 0.5
+cooldown = 4.0
+min_level = 1
+classes = ["Shaman"]
+
+[[spell]]
+name = "Spirit Bolt"
+target_type = "ENEMY"
+damage_type = "SPIRIT"
+base_damage = 28.0
+heal_amount = 0.0
+mana_cost = 20.0
+cast_time = 0.0
+cooldown = 3.0
+min_level = 1
+classes = ["Shaman"]
+
+[[spell]]
+name = "Ancestral Strike"
+target_type = "ENEMY"
+damage_type = "SPIRIT"
+base_damage = 70.0
+heal_amount = 0.0
+mana_cost = 40.0
+cast_time = 2.0
+cooldown = 10.0
+min_level = 12
+classes = ["Shaman"]
+
+# ── Blood Mage ──────────────────────────────────────────────────────
+[[spell]]
+name = "Blood Bolt"
+target_type = "ENEMY"
+damage_type = "SHADOW"
+base_damage = 35.0
+heal_amount = 0.0
+mana_cost = 20.0
+cast_time = 0.0
+cooldown = 3.0
+min_level = 4
+classes = ["Blood Mage"]
+
+[[spell]]
+name = "Crimson Bolt"
+target_type = "ENEMY"
+damage_type = "SHADOW"
+base_damage = 22.0
+heal_amount = 0.0
+mana_cost = 15.0
+cast_time = 0.0
+cooldown = 2.5
+min_level = 1
+classes = ["Blood Mage"]
+
+[[spell]]
+name = "Hemorrhage"
+target_type = "ENEMY"
+damage_type = "SHADOW"
+base_damage = 90.0
+heal_amount = 0.0
+mana_cost = 45.0
+cast_time = 2.0
+cooldown = 12.0
+min_level = 12
+classes = ["Blood Mage"]
+
+# ── Paladin ─────────────────────────────────────────────────────────
+[[spell]]
+name = "Lay on Hands"
+target_type = "SELF"
+damage_type = "HOLY"
+base_damage = 0.0
+heal_amount = 80.0
+mana_cost = 45.0
+cast_time = 2.0
+cooldown = 15.0
+min_level = 6
+classes = ["Paladin"]
+
+[[spell]]
+name = "Crusader's Mend"
+target_type = "SELF"
+damage_type = "HOLY"
+base_damage = 0.0
+heal_amount = 35.0
+mana_cost = 20.0
+cast_time = 0.5
+cooldown = 5.0
+min_level = 1
+classes = ["Paladin"]
+
+[[spell]]
+name = "Righteous Fire"
+target_type = "ENEMY"
+damage_type = "HOLY"
+base_damage = 45.0
+heal_amount = 0.0
+mana_cost = 25.0
+cast_time = 0.0
+cooldown = 4.0
+min_level = 1
+classes = ["Paladin"]
+
+# ── Shadow Knight ───────────────────────────────────────────────────
+[[spell]]
+name = "Siphon"
+target_type = "ENEMY"
+damage_type = "SHADOW"
+base_damage = 20.0
+heal_amount = 0.0
+mana_cost = 15.0
+cast_time = 0.0
+cooldown = 3.0
+min_level = 1
+classes = ["Shadow Knight"]
+
+# ── Necromancer ─────────────────────────────────────────────────────
+[[spell]]
+name = "Bone Shards"
+target_type = "ENEMY"
+damage_type = "SHADOW"
+base_damage = 30.0
+heal_amount = 0.0
+mana_cost = 18.0
+cast_time = 0.0
+cooldown = 3.0
+min_level = 1
+classes = ["Necromancer"]
+
+[[spell]]
+name = "Enervation"
+target_type = "ENEMY"
+damage_type = "SHADOW"
+base_damage = 85.0
+heal_amount = 0.0
+mana_cost = 50.0
+cast_time = 3.0
+cooldown = 15.0
+min_level = 16
+classes = ["Necromancer"]
+
+# ── Enchanter ───────────────────────────────────────────────────────
+[[spell]]
+name = "Color Spray"
+target_type = "ENEMY"
+damage_type = "ARCANE"
+base_damage = 25.0
+heal_amount = 0.0
+mana_cost = 15.0
+cast_time = 0.0
+cooldown = 3.0
+min_level = 1
+classes = ["Enchanter"]
+
+# ── Bard ────────────────────────────────────────────────────────────
+[[spell]]
+name = "Dissonance"
+target_type = "ENEMY"
+damage_type = "ARCANE"
+base_damage = 20.0
+heal_amount = 0.0
+mana_cost = 15.0
+cast_time = 0.0
+cooldown = 3.0
+min_level = 1
+classes = ["Bard"]
+
+[[spell]]
+name = "Battle Hymn"
+target_type = "SELF"
+damage_type = "ARCANE"
+base_damage = 0.0
+heal_amount = 30.0
+mana_cost = 20.0
+cast_time = 0.5
+cooldown = 6.0
+min_level = 1
+classes = ["Bard"]
+
+# ── Ranger ──────────────────────────────────────────────────────────
+[[spell]]
+name = "Hunter's Mark"
+target_type = "ENEMY"
+damage_type = "NATURE"
+base_damage = 25.0
+heal_amount = 0.0
+mana_cost = 15.0
+cast_time = 0.0
+cooldown = 3.5
+min_level = 1
+classes = ["Ranger"]
+
+[[spell]]
+name = "Nature's Cure"
+target_type = "SELF"
+damage_type = "NATURE"
+base_damage = 0.0
+heal_amount = 35.0
+mana_cost = 20.0
+cast_time = 0.5
+cooldown = 5.0
+min_level = 1
+classes = ["Ranger"]
+
+# ── Witch Hunter ────────────────────────────────────────────────────
+[[spell]]
+name = "Witchfire"
+target_type = "ENEMY"
+damage_type = "FIRE"
+base_damage = 35.0
+heal_amount = 0.0
+mana_cost = 22.0
+cast_time = 0.0
+cooldown = 4.0
+min_level = 1
+classes = ["Witch Hunter"]
+
+[[spell]]
+name = "Rite of Warding"
+target_type = "SELF"
+damage_type = "HOLY"
+base_damage = 0.0
+heal_amount = 30.0
+mana_cost = 18.0
+cast_time = 0.5
+cooldown = 5.0
+min_level = 1
+classes = ["Witch Hunter"]
+
+[[spell]]
+name = "Banishment"
+target_type = "ENEMY"
+damage_type = "HOLY"
+base_damage = 70.0
+heal_amount = 0.0
+mana_cost = 40.0
+cast_time = 1.8
+cooldown = 10.0
+min_level = 12
+classes = ["Witch Hunter"]
+
+# ── Wizard ──────────────────────────────────────────────────────────
+[[spell]]
+name = "Ice Spear"
+target_type = "ENEMY"
+damage_type = "ICE"
+base_damage = 50.0
+heal_amount = 0.0
+mana_cost = 28.0
+cast_time = 1.0
+cooldown = 5.0
+min_level = 1
+classes = ["Wizard"]
+
+[[spell]]
+name = "Flame Wave"
+target_type = "ENEMY"
+damage_type = "FIRE"
+base_damage = 75.0
+heal_amount = 0.0
+mana_cost = 38.0
+cast_time = 1.8
+cooldown = 9.0
+min_level = 4
+classes = ["Wizard"]
+
+[[spell]]
+name = "Meteor"
+target_type = "ENEMY"
+damage_type = "FIRE"
+base_damage = 130.0
+heal_amount = 0.0
+mana_cost = 65.0
+cast_time = 3.5
+cooldown = 20.0
+min_level = 18
+classes = ["Wizard"]
+
+# ── Sorcerer ────────────────────────────────────────────────────────
+[[spell]]
+name = "Arcane Burst"
+target_type = "ENEMY"
+damage_type = "ARCANE"
+base_damage = 30.0
+heal_amount = 0.0
+mana_cost = 18.0
+cast_time = 0.0
+cooldown = 3.0
+min_level = 1
+classes = ["Sorcerer"]
+
+[[spell]]
+name = "Soul Surge"
+target_type = "ENEMY"
+damage_type = "ARCANE"
+base_damage = 80.0
+heal_amount = 0.0
+mana_cost = 45.0
+cast_time = 2.0
+cooldown = 14.0
+min_level = 14
+classes = ["Sorcerer"]
+
+# ── Beast Master ────────────────────────────────────────────────────
+[[spell]]
+name = "Spirit Mend"
+target_type = "SELF"
+damage_type = "SPIRIT"
+base_damage = 0.0
+heal_amount = 25.0
+mana_cost = 15.0
+cast_time = 0.5
+cooldown = 4.0
+min_level = 1
+classes = ["Beast Master"]
+
+[[spell]]
+name = "Spirit Strike"
+target_type = "ENEMY"
+damage_type = "SPIRIT"
+base_damage = 55.0
+heal_amount = 0.0
+mana_cost = 35.0
+cast_time = 2.0
+cooldown = 10.0
+min_level = 12
+classes = ["Beast Master"]

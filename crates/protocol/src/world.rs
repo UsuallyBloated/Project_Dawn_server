@@ -116,8 +116,16 @@ pub enum ClientWorldMsg {
         is_offhand: bool,
         dmg_type: DamageType,
     },
+    /// Track 6 sub-task 3b — server-authoritative spell cast. Carries
+    /// `spell_name` (lookup key for the server's spells.toml table)
+    /// and the chosen target id. SELF target ignores target_id; ENEMY /
+    /// AOE require a valid target. Server validates mana cost +
+    /// target type + range + target liveness, applies the
+    /// authoritative damage / heal, and fans Hit + HealthUpdate /
+    /// HealthUpdate(self) + ManaUpdate. `spell_id` is reserved for
+    /// future numeric-id resolution; today the server keys by name.
     CastSpell {
-        spell_id: u32,
+        spell_name: String,
         target_id: Option<EntityId>,
     },
     UseSkill {

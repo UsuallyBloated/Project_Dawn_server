@@ -77,6 +77,18 @@ pub enum Outcome {
         is_offhand: bool,
         dmg_type: protocol::world::DamageType,
     },
+
+    /// Track 6 sub-task 3b — player → server spell-cast intent. The
+    /// tick loop resolves the spell name in spells.toml, validates
+    /// mana / target, applies the authoritative damage or heal, and
+    /// fans Hit + HealthUpdate / ManaUpdate. Cast-time + cooldown
+    /// gating is still client-side for sub-task 3b; server applies
+    /// instantly. Sub-task 4 will lift cast-time enforcement.
+    CastSpellIntent {
+        caster: u64,
+        spell_name: String,
+        target_id: Option<protocol::world::EntityId>,
+    },
     /// Track 5 sub-task 4 — player → server pickup intent for one slot
     /// of a loot bag. The tick loop validates bag existence + slot
     /// index + pickup range, removes the stack, sends `LootGranted`
@@ -402,6 +414,17 @@ pub fn handle_message(
             }
         }
 
+        ClientWorldMsg::CastSpell { spell_name, target_id } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::CastSpellIntent {
+                caster: conn.char_id as u64,
+                spell_name,
+                target_id,
+            }
+        }
+
         ClientWorldMsg::LootItem { bag_id, slot } => {
             if !conn.in_world {
                 return Outcome::Continue;
@@ -558,6 +581,27 @@ pub fn fan_out_health_update(
         return;
     }
     let msg = ServerWorldMsg::HealthUpdate { id, hp, max_hp };
+    let Some(bytes) = encode(&msg) else {
+        return;
+    };
+    for &recipient_id in recipients {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+/// Track 6 sub-task 3b — fan out a ManaUpdate. Used by the CastSpell
+/// handler after it deducts the spell's mana cost from the caster.
+pub fn fan_out_mana_update(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    id: protocol::world::EntityId,
+    mp: f32,
+    max_mp: f32,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::ManaUpdate { id, mp, max_mp };
     let Some(bytes) = encode(&msg) else {
         return;
     };

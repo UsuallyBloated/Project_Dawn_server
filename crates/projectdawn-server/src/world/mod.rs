@@ -22,6 +22,7 @@ mod loot;
 mod persistence;
 mod regen;
 mod spawn_points;
+mod spells;
 mod tick;
 mod zones;
 

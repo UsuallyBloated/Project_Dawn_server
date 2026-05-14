@@ -12,6 +12,7 @@ use super::{
     persistence,
     regen,
     spawn_points::Spawner,
+    spells,
     ATTACK_RANGE_TOLERANCE, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL,
     CORPSE_LINGER_SECS, LOOT_BAG_LINGER_SECS, LOOT_PICKUP_RANGE, MAX_MOVE_SPEED,
     RANGED_ATTACK_RANGE, STALE_MOVE_THRESHOLD, TICK_DT,
@@ -46,6 +47,15 @@ struct AttackIntent {
     weapon_path: String,
     is_offhand: bool,
     dmg_type: protocol::world::DamageType,
+}
+
+/// Track 6 sub-task 3b — buffered spell-cast intent. Server resolves
+/// the spell in spells.toml, validates mana / target, and applies
+/// damage or heal authoritatively.
+struct CastSpellIntent {
+    caster: u64,
+    spell_name: String,
+    target_id: Option<protocol::world::EntityId>,
 }
 
 /// Track 5 sub-task 4 — buffered loot pickup intent. `Slot(None)` is
@@ -257,6 +267,7 @@ pub async fn run(
         // a distinct event; coalescing would silently drop multi-hit
         // combos).
         let mut attack_intents: Vec<AttackIntent> = Vec::new();
+        let mut cast_spell_intents: Vec<CastSpellIntent> = Vec::new();
         // Track 5 sub-task 4 — player → server loot pickup intents.
         // Verbatim queue; sub-task 4 is FFA loot so order matters for
         // contested bags (first arrival wins the slot).
@@ -344,6 +355,17 @@ pub async fn run(
                                 weapon_path,
                                 is_offhand,
                                 dmg_type,
+                            });
+                        }
+                        Outcome::CastSpellIntent {
+                            caster,
+                            spell_name,
+                            target_id,
+                        } => {
+                            cast_spell_intents.push(CastSpellIntent {
+                                caster,
+                                spell_name,
+                                target_id,
                             });
                         }
                         Outcome::LootItemIntent {
@@ -945,6 +967,268 @@ pub async fn run(
                             bag_id,
                             stacks = stacks_for_log,
                             "loot bag spawned"
+                        );
+                    }
+                }
+            }
+        }
+
+        // 4ha. Apply player → server spell-cast intents. Server resolves
+        //      the spell in spells.toml, validates mana cost + target,
+        //      and applies authoritative damage (ENEMY) or heal (SELF).
+        //      Cast-time gating is still client-side for sub-task 3b;
+        //      sub-task 4 lifts it server-side.
+        if !cast_spell_intents.is_empty() {
+            for intent in cast_spell_intents.drain(..) {
+                let caster_cid = intent.caster as ClientId;
+                let Some(spell) = spells::lookup(&intent.spell_name) else {
+                    tracing::debug!(
+                        caster = intent.caster,
+                        spell = %intent.spell_name,
+                        "unknown spell name — server-side cast dropped"
+                    );
+                    continue;
+                };
+                // Resolve caster's snapshot (immutable) — we need pos
+                // for range / AOE. mp deduction lands later under a
+                // mutable borrow.
+                let Some(caster_conn) = connections.get(&caster_cid) else {
+                    continue;
+                };
+                if caster_conn.mp < spell.mana_cost {
+                    tracing::debug!(
+                        caster = intent.caster,
+                        spell = %spell.name,
+                        mp = caster_conn.mp,
+                        cost = spell.mana_cost,
+                        "spell cast rejected — insufficient mana"
+                    );
+                    continue;
+                }
+                let caster_pos = caster_conn.pos;
+                let caster_max_mp = caster_conn.max_mp;
+                let mana_cost = spell.mana_cost;
+                let hp_cost = spell.hp_cost;
+                let dmg_type = spells::parse_damage_type(&spell.damage_type);
+
+                // Deduct mana (+ optional hp_cost for blood / fallen
+                // spells). Both are caster-side; target-side effects
+                // come next.
+                let (new_mp, new_hp_after_cost, max_hp) = {
+                    let cc = connections.get_mut(&caster_cid).expect("checked");
+                    cc.mp = (cc.mp - mana_cost).max(0.0);
+                    if hp_cost > 0.0 {
+                        cc.hp = (cc.hp - hp_cost).max(0.0);
+                    }
+                    regen::mark_dirty(cc);
+                    (cc.mp, cc.hp, cc.max_hp)
+                };
+                handlers::fan_out_mana_update(
+                    &mut server,
+                    &in_world_recipients_now,
+                    intent.caster,
+                    new_mp,
+                    caster_max_mp,
+                );
+                if hp_cost > 0.0 {
+                    handlers::fan_out_health_update(
+                        &mut server,
+                        &in_world_recipients_now,
+                        intent.caster,
+                        new_hp_after_cost,
+                        max_hp,
+                    );
+                }
+
+                match spell.target_type.as_str() {
+                    "SELF" => {
+                        // Heal the caster (or damage in the rare "self
+                        // damage" case). base_damage is treated as a
+                        // self-damage; heal_amount as a heal.
+                        let heal = spell.heal_amount;
+                        let dmg = spell.base_damage;
+                        if heal > 0.0 || dmg > 0.0 {
+                            let (final_hp, max_hp) = {
+                                let cc = connections.get_mut(&caster_cid).expect("checked");
+                                cc.hp = (cc.hp + heal - dmg).clamp(0.0, cc.max_hp);
+                                regen::mark_dirty(cc);
+                                (cc.hp, cc.max_hp)
+                            };
+                            handlers::fan_out_health_update(
+                                &mut server,
+                                &in_world_recipients_now,
+                                intent.caster,
+                                final_hp,
+                                max_hp,
+                            );
+                            tracing::info!(
+                                caster = intent.caster,
+                                spell = %spell.name,
+                                heal,
+                                dmg,
+                                final_hp,
+                                "spell self effect applied"
+                            );
+                        }
+                    }
+                    "ENEMY" => {
+                        let Some(target_id) = intent.target_id else {
+                            continue;
+                        };
+                        // Player target → PvP path (gate via can_attack
+                        // for parity with melee swings).
+                        if target_id < protocol::world::ENEMY_ID_BASE {
+                            let target_cid = target_id as ClientId;
+                            if target_cid == caster_cid {
+                                continue;
+                            }
+                            let pvp_ok = match (
+                                connections.get(&caster_cid),
+                                connections.get(&target_cid),
+                            ) {
+                                (Some(a), Some(t)) => combat::can_attack(
+                                    a, t,
+                                    a.zone.as_deref(),
+                                    t.zone.as_deref(),
+                                ),
+                                _ => false,
+                            };
+                            if !pvp_ok {
+                                tracing::debug!(
+                                    caster = intent.caster,
+                                    target = target_id,
+                                    spell = %spell.name,
+                                    "PvP spell not authorized"
+                                );
+                                continue;
+                            }
+                            let (final_hp, max_hp, applied) = {
+                                let tc = connections.get_mut(&target_cid).expect("checked");
+                                if tc.hp <= 0.0 || !tc.in_world {
+                                    continue;
+                                }
+                                // Spells skip armor reduction —
+                                // matches GDScript: armor reduces only
+                                // physical melee damage in
+                                // Combat.receive_player_damage's
+                                // wrapping. Spell resists land in a
+                                // later sub-task.
+                                let dmg = spell.base_damage.max(0.0) as i32;
+                                tc.hp = (tc.hp - dmg as f32).max(0.0);
+                                regen::mark_dirty(tc);
+                                (tc.hp, tc.max_hp, dmg)
+                            };
+                            handlers::fan_out_hit(
+                                &mut server,
+                                &in_world_recipients_now,
+                                intent.caster,
+                                target_id,
+                                applied,
+                                false,
+                                dmg_type,
+                            );
+                            handlers::fan_out_health_update(
+                                &mut server,
+                                &in_world_recipients_now,
+                                target_id,
+                                final_hp,
+                                max_hp,
+                            );
+                            tracing::info!(
+                                caster = intent.caster,
+                                target = target_id,
+                                spell = %spell.name,
+                                applied,
+                                "PvP spell applied"
+                            );
+                            continue;
+                        }
+                        // Enemy target — apply spell damage to the
+                        // enemy and propagate Hit / HealthUpdate.
+                        let dmg = spell.base_damage.max(0.0) as i32;
+                        let Some(entity) = enemies.get_mut(&target_id) else {
+                            continue;
+                        };
+                        if !entity.is_alive() {
+                            continue;
+                        }
+                        let dist = entity.pos.distance_to(caster_pos);
+                        // Spells use ranged range (GDScript Spells use
+                        // 25-30m by default); be permissive.
+                        if dist > RANGED_ATTACK_RANGE {
+                            tracing::debug!(
+                                caster = intent.caster,
+                                target = target_id,
+                                spell = %spell.name,
+                                dist,
+                                "spell out of range"
+                            );
+                            continue;
+                        }
+                        entity.hp = (entity.hp - dmg as f32).max(0.0);
+                        *entity.aggro.entry(intent.caster).or_insert(0.0) += dmg as f32;
+                        handlers::fan_out_hit(
+                            &mut server,
+                            &in_world_recipients_now,
+                            intent.caster,
+                            target_id,
+                            dmg,
+                            false,
+                            dmg_type,
+                        );
+                        handlers::fan_out_health_update(
+                            &mut server,
+                            &in_world_recipients_now,
+                            entity.id,
+                            entity.hp,
+                            entity.max_hp,
+                        );
+                        if entity.hp <= 0.0 {
+                            entity.transition(EnemyState::Dead, now);
+                            handlers::fan_out_entity_died(
+                                &mut server,
+                                &in_world_recipients_now,
+                                entity.id,
+                            );
+                            if let Some((&credit_id, _)) = entity
+                                .aggro
+                                .iter()
+                                .max_by(|a, b| {
+                                    a.1.partial_cmp(b.1)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                })
+                            {
+                                let xp = entity.mob.xp;
+                                if xp > 0 {
+                                    let cid = credit_id as ClientId;
+                                    if connections.contains_key(&cid) {
+                                        handlers::send_xp_gained(&mut server, cid, xp);
+                                    }
+                                }
+                            }
+                            if let Some(items) = loot::roll_for_mob(&entity.mob.name) {
+                                let bag = LootBag::new(entity.pos, items, now);
+                                let bag_id = bag.id;
+                                handlers::fan_out_loot_bag_spawn(
+                                    &mut server,
+                                    &in_world_recipients_now,
+                                    &bag,
+                                );
+                                loot_bags.insert(bag_id, bag);
+                            }
+                        }
+                    }
+                    "AOE" | "NONE" | _ => {
+                        // AOE / port / charm / etc. aren't applied
+                        // server-side in sub-task 3b. The mana already
+                        // deducted is the only server-side effect;
+                        // client-local handler covers the rest until a
+                        // later track lifts AOE / port authority.
+                        tracing::debug!(
+                            caster = intent.caster,
+                            spell = %spell.name,
+                            target_type = %spell.target_type,
+                            "spell target_type not yet processed server-side; mana deducted only"
                         );
                     }
                 }

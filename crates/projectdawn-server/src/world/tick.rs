@@ -312,8 +312,22 @@ pub async fn run(
                     // their group. If the group dissolves (one
                     // member left), notify them too. The rest of the
                     // roster gets a fresh GroupRoster.
-                    if let Some((gid, remaining)) = group_manager.leave(client_id) {
-                        if !remaining.is_empty() {
+                    if let Some((gid, remaining, dissolved)) = group_manager.leave(client_id) {
+                        if dissolved {
+                            // Group dissolved. Survivors (0 or 1) get
+                            // an empty roster so their HUD clears.
+                            // The leaver is the disconnecting client;
+                            // their transport is already torn down.
+                            for m in &remaining {
+                                handlers::fan_group_roster(
+                                    &mut server,
+                                    std::slice::from_ref(m),
+                                    gid,
+                                    *m,
+                                    Vec::new(),
+                                );
+                            }
+                        } else {
                             // Re-fetch the group with name lookups
                             // for the survivor fan-out.
                             if let Some(g) = group_manager.groups.get(&gid) {
@@ -330,10 +344,6 @@ pub async fn run(
                                 );
                             }
                         }
-                        // remaining.is_empty() → group dissolved; no
-                        // one left to notify. (The leaver is the
-                        // disconnecting client; their transport is
-                        // already torn down.)
                     }
 
                     if let Some(mut conn) = connections.remove(&client_id) {
@@ -1826,32 +1836,35 @@ pub async fn run(
 
         for intent in group_leave_intents.drain(..) {
             let cid = intent.member as ClientId;
-            if let Some((gid, remaining)) = group_manager.leave(cid) {
+            if let Some((gid, remaining, dissolved)) = group_manager.leave(cid) {
                 tracing::info!(
                     member = intent.member,
                     gid,
                     remaining = remaining.len(),
+                    dissolved,
                     "GroupLeave processed"
                 );
-                if remaining.is_empty() {
-                    // Group dissolved — also notify the leaver so their
-                    // client clears the display.
-                    handlers::fan_group_roster(
-                        &mut server,
-                        std::slice::from_ref(&cid),
-                        gid,
-                        cid,
-                        Vec::new(),
-                    );
+                // The leaver always gets an empty roster so their HUD clears.
+                handlers::fan_group_roster(
+                    &mut server,
+                    std::slice::from_ref(&cid),
+                    gid,
+                    cid,
+                    Vec::new(),
+                );
+                if dissolved {
+                    // Survivors (0 or 1) also need a dissolution notice
+                    // so their HUD clears.
+                    for m in &remaining {
+                        handlers::fan_group_roster(
+                            &mut server,
+                            std::slice::from_ref(m),
+                            gid,
+                            *m,
+                            Vec::new(),
+                        );
+                    }
                 } else {
-                    // Notify the leaver too (empty roster from their POV).
-                    handlers::fan_group_roster(
-                        &mut server,
-                        std::slice::from_ref(&cid),
-                        gid,
-                        cid,
-                        Vec::new(),
-                    );
                     fan_roster(&mut server, &connections, &group_manager, gid, None);
                 }
             }
@@ -1879,16 +1892,16 @@ pub async fn run(
             if target_cid == leader_cid {
                 continue; // leader can't kick self (use /leave)
             }
-            if let Some((_gid, remaining)) = group_manager.leave(target_cid) {
+            if let Some((_gid, remaining, dissolved)) = group_manager.leave(target_cid) {
                 tracing::info!(
                     leader = intent.leader,
                     kicked = target_cid as u64,
                     gid,
                     remaining = remaining.len(),
+                    dissolved,
                     "GroupKick processed"
                 );
-                // Notify the kicked member their group dissolved (from
-                // their POV).
+                // Notify the kicked member their group ended (from their POV).
                 handlers::fan_group_roster(
                     &mut server,
                     std::slice::from_ref(&target_cid),
@@ -1896,7 +1909,18 @@ pub async fn run(
                     target_cid,
                     Vec::new(),
                 );
-                if !remaining.is_empty() {
+                if dissolved {
+                    // Survivors (0 or 1) also need a dissolution notice.
+                    for m in &remaining {
+                        handlers::fan_group_roster(
+                            &mut server,
+                            std::slice::from_ref(m),
+                            gid,
+                            *m,
+                            Vec::new(),
+                        );
+                    }
+                } else {
                     fan_roster(&mut server, &connections, &group_manager, gid, None);
                 }
             }

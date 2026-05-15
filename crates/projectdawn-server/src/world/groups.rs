@@ -104,8 +104,11 @@ impl GroupManager {
     /// Remove a member from their group. If they're the leader and
     /// others remain, promote the next member. If only they were in
     /// the group (or none after removal), dissolve. Returns
-    /// (GroupId, new_roster_or_empty_if_dissolved).
-    pub fn leave(&mut self, member: ClientId) -> Option<(GroupId, Vec<ClientId>)> {
+    /// (GroupId, surviving_members, dissolved_flag). On dissolve the
+    /// `surviving_members` Vec is the list of clients who need a
+    /// "group dissolved" notification (0 or 1 entries). On non-dissolve
+    /// it's the new roster.
+    pub fn leave(&mut self, member: ClientId) -> Option<(GroupId, Vec<ClientId>, bool)> {
         let gid = self.member_to_group.remove(&member)?;
         self.pending_invites.remove(&member);
         let group = self.groups.get_mut(&gid)?;
@@ -119,12 +122,12 @@ impl GroupManager {
                 self.member_to_group.remove(m);
             }
             self.groups.remove(&gid);
-            return Some((gid, Vec::new()));
+            return Some((gid, remaining, true));
         }
         if group.leader == member {
             group.leader = group.members[0];
         }
-        Some((gid, group.members.clone()))
+        Some((gid, group.members.clone(), false))
     }
 
     /// Look up the group containing this member, if any.

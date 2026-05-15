@@ -965,6 +965,7 @@ pub async fn run(
                     // after.
                     let raw_swing = swing.amount;
                     let shield_to_attacker_pvp: f32;
+                    let shield_name_pvp: Option<String>;
                     let mut absorb_strip_pvp: Option<usize> = None;
                     let (new_hp, max_hp, amount, target_armor) = {
                         let target_conn = connections.get_mut(&target_cid).expect("checked");
@@ -981,6 +982,7 @@ pub async fn run(
                         }
                         shield_to_attacker_pvp =
                             buffs::damage_shield_total(&target_conn.active_buffs);
+                        shield_name_pvp = buffs::first_damage_shield_name(&target_conn.active_buffs).map(|s| s.to_string());
                         target_conn.hp = (target_conn.hp - amount as f32).max(0.0);
                         regen::mark_dirty(target_conn);
                         (target_conn.hp, target_conn.max_hp, amount, target_conn.equipped_armor)
@@ -1007,6 +1009,7 @@ pub async fn run(
                         if let Some(att) = connections.get_mut(&attacker_cid) {
                             if att.hp > 0.0 {
                                 let dmg = shield_to_attacker_pvp;
+                                let reflect_dmg = dmg as i32;
                                 att.hp = (att.hp - dmg).max(0.0);
                                 regen::mark_dirty(att);
                                 let new_att_hp = att.hp;
@@ -1018,6 +1021,16 @@ pub async fn run(
                                     new_att_hp,
                                     att_max,
                                 );
+                                if let Some(name) = shield_name_pvp.as_ref() {
+                                    handlers::fan_out_damage_shield_trigger(
+                                        &mut server,
+                                        &in_world_recipients_now,
+                                        intent.target_id,
+                                        intent.attacker,
+                                        reflect_dmg,
+                                        name.clone(),
+                                    );
+                                }
                             }
                         }
                     }
@@ -1499,6 +1512,7 @@ pub async fn run(
                             // too. Armor reduction is skipped for
                             // spells (matches GDScript wrapping).
                             let shield_back: f32;
+                            let shield_back_name: Option<String>;
                             let mut absorb_strip_idx: Option<usize> = None;
                             let (final_hp, max_hp, applied) = {
                                 let tc = connections.get_mut(&target_cid).expect("checked");
@@ -1515,6 +1529,7 @@ pub async fn run(
                                     });
                                 }
                                 shield_back = buffs::damage_shield_total(&tc.active_buffs);
+                                shield_back_name = buffs::first_damage_shield_name(&tc.active_buffs).map(|s| s.to_string());
                                 tc.hp = (tc.hp - dmg as f32).max(0.0);
                                 regen::mark_dirty(tc);
                                 (tc.hp, tc.max_hp, dmg)
@@ -1560,6 +1575,7 @@ pub async fn run(
                             if shield_back > 0.0 {
                                 if let Some(att) = connections.get_mut(&caster_cid) {
                                     if att.hp > 0.0 {
+                                        let reflect_dmg = shield_back as i32;
                                         att.hp = (att.hp - shield_back).max(0.0);
                                         regen::mark_dirty(att);
                                         let new_att_hp = att.hp;
@@ -1571,6 +1587,16 @@ pub async fn run(
                                             new_att_hp,
                                             att_max,
                                         );
+                                        if let Some(name) = shield_back_name.as_ref() {
+                                            handlers::fan_out_damage_shield_trigger(
+                                                &mut server,
+                                                &in_world_recipients_now,
+                                                target_id,
+                                                intent.caster,
+                                                reflect_dmg,
+                                                name.clone(),
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -1972,6 +1998,7 @@ pub async fn run(
                 // value so the floating number matches the bar drop.
                 let mut damaged_player: Option<u64> = None;
                 let mut shield_to_attacker: f32 = 0.0;
+                let mut shield_name_pve: Option<String> = None;
                 let mut absorb_buff_to_strip: Option<usize> = None;
                 let final_amount = if hit.target < protocol::world::ENEMY_ID_BASE {
                     let target_cid = hit.target as ClientId;
@@ -1999,6 +2026,7 @@ pub async fn run(
                             // Read amount before mutating HP so a
                             // killing blow still triggers thorns.
                             shield_to_attacker = buffs::damage_shield_total(&target_conn.active_buffs);
+                            shield_name_pve = buffs::first_damage_shield_name(&target_conn.active_buffs).map(|s| s.to_string());
                             target_conn.hp = (target_conn.hp - reduced as f32).max(0.0);
                             regen::mark_dirty(target_conn);
                             damaged_player = Some(hit.target);
@@ -2044,6 +2072,16 @@ pub async fn run(
                                 att_entity.hp,
                                 att_entity.max_hp,
                             );
+                            if let (Some(defender), Some(name)) = (damaged_player, shield_name_pve.as_ref()) {
+                                handlers::fan_out_damage_shield_trigger(
+                                    &mut server,
+                                    &in_world_recipients_now,
+                                    defender,
+                                    attacker,
+                                    dmg,
+                                    name.clone(),
+                                );
+                            }
                             if att_entity.hp <= 0.0 {
                                 att_entity.transition(EnemyState::Dead, now);
                                 handlers::fan_out_entity_died(

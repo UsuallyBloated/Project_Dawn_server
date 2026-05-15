@@ -287,6 +287,16 @@ pub fn damage_shield_total(buffs: &[ActiveBuff]) -> f32 {
     }).sum()
 }
 
+/// Track 6 — name of the first active DamageShield buff, for combat
+/// log attribution ("attacker took N damage from your <shield_name>").
+/// Returns the buff's spell name (e.g. "Thorns", "Spellshield").
+pub fn first_damage_shield_name(buffs: &[ActiveBuff]) -> Option<&str> {
+    buffs.iter().find_map(|b| match b.effect {
+        BuffEffect::DamageShield { .. } => Some(b.name.as_str()),
+        _ => None,
+    })
+}
+
 /// Track 6 sub-task 4c — sum of (accuracy, crit) buff bonuses. Used
 /// by `combat::calc_swing` to push crit chance up and miss chance
 /// down (1 - accuracy_bonus). Both are in 0.0..=1.0 ratio form

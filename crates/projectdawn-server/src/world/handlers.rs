@@ -489,11 +489,14 @@ pub fn handle_message(
             if !conn.in_world {
                 return Outcome::Continue;
             }
-            // Track 6 sub-task 4d — Silence and Mez gate CastSpell.
-            if super::buffs::is_mezzed(&conn.active_buffs)
-                || super::buffs::is_silenced(&conn.active_buffs)
-            {
-                return Outcome::Continue;
+            // Track 6 sub-task 4d — Silence and Mez gate CastSpell. Fan
+            // a CastFail back so the caster's client can log "Silenced!"
+            // and the local Spells cooldown / mana doesn't sit stuck.
+            if super::buffs::is_silenced(&conn.active_buffs) {
+                return Outcome::CastFailFanOut { reason: "Silenced.".to_string() };
+            }
+            if super::buffs::is_mezzed(&conn.active_buffs) {
+                return Outcome::CastFailFanOut { reason: "Mesmerized.".to_string() };
             }
             Outcome::CastSpellIntent {
                 caster: conn.char_id as u64,
@@ -877,6 +880,31 @@ pub fn fan_out_hit(
         amount,
         crit,
         dmg_type,
+    };
+    let Some(bytes) = encode(&msg) else { return };
+    for recipient in recipients {
+        server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+/// Track 6 — broadcast a DamageShieldTrigger so both attacker + defender
+/// clients can log the reflect and render floating damage on the attacker.
+pub fn fan_out_damage_shield_trigger(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    defender: u64,
+    attacker: u64,
+    amount: i32,
+    shield_name: String,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::DamageShieldTrigger {
+        defender,
+        attacker,
+        amount,
+        shield_name,
     };
     let Some(bytes) = encode(&msg) else { return };
     for recipient in recipients {

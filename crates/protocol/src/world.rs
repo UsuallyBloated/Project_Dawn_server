@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// `StaminaUpdate`); `ClientWorldMsg::ResourceUpdate` is removed because the
 /// authority flips and the client no longer broadcasts resources. One bump
 /// per track; individual sub-task commits append new variants under this id.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3035; // "PD_W0005"
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3036; // "PD_W0006"
 
 pub type EntityId = u64;
 pub type Sequence = u32;
@@ -607,6 +607,17 @@ pub enum ServerWorldMsg {
         group_id: u64,
         leader_id: EntityId,
         members: Vec<(EntityId, String)>,
+    },
+    /// Track 6 — damage-shield reflect notification. Fanned when a
+    /// player's DamageShield buff (Thorns / Spellshield) reflects
+    /// damage back at an attacker. The defender's client uses this
+    /// to log "X took N damage from your <shield_name>"; the
+    /// attacker's client renders the floating number as well.
+    DamageShieldTrigger {
+        defender: EntityId,
+        attacker: EntityId,
+        amount: i32,
+        shield_name: String,
     },
 }
 

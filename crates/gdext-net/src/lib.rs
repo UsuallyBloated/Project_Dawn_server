@@ -231,6 +231,18 @@ impl NetClient {
         member_names: PackedStringArray,
     );
 
+    /// Track 6 — damage-shield reflect. Fanned to all peers when a
+    /// player's DamageShield buff reflects damage back at an attacker
+    /// (Thorns / Spellshield). Clients use this for combat-log
+    /// attribution and floating-number rendering on the attacker.
+    #[signal]
+    fn damage_shield_trigger(
+        defender: i64,
+        attacker: i64,
+        amount: i32,
+        shield_name: GString,
+    );
+
     /// Track 4 sub-task 3 buff snapshot. `names` and `durations` are
     /// parallel arrays — entry i is one buff. Empty arrays mean "no
     /// active buffs". Receiver should replace any previously-tracked
@@ -780,6 +792,12 @@ enum Incoming {
         member_ids: Vec<i64>,
         member_names: Vec<String>,
     },
+    DamageShieldTrigger {
+        defender: i64,
+        attacker: i64,
+        amount: i32,
+        shield_name: String,
+    },
     Raw {
         channel: u8,
         bytes: Vec<u8>,
@@ -1161,6 +1179,17 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::DamageShieldTrigger { defender, attacker, amount, shield_name } => {
+                    self.base_mut().emit_signal(
+                        "damage_shield_trigger",
+                        &[
+                            defender.to_variant(),
+                            attacker.to_variant(),
+                            amount.to_variant(),
+                            GString::from(shield_name.as_str()).to_variant(),
+                        ],
+                    );
+                }
                 Incoming::Raw { channel, bytes } => {
                     let pba = packed_byte_array_from(&bytes);
                     self.base_mut().emit_signal(
@@ -1336,6 +1365,14 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
                 leader_id: leader_id as i64,
                 member_ids,
                 member_names,
+            }
+        }
+        ServerWorldMsg::DamageShieldTrigger { defender, attacker, amount, shield_name } => {
+            Incoming::DamageShieldTrigger {
+                defender: defender as i64,
+                attacker: attacker as i64,
+                amount,
+                shield_name,
             }
         }
         // Other variants (BuffApplied, ChatMessage, ...) get

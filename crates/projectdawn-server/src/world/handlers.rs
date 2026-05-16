@@ -493,9 +493,19 @@ pub fn handle_message(
             // a CastFail back so the caster's client can log "Silenced!"
             // and the local Spells cooldown / mana doesn't sit stuck.
             if super::buffs::is_silenced(&conn.active_buffs) {
+                tracing::info!(
+                    caster = conn.char_id,
+                    spell = %spell_name,
+                    "cast rejected — silenced"
+                );
                 return Outcome::CastFailFanOut { reason: "Silenced.".to_string() };
             }
             if super::buffs::is_mezzed(&conn.active_buffs) {
+                tracing::info!(
+                    caster = conn.char_id,
+                    spell = %spell_name,
+                    "cast rejected — mezzed"
+                );
                 return Outcome::CastFailFanOut { reason: "Mesmerized.".to_string() };
             }
             Outcome::CastSpellIntent {

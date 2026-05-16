@@ -1225,7 +1225,7 @@ pub async fn run(
             for intent in cast_spell_intents.drain(..) {
                 let caster_cid = intent.caster as ClientId;
                 let Some(spell) = spells::lookup(&intent.spell_name) else {
-                    tracing::debug!(
+                    tracing::info!(
                         caster = intent.caster,
                         spell = %intent.spell_name,
                         "unknown spell name — server-side cast dropped"
@@ -1239,7 +1239,7 @@ pub async fn run(
                     continue;
                 };
                 if caster_conn.mp < spell.mana_cost {
-                    tracing::debug!(
+                    tracing::info!(
                         caster = intent.caster,
                         spell = %spell.name,
                         mp = caster_conn.mp,
@@ -1285,6 +1285,12 @@ pub async fn run(
 
                 match spell.target_type.as_str() {
                     "SELF" => {
+                        tracing::info!(
+                            caster = intent.caster,
+                            spell = %spell.name,
+                            absorb = spell.absorb_amount,
+                            "SELF cast received"
+                        );
                         // Heal the caster (or damage in the rare "self
                         // damage" case). base_damage is treated as a
                         // self-damage; heal_amount as a heal.
@@ -1409,6 +1415,12 @@ pub async fn run(
                                 ),
                             );
                             buff_changed = true;
+                            tracing::info!(
+                                caster = intent.caster,
+                                spell = %spell.name,
+                                pool = spell.absorb_amount,
+                                "absorb buff applied"
+                            );
                         }
                         if (spell.accuracy_buff > 0.0 || spell.crit_buff > 0.0)
                             && spell.stat_buff_duration > 0.0

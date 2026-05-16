@@ -124,6 +124,24 @@ fn apply_mp_regen_exclusive(conn: &mut PerConnection, buff: ActiveBuff) {
     conn.active_buffs.push(buff);
 }
 
+/// "Latest wins" exclusive apply for DamageShield (Thorns / Spellshield)
+/// and Absorb (Rune / Primal Bond). The client's BuffManager tracks
+/// these as single slots, so the server matches by purging any
+/// existing variant of the same effect kind before pushing the new
+/// buff. Keeps both renderings (local buff bar + target HUD)
+/// in agreement: one shield, one absorb at a time.
+fn apply_damage_shield_exclusive(conn: &mut PerConnection, buff: ActiveBuff) {
+    conn.active_buffs
+        .retain(|b| !matches!(b.effect, buffs::BuffEffect::DamageShield { .. }));
+    conn.active_buffs.push(buff);
+}
+
+fn apply_absorb_exclusive(conn: &mut PerConnection, buff: ActiveBuff) {
+    conn.active_buffs
+        .retain(|b| !matches!(b.effect, buffs::BuffEffect::Absorb { .. }));
+    conn.active_buffs.push(buff);
+}
+
 /// Track 6 sub-task 4a — rebuild conn.buff_snapshot from
 /// active_buffs and fan a BuffSnapshot to in-world peers. Server is
 /// authoritative on buff state now; the client-driven
@@ -1394,7 +1412,7 @@ pub async fn run(
                             buff_changed = true;
                         }
                         if spell.damage_shield_amount > 0.0 && spell.damage_shield_duration > 0.0 {
-                            apply_buff(
+                            apply_damage_shield_exclusive(
                                 connections.get_mut(&caster_cid).expect("checked"),
                                 ActiveBuff::new_damage_shield(
                                     spell.name.clone(),
@@ -1406,7 +1424,7 @@ pub async fn run(
                             buff_changed = true;
                         }
                         if spell.absorb_amount > 0.0 {
-                            apply_buff(
+                            apply_absorb_exclusive(
                                 connections.get_mut(&caster_cid).expect("checked"),
                                 ActiveBuff::new_absorb(
                                     spell.name.clone(),

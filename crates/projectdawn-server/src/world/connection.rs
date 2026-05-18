@@ -183,6 +183,13 @@ pub struct PerConnection {
     /// Future: wire to a DB `is_gm` flag from the auth token.
     pub is_dev: bool,
 
+    /// Track 7 — AOI grid cell the player currently occupies. Derived from
+    /// `pos.x` / `pos.z` via `aoi::cell_for`; updated by the tick loop
+    /// whenever the player's position crosses a cell boundary. Used to
+    /// filter position broadcasts and drive the spawn/despawn fan-out when
+    /// the neighborhood set changes.
+    pub aoi_cell: (i32, i32),
+
     /// Track 6: fractional regen accumulator. The 20 Hz tick produces
     /// sub-integer amounts; we accumulate and only mutate `hp`/`mp`/
     /// `stamina` (and fan out) when the integer part bumps. Reset to 0.0
@@ -275,6 +282,7 @@ impl PerConnection {
             equipped_armor: 0,
             pvp_override_on: false,
             is_dev: dev_cmds_enabled(),
+            aoi_cell: (0, 0), // tick.rs sets the real cell from aoi::cell_for after construction
             regen_hp_acc: 0.0,
             regen_mp_acc: 0.0,
             regen_stamina_acc: 0.0,

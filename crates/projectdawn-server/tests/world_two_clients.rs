@@ -34,6 +34,7 @@ const TICK_DT: Duration = Duration::from_millis(50);
 
 struct Harness {
     auth_url: String,
+    db_url: String,
     _world_addr: SocketAddr,
     _tmp: TempDir,
 }
@@ -73,6 +74,7 @@ async fn start_both() -> Harness {
 
     Harness {
         auth_url: format!("ws://{auth_addr}"),
+        db_url: url,
         _world_addr: world_addr,
         _tmp: tmp,
     }
@@ -245,6 +247,10 @@ impl WorldClient {
 
     fn send_death(&mut self) {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::DeathBroadcast);
+    }
+
+    fn send_heartbeat(&mut self) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Heartbeat);
     }
 
     fn send_attack(&mut self, target_id: u64, weapon_path: &str, is_offhand: bool, dmg_type: DamageType) {
@@ -846,6 +852,116 @@ async fn enemies_visible_after_enter_world() {
         assert!(max_hp > 0.0 && hp > 0.0, "fresh spawn has positive HP");
         assert!((hp - max_hp).abs() < 0.01, "fresh spawn is at full HP");
     }
+}
+
+/// Track 7 AOI — far-apart clients do not see each other.
+///
+/// CELL_SIZE = 120 m; cell boundaries at x = 120, 240, 360 …
+/// B is placed at x = 300 (cell (2, 0)) before connecting. A spawns at
+/// the origin (cell (0, 0)). |2 − 0| = 2 > 1, so they fall outside
+/// each other's 3×3 neighbourhood: neither should receive EntitySpawn
+/// for the other. Previously (broadcast-to-all) both would appear.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aoi_far_apart_clients_dont_see_each_other() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "aoifar1", "FarA", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "aoifar2", "FarB", "Elf", "Cleric").await;
+
+    // Place B at x = 300 (cell 2) before it connects. The world server
+    // reads pos from the DB at ClientConnected time.
+    let pool = db::open(&h.db_url).await.expect("open pool for pos update");
+    db::set_character_position(&pool, b_char_id, 300.0, 0.0, 0.0)
+        .await
+        .expect("set B starting position");
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+
+    // 2 s is far beyond the 1-tick fanout window; if EntitySpawn were
+    // going to arrive it would do so within ~100 ms.
+    let spawn_b_at_a = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == b_char_id as u64)
+        })
+        .await;
+    assert!(
+        spawn_b_at_a.is_none(),
+        "A at cell (0,0) must NOT receive EntitySpawn for B at cell (2,0)"
+    );
+
+    let spawn_a_at_b = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == a_char_id as u64)
+        })
+        .await;
+    assert!(
+        spawn_a_at_b.is_none(),
+        "B at cell (2,0) must NOT receive EntitySpawn for A at cell (0,0)"
+    );
+}
+
+/// Track 7 AOI — approaching client triggers mutual EntitySpawn on cell
+/// boundary crossing.
+///
+/// A sits at the origin (cell (0, 0)). B starts at x = 300 (cell (2, 0))
+/// and walks in the −X direction at MAX_MOVE_SPEED = 7.5 m/s. After
+/// ~8 s B crosses x = 240 (cell (1, 0)), which is adjacent to A's cell.
+/// The tick loop's step-5b fan-out must fire mutual EntitySpawn at that
+/// moment. We budget 12 s of walking to absorb test-parallelism jitter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aoi_approaching_client_triggers_entity_spawn() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "aoiappr1", "ApprA", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "aoiappr2", "ApprB", "Elf", "Ranger").await;
+
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_character_position(&pool, b_char_id, 300.0, 0.0, 0.0)
+        .await
+        .expect("set B starting position");
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+
+    // Walk B toward A. 300 → 240 = 60 m ÷ 7.5 m/s = 8 s; 12 s covers
+    // the full crossing with margin. Both transports are pumped each tick:
+    // without pumping A's transport for ~12 s the server's 15 s netcode
+    // timeout would fire and disconnect A before we can assert.
+    let walk_end = Instant::now() + Duration::from_secs(12);
+    let mut seq: u32 = 1;
+    let mut heartbeat_tick: u32 = 0;
+    while Instant::now() < walk_end {
+        b.send_move(seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 });
+        seq += 1;
+        // A sends a Heartbeat every ~4 s (80 ticks) to satisfy the
+        // server's 10 s app-layer idle timeout while B walks.
+        heartbeat_tick += 1;
+        if heartbeat_tick % 80 == 0 {
+            a.send_heartbeat();
+        }
+        tick_one(&mut b.client, &mut b.transport);
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // At this point B is at ~x = 210 (cell 1). EntitySpawn messages
+    // arrived at both clients during the walk; wait_for drains the queue.
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == b_char_id as u64)
+    })
+    .await
+    .expect("A receives EntitySpawn for B once B enters A's 3×3 neighbourhood");
+
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == a_char_id as u64)
+    })
+    .await
+    .expect("B receives EntitySpawn for A when it crosses into A's neighbourhood");
 }
 
 fn tick_one(client: &mut RenetClient, transport: &mut NetcodeClientTransport) {

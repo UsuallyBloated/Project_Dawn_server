@@ -13,6 +13,7 @@
 //! the shared `netcode_private_key`. The launcher delivers those bytes to
 //! the game .exe (track D will define the temp-file handoff).
 
+mod aoi;
 mod buffs;
 mod combat;
 mod connection;

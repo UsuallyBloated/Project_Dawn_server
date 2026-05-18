@@ -3,6 +3,7 @@
 //! pipeline.
 
 use super::{
+    aoi::{self, AoiGrid},
     buffs::{self, ActiveBuff},
     combat,
     connection::{PerConnection, Vec3f},
@@ -201,6 +202,11 @@ pub async fn run(
     let _ = cfg; // Reserved for future config-driven tuning (max_clients live-reload, etc.).
 
     let mut connections: HashMap<ClientId, PerConnection> = HashMap::new();
+    // Track 7 — AOI spatial index. Tracks which grid cell each in_world
+    // entity (player, enemy, loot bag) occupies so position broadcasts
+    // and EntitySpawn/Despawn can be filtered to the 3×3 neighbourhood
+    // instead of broadcasting to every in_world client.
+    let mut aoi = AoiGrid::new();
     let mut interval = tokio::time::interval(TICK_DT);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -264,6 +270,10 @@ pub async fn run(
                                 client_id,
                                 PerConnection::from_spawn(spawn, now),
                             );
+                            // Set the real AOI cell from spawn position.
+                            if let Some(conn) = connections.get_mut(&client_id) {
+                                conn.aoi_cell = aoi::cell_for(conn.pos.x, conn.pos.z);
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(char_id, error = %e, "failed to load character");
@@ -302,19 +312,24 @@ pub async fn run(
                         }
                     }
 
-                    // Broadcast EntityDespawn to every other in_world peer
-                    // before removing the conn from the map. Skip if the
-                    // leaver never entered the world (no EntitySpawn was
-                    // ever sent for them, so a despawn would land at peers
-                    // who never had a record).
-                    let despawn_id = connections
+                    // Track 7: remove leaver from the AOI grid BEFORE
+                    // computing recipients so entities_visible_from gives
+                    // the correct set of peers who could see this player.
+                    // Send EntityDespawn only to that AOI-visible set.
+                    let despawn_info = connections
                         .get(&client_id)
                         .filter(|c| c.in_world)
-                        .map(|c| c.char_id as u64);
-                    if let Some(entity_id) = despawn_id {
+                        .map(|c| (c.char_id as u64, c.aoi_cell));
+                    if let Some((entity_id, leaver_cell)) = despawn_info {
+                        aoi.remove(entity_id, leaver_cell);
+                        let visible_peers = aoi.entities_visible_from(leaver_cell);
                         let peer_ids: Vec<ClientId> = connections
                             .iter()
-                            .filter(|(id, c)| **id != client_id && c.in_world)
+                            .filter(|(id, c)| {
+                                **id != client_id
+                                    && c.in_world
+                                    && visible_peers.contains(*id)
+                            })
                             .map(|(id, _)| *id)
                             .collect();
                         for peer_id in peer_ids {
@@ -596,9 +611,21 @@ pub async fn run(
             if !connections.contains_key(new_id) {
                 continue;
             }
+            // Track 7: insert the new player into the AOI grid so
+            // entities_visible_from returns the correct neighbourhood.
+            // peer_ids is filtered to AOI-visible peers only: they're
+            // the ones who received EntitySpawn for the new player and
+            // should also seed their state in return.
+            if let Some(conn) = connections.get(new_id) {
+                aoi.insert(conn.char_id as u64, conn.aoi_cell);
+            }
+            let visible_to_new = connections
+                .get(new_id)
+                .map(|c| aoi.entities_visible_from(c.aoi_cell))
+                .unwrap_or_default();
             let peer_ids: Vec<ClientId> = connections
                 .iter()
-                .filter(|(id, c)| *id != new_id && c.in_world)
+                .filter(|(id, c)| *id != new_id && c.in_world && visible_to_new.contains(*id))
                 .map(|(id, _)| *id)
                 .collect();
             // New client → existing peers. Mirror of the "Existing peers
@@ -684,30 +711,34 @@ pub async fn run(
                     );
                 }
             }
-            // Track 5 sub-task 1B — seed the new joiner with every alive
-            // enemy. Subsequent live spawns fan out via the spawner phase
-            // below; this catches everything that existed before the
-            // joiner arrived.
+            // Track 5 sub-task 1B — seed the new joiner with alive enemies
+            // in their AOI neighbourhood. Track 7: filter by aoi.can_see
+            // so only nearby enemies are seeded on enter-world.
+            let joiner_cell = connections.get(new_id).map(|c| c.aoi_cell).unwrap_or((0, 0));
             for entity in enemies.values() {
                 if !entity.is_alive() {
                     continue;
                 }
-                handlers::fan_out_enemy_spawn(
-                    &mut server,
-                    std::slice::from_ref(new_id),
-                    entity,
-                );
+                let enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
+                if aoi.can_see(joiner_cell, enemy_cell) {
+                    handlers::fan_out_enemy_spawn(
+                        &mut server,
+                        std::slice::from_ref(new_id),
+                        entity,
+                    );
+                }
             }
-            // Track 5 sub-task 4 — seed the new joiner with every live
-            // loot bag. Bags persist across player joins (until the
-            // 120 s linger expires), so a late joiner can still see
-            // unlooted drops from earlier kills.
+            // Track 5 sub-task 4 — seed the new joiner with live loot bags
+            // in their AOI neighbourhood. Track 7: filter by aoi.can_see.
             for bag in loot_bags.values() {
-                handlers::fan_out_loot_bag_spawn(
-                    &mut server,
-                    std::slice::from_ref(new_id),
-                    bag,
-                );
+                let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
+                if aoi.can_see(joiner_cell, bag_cell) {
+                    handlers::fan_out_loot_bag_spawn(
+                        &mut server,
+                        std::slice::from_ref(new_id),
+                        bag,
+                    );
+                }
             }
         }
 
@@ -864,12 +895,25 @@ pub async fn run(
                     .map(|(id, _)| *id)
                     .collect();
                 for entity in newly_spawned {
+                    // Track 7: add the enemy to the AOI grid so player
+                    // cell-change fan-outs can find it, then fan EnemySpawn
+                    // only to players who can see its cell.
+                    let enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
+                    aoi.insert(entity.id, enemy_cell);
                     if !spawn_recipients.is_empty() {
-                        handlers::fan_out_enemy_spawn(
-                            &mut server,
-                            &spawn_recipients,
-                            &entity,
-                        );
+                        let visible = aoi.entities_visible_from(enemy_cell);
+                        let aoi_recipients: Vec<ClientId> = spawn_recipients
+                            .iter()
+                            .copied()
+                            .filter(|id| visible.contains(id))
+                            .collect();
+                        if !aoi_recipients.is_empty() {
+                            handlers::fan_out_enemy_spawn(
+                                &mut server,
+                                &aoi_recipients,
+                                &entity,
+                            );
+                        }
                     }
                     enemies.insert(entity.id, entity);
                 }
@@ -1217,11 +1261,23 @@ pub async fn run(
                         let stacks_for_log = items.len();
                         let bag = LootBag::new(entity.pos, items, now);
                         let bag_id = bag.id;
-                        handlers::fan_out_loot_bag_spawn(
-                            &mut server,
-                            &in_world_recipients_now,
-                            &bag,
-                        );
+                        // Track 7: add bag to AOI; fan LootBagSpawn only
+                        // to players who can see the bag's cell.
+                        let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
+                        aoi.insert(bag_id, bag_cell);
+                        let visible = aoi.entities_visible_from(bag_cell);
+                        let bag_recipients: Vec<ClientId> = in_world_recipients_now
+                            .iter()
+                            .copied()
+                            .filter(|id| visible.contains(id))
+                            .collect();
+                        if !bag_recipients.is_empty() {
+                            handlers::fan_out_loot_bag_spawn(
+                                &mut server,
+                                &bag_recipients,
+                                &bag,
+                            );
+                        }
                         loot_bags.insert(bag.id, bag);
                         tracing::info!(
                             mob = %entity.mob.name,
@@ -1995,10 +2051,15 @@ pub async fn run(
                 .collect();
             let mut target_changes: Vec<(EntityId, Option<EntityId>)> = Vec::new();
             let mut enemy_hits: Vec<(EntityId, HitIntent)> = Vec::new();
+            // Track 7: collect enemy cell changes so the aoi grid stays
+            // current. Player cell-change fan-outs read the grid to find
+            // which enemies are now visible.
+            let mut enemy_cell_changes: Vec<(EntityId, (i32, i32), (i32, i32))> = Vec::new();
             for entity in enemies.values_mut() {
                 if !entity.is_alive() {
                     continue;
                 }
+                let old_enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
                 let events = entity.tick_ai(&player_snapshots, dt, now);
                 if let Some(new_target) = events.target_changed {
                     target_changes.push((entity.id, new_target));
@@ -2006,6 +2067,13 @@ pub async fn run(
                 if let Some(hit) = events.hit {
                     enemy_hits.push((entity.id, hit));
                 }
+                let new_enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
+                if new_enemy_cell != old_enemy_cell {
+                    enemy_cell_changes.push((entity.id, old_enemy_cell, new_enemy_cell));
+                }
+            }
+            for (id, old_cell, new_cell) in enemy_cell_changes {
+                aoi.update(id, old_cell, new_cell);
             }
             for (id, target) in target_changes {
                 handlers::fan_out_entity_target(
@@ -2170,8 +2238,15 @@ pub async fn run(
             let Some(entity) = enemies.remove(&id) else {
                 continue;
             };
+            // Track 7: remove from AOI; fan EntityDespawn only to players
+            // who could see the enemy's cell.
+            let enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
+            aoi.remove(entity.id, enemy_cell);
+            let visible = aoi.entities_visible_from(enemy_cell);
             for &recipient in &in_world_recipients_now {
-                handlers::send_entity_despawn(&mut server, recipient, entity.id);
+                if visible.contains(&recipient) {
+                    handlers::send_entity_despawn(&mut server, recipient, entity.id);
+                }
             }
             spawner.on_enemy_died(entity.spawn_point_idx, now);
         }
@@ -2221,16 +2296,28 @@ pub async fn run(
                         count,
                     );
                 }
+                // Track 7: capture position before potentially removing the bag.
+                let bag_id = bag.id;
+                let bag_pos = bag.pos;
+                let bag_cell = aoi::cell_for(bag_pos.x, bag_pos.z);
+                let bag_visible = aoi.entities_visible_from(bag_cell);
                 if bag.items.is_empty() {
-                    let bag_id = bag.id;
                     loot_bags.remove(&bag_id);
+                    aoi.remove(bag_id, bag_cell);
                     for &recipient in &in_world_recipients_now {
-                        handlers::send_entity_despawn(&mut server, recipient, bag_id);
+                        if bag_visible.contains(&recipient) {
+                            handlers::send_entity_despawn(&mut server, recipient, bag_id);
+                        }
                     }
                 } else {
+                    let bag_recipients: Vec<ClientId> = in_world_recipients_now
+                        .iter()
+                        .copied()
+                        .filter(|id| bag_visible.contains(id))
+                        .collect();
                     handlers::fan_out_loot_bag_spawn(
                         &mut server,
-                        &in_world_recipients_now,
+                        &bag_recipients,
                         bag,
                     );
                 }
@@ -2251,9 +2338,15 @@ pub async fn run(
             }
         }
         for id in expired_bags {
-            if loot_bags.remove(&id).is_some() {
+            if let Some(bag) = loot_bags.remove(&id) {
+                // Track 7: remove from AOI; fan EntityDespawn only to visible players.
+                let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
+                aoi.remove(id, bag_cell);
+                let visible = aoi.entities_visible_from(bag_cell);
                 for &recipient in &in_world_recipients_now {
-                    handlers::send_entity_despawn(&mut server, recipient, id);
+                    if visible.contains(&recipient) {
+                        handlers::send_entity_despawn(&mut server, recipient, id);
+                    }
                 }
             }
         }
@@ -2266,7 +2359,14 @@ pub async fn run(
         //    integrate zero — protects against a crashed client visually
         //    running forward until the heartbeat timeout.
         // dt was computed above for the AI tick; reuse.
-        for conn in connections.values_mut().filter(|c| c.ready) {
+        //
+        // Track 7: collect (client_id, old_cell, new_cell) for any player
+        // who crosses a cell boundary this tick. Applied to `aoi` and
+        // fanned as EntitySpawn/Despawn AFTER the loop so we don't hold
+        // a mutable borrow on `connections` while also needing it for
+        // the fan-out reads.
+        let mut cell_changes: Vec<(ClientId, (i32, i32), (i32, i32))> = Vec::new();
+        for (client_id, conn) in connections.iter_mut().filter(|(_, c)| c.ready) {
             let dir = match conn.last_move_received {
                 Some(t) if now.duration_since(t) < STALE_MOVE_THRESHOLD => {
                     conn.latest_direction
@@ -2293,6 +2393,109 @@ pub async fn run(
             conn.pos.x += dir.x * speed * dt;
             conn.pos.z += dir.z * speed * dt;
             // Y is not integrated — server tracks only XZ; gravity is client-side.
+
+            // Track 7: detect cell boundary crossing.
+            let new_cell = aoi::cell_for(conn.pos.x, conn.pos.z);
+            if new_cell != conn.aoi_cell {
+                cell_changes.push((*client_id, conn.aoi_cell, new_cell));
+                conn.aoi_cell = new_cell;
+            }
+        }
+
+        // 5b. Track 7 — AOI cell-change fan-out. For each player who
+        //     crossed a cell boundary, update the grid and fan
+        //     EntitySpawn to newly-visible peers (both directions) and
+        //     EntityDespawn to peers who left the neighbourhood.
+        for (mover_id, old_cell, new_cell) in &cell_changes {
+            let mover_entity = connections
+                .get(mover_id)
+                .map(|c| c.char_id as u64)
+                .unwrap_or(0);
+            if mover_entity == 0 {
+                continue;
+            }
+            let (gained_cells, lost_cells) = aoi.update(mover_entity, *old_cell, *new_cell);
+
+            // Newly visible — entities in cells that entered our neighbourhood.
+            let newly_visible = aoi.entities_in_cells(gained_cells.iter());
+            for &peer_entity in &newly_visible {
+                if peer_entity == mover_entity {
+                    continue;
+                }
+                if peer_entity >= protocol::world::LOOT_BAG_ID_BASE {
+                    // Loot bag — seed the mover with LootBagSpawn.
+                    if let Some(bag) = loot_bags.get(&peer_entity) {
+                        handlers::fan_out_loot_bag_spawn(
+                            &mut server,
+                            std::slice::from_ref(mover_id),
+                            bag,
+                        );
+                    }
+                } else if peer_entity >= protocol::world::ENEMY_ID_BASE {
+                    // Enemy — seed the mover with EnemySpawn.
+                    if let Some(entity) = enemies.get(&peer_entity) {
+                        if entity.is_alive() {
+                            handlers::fan_out_enemy_spawn(
+                                &mut server,
+                                std::slice::from_ref(mover_id),
+                                entity,
+                            );
+                        }
+                    }
+                } else {
+                    // Player — mutual EntitySpawn.
+                    let peer_id = peer_entity as ClientId;
+                    // Mover → peer: peer can now see the mover
+                    if let Some(mover_conn) = connections.get(mover_id) {
+                        if mover_conn.in_world {
+                            handlers::send_entity_spawn(&mut server, peer_id, mover_conn);
+                            handlers::fan_out_resources(
+                                &mut server,
+                                std::slice::from_ref(&peer_id),
+                                mover_conn,
+                            );
+                            handlers::fan_out_buff_snapshot(
+                                &mut server,
+                                std::slice::from_ref(&peer_id),
+                                mover_conn,
+                            );
+                        }
+                    }
+                    // Peer → mover: mover can now see the peer
+                    if let Some(peer_conn) = connections.get(&peer_id) {
+                        if peer_conn.in_world {
+                            handlers::send_entity_spawn(&mut server, *mover_id, peer_conn);
+                            handlers::fan_out_resources(
+                                &mut server,
+                                std::slice::from_ref(mover_id),
+                                peer_conn,
+                            );
+                            handlers::fan_out_buff_snapshot(
+                                &mut server,
+                                std::slice::from_ref(mover_id),
+                                peer_conn,
+                            );
+                        }
+                    }
+                }
+            }
+
+            // No longer visible — entities in cells that left our neighbourhood.
+            let no_longer_visible = aoi.entities_in_cells(lost_cells.iter());
+            for &peer_entity in &no_longer_visible {
+                if peer_entity == mover_entity {
+                    continue;
+                }
+                if peer_entity >= protocol::world::ENEMY_ID_BASE {
+                    // Enemy or bag — just tell the mover it's gone.
+                    handlers::send_entity_despawn(&mut server, *mover_id, peer_entity);
+                } else {
+                    // Player — mutual despawn.
+                    let peer_id = peer_entity as ClientId;
+                    handlers::send_entity_despawn(&mut server, peer_id, mover_entity);
+                    handlers::send_entity_despawn(&mut server, *mover_id, peer_entity);
+                }
+            }
         }
 
         // 5a. Track 6 sub-task 4a buff tick — process HoT / MP regen
@@ -2459,18 +2662,12 @@ pub async fn run(
             }
         }
 
-        // 6. Position fan-out. Every in_world client's position goes to
-        //    every in_world client INCLUDING themselves — Track 2's
-        //    snap-or-lerp depends on the owner receiving their own
-        //    broadcasts. Gated on in_world both ways so lobby-state
-        //    clients don't broadcast static positions and don't receive
-        //    Position broadcasts they couldn't render anyway. No AOI yet
-        //    (slice 3 is "everyone in zone sees everyone"); spatial
-        //    filtering is a future track.
-        //
-        //    Encode each sender once, clone bytes per recipient. At
-        //    MAX_CLIENTS=64 and ~50 B per Position, worst case is
-        //    64×64×50 = 200 KB/tick of memcpy ≈ 4 MB/s. Trivial.
+        // 6. Position fan-out. Track 7: AOI-filtered. Each sender's
+        //    position goes only to in_world players whose AOI cell is
+        //    within the 3×3 neighbourhood of the sender's cell.
+        //    Self-broadcast is preserved (sender is in its own
+        //    neighbourhood) — Track 2 snap-or-lerp still needs it.
+        //    Encode each sender once; clone bytes only to visible peers.
         let in_world_ids: Vec<ClientId> = connections
             .iter()
             .filter(|(_, c)| c.in_world)
@@ -2483,33 +2680,35 @@ pub async fn run(
             let Some(bytes) = handlers::build_position_msg(sender) else {
                 continue;
             };
+            let visible = aoi.entities_visible_from(sender.aoi_cell);
             for recipient_id in &in_world_ids {
-                server.send_message(*recipient_id, CHANNEL_POSITION, bytes.clone());
+                if visible.contains(recipient_id) {
+                    server.send_message(*recipient_id, CHANNEL_POSITION, bytes.clone());
+                }
             }
         }
 
-        // 6b. Enemy Position fan-out. Every alive enemy → every in_world
-        //     client. Idle / Attack / Dead enemies don't move so their
-        //     `events.moved` from step 4h gates whether they enter this
-        //     loop. Sequence increments per broadcast so the client can
-        //     drop out-of-order Position arrivals on the unreliable
-        //     channel (same role as PerConnection.last_move_seq).
+        // 6b. Enemy Position fan-out. Track 7: AOI-filtered by the
+        //     enemy's current XZ position. Only players whose cell is
+        //     in the 3×3 neighbourhood of the enemy's cell receive
+        //     the broadcast. Enemy entities are not yet in the AoiGrid
+        //     (that lands in Track 7 sub-task 5 with EnemySpawn
+        //     narrowing); the cell is computed inline from entity.pos.
         if !in_world_ids.is_empty() {
             for entity in enemies.values_mut() {
                 if !entity.is_alive() {
                     continue;
                 }
-                // Always broadcast for now — moving enemies need the live
-                // updates, stationary ones need the seed for a late
-                // joiner. A later optimisation can dedup with a per-entity
-                // `last_broadcast_pos` check; bandwidth at 27 × 20 Hz is
-                // trivial.
                 entity.seq = entity.seq.wrapping_add(1);
                 let Some(bytes) = handlers::build_enemy_position_msg(entity) else {
                     continue;
                 };
+                let enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
+                let visible = aoi.entities_visible_from(enemy_cell);
                 for recipient_id in &in_world_ids {
-                    server.send_message(*recipient_id, CHANNEL_POSITION, bytes.clone());
+                    if visible.contains(recipient_id) {
+                        server.send_message(*recipient_id, CHANNEL_POSITION, bytes.clone());
+                    }
                 }
             }
         }

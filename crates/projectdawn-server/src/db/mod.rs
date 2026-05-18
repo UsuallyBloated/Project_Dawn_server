@@ -523,6 +523,28 @@ pub async fn checkpoint_position(
     Ok(())
 }
 
+/// Test-only: directly set a character's world position in the DB. Used by
+/// AOI integration tests to place characters in specific grid cells before
+/// connecting, so the world server loads the overridden position at spawn.
+pub async fn set_character_position(
+    pool: &SqlitePool,
+    char_id: i64,
+    x: f64,
+    y: f64,
+    z: f64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE characters SET pos_x = ?1, pos_y = ?2, pos_z = ?3 WHERE id = ?4",
+    )
+    .bind(x)
+    .bind(y)
+    .bind(z)
+    .bind(char_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Track 6 periodic checkpoint for the resources the server now owns:
 /// current HP/MP/Stamina + accumulated XP. Called alongside
 /// `checkpoint_position` on the 60 s cadence and on disconnect so a power

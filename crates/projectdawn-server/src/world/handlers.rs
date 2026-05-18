@@ -218,7 +218,9 @@ pub fn handle_message(
             {
                 Vec3f::ZERO
             } else {
-                let v = Vec3f { x: direction.x, y: direction.y, z: direction.z };
+                // Y is zeroed — server does not simulate gravity or jumping.
+                // Only XZ is authoritative; vertical position stays at spawn height.
+                let v = Vec3f { x: direction.x, y: 0.0, z: direction.z };
                 v.clamp_length(1.0)
             };
             // Store the latest intent for the tick loop to integrate exactly
@@ -330,7 +332,7 @@ pub fn handle_message(
         }
 
         ClientWorldMsg::DamageSelf { amount } => {
-            if !conn.in_world || conn.hp <= 0.0 {
+            if !conn.in_world || conn.hp <= 0.0 || !conn.is_dev {
                 return Outcome::Continue;
             }
             let delta = amount.max(0) as f32;
@@ -346,7 +348,7 @@ pub fn handle_message(
         }
 
         ClientWorldMsg::HealSelf { amount } => {
-            if !conn.in_world {
+            if !conn.in_world || !conn.is_dev {
                 return Outcome::Continue;
             }
             let delta = amount.max(0) as f32;

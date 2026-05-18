@@ -2291,8 +2291,8 @@ pub async fn run(
             let snare_mult = (1.0 - snare).max(0.1);
             let speed = MAX_MOVE_SPEED * speed_buff * snare_mult;
             conn.pos.x += dir.x * speed * dt;
-            conn.pos.y += dir.y * speed * dt;
             conn.pos.z += dir.z * speed * dt;
+            // Y is not integrated — server tracks only XZ; gravity is client-side.
         }
 
         // 5a. Track 6 sub-task 4a buff tick — process HoT / MP regen

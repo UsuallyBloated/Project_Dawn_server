@@ -2,7 +2,18 @@
 //! `client_id` (which equals the renet `ConnectToken.client_id` we minted,
 //! which equals the player's `char_id`).
 
+use std::sync::OnceLock;
 use std::time::Instant;
+
+/// Returns true when the server was launched with `PD_DEV_CMDS=1`.
+/// Checked once at first call; cached for the process lifetime.
+/// Gates `HealSelf` / `DamageSelf` so random players can't restore
+/// themselves in a real deployment. Wire to a DB `is_gm` flag once
+/// auth lands.
+pub(super) fn dev_cmds_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("PD_DEV_CMDS").as_deref() == Ok("1"))
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Vec3f {
@@ -167,6 +178,11 @@ pub struct PerConnection {
     /// will layer atop the same flag.
     pub pvp_override_on: bool,
 
+    /// True when the server was started with `PD_DEV_CMDS=1`. Gates
+    /// `HealSelf` / `DamageSelf` so non-dev clients can't use them.
+    /// Future: wire to a DB `is_gm` flag from the auth token.
+    pub is_dev: bool,
+
     /// Track 6: fractional regen accumulator. The 20 Hz tick produces
     /// sub-integer amounts; we accumulate and only mutate `hp`/`mp`/
     /// `stamina` (and fan out) when the integer part bumps. Reset to 0.0
@@ -258,6 +274,7 @@ impl PerConnection {
             is_sitting: false,
             equipped_armor: 0,
             pvp_override_on: false,
+            is_dev: dev_cmds_enabled(),
             regen_hp_acc: 0.0,
             regen_mp_acc: 0.0,
             regen_stamina_acc: 0.0,

@@ -1500,6 +1500,105 @@ async fn pet_command_attack_locks_onto_target() {
     }
 }
 
+/// Track 12 Piece A2 — pet pulls aggro via threat re-eval. Walk
+/// player into camp, get aggro'd, summon skeleton, command attack;
+/// pet's accumulated threat eventually clears the 1.3× current-
+/// target multiplier and the enemy re-targets onto the pet,
+/// broadcasting an EntityTarget switch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pet_pulls_aggro_via_threat_reaggro() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "tnk", "Tanker", "Human", "Necromancer").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Walk into camp 0.
+    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
+    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
+    let walk_end = Instant::now() + Duration::from_millis(2_000);
+    let mut seq: u32 = 1;
+    while Instant::now() < walk_end {
+        a.send_move(seq, dir);
+        seq += 1;
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Wait for enemy to lock on us and start swinging. We capture
+    // the enemy id and confirm the player is the target.
+    let initial_target_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
+            matches!(m, ServerWorldMsg::EntityTarget { target: Some(t), .. }
+                if *t == a_char_id as u64)
+        })
+        .await
+        .expect("enemy targets the player initially");
+    let enemy_id: u64 = match initial_target_evt {
+        ServerWorldMsg::EntityTarget { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    // Summon Skeleton and lock it onto the enemy via /pet attack.
+    a.send_cast_start("Summon Skeleton", 3.0);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    tokio::time::sleep(Duration::from_millis(3100)).await;
+    a.send_cast_spell("Summon Skeleton", None);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    let pet_id: u64 = match a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+        })
+        .await
+        .expect("PetSpawn for own pet")
+    {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    a.send_pet_command(protocol::world::pet_command::ATTACK, Some(enemy_id));
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Skeleton dmg is 8/swing on 2.2 s interval; bare-handed human
+    // Necromancer is doing single-digit damage / 2-3 s. After ~3-4
+    // pet swings (each adding +8 threat against pet_id) plus the
+    // player's accumulated threat, the pet's threat passes 1.3× the
+    // player's and the enemy switches. Generous timeout because
+    // the player keeps adding threat too via auto-attacks... wait,
+    // the test doesn't send player attacks. Player threat only
+    // accumulates if THEY swing; the test client doesn't. So pet
+    // threat starts at 0, climbs by 8 per 2.2 s; player threat is
+    // 0 (the test doesn't send Attack). Pet pulls on the first
+    // swing because 8 >= 0 * 1.3 (but the > 0 guard catches that).
+    //
+    // To make this deterministic, send one player Attack so the
+    // player has > 0 threat; pet's accumulated swings then have
+    // to surpass it by 1.3×.
+    a.send_attack(enemy_id, "", false, DamageType::Physical);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let switch_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
+            matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(t), .. }
+                if *id == enemy_id && *t == pet_id)
+        })
+        .await
+        .expect("enemy re-targets onto the pet once threat passes 1.3× the player's");
+    let _ = switch_evt;
+}
+
 fn tick_one(client: &mut RenetClient, transport: &mut NetcodeClientTransport) {
     client.update(TICK_DT);
     if let Err(e) = transport.update(TICK_DT, client) {

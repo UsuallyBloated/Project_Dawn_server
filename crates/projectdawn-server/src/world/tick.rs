@@ -208,6 +208,9 @@ fn apply_spell_damage_to_enemy(
         let dmg = spell.base_damage.max(0.0) as i32;
         entity.hp = (entity.hp - dmg as f32).max(0.0);
         *entity.aggro.entry(caster_id).or_insert(0.0) += dmg as f32;
+        // Track 12 Piece A2 — caster threat mirrors aggro for the
+        // re-target check.
+        *entity.threat.entry(caster_id).or_insert(0.0) += dmg as f32;
         let entity_id = entity.id;
         let entity_hp = entity.hp;
         let entity_max_hp = entity.max_hp;
@@ -1360,6 +1363,10 @@ pub async fn run(
                 let amount = swing.amount.max(0);
                 entity.hp = (entity.hp - amount as f32).max(0.0);
                 *entity.aggro.entry(intent.attacker).or_insert(0.0) += amount as f32;
+                // Track 12 Piece A2 — also tracks per-actual-attacker
+                // threat for the AI re-target check. Mirrors aggro
+                // for a player attacker (no pet remapping here).
+                *entity.threat.entry(intent.attacker).or_insert(0.0) += amount as f32;
                 // Track 11.3 — record the attacker's last hit on an
                 // enemy so their pet (if any) can inherit the target
                 // on its next AI tick. Decayed by the pet's AI
@@ -2722,6 +2729,15 @@ pub async fn run(
                                 .entry(owner)
                                 .or_insert(0.0) += amount as f32;
                         }
+                        // Track 12 Piece A2 — threat accrues under
+                        // the pet's own id so the enemy can pull
+                        // onto a hard-hitting pet via the AI re-eval
+                        // even when the owner has been damaging it
+                        // longer.
+                        *target_entity
+                            .threat
+                            .entry(attacker)
+                            .or_insert(0.0) += amount as f32;
                         let new_hp = target_entity.hp;
                         let max_hp = target_entity.max_hp;
                         let died = new_hp <= 0.0;

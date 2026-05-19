@@ -85,9 +85,16 @@ pub struct Entity {
     pub state: EnemyState,
     /// Current aggro target. `None` outside Chase/Attack.
     pub target: Option<EntityId>,
-    /// Aggro table — accumulated damage per attacker, used on target
-    /// switch evaluation. Cleared on death.
+    /// Aggro / credit table — accumulated damage per attacker, used
+    /// for kill-credit XP routing on death. Pets contribute under
+    /// their OWNER's id so XP routes to the owner naturally.
     pub aggro: HashMap<EntityId, f32>,
+    /// Track 12 Piece A2 — per-actual-attacker threat table. Pets
+    /// contribute under their own id here (not the owner's). Used
+    /// only by the AI's `maybe_switch_target_by_threat` re-eval so
+    /// the enemy can pull onto a pet that out-damages its current
+    /// target by >= THREAT_SWITCH_MULT.
+    pub threat: HashMap<EntityId, f32>,
 
     /// Time of last melee swing. Compared against
     /// `mob.attack_interval` to gate attack firing.
@@ -162,6 +169,7 @@ impl Entity {
             state: EnemyState::Idle,
             target: None,
             aggro: HashMap::new(),
+            threat: HashMap::new(),
             last_attack_at: None,
             state_entered_at: now,
             mob,
@@ -198,6 +206,7 @@ impl Entity {
             state: EnemyState::Idle,
             target: None,
             aggro: HashMap::new(),
+            threat: HashMap::new(),
             last_attack_at: None,
             state_entered_at: now,
             mob,
@@ -437,6 +446,7 @@ impl Entity {
     }
 
     fn tick_chase(&mut self, targets: &[(EntityId, Vec3f)], dt: f32, now: Instant) {
+        self.maybe_switch_target_by_threat(targets);
         let Some(target_id) = self.target else {
             self.transition(EnemyState::Leash, now);
             return;
@@ -473,6 +483,7 @@ impl Entity {
         now: Instant,
         events: &mut AiEvents,
     ) {
+        self.maybe_switch_target_by_threat(targets);
         let Some(target_id) = self.target else {
             self.transition(EnemyState::Leash, now);
             return;
@@ -508,12 +519,45 @@ impl Entity {
         let dist = self.pos.distance_to(self.spawn_pos);
         if dist < LEASH_HOME_TOLERANCE {
             self.hp = self.max_hp;
+            // Track 12 Piece A2 — clear threat AND aggro on leash
+            // home. Returning to spawn is a fight reset; existing
+            // attackers shouldn't carry over residual threat into
+            // the next engagement.
+            self.threat.clear();
+            self.aggro.clear();
             self.transition(EnemyState::Idle, now);
             return;
         }
         let step = self.mob.speed * dt;
         self.face_toward(self.spawn_pos);
         self.pos = self.pos.step_toward(self.spawn_pos, step);
+    }
+
+    /// Track 12 Piece A2 — pet-induced threat redirect. If any
+    /// attacker in `threat` has accumulated damage >= the current
+    /// target's by THREAT_SWITCH_MULT (1.3×), and that attacker is
+    /// still in the targets slice (alive + visible), switch the
+    /// enemy onto them. Skips when there's no current target. Skips
+    /// when the highest threat IS the current target.
+    fn maybe_switch_target_by_threat(&mut self, targets: &[(EntityId, Vec3f)]) {
+        const THREAT_SWITCH_MULT: f32 = 1.3;
+        let Some(current) = self.target else { return };
+        let current_threat = self.threat.get(&current).copied().unwrap_or(0.0);
+        let mut best: Option<(EntityId, f32)> = None;
+        for (&id, &threat) in &self.threat {
+            if id == current { continue; }
+            if !targets.iter().any(|(t, _)| *t == id) { continue; }
+            match best {
+                None => best = Some((id, threat)),
+                Some((_, b)) if threat > b => best = Some((id, threat)),
+                _ => {}
+            }
+        }
+        if let Some((top_id, top_threat)) = best {
+            if top_threat >= current_threat * THREAT_SWITCH_MULT && top_threat > 0.0 {
+                self.target = Some(top_id);
+            }
+        }
     }
 
     fn face_toward(&mut self, target_pos: Vec3f) {

@@ -135,13 +135,10 @@ pub enum ClientWorldMsg {
     CancelCast,
 
     // Track 13.2 inventory ops live further down. The scaffolded
-    // SlotRef-based MoveItem / EquipItem / UnequipItem variants were
-    // never wired (the GDScript side has no bincode encoder for
-    // tagged enums); Track 13.2 uses string-based locations instead.
-    DropItem {
-        slot: SlotRef,
-        count: u32,
-    },
+    // SlotRef-based MoveItem / EquipItem / UnequipItem / DropItem
+    // variants were never wired (the GDScript side has no bincode
+    // encoder for tagged enums); Track 13.2 uses string-based
+    // locations instead.
     UseConsumable {
         slot: SlotRef,
     },
@@ -240,6 +237,27 @@ pub enum ClientWorldMsg {
         src_slot: u32,
         dst_location: String,
         dst_slot: u32,
+    },
+
+    /// Track 13.2.b — split `count` items off the src stack into
+    /// dst. Dst must be empty or hold the same item_path; on merge
+    /// the dst count saturates rather than overflowing.
+    SplitStack {
+        src_location: String,
+        src_slot: u32,
+        dst_location: String,
+        dst_slot: u32,
+        count: u32,
+    },
+
+    /// Track 13.2.b — drop `count` of the entry at `(location, slot)`
+    /// at the player's feet. `count == 0` drops the whole stack.
+    /// Server creates a single-stack `LootBag` at the caster's pos
+    /// and fans `LootBagSpawn` via the existing FFA loot pipeline.
+    DropItem {
+        location: String,
+        slot: u32,
+        count: u32,
     },
 
     // GM

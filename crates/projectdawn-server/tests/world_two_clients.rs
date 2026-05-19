@@ -284,6 +284,33 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
+    fn send_split_stack(
+        &mut self,
+        src_location: &str,
+        src_slot: u32,
+        dst_location: &str,
+        dst_slot: u32,
+        count: u32,
+    ) {
+        let msg = ClientWorldMsg::SplitStack {
+            src_location: src_location.into(),
+            src_slot,
+            dst_location: dst_location.into(),
+            dst_slot,
+            count,
+        };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
+    fn send_drop_item(&mut self, location: &str, slot: u32, count: u32) {
+        let msg = ClientWorldMsg::DropItem {
+            location: location.into(),
+            slot,
+            count,
+        };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
     async fn wait_for(
         &mut self,
         channel: u8,
@@ -1752,6 +1779,140 @@ async fn inventory_snapshot_arrives_on_enter_world() {
     if let ServerWorldMsg::InventorySnapshot { entries } = snap {
         assert!(entries.is_empty(), "fresh character has no items");
     }
+}
+
+/// Track 13.2.b — SplitStack carves part of a stack into another
+/// slot. Seeds 10 of a known item into slot 0 via direct DB write
+/// before EnterWorld, asserts the Snapshot reflects it, sends
+/// SplitStack(slot 0 → slot 5, count 3), asserts two
+/// InventoryDeltas arrive (slot 0 with count 7, slot 5 with count
+/// 3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn split_stack_carves_off_count() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "spl", "Splita", "Human", "Warrior").await;
+
+    // Seed inventory via the public DB helper before the client
+    // connects to the world server. This bypasses needing a real
+    // loot-drop flow to populate items in test time.
+    let db_url = h.db_url.clone();
+    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    projectdawn_server::db::save_inventory(
+        &pool,
+        a_char_id,
+        &[projectdawn_server::db::InventoryRow {
+            location: "base".into(),
+            slot: 0,
+            item_path: "res://items/cloth.tres".into(),
+            count: 10,
+        }],
+    )
+    .await
+    .expect("seed inventory");
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Confirm the seed lands on the wire.
+    let snap = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+        })
+        .await
+        .expect("snapshot");
+    if let ServerWorldMsg::InventorySnapshot { entries } = snap {
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].2, "res://items/cloth.tres");
+        assert_eq!(entries[0].3, 10);
+    }
+
+    a.send_split_stack("base", 0, "base", 5, 3);
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Two Deltas land: slot 0 with residual count 7, slot 5 with
+    // the new stack of 3.
+    let mut saw_src = false;
+    let mut saw_dst = false;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while (!saw_src || !saw_dst) && Instant::now() < deadline {
+        if let Some(msg) = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_millis(200), |m| {
+                matches!(m, ServerWorldMsg::InventoryDelta { .. })
+            })
+            .await
+        {
+            if let ServerWorldMsg::InventoryDelta { slot, item_path, count, .. } = msg {
+                let path = item_path.unwrap_or_default();
+                if slot == 0 && path == "res://items/cloth.tres" && count == 7 {
+                    saw_src = true;
+                }
+                if slot == 5 && path == "res://items/cloth.tres" && count == 3 {
+                    saw_dst = true;
+                }
+            }
+        }
+    }
+    assert!(saw_src && saw_dst, "expected both src and dst Deltas (src={saw_src}, dst={saw_dst})");
+}
+
+/// Track 13.2.b — DropItem removes from inventory and spawns a
+/// server-owned LootBag at the player's pos. Asserts:
+///   - InventoryDelta clears the source slot.
+///   - LootBagSpawn fans out with the dropped item.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_item_creates_loot_bag_at_player_pos() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "drp", "Dropper", "Human", "Warrior").await;
+    let db_url = h.db_url.clone();
+    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    projectdawn_server::db::save_inventory(
+        &pool,
+        a_char_id,
+        &[projectdawn_server::db::InventoryRow {
+            location: "base".into(),
+            slot: 0,
+            item_path: "res://items/cloth.tres".into(),
+            count: 5,
+        }],
+    )
+    .await
+    .expect("seed inventory");
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let _ = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+        })
+        .await
+        .expect("snapshot");
+
+    // Drop the whole stack (count=0).
+    a.send_drop_item("base", 0, 0);
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let delta = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { slot, item_path, .. }
+                if *slot == 0 && item_path.is_none())
+        })
+        .await
+        .expect("inventory slot cleared");
+    let _ = delta;
+
+    let bag_spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::LootBagSpawn { items, .. }
+                if items.iter().any(|(p, c)| p == "res://items/cloth.tres" && *c == 5))
+        })
+        .await
+        .expect("LootBag spawns with the dropped stack");
+    let _ = bag_spawn;
 }
 
 /// Track 13.2 — MoveItem on a non-existent source slot is rejected

@@ -713,6 +713,23 @@ pub async fn run(
             dst_slot: u32,
         }
         let mut move_item_intents: Vec<MoveItemI> = Vec::new();
+        // Track 13.2.b — split + drop intents.
+        struct SplitStackI {
+            owner: u64,
+            src_location: String,
+            src_slot: u32,
+            dst_location: String,
+            dst_slot: u32,
+            count: u32,
+        }
+        let mut split_stack_intents: Vec<SplitStackI> = Vec::new();
+        struct DropItemI {
+            owner: u64,
+            location: String,
+            slot: u32,
+            count: u32,
+        }
+        let mut drop_item_intents: Vec<DropItemI> = Vec::new();
         for client_id in client_ids {
             // Skip clients whose Connected event is in the queue but whose
             // PerConnection row hasn't been built yet (load_character failed
@@ -829,6 +846,36 @@ pub async fn run(
                                 src_slot,
                                 dst_location,
                                 dst_slot,
+                            });
+                        }
+                        Outcome::SplitStackIntent {
+                            owner,
+                            src_location,
+                            src_slot,
+                            dst_location,
+                            dst_slot,
+                            count,
+                        } => {
+                            split_stack_intents.push(SplitStackI {
+                                owner,
+                                src_location,
+                                src_slot,
+                                dst_location,
+                                dst_slot,
+                                count,
+                            });
+                        }
+                        Outcome::DropItemIntent {
+                            owner,
+                            location,
+                            slot,
+                            count,
+                        } => {
+                            drop_item_intents.push(DropItemI {
+                                owner,
+                                location,
+                                slot,
+                                count,
                             });
                         }
                         Outcome::GroupInviteIntent { inviter, target_name } => {
@@ -2855,6 +2902,165 @@ pub async fn run(
                     src,
                     dst,
                     "MoveItem applied"
+                );
+            }
+        }
+
+        // 4he. Track 13.2.b — apply split-stack intents. Splits part
+        //      of one base stack into another slot (empty dst or
+        //      merge same-path dst). Bag/equip locations defer.
+        if !split_stack_intents.is_empty() {
+            for intent in split_stack_intents.drain(..) {
+                if intent.src_location != "base" || intent.dst_location != "base" {
+                    tracing::debug!(
+                        owner = intent.owner,
+                        src_loc = %intent.src_location,
+                        dst_loc = %intent.dst_location,
+                        "SplitStack rejected — non-base locations not yet supported"
+                    );
+                    continue;
+                }
+                let owner_cid = intent.owner as ClientId;
+                let Some(conn) = connections.get_mut(&owner_cid) else {
+                    continue;
+                };
+                let src = intent.src_slot as usize;
+                let dst = intent.dst_slot as usize;
+                let touched = match conn.inventory.split_base(src, dst, intent.count) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::debug!(
+                            owner = intent.owner,
+                            src,
+                            dst,
+                            count = intent.count,
+                            error = %e,
+                            "SplitStack rejected"
+                        );
+                        continue;
+                    }
+                };
+                conn.inventory_dirty = true;
+                let deltas: Vec<(u32, Option<(String, u32)>)> = touched
+                    .iter()
+                    .map(|&i| {
+                        let payload = conn
+                            .inventory
+                            .base
+                            .get(i)
+                            .and_then(|s| s.as_ref())
+                            .map(|e| (e.item_path.clone(), e.count));
+                        (i as u32, payload)
+                    })
+                    .collect();
+                for (slot, payload) in deltas {
+                    let (item_path, count) = match payload {
+                        Some((p, c)) => (Some(p), c),
+                        None => (None, 0),
+                    };
+                    handlers::send_inventory_delta(
+                        &mut server,
+                        owner_cid,
+                        "base".to_string(),
+                        slot,
+                        item_path,
+                        count,
+                    );
+                }
+                tracing::debug!(owner = intent.owner, src, dst, count = intent.count, "SplitStack applied");
+            }
+        }
+
+        // 4hf. Track 13.2.b — apply drop-item intents. Removes
+        //      `count` from `(base, slot)` (0 = whole stack) and
+        //      spawns a server-owned LootBag at the player's pos
+        //      via the existing pipeline. The bag is FFA — any
+        //      player nearby can pick it up — matching the GDScript
+        //      behaviour of "drop on ground".
+        if !drop_item_intents.is_empty() {
+            for intent in drop_item_intents.drain(..) {
+                if intent.location != "base" {
+                    tracing::debug!(
+                        owner = intent.owner,
+                        loc = %intent.location,
+                        "DropItem rejected — non-base locations not yet supported"
+                    );
+                    continue;
+                }
+                let owner_cid = intent.owner as ClientId;
+                let drop_pos: Vec3f;
+                let dropped: Option<(String, u32)>;
+                if let Some(conn) = connections.get_mut(&owner_cid) {
+                    drop_pos = conn.pos;
+                    dropped = conn.inventory.drop_base(intent.slot as usize, intent.count);
+                    if dropped.is_some() {
+                        conn.inventory_dirty = true;
+                    }
+                } else {
+                    continue;
+                }
+                let Some((item_path, count)) = dropped else {
+                    tracing::debug!(
+                        owner = intent.owner,
+                        slot = intent.slot,
+                        "DropItem rejected — empty slot"
+                    );
+                    continue;
+                };
+                // Inventory Delta for the source slot — reflect the
+                // new state (residual count or empty).
+                let post = connections
+                    .get(&owner_cid)
+                    .and_then(|c| {
+                        c.inventory
+                            .base
+                            .get(intent.slot as usize)
+                            .and_then(|s| s.as_ref())
+                            .map(|e| (e.item_path.clone(), e.count))
+                    });
+                let (delta_path, delta_count) = match post {
+                    Some((p, c)) => (Some(p), c),
+                    None => (None, 0),
+                };
+                handlers::send_inventory_delta(
+                    &mut server,
+                    owner_cid,
+                    "base".to_string(),
+                    intent.slot,
+                    delta_path,
+                    delta_count,
+                );
+                // Spawn a single-stack LootBag at the player's feet
+                // and fan via the existing AOI-filtered loot pipeline.
+                let bag = loot::LootBag::new(
+                    drop_pos,
+                    vec![loot::LootItemStack { item_path: item_path.clone(), count }],
+                    now,
+                );
+                let bag_id = bag.id;
+                let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
+                aoi.insert(bag_id, bag_cell);
+                let visible = aoi.entities_visible_from(bag_cell);
+                let bag_recipients: Vec<ClientId> = in_world_recipients_now
+                    .iter()
+                    .copied()
+                    .filter(|id| visible.contains(id))
+                    .collect();
+                if !bag_recipients.is_empty() {
+                    handlers::fan_out_loot_bag_spawn(
+                        &mut server,
+                        &bag_recipients,
+                        &bag,
+                    );
+                }
+                loot_bags.insert(bag_id, bag);
+                tracing::info!(
+                    owner = intent.owner,
+                    slot = intent.slot,
+                    %item_path,
+                    count,
+                    bag_id,
+                    "DropItem spawned loot bag"
                 );
             }
         }

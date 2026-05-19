@@ -711,6 +711,43 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// Track 13.2.b — split `count` items off the src stack into
+    /// `dst`. Both locations are `"base"` for now. Dst must be
+    /// empty or hold the same item_path (merge); on different items
+    /// the server rejects.
+    #[func]
+    fn send_split_stack(
+        &mut self,
+        src_location: GString,
+        src_slot: i64,
+        dst_location: GString,
+        dst_slot: i64,
+        count: i64,
+    ) -> bool {
+        let msg = ClientWorldMsg::SplitStack {
+            src_location: src_location.to_string(),
+            src_slot: src_slot.max(0) as u32,
+            dst_location: dst_location.to_string(),
+            dst_slot: dst_slot.max(0) as u32,
+            count: count.max(0) as u32,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// Track 13.2.b — drop `count` of the entry at `(location, slot)`
+    /// at the player's feet. `count <= 0` drops the whole stack.
+    /// Server spawns a server-owned LootBag at the caster's pos
+    /// (FFA — any nearby player can pick it up).
+    #[func]
+    fn send_drop_item(&mut self, location: GString, slot: i64, count: i64) -> bool {
+        let msg = ClientWorldMsg::DropItem {
+            location: location.to_string(),
+            slot: slot.max(0) as u32,
+            count: count.max(0) as u32,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
     /// Track 12 Piece A — player issues a command to their pet.
     /// `command` is one of `protocol::world::pet_command::*` (Attack=2,
     /// Back=3 are the MVP set; Follow=0 aliases to Back today).

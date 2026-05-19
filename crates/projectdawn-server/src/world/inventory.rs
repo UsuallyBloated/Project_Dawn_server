@@ -139,6 +139,89 @@ impl PlayerInventory {
         Err("inventory full")
     }
 
+    /// Track 13.2.b — split `count` items off src into dst. Dst must
+    /// be empty or hold the same item_path (merge); different
+    /// item_paths are rejected (the legacy UI uses MoveItem for
+    /// swaps). Src is reduced by `count`; if that empties it, the
+    /// slot is cleared. Returns the touched slots so the caller
+    /// fans one `InventoryDelta` per slot.
+    pub fn split_base(
+        &mut self,
+        src: usize,
+        dst: usize,
+        count: u32,
+    ) -> Result<Vec<usize>, &'static str> {
+        if src >= BASE_SLOT_COUNT || dst >= BASE_SLOT_COUNT {
+            return Err("slot out of range");
+        }
+        if src == dst {
+            return Err("src == dst");
+        }
+        if count == 0 {
+            return Err("zero count");
+        }
+        let src_entry = self
+            .base
+            .get(src)
+            .and_then(|s| s.as_ref())
+            .ok_or("source slot empty")?;
+        if src_entry.count < count {
+            return Err("source has fewer items than split count");
+        }
+        let src_path = src_entry.item_path.clone();
+        // Validate dst before mutating either slot.
+        match self.base.get(dst).and_then(|s| s.as_ref()) {
+            None => {} // empty dst — clean transfer.
+            Some(existing) if existing.item_path == src_path => {} // merge.
+            Some(_) => return Err("dst holds a different item"),
+        }
+        // Apply: subtract from src (clear if zero) then add to dst.
+        let src_now_zero;
+        {
+            let src_entry_mut = self.base[src].as_mut().expect("checked");
+            src_entry_mut.count -= count;
+            src_now_zero = src_entry_mut.count == 0;
+        }
+        if src_now_zero {
+            self.base[src] = None;
+        }
+        match self.base[dst].as_mut() {
+            Some(existing) => {
+                existing.count = existing.count.saturating_add(count);
+            }
+            None => {
+                self.base[dst] = Some(InventoryEntry {
+                    item_path: src_path,
+                    count,
+                });
+            }
+        }
+        Ok(vec![src, dst])
+    }
+
+    /// Track 13.2.b — remove `count` of the entry at `(base, slot)`.
+    /// `count == 0` drops the whole stack. Returns the item_path
+    /// and actual quantity removed (capped by the stack), plus
+    /// whether the slot is now empty. None if the slot was already
+    /// empty.
+    pub fn drop_base(&mut self, slot: usize, count: u32) -> Option<(String, u32)> {
+        if slot >= BASE_SLOT_COUNT {
+            return None;
+        }
+        let entry = self.base.get_mut(slot)?.as_mut()?;
+        let path = entry.item_path.clone();
+        let to_remove = if count == 0 || count >= entry.count {
+            entry.count
+        } else {
+            count
+        };
+        entry.count -= to_remove;
+        if entry.count == 0 {
+            self.base[slot] = None;
+        }
+        Some((path, to_remove))
+    }
+
     /// Track 13.2 — atomic move/swap between base slots. Move-to-empty
     /// is a clean transfer; move-to-occupied with the same item_path
     /// merges counts (caps at u32::MAX); move-to-occupied with a
@@ -269,6 +352,85 @@ mod tests {
         );
         assert_eq!(restored.base[0].as_ref().unwrap().count, 4);
         assert_eq!(restored.base[1].as_ref().unwrap().count, 7);
+    }
+
+    #[test]
+    fn split_base_carves_off_count() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item("res://items/cloth.tres", 10).unwrap();
+        let touched = inv.split_base(0, 5, 3).expect("split");
+        assert_eq!(touched, vec![0, 5]);
+        assert_eq!(inv.base[0].as_ref().unwrap().count, 7);
+        assert_eq!(inv.base[5].as_ref().unwrap().item_path, "res://items/cloth.tres");
+        assert_eq!(inv.base[5].as_ref().unwrap().count, 3);
+    }
+
+    #[test]
+    fn split_base_into_same_path_merges() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item("res://items/cloth.tres", 10).unwrap();
+        // Manually place a second stack of cloth at slot 2.
+        inv.base[2] = Some(InventoryEntry {
+            item_path: "res://items/cloth.tres".into(),
+            count: 4,
+        });
+        inv.split_base(0, 2, 3).expect("split merges");
+        assert_eq!(inv.base[2].as_ref().unwrap().count, 7);
+        assert_eq!(inv.base[0].as_ref().unwrap().count, 7);
+    }
+
+    #[test]
+    fn split_base_rejects_different_item_at_dst() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item("res://items/cloth.tres", 5).unwrap();
+        inv.add_item("res://items/iron.tres", 2).unwrap();
+        let err = inv.split_base(0, 1, 1);
+        assert!(err.is_err(), "different item paths must reject split");
+        assert_eq!(inv.base[0].as_ref().unwrap().count, 5, "src unchanged on reject");
+        assert_eq!(inv.base[1].as_ref().unwrap().count, 2, "dst unchanged on reject");
+    }
+
+    #[test]
+    fn split_base_full_carve_empties_src() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item("res://items/cloth.tres", 5).unwrap();
+        inv.split_base(0, 7, 5).expect("split-all");
+        assert!(inv.base[0].is_none(), "src empty after full carve");
+        assert_eq!(inv.base[7].as_ref().unwrap().count, 5);
+    }
+
+    #[test]
+    fn drop_base_partial_keeps_residual() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item("res://items/cloth.tres", 10).unwrap();
+        let (path, removed) = inv.drop_base(0, 3).expect("drop");
+        assert_eq!(path, "res://items/cloth.tres");
+        assert_eq!(removed, 3);
+        assert_eq!(inv.base[0].as_ref().unwrap().count, 7);
+    }
+
+    #[test]
+    fn drop_base_zero_count_drops_whole_stack() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item("res://items/cloth.tres", 10).unwrap();
+        let (_, removed) = inv.drop_base(0, 0).expect("drop whole");
+        assert_eq!(removed, 10);
+        assert!(inv.base[0].is_none());
+    }
+
+    #[test]
+    fn drop_base_count_exceeds_stack_drops_all() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item("res://items/cloth.tres", 5).unwrap();
+        let (_, removed) = inv.drop_base(0, 99).expect("drop over-cap");
+        assert_eq!(removed, 5, "drop caps at the stack size");
+        assert!(inv.base[0].is_none());
+    }
+
+    #[test]
+    fn drop_base_empty_slot_returns_none() {
+        let mut inv = PlayerInventory::new();
+        assert!(inv.drop_base(0, 1).is_none());
     }
 
     #[test]

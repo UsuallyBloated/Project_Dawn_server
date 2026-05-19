@@ -138,6 +138,26 @@ pub enum Outcome {
         dst_slot: u32,
     },
 
+    /// Track 13.2.b — split `count` items off src into dst. Both
+    /// locations are 'base' for now; bag locations defer to 13.2.c.
+    SplitStackIntent {
+        owner: u64,
+        src_location: String,
+        src_slot: u32,
+        dst_location: String,
+        dst_slot: u32,
+        count: u32,
+    },
+
+    /// Track 13.2.b — drop `count` items at the player's feet as
+    /// a server-owned loot bag. `count == 0` drops the whole stack.
+    DropItemIntent {
+        owner: u64,
+        location: String,
+        slot: u32,
+        count: u32,
+    },
+
     /// Track 5 sub-task 4 — player → server pickup intent for one slot
     /// of a loot bag. The tick loop validates bag existence + slot
     /// index + pickup range, removes the stack, sends `LootGranted`
@@ -600,6 +620,42 @@ pub fn handle_message(
                 src_slot,
                 dst_location,
                 dst_slot,
+            }
+        }
+
+        ClientWorldMsg::SplitStack {
+            src_location,
+            src_slot,
+            dst_location,
+            dst_slot,
+            count,
+        } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::SplitStackIntent {
+                owner: conn.char_id as u64,
+                src_location,
+                src_slot,
+                dst_location,
+                dst_slot,
+                count,
+            }
+        }
+
+        ClientWorldMsg::DropItem {
+            location,
+            slot,
+            count,
+        } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::DropItemIntent {
+                owner: conn.char_id as u64,
+                location,
+                slot,
+                count,
             }
         }
 

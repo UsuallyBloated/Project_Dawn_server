@@ -268,6 +268,22 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
+    fn send_move_item(
+        &mut self,
+        src_location: &str,
+        src_slot: u32,
+        dst_location: &str,
+        dst_slot: u32,
+    ) {
+        let msg = ClientWorldMsg::MoveItem {
+            src_location: src_location.into(),
+            src_slot,
+            dst_location: dst_location.into(),
+            dst_slot,
+        };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
     async fn wait_for(
         &mut self,
         channel: u8,
@@ -1714,6 +1730,64 @@ async fn non_beast_master_gets_no_auto_warder() {
         })
         .await;
     assert!(stray.is_none(), "Warrior must not receive an auto-summoned pet");
+}
+
+/// Track 13.2 — on EnterWorld the server seeds the client with a
+/// full inventory snapshot. New character has zero items, so the
+/// snapshot's entries list is empty. Just asserts the message
+/// arrives — proves the seed loop is wired.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inventory_snapshot_arrives_on_enter_world() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "inv", "Inv", "Human", "Warrior").await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    let snap = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+        })
+        .await
+        .expect("InventorySnapshot fans privately on EnterWorld");
+    if let ServerWorldMsg::InventorySnapshot { entries } = snap {
+        assert!(entries.is_empty(), "fresh character has no items");
+    }
+}
+
+/// Track 13.2 — MoveItem on a non-existent source slot is rejected
+/// silently (no Delta fan-out). Negative test for the dispatch
+/// validation. Tests both that the wire path round-trips and that
+/// the server doesn't crash on bogus inputs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn move_item_empty_source_drops_silently() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "mvi", "Mover", "Human", "Warrior").await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Wait for the EnterWorld snapshot so we know we're past the
+    // seed loop.
+    let _ = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+        })
+        .await
+        .expect("snapshot seed");
+
+    // Empty slot 0 → empty slot 3. Server should reject (source
+    // empty) without fanning a Delta.
+    a.send_move_item("base", 0, "base", 3);
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let stray = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { .. })
+        })
+        .await;
+    assert!(stray.is_none(), "MoveItem on empty source must not fan an InventoryDelta");
 }
 
 fn tick_one(client: &mut RenetClient, transport: &mut NetcodeClientTransport) {

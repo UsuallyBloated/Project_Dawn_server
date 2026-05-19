@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// `StaminaUpdate`); `ClientWorldMsg::ResourceUpdate` is removed because the
 /// authority flips and the client no longer broadcasts resources. One bump
 /// per track; individual sub-task commits append new variants under this id.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3038; // "PD_W0008"
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3039; // "PD_W0009"
 
 pub type EntityId = u64;
 pub type Sequence = u32;
@@ -134,17 +134,10 @@ pub enum ClientWorldMsg {
     },
     CancelCast,
 
-    // Inventory
-    MoveItem {
-        from: SlotRef,
-        to: SlotRef,
-    },
-    EquipItem {
-        from: SlotRef,
-    },
-    UnequipItem {
-        slot: EquipSlot,
-    },
+    // Track 13.2 inventory ops live further down. The scaffolded
+    // SlotRef-based MoveItem / EquipItem / UnequipItem variants were
+    // never wired (the GDScript side has no bincode encoder for
+    // tagged enums); Track 13.2 uses string-based locations instead.
     DropItem {
         slot: SlotRef,
         count: u32,
@@ -233,6 +226,20 @@ pub enum ClientWorldMsg {
     PetCommand {
         command: u8,
         target_id: Option<EntityId>,
+    },
+
+    /// Track 13.2 — player requests to move an inventory entry from
+    /// `src` to `dst`. The wire shape uses string `location` to
+    /// stay future-proof against bag / equip locations added in
+    /// later sub-tasks; for 13.2 only `'base'` is honoured server-
+    /// side. The server validates source occupancy + destination
+    /// empty / same-stack semantics, mutates, and fans
+    /// `InventoryDelta` for each affected slot.
+    MoveItem {
+        src_location: String,
+        src_slot: u32,
+        dst_location: String,
+        dst_slot: u32,
     },
 
     // GM
@@ -645,6 +652,30 @@ pub enum ServerWorldMsg {
         hp: f32,
         pos: Vec3,
         yaw: f32,
+    },
+
+    /// Track 13.2 — full inventory snapshot. Fanned privately to the
+    /// owning client on EnterWorld so they see their persisted items
+    /// from `character_items` rendered into their UI immediately.
+    /// `entries` is parallel arrays of (location, slot, item_path,
+    /// count); the client projects into its `Inventory.base_slots` /
+    /// `bag_contents` / `Equipment.equipped` shapes as appropriate.
+    InventorySnapshot {
+        entries: Vec<(String, u32, String, u32)>,
+    },
+
+    /// Track 13.2 — incremental inventory mutation. Fanned privately
+    /// to the owning client when the server adds, removes, or moves
+    /// an entry (loot grant, MoveItem, drop, equip). `item_path =
+    /// None` means the slot is now empty; otherwise the slot now
+    /// holds `(item_path, count)`. Slot-by-slot framing keeps the
+    /// wire shape stable across single-slot operations and bulk ones
+    /// (a swap fans two Deltas, a drop fans one).
+    InventoryDelta {
+        location: String,
+        slot: u32,
+        item_path: Option<String>,
+        count: u32,
     },
 }
 

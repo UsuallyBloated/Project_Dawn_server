@@ -702,6 +702,17 @@ pub async fn run(
         // `connections` borrow.
         struct PetCommandI { owner: u64, command: u8, target_id: Option<EntityId> }
         let mut pet_command_intents: Vec<PetCommandI> = Vec::new();
+        // Track 13.2 — move-item intents. Buffered like pet commands;
+        // dispatch runs after the message-drain so we don't overlap
+        // the handler's mut borrow on `conn`.
+        struct MoveItemI {
+            owner: u64,
+            src_location: String,
+            src_slot: u32,
+            dst_location: String,
+            dst_slot: u32,
+        }
+        let mut move_item_intents: Vec<MoveItemI> = Vec::new();
         for client_id in client_ids {
             // Skip clients whose Connected event is in the queue but whose
             // PerConnection row hasn't been built yet (load_character failed
@@ -804,6 +815,21 @@ pub async fn run(
                         }
                         Outcome::PetCommandIntent { owner, command, target_id } => {
                             pet_command_intents.push(PetCommandI { owner, command, target_id });
+                        }
+                        Outcome::MoveItemIntent {
+                            owner,
+                            src_location,
+                            src_slot,
+                            dst_location,
+                            dst_slot,
+                        } => {
+                            move_item_intents.push(MoveItemI {
+                                owner,
+                                src_location,
+                                src_slot,
+                                dst_location,
+                                dst_slot,
+                            });
                         }
                         Outcome::GroupInviteIntent { inviter, target_name } => {
                             group_invite_intents.push(GroupInviteI { inviter, target_name });
@@ -971,6 +997,15 @@ pub async fn run(
                         peer_conn,
                     );
                 }
+            }
+            // Track 13.2 — seed the new joiner with their own inventory
+            // snapshot. Private message; peers don't see it. Always
+            // fans (even if the snapshot is empty) so the client knows
+            // when the seed is complete and can flip into "render
+            // from server state" mode.
+            if let Some(new_conn) = connections.get(new_id) {
+                let entries = new_conn.inventory.to_snapshot_entries();
+                handlers::send_inventory_snapshot(&mut server, *new_id, entries);
             }
             // Track 5 sub-task 1B — seed the new joiner with alive enemies
             // in their AOI neighbourhood. Track 7: filter by aoi.can_see
@@ -2747,6 +2782,83 @@ pub async fn run(
             }
         }
 
+        // 4hd. Track 13.2 — apply move-item intents. Validates src
+        //      + dst (both must be base slots for the MVP set;
+        //      bag_<i> and equip arrive in 13.2.b / 13.3), mutates
+        //      `conn.inventory`, fans one `InventoryDelta` per
+        //      touched slot. inventory_dirty flips so the next
+        //      checkpoint persists the new state.
+        if !move_item_intents.is_empty() {
+            for intent in move_item_intents.drain(..) {
+                if intent.src_location != "base" || intent.dst_location != "base" {
+                    tracing::debug!(
+                        owner = intent.owner,
+                        src_loc = %intent.src_location,
+                        dst_loc = %intent.dst_location,
+                        "MoveItem rejected — non-base locations not yet supported"
+                    );
+                    continue;
+                }
+                let owner_cid = intent.owner as ClientId;
+                let Some(conn) = connections.get_mut(&owner_cid) else {
+                    continue;
+                };
+                let src = intent.src_slot as usize;
+                let dst = intent.dst_slot as usize;
+                let touched = match conn.inventory.move_base(src, dst) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::debug!(
+                            owner = intent.owner,
+                            src,
+                            dst,
+                            error = %e,
+                            "MoveItem rejected — move_base failed"
+                        );
+                        continue;
+                    }
+                };
+                if touched.is_empty() {
+                    continue;
+                }
+                conn.inventory_dirty = true;
+                // Snapshot the touched slots so we can fan Deltas
+                // without re-borrowing conn mutably.
+                let deltas: Vec<(u32, Option<(String, u32)>)> = touched
+                    .iter()
+                    .map(|&i| {
+                        let payload = conn
+                            .inventory
+                            .base
+                            .get(i)
+                            .and_then(|s| s.as_ref())
+                            .map(|e| (e.item_path.clone(), e.count));
+                        (i as u32, payload)
+                    })
+                    .collect();
+                for (slot, payload) in deltas {
+                    let (item_path, count) = match payload {
+                        Some((p, c)) => (Some(p), c),
+                        None => (None, 0),
+                    };
+                    handlers::send_inventory_delta(
+                        &mut server,
+                        owner_cid,
+                        "base".to_string(),
+                        slot,
+                        item_path,
+                        count,
+                    );
+                }
+                tracing::debug!(
+                    owner = intent.owner,
+                    src,
+                    dst,
+                    "MoveItem applied"
+                );
+            }
+        }
+
         // 4i. Enemy AI tick. Each alive enemy evaluates its state machine
         //     against the snapshot of in_world player positions, advances
         //     its own pos / target / state, and yields events for the
@@ -3290,22 +3402,31 @@ pub async fn run(
                     }
                 }
                 for (path, count) in granted {
-                    // Track 13.1 — server-side inventory mutation.
-                    // The wire shape is unchanged (LootGranted still
-                    // carries item_path + count and the client picks
-                    // the slot for now); 13.2 will narrow the slot
-                    // server-side and include it on the wire. Stack
-                    // overflow / inventory full just logs — the
-                    // client still accepts the grant and shows the
-                    // floating "+N item" pickup. 13.2 will reject
-                    // the intent server-side and stop the bag from
-                    // emptying when the player can't carry the
-                    // stack.
+                    // Track 13.2 — server-side inventory mutation +
+                    // authoritative slot pick. add_item_locating
+                    // returns the slot the new stack landed in
+                    // (stack target or first-empty). InventoryDelta
+                    // fan-out carries the slot so the client renders
+                    // the pickup in the exact spot the server chose,
+                    // avoiding the divergence Track 13.1 documented.
+                    // LootGranted still fires for the combat-log
+                    // line; the client's RemoteLootBagManager skips
+                    // the local add_item in launcher mode and
+                    // defers to InventoryDelta.
                     let looter_cid = intent.looter as ClientId;
+                    let mut delta: Option<(u32, String, u32)> = None;
                     if let Some(conn) = connections.get_mut(&looter_cid) {
-                        match conn.inventory.add_item(&path, count) {
-                            Ok(()) => {
+                        match conn.inventory.add_item_locating(&path, count) {
+                            Ok(slot_idx) => {
                                 conn.inventory_dirty = true;
+                                let entry = conn.inventory.base[slot_idx]
+                                    .as_ref()
+                                    .expect("just inserted");
+                                delta = Some((
+                                    slot_idx as u32,
+                                    entry.item_path.clone(),
+                                    entry.count,
+                                ));
                             }
                             Err(e) => {
                                 tracing::info!(
@@ -3313,10 +3434,20 @@ pub async fn run(
                                     item_path = %path,
                                     count,
                                     error = %e,
-                                    "server inventory add_item rejected; client still receives the grant for Track 13.1 compatibility",
+                                    "server inventory add_item rejected; client still receives LootGranted, no InventoryDelta",
                                 );
                             }
                         }
+                    }
+                    if let Some((slot_idx, item_path, total_count)) = delta {
+                        handlers::send_inventory_delta(
+                            &mut server,
+                            looter_cid,
+                            "base".to_string(),
+                            slot_idx,
+                            Some(item_path),
+                            total_count,
+                        );
                     }
                     handlers::send_loot_granted(
                         &mut server,

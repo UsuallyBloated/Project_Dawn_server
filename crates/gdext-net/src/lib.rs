@@ -10,10 +10,11 @@
 //! `HealthUpdate`, `ManaUpdate`, `StaminaUpdate`, `CastStart`,
 //! `CastComplete`, `CastFail`, `BuffSnapshot`, `Hit`, `Miss`, `Evade`,
 //! `EntityDied`, `EnemySpawn`, `EntityTarget`, `PetSpawn`,
-//! `LootBagSpawn`, `LootGranted`, `XpGained`. Other variants get
-//! bubbled up via `unhandled_server_message(channel, bytes)` for
-//! forward-compat — when their handlers land, add a typed `match` arm
-//! in `classify` and a matching emit in `fire`.
+//! `InventorySnapshot`, `InventoryDelta`, `LootBagSpawn`,
+//! `LootGranted`, `XpGained`. Other variants get bubbled up via
+//! `unhandled_server_message(channel, bytes)` for forward-compat —
+//! when their handlers land, add a typed `match` arm in `classify`
+//! and a matching emit in `fire`.
 
 // EntitySpawn signal carries 7 identity fields by design; godot-rust's
 // `#[godot_api]` proc-macro expands declarations into 8-arg fns (self + args),
@@ -199,6 +200,34 @@ impl NetClient {
         hp: f32,
         pos: Vector3,
         yaw: f32,
+    );
+
+    /// Track 13.2 — full inventory snapshot privately seeded to the
+    /// owning client on EnterWorld. Parallel arrays: locations[i] /
+    /// slots[i] / item_paths[i] / counts[i] all describe the same
+    /// entry. Empty arrays = empty inventory. Receiving the
+    /// snapshot tells the client to flip into "render from server
+    /// state" mode in launcher mode (legacy local Inventory autoload
+    /// kept for solo / Test Room).
+    #[signal]
+    fn inventory_snapshot(
+        locations: PackedStringArray,
+        slots: PackedInt32Array,
+        item_paths: PackedStringArray,
+        counts: PackedInt32Array,
+    );
+
+    /// Track 13.2 — single-slot mutation. `item_path` is empty when the
+    /// slot is now empty (server's wire-side `Option::None`); a non-
+    /// empty path means the slot now holds `(item_path, count)`.
+    /// Counts < 0 shouldn't happen (server validates) but the i64
+    /// width on the FFI boundary is conservative.
+    #[signal]
+    fn inventory_delta(
+        location: GString,
+        slot: i64,
+        item_path: GString,
+        count: i64,
     );
 
     /// Track 5 sub-task 4 — server-owned loot bag landed in the AOI.
@@ -661,6 +690,27 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// Track 13.2 — player requests a slot-to-slot inventory move.
+    /// `src_location` / `dst_location` are `"base"` for 13.2;
+    /// `"bag_<i>"` and `"equip"` are reserved for 13.2.b / 13.3.
+    /// Server validates and fans `InventoryDelta` per affected slot.
+    #[func]
+    fn send_move_item(
+        &mut self,
+        src_location: GString,
+        src_slot: i64,
+        dst_location: GString,
+        dst_slot: i64,
+    ) -> bool {
+        let msg = ClientWorldMsg::MoveItem {
+            src_location: src_location.to_string(),
+            src_slot: src_slot.max(0) as u32,
+            dst_location: dst_location.to_string(),
+            dst_slot: dst_slot.max(0) as u32,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
     /// Track 12 Piece A — player issues a command to their pet.
     /// `command` is one of `protocol::world::pet_command::*` (Attack=2,
     /// Back=3 are the MVP set; Follow=0 aliases to Back today).
@@ -810,6 +860,15 @@ enum Incoming {
         hp: f32,
         pos: WireVec3,
         yaw: f32,
+    },
+    InventorySnapshot {
+        entries: Vec<(String, u32, String, u32)>,
+    },
+    InventoryDelta {
+        location: String,
+        slot: u32,
+        item_path: Option<String>,
+        count: u32,
     },
     LootBagSpawn {
         bag_id: i64,
@@ -1165,6 +1224,44 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::InventorySnapshot { entries } => {
+                    let mut locations = PackedStringArray::new();
+                    let mut slots = PackedInt32Array::new();
+                    let mut item_paths = PackedStringArray::new();
+                    let mut counts = PackedInt32Array::new();
+                    for (loc, slot, path, count) in entries {
+                        locations.push(&GString::from(loc.as_str()));
+                        slots.push(slot as i32);
+                        item_paths.push(&GString::from(path.as_str()));
+                        counts.push(count as i32);
+                    }
+                    self.base_mut().emit_signal(
+                        "inventory_snapshot",
+                        &[
+                            locations.to_variant(),
+                            slots.to_variant(),
+                            item_paths.to_variant(),
+                            counts.to_variant(),
+                        ],
+                    );
+                }
+                Incoming::InventoryDelta {
+                    location,
+                    slot,
+                    item_path,
+                    count,
+                } => {
+                    let path_str = item_path.unwrap_or_default();
+                    self.base_mut().emit_signal(
+                        "inventory_delta",
+                        &[
+                            GString::from(location.as_str()).to_variant(),
+                            (slot as i64).to_variant(),
+                            GString::from(path_str.as_str()).to_variant(),
+                            (count as i64).to_variant(),
+                        ],
+                    );
+                }
                 Incoming::EntityTarget { id, target } => {
                     // `target == None` encodes as 0 over the wire (see
                     // signal docs). Mint a non-collision sentinel because
@@ -1420,6 +1517,20 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             hp,
             pos,
             yaw,
+        },
+        ServerWorldMsg::InventorySnapshot { entries } => {
+            Incoming::InventorySnapshot { entries }
+        }
+        ServerWorldMsg::InventoryDelta {
+            location,
+            slot,
+            item_path,
+            count,
+        } => Incoming::InventoryDelta {
+            location,
+            slot,
+            item_path,
+            count,
         },
         ServerWorldMsg::LootBagSpawn { bag_id, pos, items } => Incoming::LootBagSpawn {
             bag_id: bag_id as i64,

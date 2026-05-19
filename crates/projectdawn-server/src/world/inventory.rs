@@ -84,39 +84,113 @@ impl PlayerInventory {
         out
     }
 
+    /// Track 13.2 — project to the wire shape used by
+    /// `ServerWorldMsg::InventorySnapshot`. Parallel to `to_rows`
+    /// but emits the protocol's (location, slot, item_path, count)
+    /// tuple instead of the DB row struct.
+    pub fn to_snapshot_entries(&self) -> Vec<(String, u32, String, u32)> {
+        let mut out = Vec::new();
+        for (i, slot) in self.base.iter().enumerate() {
+            if let Some(entry) = slot {
+                out.push((
+                    "base".to_string(),
+                    i as u32,
+                    entry.item_path.clone(),
+                    entry.count,
+                ));
+            }
+        }
+        out
+    }
+
+    /// Track 13.2 — record the slot index used by the next `add_item`
+    /// (stack target or first-empty), then mutate. Returns the slot
+    /// index so the caller can fan a single targeted `InventoryDelta`
+    /// rather than diffing before/after snapshots. None on full
+    /// inventory.
+    pub fn add_item_locating(
+        &mut self,
+        item_path: &str,
+        count: u32,
+    ) -> Result<usize, &'static str> {
+        if count == 0 {
+            return Err("zero count");
+        }
+        if item_path.is_empty() {
+            return Err("empty item_path");
+        }
+        for (i, slot) in self.base.iter_mut().enumerate() {
+            if let Some(entry) = slot {
+                if entry.item_path == item_path {
+                    entry.count = entry.count.saturating_add(count);
+                    return Ok(i);
+                }
+            }
+        }
+        for (i, slot) in self.base.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(InventoryEntry {
+                    item_path: item_path.to_string(),
+                    count,
+                });
+                return Ok(i);
+            }
+        }
+        Err("inventory full")
+    }
+
+    /// Track 13.2 — atomic move/swap between base slots. Move-to-empty
+    /// is a clean transfer; move-to-occupied with the same item_path
+    /// merges counts (caps at u32::MAX); move-to-occupied with a
+    /// different item_path is a swap. Returns the list of slots
+    /// touched so the caller fans one `InventoryDelta` per slot.
+    pub fn move_base(&mut self, src: usize, dst: usize) -> Result<Vec<usize>, &'static str> {
+        if src >= BASE_SLOT_COUNT || dst >= BASE_SLOT_COUNT {
+            return Err("slot out of range");
+        }
+        if src == dst {
+            return Ok(Vec::new());
+        }
+        let src_entry = self.base[src].take();
+        let Some(src_entry) = src_entry else {
+            return Err("source slot empty");
+        };
+        let dst_entry = self.base[dst].take();
+        match dst_entry {
+            None => {
+                self.base[dst] = Some(src_entry);
+            }
+            Some(existing) if existing.item_path == src_entry.item_path => {
+                let merged_count = existing.count.saturating_add(src_entry.count);
+                self.base[dst] = Some(InventoryEntry {
+                    item_path: existing.item_path,
+                    count: merged_count,
+                });
+            }
+            Some(existing) => {
+                // Different item — swap. Src now holds what was in dst.
+                self.base[src] = Some(existing);
+                self.base[dst] = Some(src_entry);
+            }
+        }
+        Ok(vec![src, dst])
+    }
+
     /// Add `count` of `item_path` to the inventory. Stacks onto an
     /// existing slot with the same item_path first (unbounded stacks
     /// for now — the client's max_stack enforces visual splitting
     /// while the server tracks total ownership), falls back to the
     /// first empty slot. Returns `Err` if the inventory is full.
     ///
-    /// Track 13.2 will swap the unbounded-stack policy for a real
-    /// max_stack lookup against a server-side item registry.
+    /// Track 13.2 prefers `add_item_locating` which returns the
+    /// chosen slot index; this signature stays for the unit tests
+    /// that just need to assert "did the item land somewhere."
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn add_item(&mut self, item_path: &str, count: u32) -> Result<(), &'static str> {
         if count == 0 {
             return Ok(());
         }
-        if item_path.is_empty() {
-            return Err("empty item_path");
-        }
-        for slot in self.base.iter_mut() {
-            if let Some(entry) = slot {
-                if entry.item_path == item_path {
-                    entry.count = entry.count.saturating_add(count);
-                    return Ok(());
-                }
-            }
-        }
-        for slot in self.base.iter_mut() {
-            if slot.is_none() {
-                *slot = Some(InventoryEntry {
-                    item_path: item_path.to_string(),
-                    count,
-                });
-                return Ok(());
-            }
-        }
-        Err("inventory full")
+        self.add_item_locating(item_path, count).map(|_| ())
     }
 
     /// Track 13.2 will consume this when validating drop / split

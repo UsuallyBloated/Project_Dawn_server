@@ -127,6 +127,17 @@ pub enum Outcome {
         target_id: Option<protocol::world::EntityId>,
     },
 
+    /// Track 13.2 — player → server inventory move. Tick loop
+    /// validates src/dst, mutates `PerConnection.inventory`, and
+    /// fans `InventoryDelta` for each affected slot.
+    MoveItemIntent {
+        owner: u64,
+        src_location: String,
+        src_slot: u32,
+        dst_location: String,
+        dst_slot: u32,
+    },
+
     /// Track 5 sub-task 4 — player → server pickup intent for one slot
     /// of a loot bag. The tick loop validates bag existence + slot
     /// index + pickup range, removes the stack, sends `LootGranted`
@@ -574,6 +585,24 @@ pub fn handle_message(
             }
         }
 
+        ClientWorldMsg::MoveItem {
+            src_location,
+            src_slot,
+            dst_location,
+            dst_slot,
+        } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::MoveItemIntent {
+                owner: conn.char_id as u64,
+                src_location,
+                src_slot,
+                dst_location,
+                dst_slot,
+            }
+        }
+
         // The other ~30 ClientWorldMsg variants land in later tracks.
         // Unknown-but-decoded messages: ignore, don't kick. Unknown-and-
         // failed-to-decode messages don't reach here (decode error is
@@ -838,6 +867,42 @@ pub fn fan_out_enemy_spawn(
     for &recipient_id in recipients {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes.clone());
     }
+}
+
+/// Track 13.2 — fan out a full `InventorySnapshot` privately to one
+/// recipient (the owning client). Used to seed the client with its
+/// persisted inventory on EnterWorld so the local UI renders from
+/// authoritative state rather than the legacy local Inventory
+/// autoload.
+pub fn send_inventory_snapshot(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    entries: Vec<(String, u32, String, u32)>,
+) {
+    let msg = ServerWorldMsg::InventorySnapshot { entries };
+    let Some(bytes) = encode(&msg) else { return };
+    server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+}
+
+/// Track 13.2 — fan an `InventoryDelta` privately to one recipient
+/// when a single slot mutates (loot grant, MoveItem source / dest,
+/// drop, equip). `item_path = None` clears the slot.
+pub fn send_inventory_delta(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    location: String,
+    slot: u32,
+    item_path: Option<String>,
+    count: u32,
+) {
+    let msg = ServerWorldMsg::InventoryDelta {
+        location,
+        slot,
+        item_path,
+        count,
+    };
+    let Some(bytes) = encode(&msg) else { return };
+    server.send_message(recipient, CHANNEL_SYSTEM, bytes);
 }
 
 /// Track 11 — fan out `PetSpawn` for a freshly summoned pet. Same

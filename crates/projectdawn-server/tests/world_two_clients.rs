@@ -964,6 +964,81 @@ async fn aoi_approaching_client_triggers_entity_spawn() {
     .expect("B receives EntitySpawn for A when it crosses into A's neighbourhood");
 }
 
+/// Track 9 — server-side AOE damage. A Magician walks into camp 0's
+/// aggro radius until an enemy chases into melee, then casts Inferno
+/// (5 m radius, 45 base damage, FIRE). The server's AOE arm searches
+/// the caster's AOI neighbourhood, filters by radius, and fans a Hit
+/// per victim. Asserts at least one enemy receives a Fire Hit
+/// authored by the caster.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aoe_spell_damages_nearby_enemies() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "ino", "Inora", "Human", "Magician").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Walk toward camp 0's [20, 0, 5] for ~2 s — same pattern as
+    // player_attack_kills_enemy_and_corpse_despawns.
+    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
+    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
+    let walk_end = Instant::now() + Duration::from_millis(2_000);
+    let mut seq: u32 = 1;
+    while Instant::now() < walk_end {
+        a.send_move(seq, dir);
+        seq += 1;
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Wait for an enemy hit on us — proves an enemy chased into
+    // melee range, which puts it well within Inferno's 5 m radius.
+    let hit_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(20), |m| {
+            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
+        })
+        .await
+        .expect("an enemy locks on and swings");
+    let enemy_id: u64 = match hit_evt {
+        ServerWorldMsg::Hit { attacker, .. } => attacker,
+        _ => unreachable!(),
+    };
+    assert!(
+        enemy_id >= ENEMY_ID_BASE,
+        "attacker id must be an enemy id (got {enemy_id}, base {ENEMY_ID_BASE})"
+    );
+
+    // Cast Inferno. `target_id: None` because AOE doesn't take a
+    // single target — the server searches the caster's AOI for
+    // anything in radius. Burst a few ticks to drive the cast intent
+    // through the dispatch loop.
+    a.send_cast_spell("Inferno", None);
+    for _ in 0..6 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Inferno must fan at least one Hit with attacker=a, target=enemy,
+    // dmg_type=Fire. The amount is the authored base_damage (45) —
+    // server doesn't apply INT scale yet, matching single-target.
+    let aoe_hit = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(
+                m,
+                ServerWorldMsg::Hit { attacker, target, dmg_type, .. }
+                    if *attacker == a_char_id as u64
+                    && *target >= ENEMY_ID_BASE
+                    && matches!(dmg_type, DamageType::Fire)
+            )
+        })
+        .await
+        .expect("Inferno fans a Fire Hit to at least one enemy in range");
+    if let ServerWorldMsg::Hit { amount, .. } = aoe_hit {
+        assert_eq!(amount, 45, "Inferno authored base_damage is 45");
+    }
+}
+
 fn tick_one(client: &mut RenetClient, transport: &mut NetcodeClientTransport) {
     client.update(TICK_DT);
     if let Err(e) = transport.update(TICK_DT, client) {

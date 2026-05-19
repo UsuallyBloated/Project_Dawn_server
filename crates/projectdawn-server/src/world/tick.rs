@@ -166,6 +166,133 @@ fn fan_out_server_buff_snapshot(
     }
 }
 
+/// Track 9 — apply a single spell hit to one enemy. Shared by the
+/// single-target ENEMY arm and the AOE fan-out so the damage / death /
+/// kill-credit / loot / CC sequence stays in one place. Caller is
+/// responsible for range checks; this just applies the hit to the
+/// `target_id` enemy if it exists and is alive.
+///
+/// Returns `true` if damage landed (entity existed and was alive at
+/// entry), `false` otherwise.
+#[allow(clippy::too_many_arguments)]
+fn apply_spell_damage_to_enemy(
+    server: &mut RenetServer,
+    in_world_recipients: &[ClientId],
+    connections: &HashMap<ClientId, PerConnection>,
+    enemies: &mut HashMap<EntityId, Entity>,
+    loot_bags: &mut HashMap<EntityId, LootBag>,
+    aoi: &mut AoiGrid,
+    caster_id: u64,
+    target_id: EntityId,
+    spell: &spells::Spell,
+    dmg_type: DamageType,
+    now: Instant,
+) -> bool {
+    let (died, credit_id_opt, mob_xp, death_pos, mob_name) = {
+        let Some(entity) = enemies.get_mut(&target_id) else {
+            return false;
+        };
+        if !entity.is_alive() {
+            return false;
+        }
+        let dmg = spell.base_damage.max(0.0) as i32;
+        entity.hp = (entity.hp - dmg as f32).max(0.0);
+        *entity.aggro.entry(caster_id).or_insert(0.0) += dmg as f32;
+        let entity_id = entity.id;
+        let entity_hp = entity.hp;
+        let entity_max_hp = entity.max_hp;
+        let died = entity.hp <= 0.0;
+
+        handlers::fan_out_hit(
+            server,
+            in_world_recipients,
+            caster_id,
+            target_id,
+            dmg,
+            false,
+            dmg_type,
+        );
+        handlers::fan_out_health_update(
+            server,
+            in_world_recipients,
+            entity_id,
+            entity_hp,
+            entity_max_hp,
+        );
+
+        if died {
+            entity.transition(EnemyState::Dead, now);
+            handlers::fan_out_entity_died(server, in_world_recipients, entity_id);
+            let credit_id_opt = entity
+                .aggro
+                .iter()
+                .max_by(|a, b| {
+                    a.1.partial_cmp(b.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(&id, _)| id);
+            let mob_xp = entity.mob.xp;
+            let death_pos = entity.pos;
+            let mob_name = entity.mob.name.clone();
+            (true, credit_id_opt, mob_xp, death_pos, mob_name)
+        } else {
+            if dmg > 0 {
+                entity.clear_mez();
+            }
+            if spell.cc_duration > 0.0 {
+                entity.apply_cc(ActiveCc::new_mez(spell.cc_duration));
+            }
+            if spell.root_duration > 0.0 {
+                entity.apply_cc(ActiveCc::new_root(spell.root_duration));
+            }
+            if spell.slow_amount > 0.0 && spell.slow_duration > 0.0 {
+                entity.apply_cc(ActiveCc::new_snare(spell.slow_amount, spell.slow_duration));
+            }
+            if spell.attack_slow_amount > 0.0 && spell.attack_slow_duration > 0.0 {
+                entity.apply_cc(ActiveCc::new_attack_slow(
+                    spell.attack_slow_amount,
+                    spell.attack_slow_duration,
+                ));
+            }
+            (false, None, 0, entity.pos, String::new())
+        }
+    };
+
+    if died {
+        if let Some(credit_id) = credit_id_opt {
+            if mob_xp > 0 {
+                let cid = credit_id as ClientId;
+                if connections.contains_key(&cid) {
+                    handlers::send_xp_gained(server, cid, mob_xp);
+                }
+            }
+        }
+        if let Some(items) = loot::roll_for_mob(&mob_name) {
+            let bag = LootBag::new(death_pos, items, now);
+            let bag_id = bag.id;
+            let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
+            aoi.insert(bag_id, bag_cell);
+            let visible = aoi.entities_visible_from(bag_cell);
+            let bag_recipients: Vec<ClientId> = in_world_recipients
+                .iter()
+                .copied()
+                .filter(|id| visible.contains(id))
+                .collect();
+            if !bag_recipients.is_empty() {
+                handlers::fan_out_loot_bag_spawn(server, &bag_recipients, &bag);
+            }
+            loot_bags.insert(bag.id, bag);
+            tracing::info!(
+                mob = %mob_name,
+                bag_id,
+                "loot bag spawned (spell kill)"
+            );
+        }
+    }
+
+    true
+}
+
 /// Track 5 sub-task 4 — buffered loot pickup intent. `Slot(None)` is
 /// the "take everything" variant; `Slot(Some(idx))` is the
 /// "take one specific slot" variant. Same buffering rationale as
@@ -1820,115 +1947,113 @@ pub async fn run(
                             }
                             continue;
                         }
-                        // Enemy target — apply spell damage to the
-                        // enemy and propagate Hit / HealthUpdate.
-                        let dmg = spell.base_damage.max(0.0) as i32;
-                        let Some(entity) = enemies.get_mut(&target_id) else {
-                            continue;
-                        };
-                        if !entity.is_alive() {
-                            continue;
-                        }
-                        let dist = entity.pos.distance_to(caster_pos);
-                        // Spells use ranged range (GDScript Spells use
-                        // 25-30m by default); be permissive.
-                        if dist > RANGED_ATTACK_RANGE {
-                            tracing::debug!(
-                                caster = intent.caster,
-                                target = target_id,
-                                spell = %spell.name,
-                                dist,
-                                "spell out of range"
-                            );
-                            continue;
-                        }
-                        entity.hp = (entity.hp - dmg as f32).max(0.0);
-                        *entity.aggro.entry(intent.caster).or_insert(0.0) += dmg as f32;
-                        handlers::fan_out_hit(
-                            &mut server,
-                            &in_world_recipients_now,
-                            intent.caster,
-                            target_id,
-                            dmg,
-                            false,
-                            dmg_type,
-                        );
-                        handlers::fan_out_health_update(
-                            &mut server,
-                            &in_world_recipients_now,
-                            entity.id,
-                            entity.hp,
-                            entity.max_hp,
-                        );
-                        if entity.hp <= 0.0 {
-                            entity.transition(EnemyState::Dead, now);
-                            handlers::fan_out_entity_died(
-                                &mut server,
-                                &in_world_recipients_now,
-                                entity.id,
-                            );
-                            if let Some((&credit_id, _)) = entity
-                                .aggro
-                                .iter()
-                                .max_by(|a, b| {
-                                    a.1.partial_cmp(b.1)
-                                        .unwrap_or(std::cmp::Ordering::Equal)
-                                })
-                            {
-                                let xp = entity.mob.xp;
-                                if xp > 0 {
-                                    let cid = credit_id as ClientId;
-                                    if connections.contains_key(&cid) {
-                                        handlers::send_xp_gained(&mut server, cid, xp);
-                                    }
+                        // Enemy target — range-check, then apply spell
+                        // damage via the shared helper (Track 9; same
+                        // path AOE uses per victim).
+                        let in_range = match enemies.get(&target_id) {
+                            Some(e) if e.is_alive() => {
+                                let dist = e.pos.distance_to(caster_pos);
+                                if dist > RANGED_ATTACK_RANGE {
+                                    tracing::debug!(
+                                        caster = intent.caster,
+                                        target = target_id,
+                                        spell = %spell.name,
+                                        dist,
+                                        "spell out of range"
+                                    );
+                                    false
+                                } else {
+                                    true
                                 }
                             }
-                            if let Some(items) = loot::roll_for_mob(&entity.mob.name) {
-                                let bag = LootBag::new(entity.pos, items, now);
-                                let bag_id = bag.id;
-                                handlers::fan_out_loot_bag_spawn(
-                                    &mut server,
-                                    &in_world_recipients_now,
-                                    &bag,
-                                );
-                                loot_bags.insert(bag_id, bag);
-                            }
+                            _ => false,
+                        };
+                        if !in_range {
+                            continue;
                         }
-                        // Sub-task 3: damage breaks mez on enemies.
-                        if dmg > 0 {
-                            entity.clear_mez();
-                        }
-                        // Sub-task 2: apply CC from spell fields (only to
-                        // living enemies; dead enemies ignore CC).
-                        if entity.is_alive() {
-                            if spell.cc_duration > 0.0 {
-                                entity.apply_cc(ActiveCc::new_mez(spell.cc_duration));
-                            }
-                            if spell.root_duration > 0.0 {
-                                entity.apply_cc(ActiveCc::new_root(spell.root_duration));
-                            }
-                            if spell.slow_amount > 0.0 && spell.slow_duration > 0.0 {
-                                entity.apply_cc(ActiveCc::new_snare(
-                                    spell.slow_amount,
-                                    spell.slow_duration,
-                                ));
-                            }
-                            if spell.attack_slow_amount > 0.0
-                                && spell.attack_slow_duration > 0.0
-                            {
-                                entity.apply_cc(ActiveCc::new_attack_slow(
-                                    spell.attack_slow_amount,
-                                    spell.attack_slow_duration,
-                                ));
-                            }
-                        }
+                        apply_spell_damage_to_enemy(
+                            &mut server,
+                            &in_world_recipients_now,
+                            &connections,
+                            &mut enemies,
+                            &mut loot_bags,
+                            &mut aoi,
+                            intent.caster,
+                            target_id,
+                            spell,
+                            dmg_type,
+                            now,
+                        );
                     }
-                    "AOE" | "NONE" | _ => {
-                        // AOE / port / charm / etc. aren't applied
-                        // server-side in sub-task 3b. The mana already
-                        // deducted is the only server-side effect;
-                        // client-local handler covers the rest until a
-                        // later track lifts AOE / port authority.
+                    "AOE" => {
+                        // Track 9 — server-authoritative AOE damage.
+                        // Search the caster's AOI neighbourhood (3×3
+                        // cells around the caster, 360 m on a side at
+                        // CELL_SIZE=120), then filter by spell radius.
+                        // AOE spell radii top out around 6 m today, so
+                        // this is a tiny working set in practice.
+                        if spell.aoe_radius <= 0.0 {
+                            tracing::debug!(
+                                caster = intent.caster,
+                                spell = %spell.name,
+                                "AOE spell with no radius; nothing to apply"
+                            );
+                            continue;
+                        }
+                        let radius = spell.aoe_radius;
+                        let radius_sq = radius * radius;
+                        let caster_cell = aoi::cell_for(caster_pos.x, caster_pos.z);
+                        let visible = aoi.entities_visible_from(caster_cell);
+                        let mut victims: Vec<EntityId> = Vec::new();
+                        for id in visible {
+                            if id < protocol::world::ENEMY_ID_BASE
+                                || id >= protocol::world::LOOT_BAG_ID_BASE
+                            {
+                                continue;
+                            }
+                            if let Some(entity) = enemies.get(&id) {
+                                if !entity.is_alive() {
+                                    continue;
+                                }
+                                let dx = entity.pos.x - caster_pos.x;
+                                let dy = entity.pos.y - caster_pos.y;
+                                let dz = entity.pos.z - caster_pos.z;
+                                if dx * dx + dy * dy + dz * dz <= radius_sq {
+                                    victims.push(id);
+                                }
+                            }
+                        }
+                        let mut hits = 0;
+                        for victim in victims {
+                            if apply_spell_damage_to_enemy(
+                                &mut server,
+                                &in_world_recipients_now,
+                                &connections,
+                                &mut enemies,
+                                &mut loot_bags,
+                                &mut aoi,
+                                intent.caster,
+                                victim,
+                                spell,
+                                dmg_type,
+                                now,
+                            ) {
+                                hits += 1;
+                            }
+                        }
+                        tracing::info!(
+                            caster = intent.caster,
+                            spell = %spell.name,
+                            radius,
+                            hits,
+                            "AOE spell applied"
+                        );
+                    }
+                    "NONE" | _ => {
+                        // port / charm / pet-summon / bind etc. — not
+                        // applied server-side yet. Mana already deducted;
+                        // the client-local handler covers the rest until
+                        // a later track lifts that authority.
                         tracing::debug!(
                             caster = intent.caster,
                             spell = %spell.name,

@@ -9,11 +9,11 @@
 //! `Heartbeat`, `Kick`, `Position`, `EntitySpawn`, `EntityDespawn`,
 //! `HealthUpdate`, `ManaUpdate`, `StaminaUpdate`, `CastStart`,
 //! `CastComplete`, `CastFail`, `BuffSnapshot`, `Hit`, `Miss`, `Evade`,
-//! `EntityDied`, `EnemySpawn`, `EntityTarget`, `LootBagSpawn`,
-//! `LootGranted`, `XpGained`. Other variants get bubbled up via
-//! `unhandled_server_message(channel, bytes)` for forward-compat — when
-//! their handlers land, add a typed `match` arm in `classify` and a
-//! matching emit in `fire`.
+//! `EntityDied`, `EnemySpawn`, `EntityTarget`, `PetSpawn`,
+//! `LootBagSpawn`, `LootGranted`, `XpGained`. Other variants get
+//! bubbled up via `unhandled_server_message(channel, bytes)` for
+//! forward-compat — when their handlers land, add a typed `match` arm
+//! in `classify` and a matching emit in `fire`.
 
 // EntitySpawn signal carries 7 identity fields by design; godot-rust's
 // `#[godot_api]` proc-macro expands declarations into 8-arg fns (self + args),
@@ -184,6 +184,22 @@ impl NetClient {
     /// for both partitions.
     #[signal]
     fn entity_target(id: i64, target_id: i64);
+
+    /// Track 11 — server announces a player-owned pet at `pos`. `id` is
+    /// in the reserved pet partition (`>= PET_ID_BASE`) so the client
+    /// can disambiguate from EnemySpawn / EntitySpawn by id alone.
+    /// `owner` is the summoner's char_id (always in the player range).
+    #[signal]
+    fn pet_spawn(
+        id: i64,
+        owner: i64,
+        pet_name: GString,
+        level: i64,
+        max_hp: f32,
+        hp: f32,
+        pos: Vector3,
+        yaw: f32,
+    );
 
     /// Track 5 sub-task 4 — server-owned loot bag landed in the AOI.
     /// `items` is parallel arrays of (path, count) so the FFI stays
@@ -768,6 +784,16 @@ enum Incoming {
         id: i64,
         target: Option<i64>,
     },
+    PetSpawn {
+        id: i64,
+        owner: i64,
+        pet_name: String,
+        level: u32,
+        max_hp: f32,
+        hp: f32,
+        pos: WireVec3,
+        yaw: f32,
+    },
     LootBagSpawn {
         bag_id: i64,
         pos: WireVec3,
@@ -1098,6 +1124,30 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::PetSpawn {
+                    id,
+                    owner,
+                    pet_name,
+                    level,
+                    max_hp,
+                    hp,
+                    pos,
+                    yaw,
+                } => {
+                    self.base_mut().emit_signal(
+                        "pet_spawn",
+                        &[
+                            id.to_variant(),
+                            owner.to_variant(),
+                            GString::from(pet_name.as_str()).to_variant(),
+                            (level as i64).to_variant(),
+                            max_hp.to_variant(),
+                            hp.to_variant(),
+                            Vector3::new(pos.x, pos.y, pos.z).to_variant(),
+                            yaw.to_variant(),
+                        ],
+                    );
+                }
                 Incoming::EntityTarget { id, target } => {
                     // `target == None` encodes as 0 over the wire (see
                     // signal docs). Mint a non-collision sentinel because
@@ -1334,6 +1384,25 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
         ServerWorldMsg::EntityTarget { id, target } => Incoming::EntityTarget {
             id: id as i64,
             target: target.map(|t| t as i64),
+        },
+        ServerWorldMsg::PetSpawn {
+            id,
+            owner,
+            pet_name,
+            level,
+            max_hp,
+            hp,
+            pos,
+            yaw,
+        } => Incoming::PetSpawn {
+            id: id as i64,
+            owner: owner as i64,
+            pet_name,
+            level,
+            max_hp,
+            hp,
+            pos,
+            yaw,
         },
         ServerWorldMsg::LootBagSpawn { bag_id, pos, items } => Incoming::LootBagSpawn {
             bag_id: bag_id as i64,

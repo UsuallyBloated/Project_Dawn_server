@@ -10,7 +10,7 @@
 //! launcher-mode client will be a render-only consumer (sub-task 2).
 
 use super::{connection::Vec3f, zones::MobTemplate};
-use protocol::world::{EntityId, ENEMY_ID_BASE};
+use protocol::world::{EntityId, ENEMY_ID_BASE, PET_ID_BASE};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -104,6 +104,13 @@ pub struct Entity {
     /// Active crowd-control effects. Ticked every AI frame; empty is the
     /// common case (no per-tick allocation cost when idle).
     pub active_cc: Vec<ActiveCc>,
+
+    /// Track 11 — player-owned pet. `None` for world-spawned enemies
+    /// (the default); `Some(owner_char_id)` for pets summoned via
+    /// PET_SUMMON. Owner determines despawn-on-disconnect and (later)
+    /// follow-and-attack AI; identity also drives id partition
+    /// (>= PET_ID_BASE).
+    pub owner: Option<EntityId>,
 }
 
 /// Outcome of one AI tick. Carries the events the tick loop needs to
@@ -153,7 +160,47 @@ impl Entity {
             mob,
             seq: 0,
             active_cc: Vec::new(),
+            owner: None,
         }
+    }
+
+    /// Track 11 — instantiate a player-owned pet. Uses the pet id
+    /// partition (`>= PET_ID_BASE`) so the client routes pet-related
+    /// broadcasts separately from enemies. `spawn_point_idx` is set
+    /// to `usize::MAX` since pets aren't tied to a respawn point;
+    /// nothing in the code path that consumes this field runs for
+    /// pets (corpse cleanup arms by id partition for the despawn
+    /// fan-out instead).
+    pub fn from_pet_summon(
+        owner: EntityId,
+        pos: Vec3f,
+        mob: MobTemplate,
+        now: Instant,
+    ) -> Self {
+        let id = mint_pet_id();
+        let hp = mob.hp;
+        Self {
+            id,
+            spawn_point_idx: usize::MAX,
+            spawn_pos: pos,
+            pos,
+            yaw: 0.0,
+            hp,
+            max_hp: hp,
+            state: EnemyState::Idle,
+            target: None,
+            aggro: HashMap::new(),
+            last_attack_at: None,
+            state_entered_at: now,
+            mob,
+            seq: 0,
+            active_cc: Vec::new(),
+            owner: Some(owner),
+        }
+    }
+
+    pub fn is_pet(&self) -> bool {
+        self.owner.is_some()
     }
 
     pub fn is_alive(&self) -> bool {
@@ -413,6 +460,14 @@ static NEXT_ENEMY_ID: AtomicU64 = AtomicU64::new(ENEMY_ID_BASE);
 
 pub fn mint_enemy_id() -> EntityId {
     NEXT_ENEMY_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Track 11 — monotonic pet-id counter, partitioned above bags. Same
+/// never-reused semantics as enemy ids.
+static NEXT_PET_ID: AtomicU64 = AtomicU64::new(PET_ID_BASE);
+
+pub fn mint_pet_id() -> EntityId {
+    NEXT_PET_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 #[cfg(test)]

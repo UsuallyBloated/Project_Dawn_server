@@ -13,6 +13,7 @@ use super::{
     items,
     loot::{self, LootBag},
     persistence,
+    pet_templates,
     regen,
     spawn_points::Spawner,
     spells,
@@ -473,6 +474,44 @@ pub async fn run(
                                 &mut server,
                                 peer_id,
                                 entity_id,
+                            );
+                        }
+
+                        // Track 11 — leaver's pet (if any) dies with
+                        // them. Drop from AOI + enemies map, fan
+                        // EntityDespawn to peers who could see the
+                        // pet's cell. Future work: hand off pets on
+                        // zone change rather than instant despawn.
+                        let owned_pets: Vec<(EntityId, Vec3f)> = enemies
+                            .iter()
+                            .filter(|(_, e)| e.owner == Some(entity_id))
+                            .map(|(id, e)| (*id, e.pos))
+                            .collect();
+                        for (pet_id, pet_pos) in owned_pets {
+                            let pet_cell = aoi::cell_for(pet_pos.x, pet_pos.z);
+                            aoi.remove(pet_id, pet_cell);
+                            let pet_visible = aoi.entities_visible_from(pet_cell);
+                            let pet_recipients: Vec<ClientId> = connections
+                                .iter()
+                                .filter(|(id, c)| {
+                                    **id != client_id
+                                        && c.in_world
+                                        && pet_visible.contains(*id)
+                                })
+                                .map(|(id, _)| *id)
+                                .collect();
+                            for peer_id in pet_recipients {
+                                handlers::send_entity_despawn(
+                                    &mut server,
+                                    peer_id,
+                                    pet_id,
+                                );
+                            }
+                            enemies.remove(&pet_id);
+                            tracing::info!(
+                                owner = entity_id,
+                                pet_id,
+                                "pet despawned on owner disconnect"
                             );
                         }
                     }
@@ -2102,11 +2141,100 @@ pub async fn run(
                             "AOE spell applied"
                         );
                     }
+                    "PET_SUMMON" => {
+                        // Track 11 — spawn a player-owned pet at the
+                        // caster's position. One pet per owner: any
+                        // existing pet for this caster is despawned
+                        // first (mark Dead + EntityDespawn fan-out;
+                        // corpse cleanup phase removes it from the
+                        // map and AOI next tick).
+                        let pet_type = spell.pet_type.clone();
+                        if pet_type.is_empty() {
+                            tracing::info!(
+                                caster = intent.caster,
+                                spell = %spell.name,
+                                "PET_SUMMON spell has no pet_type; ignored"
+                            );
+                            continue;
+                        }
+                        let Some(template) = pet_templates::lookup(&pet_type) else {
+                            tracing::info!(
+                                caster = intent.caster,
+                                spell = %spell.name,
+                                pet_type = %pet_type,
+                                "unknown pet_type — server-side summon dropped"
+                            );
+                            continue;
+                        };
+                        let owner_id = intent.caster;
+                        // Despawn caster's existing pet, if any.
+                        let existing_pet_id: Option<EntityId> = enemies
+                            .iter()
+                            .find(|(_, e)| {
+                                e.owner == Some(owner_id) && e.is_alive()
+                            })
+                            .map(|(id, _)| *id);
+                        if let Some(old_id) = existing_pet_id {
+                            if let Some(old) = enemies.get_mut(&old_id) {
+                                old.transition(EnemyState::Dead, now);
+                            }
+                            handlers::fan_out_entity_died(
+                                &mut server,
+                                &in_world_recipients_now,
+                                old_id,
+                            );
+                            tracing::info!(
+                                owner = owner_id,
+                                old_pet = old_id,
+                                "dismissed existing pet on new summon"
+                            );
+                        }
+                        // Spawn the fresh pet at the caster's pos +
+                        // a small forward offset so it doesn't clip
+                        // into the player capsule. 1.5 m along yaw=0
+                        // for now (server has no caster facing yet).
+                        let spawn_pos = Vec3f {
+                            x: caster_pos.x + 1.5,
+                            y: caster_pos.y,
+                            z: caster_pos.z,
+                        };
+                        let pet = Entity::from_pet_summon(
+                            owner_id,
+                            spawn_pos,
+                            template,
+                            now,
+                        );
+                        let pet_id = pet.id;
+                        let pet_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
+                        aoi.insert(pet_id, pet_cell);
+                        let visible = aoi.entities_visible_from(pet_cell);
+                        let pet_recipients: Vec<ClientId> =
+                            in_world_recipients_now
+                                .iter()
+                                .copied()
+                                .filter(|id| visible.contains(id))
+                                .collect();
+                        if !pet_recipients.is_empty() {
+                            handlers::fan_out_pet_spawn(
+                                &mut server,
+                                &pet_recipients,
+                                &pet,
+                            );
+                        }
+                        enemies.insert(pet_id, pet);
+                        tracing::info!(
+                            owner = owner_id,
+                            pet_id,
+                            spell = %spell.name,
+                            pet_type = %pet_type,
+                            "pet summoned"
+                        );
+                    }
                     "NONE" | _ => {
-                        // port / charm / pet-summon / bind etc. — not
-                        // applied server-side yet. Mana already deducted;
-                        // the client-local handler covers the rest until
-                        // a later track lifts that authority.
+                        // port / charm / bind / pet-charm — not yet
+                        // applied server-side. Mana already deducted;
+                        // the client-local handler covers the rest
+                        // until a later track lifts that authority.
                         tracing::debug!(
                             caster = intent.caster,
                             spell = %spell.name,

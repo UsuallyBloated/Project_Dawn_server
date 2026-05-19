@@ -108,6 +108,12 @@ pub struct Spell {
     #[serde(default)]
     pub stat_buff_duration: f32,
 
+    // Track 11 — pet summon. `pet_type` keys into pet_templates.rs
+    // (currently "skeleton"). Only meaningful when target_type ==
+    // "PET_SUMMON".
+    #[serde(default)]
+    pub pet_type: String,
+
     // Track 6 sub-task 4d — CC fields.
     #[serde(default)]
     pub cc_duration: f32,

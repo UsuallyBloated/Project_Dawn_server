@@ -818,6 +818,40 @@ pub fn fan_out_enemy_spawn(
     }
 }
 
+/// Track 11 — fan out `PetSpawn` for a freshly summoned pet. Same
+/// pattern as `fan_out_enemy_spawn`; the variant carries the owner's
+/// char_id so the client can route the pet under the right player.
+/// Caller is responsible for `entity.owner.is_some()`.
+pub fn fan_out_pet_spawn(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    entity: &Entity,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let owner = match entity.owner {
+        Some(o) => o,
+        None => return,
+    };
+    let msg = ServerWorldMsg::PetSpawn {
+        id: entity.id,
+        owner,
+        pet_name: entity.mob.name.clone(),
+        level: entity.mob.level,
+        max_hp: entity.max_hp,
+        hp: entity.hp,
+        pos: Vec3 { x: entity.pos.x, y: entity.pos.y, z: entity.pos.z },
+        yaw: entity.yaw,
+    };
+    let Some(bytes) = encode(&msg) else {
+        return;
+    };
+    for &recipient_id in recipients {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
 /// Fan out `conn`'s cached resources to every recipient as three separate
 /// ServerWorldMsg variants (HealthUpdate / ManaUpdate / StaminaUpdate).
 /// Each variant is encoded once and the bytes cloned per recipient —

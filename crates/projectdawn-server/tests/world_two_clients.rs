@@ -16,7 +16,7 @@
 use bincode::config::standard as bincode_cfg;
 use futures_util::{SinkExt, StreamExt};
 use projectdawn_server::{auth, db, world, Config};
-use protocol::world::{ClientWorldMsg, DamageType, ServerWorldMsg, Vec3, ENEMY_ID_BASE};
+use protocol::world::{ClientWorldMsg, DamageType, ServerWorldMsg, Vec3, ENEMY_ID_BASE, PET_ID_BASE};
 use renet::{ConnectionConfig, RenetClient};
 use renet_netcode::{ClientAuthentication, ConnectToken, NetcodeClientTransport};
 use std::{
@@ -1170,6 +1170,67 @@ async fn cast_spell_accepted_after_cast_time() {
         })
         .await;
     assert!(fail.is_none(), "well-timed cast must not produce a CastFail");
+}
+
+/// Track 11 — server-side pet summon. Necromancer A casts Summon
+/// Skeleton; the server spawns a player-owned pet entity, fans
+/// `PetSpawn` to AOI peers, and B (in the same cell) receives the
+/// broadcast carrying A's char_id as owner and a pet id in the
+/// reserved partition.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pet_summon_visible_to_peer() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "xio", "Xiora", "Human", "Necromancer").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "yuu", "Yuusu", "Elf", "Cleric").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+
+    // Let both clients settle into the world so EntitySpawn fan-outs
+    // complete before we start kicking off the cast.
+    for _ in 0..6 {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Summon Skeleton: cast_time 3.0s. Pump the start packet out
+    // before sleeping (tokio::sleep doesn't advance the renet
+    // transport — same gotcha as Track 10's gate tests).
+    a.send_cast_start("Summon Skeleton", 3.0);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    tokio::time::sleep(Duration::from_millis(3100)).await;
+    a.send_cast_spell("Summon Skeleton", None);
+    for _ in 0..6 {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let pet_spawn = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+        })
+        .await
+        .expect("B receives PetSpawn fanned from A's Summon Skeleton cast");
+    if let ServerWorldMsg::PetSpawn { id, owner, pet_name, level, max_hp, hp, .. } = pet_spawn {
+        assert!(
+            id >= PET_ID_BASE,
+            "pet id must be in the pet partition (got {id}, base {PET_ID_BASE})"
+        );
+        assert_eq!(owner, a_char_id as u64);
+        assert_eq!(pet_name, "Skeletal Warrior");
+        assert_eq!(level, 6);
+        assert!((max_hp - 80.0).abs() < 0.01, "skeleton template authored hp is 80");
+        assert!((hp - 80.0).abs() < 0.01, "fresh pet spawns at full hp");
+    }
 }
 
 fn tick_one(client: &mut RenetClient, transport: &mut NetcodeClientTransport) {

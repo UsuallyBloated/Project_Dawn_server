@@ -1416,3 +1416,21 @@ cooldown = 20.0
 aoe_radius = 5.0
 min_level = 18
 classes = ["Sorcerer"]
+
+# ══ Pet summons ═════════════════════════════════════════════════════
+# Track 11 added the server-side PET_SUMMON arm. `pet_type` keys into
+# crates/projectdawn-server/src/world/pet_templates.rs; spells whose
+# pet_type isn't in that lookup are dropped at the dispatch site.
+
+[[spell]]
+name = "Summon Skeleton"
+target_type = "PET_SUMMON"
+damage_type = "NONE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 60.0
+cast_time = 3.0
+cooldown = 30.0
+pet_type = "skeleton"
+min_level = 6
+classes = ["Necromancer"]

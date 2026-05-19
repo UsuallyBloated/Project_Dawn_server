@@ -23,6 +23,7 @@ mod handlers;
 mod items;
 mod loot;
 mod persistence;
+mod pet_templates;
 mod regen;
 mod spawn_points;
 mod spells;

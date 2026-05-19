@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// `StaminaUpdate`); `ClientWorldMsg::ResourceUpdate` is removed because the
 /// authority flips and the client no longer broadcasts resources. One bump
 /// per track; individual sub-task commits append new variants under this id.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3036; // "PD_W0006"
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3037; // "PD_W0007"
 
 pub type EntityId = u64;
 pub type Sequence = u32;
@@ -619,6 +619,23 @@ pub enum ServerWorldMsg {
         amount: i32,
         shield_name: String,
     },
+
+    /// Track 11 — server announces a player-owned pet at `pos`.
+    /// `id` is in the reserved pet partition (`>= PET_ID_BASE`) so
+    /// the client can route by id alone. `owner` is the summoner's
+    /// char_id (always `< ENEMY_ID_BASE`). Ongoing position / HP /
+    /// death broadcasts reuse the generic `Position` /
+    /// `HealthUpdate` / `EntityDied` / `EntityDespawn` variants.
+    PetSpawn {
+        id: EntityId,
+        owner: EntityId,
+        pet_name: String,
+        level: u32,
+        max_hp: f32,
+        hp: f32,
+        pos: Vec3,
+        yaw: f32,
+    },
 }
 
 /// First entity id reserved for server-spawned enemies. Player char_ids are
@@ -628,5 +645,11 @@ pub enum ServerWorldMsg {
 pub const ENEMY_ID_BASE: EntityId = 1_000_000_000;
 /// First entity id reserved for server-spawned loot bags. Above the enemy
 /// partition so the client can route a Position / EntityDespawn by id
-/// alone: < ENEMY_ID_BASE → player, < LOOT_BAG_ID_BASE → enemy, else bag.
+/// alone: < ENEMY_ID_BASE → player, < LOOT_BAG_ID_BASE → enemy,
+/// < PET_ID_BASE → bag, else pet.
 pub const LOOT_BAG_ID_BASE: EntityId = 2_000_000_000;
+/// First entity id reserved for server-spawned player-owned pets
+/// (Track 11). Sits above the bag partition; the four ranges
+/// (player < 1B, enemy < 2B, bag < 3B, pet ≥ 3B) cover the id
+/// space the client routes on.
+pub const PET_ID_BASE: EntityId = 3_000_000_000;

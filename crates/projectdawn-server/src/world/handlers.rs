@@ -81,13 +81,21 @@ pub enum Outcome {
     /// Track 6 sub-task 3b — player → server spell-cast intent. The
     /// tick loop resolves the spell name in spells.toml, validates
     /// mana / target, applies the authoritative damage or heal, and
-    /// fans Hit + HealthUpdate / ManaUpdate. Cast-time + cooldown
-    /// gating is still client-side for sub-task 3b; server applies
-    /// instantly. Sub-task 4 will lift cast-time enforcement.
+    /// fans Hit + HealthUpdate / ManaUpdate.
+    ///
+    /// Track 10 — `cast_name_at_dispatch` / `cast_set_at_at_dispatch`
+    /// snapshot the caster's cast cache at the moment this CastSpell
+    /// was decoded. The tick loop's gate uses them to verify that a
+    /// matching CastStartBroadcast actually ran for long enough. We
+    /// snapshot here (rather than re-reading conn at gate time)
+    /// because CastComplete arrives in the same incoming batch as
+    /// CastSpell and would clear the cache before the gate fires.
     CastSpellIntent {
         caster: u64,
         spell_name: String,
         target_id: Option<protocol::world::EntityId>,
+        cast_name_at_dispatch: String,
+        cast_set_at_at_dispatch: Option<std::time::Instant>,
     },
 
     /// Track 6 sub-task 5 — player → server group intents. The tick
@@ -510,10 +518,16 @@ pub fn handle_message(
                 );
                 return Outcome::CastFailFanOut { reason: "Mesmerized.".to_string() };
             }
+            // Track 10 — snapshot the cast cache state *now*, before
+            // any CastCompleteBroadcast in the same batch wipes it.
+            let cast_name_at_dispatch = conn.cast_spell_name.clone();
+            let cast_set_at_at_dispatch = conn.cast_set_at;
             Outcome::CastSpellIntent {
                 caster: conn.char_id as u64,
                 spell_name,
                 target_id,
+                cast_name_at_dispatch,
+                cast_set_at_at_dispatch,
             }
         }
 

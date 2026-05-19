@@ -55,10 +55,19 @@ struct AttackIntent {
 /// Track 6 sub-task 3b — buffered spell-cast intent. Server resolves
 /// the spell in spells.toml, validates mana / target, and applies
 /// damage or heal authoritatively.
+///
+/// Track 10 — `cast_name_at_dispatch` / `cast_set_at_at_dispatch` are
+/// the caster's cast cache state at the moment handle_message decoded
+/// this intent. The gate uses them to verify a CastStartBroadcast
+/// for this spell actually ran for long enough; snapshotted at
+/// dispatch (not gate) time so a same-batch CastCompleteBroadcast
+/// doesn't blank the cache before the gate fires.
 struct CastSpellIntent {
     caster: u64,
     spell_name: String,
     target_id: Option<protocol::world::EntityId>,
+    cast_name_at_dispatch: String,
+    cast_set_at_at_dispatch: Option<Instant>,
 }
 
 /// Track 6 sub-task 4a — apply an active buff to a connection.
@@ -664,11 +673,15 @@ pub async fn run(
                             caster,
                             spell_name,
                             target_id,
+                            cast_name_at_dispatch,
+                            cast_set_at_at_dispatch,
                         } => {
                             cast_spell_intents.push(CastSpellIntent {
                                 caster,
                                 spell_name,
                                 target_id,
+                                cast_name_at_dispatch,
+                                cast_set_at_at_dispatch,
                             });
                         }
                         Outcome::GroupInviteIntent { inviter, target_name } => {
@@ -1418,10 +1431,9 @@ pub async fn run(
         }
 
         // 4ha. Apply player → server spell-cast intents. Server resolves
-        //      the spell in spells.toml, validates mana cost + target,
-        //      and applies authoritative damage (ENEMY) or heal (SELF).
-        //      Cast-time gating is still client-side for sub-task 3b;
-        //      sub-task 4 lifts it server-side.
+        //      the spell in spells.toml, validates the cast-time gate
+        //      (Track 10) + mana cost + target, and applies
+        //      authoritative damage (ENEMY/AOE) or heal (SELF/ALLY).
         if !cast_spell_intents.is_empty() {
             for intent in cast_spell_intents.drain(..) {
                 let caster_cid = intent.caster as ClientId;
@@ -1433,6 +1445,41 @@ pub async fn run(
                     );
                     continue;
                 };
+                // Track 10 — cast-time gate. Instant casts (cast_time
+                // == 0) skip; for timed casts we require a matching
+                // CastStartBroadcast on file with enough wall time
+                // elapsed. The 100 ms tolerance absorbs network jitter
+                // — packet loss can push arrival past the cast bar
+                // ending, but a forged CastSpell sent the same tick as
+                // CastStart will fall well short.
+                if spell.cast_time > 0.0 {
+                    const CAST_TOLERANCE_MS: u128 = 100;
+                    let required_ms = (spell.cast_time * 1000.0) as u128;
+                    let name_matches = intent.cast_name_at_dispatch == spell.name;
+                    let elapsed_ok = intent
+                        .cast_set_at_at_dispatch
+                        .map(|set_at| {
+                            now.duration_since(set_at).as_millis() + CAST_TOLERANCE_MS
+                                >= required_ms
+                        })
+                        .unwrap_or(false);
+                    if !(name_matches && elapsed_ok) {
+                        tracing::info!(
+                            caster = intent.caster,
+                            spell = %spell.name,
+                            cast_time = spell.cast_time,
+                            in_flight = %intent.cast_name_at_dispatch,
+                            "CastSpell rejected — cast-time gate (no matching CastStart or too early)"
+                        );
+                        handlers::fan_out_cast_fail(
+                            &mut server,
+                            &in_world_recipients_now,
+                            intent.caster,
+                            "cast not ready".to_string(),
+                        );
+                        continue;
+                    }
+                }
                 // Resolve caster's snapshot (immutable) — we need pos
                 // for range / AOE. mp deduction lands later under a
                 // mutable borrow.
@@ -1457,13 +1504,19 @@ pub async fn run(
 
                 // Deduct mana (+ optional hp_cost for blood / fallen
                 // spells). Both are caster-side; target-side effects
-                // come next.
+                // come next. Track 10 — also clear the cast cache so a
+                // CastSpell sent without a follow-up CastComplete (or
+                // before it arrives) doesn't leave stale state that
+                // gates the next timed cast.
                 let (new_mp, new_hp_after_cost, max_hp) = {
                     let cc = connections.get_mut(&caster_cid).expect("checked");
                     cc.mp = (cc.mp - mana_cost).max(0.0);
                     if hp_cost > 0.0 {
                         cc.hp = (cc.hp - hp_cost).max(0.0);
                     }
+                    cc.cast_spell_name.clear();
+                    cc.cast_total_duration = 0.0;
+                    cc.cast_set_at = None;
                     regen::mark_dirty(cc);
                     (cc.mp, cc.hp, cc.max_hp)
                 };

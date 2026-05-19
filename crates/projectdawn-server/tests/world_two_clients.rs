@@ -605,9 +605,19 @@ async fn two_clients_buff_snapshot_fanout() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
 
-    // A casts Healing Wave (SELF, 15 immediate heal + 4 hps × 18s HoT).
+    // A casts Healing Wave (ALLY, 15 immediate heal + 4 hps × 18s HoT,
+    // cast_time 1.0s). Track 10 — the cast-time gate now rejects
+    // CastSpell unless a matching CastStart ran long enough, so we
+    // pump CastStart out first (transport doesn't advance during a
+    // bare tokio sleep), then wait the cast time, then send CastSpell.
     // Server applies the HoT to A.active_buffs and fans BuffSnapshot
     // to all in-world peers including B.
+    a.send_cast_start("Healing Wave", 1.0);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    tokio::time::sleep(Duration::from_millis(1100)).await;
     a.send_cast_spell("Healing Wave", None);
     for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);
@@ -1011,8 +1021,16 @@ async fn aoe_spell_damages_nearby_enemies() {
 
     // Cast Inferno. `target_id: None` because AOE doesn't take a
     // single target — the server searches the caster's AOI for
-    // anything in radius. Burst a few ticks to drive the cast intent
-    // through the dispatch loop.
+    // anything in radius. Inferno has cast_time 2.5s; Track 10's
+    // gate rejects CastSpell without a matching CastStart that ran
+    // long enough, so pump CastStart out first (sleeping doesn't
+    // advance the transport), wait the cast time, then fire CastSpell.
+    a.send_cast_start("Inferno", 2.5);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    tokio::time::sleep(Duration::from_millis(2600)).await;
     a.send_cast_spell("Inferno", None);
     for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);
@@ -1037,6 +1055,121 @@ async fn aoe_spell_damages_nearby_enemies() {
     if let ServerWorldMsg::Hit { amount, .. } = aoe_hit {
         assert_eq!(amount, 45, "Inferno authored base_damage is 45");
     }
+}
+
+/// Track 10 — cast-time gate rejects a CastSpell that arrives before
+/// the cast bar had time to run. Send CastStart for Fireball (1.5 s
+/// cast), then *immediately* send CastSpell. Assert: a CastFail
+/// arrives with reason "cast not ready", and no Hit fires for the
+/// next half-second.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cast_spell_rejected_before_cast_time() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "muu", "Mura", "Human", "Magician").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Skip walking — we don't need an enemy in range; the gate fails
+    // long before target resolution. Sit at spawn.
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Forge a CastStart + immediate CastSpell with no real wait.
+    a.send_cast_start("Fireball", 1.5);
+    a.send_cast_spell("Fireball", Some(ENEMY_ID_BASE));
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let fail = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64 && reason == "cast not ready")
+        })
+        .await
+        .expect("server fans CastFail when CastSpell arrives before cast time elapsed");
+    if let ServerWorldMsg::CastFail { reason, .. } = fail {
+        assert_eq!(reason, "cast not ready");
+    }
+
+    // No Hit should fire — gate ran before mana deduction and spell
+    // application. (Target id was a stub anyway; we want to confirm
+    // no side effects, not target resolution.)
+    let stray = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == a_char_id as u64)
+        })
+        .await;
+    assert!(stray.is_none(), "rejected cast must not fan a Hit");
+}
+
+/// Track 10 — cast-time gate passes once the cast bar has actually
+/// run. Send CastStart for Healing Wave (1.0 s cast, ALLY target_type
+/// — self-heal when target_id is None), wait the cast time + jitter,
+/// then send CastSpell. Assert: a HealthUpdate arrives for the caster
+/// (proof the cast went through the helper that fans on heal apply).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cast_spell_accepted_after_cast_time() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "nuu", "Nura", "Human", "Cleric").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Pump a few ticks so the world-enter handshake completes before
+    // the server's first regen tick can fire a HealthUpdate we'd
+    // mistake for a heal apply later.
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Queue CastStart and pump immediately so the packet reaches the
+    // server's `cast_set_at` clock before we start counting wait time.
+    // tokio::time::sleep alone doesn't advance the transport — we'd
+    // otherwise be measuring "time until the test got around to
+    // ticking" not "time the cast bar ran on the server".
+    a.send_cast_start("Healing Wave", 1.0);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    // Now wait past the cast time (1.0 s) on the server's wall clock.
+    // 1100 ms includes a 100 ms cushion above the gate's tolerance.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    a.send_cast_spell("Healing Wave", None);
+    for _ in 0..6 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Healing Wave applies a 4 hps × 18 s HoT; the server fans a
+    // BuffSnapshot containing "Healing Wave" once the cast lands.
+    // That's the cleanest "cast actually applied server-side" signal
+    // and doesn't race against regen ticks like HealthUpdate would.
+    let snap = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::BuffSnapshot { target, buffs }
+                if *target == a_char_id as u64
+                    && buffs.iter().any(|(n, _)| n == "Healing Wave"))
+        })
+        .await
+        .expect("Healing Wave applies once cast bar has run");
+    let _ = snap;
+
+    // No CastFail should have fired.
+    let fail = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(300), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64)
+        })
+        .await;
+    assert!(fail.is_none(), "well-timed cast must not produce a CastFail");
 }
 
 fn tick_one(client: &mut RenetClient, transport: &mut NetcodeClientTransport) {

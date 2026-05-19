@@ -58,7 +58,7 @@ classes = ["Magician"]
 
 [[spell]]
 name = "Heal"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "NONE"
 base_damage = 0.0
 heal_amount = 40.0
@@ -83,7 +83,7 @@ classes = ["Magician"]
 # ── Cleric ──────────────────────────────────────────────────────────
 [[spell]]
 name = "Healing Light"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "HOLY"
 base_damage = 0.0
 heal_amount = 60.0
@@ -95,7 +95,7 @@ classes = ["Cleric"]
 
 [[spell]]
 name = "Greater Heal"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "HOLY"
 base_damage = 0.0
 heal_amount = 120.0
@@ -131,7 +131,7 @@ classes = ["Cleric"]
 
 [[spell]]
 name = "Complete Heal"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "HOLY"
 base_damage = 0.0
 heal_amount = 9999.0
@@ -169,7 +169,7 @@ classes = ["Druid"]
 # ── Shaman ──────────────────────────────────────────────────────────
 [[spell]]
 name = "Mending"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "SPIRIT"
 base_damage = 0.0
 heal_amount = 25.0
@@ -185,7 +185,7 @@ classes = ["Shaman"]
 # tools/export_spells.gd is re-run.
 [[spell]]
 name = "Healing Wave"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "SPIRIT"
 base_damage = 0.0
 heal_amount = 15.0
@@ -199,7 +199,7 @@ classes = ["Shaman"]
 
 [[spell]]
 name = "Regrowth"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "NATURE"
 base_damage = 0.0
 heal_amount = 0.0
@@ -643,7 +643,7 @@ classes = ["Blood Mage"]
 # ── Paladin ─────────────────────────────────────────────────────────
 [[spell]]
 name = "Lay on Hands"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "HOLY"
 base_damage = 0.0
 heal_amount = 80.0
@@ -655,7 +655,7 @@ classes = ["Paladin"]
 
 [[spell]]
 name = "Crusader's Mend"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "HOLY"
 base_damage = 0.0
 heal_amount = 35.0
@@ -743,7 +743,7 @@ classes = ["Bard"]
 
 [[spell]]
 name = "Battle Hymn"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "ARCANE"
 base_damage = 0.0
 heal_amount = 30.0
@@ -768,7 +768,7 @@ classes = ["Ranger"]
 
 [[spell]]
 name = "Nature's Cure"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "NATURE"
 base_damage = 0.0
 heal_amount = 35.0
@@ -793,7 +793,7 @@ classes = ["Witch Hunter"]
 
 [[spell]]
 name = "Rite of Warding"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "HOLY"
 base_damage = 0.0
 heal_amount = 30.0
@@ -880,7 +880,7 @@ classes = ["Sorcerer"]
 # ── Beast Master ────────────────────────────────────────────────────
 [[spell]]
 name = "Spirit Mend"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "SPIRIT"
 base_damage = 0.0
 heal_amount = 25.0

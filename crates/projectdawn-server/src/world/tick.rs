@@ -7,7 +7,7 @@ use super::{
     buffs::{self, ActiveBuff},
     combat,
     connection::{PerConnection, Vec3f},
-    entity::{Entity, EnemyState, HitIntent},
+    entity::{ActiveCc, Entity, EnemyState, HitIntent},
     groups::{self, GroupManager},
     handlers::{self, Outcome},
     items,
@@ -1562,6 +1562,69 @@ pub async fn run(
                             }
                         }
                     }
+                    "ALLY" => {
+                        // target_id == 0 or absent → self-heal. Any non-zero
+                        // target below ENEMY_ID_BASE is treated as a player
+                        // char_id; anything ≥ ENEMY_ID_BASE is rejected (you
+                        // can't ALLY-heal an enemy or loot bag).
+                        let target_entity_id = intent
+                            .target_id
+                            .filter(|&id| id > 0 && id < protocol::world::ENEMY_ID_BASE)
+                            .unwrap_or(intent.caster);
+                        let target_cid = target_entity_id as ClientId;
+                        let target_ok = connections
+                            .get(&target_cid)
+                            .map_or(false, |c| c.in_world && c.hp > 0.0);
+                        if !target_ok {
+                            continue;
+                        }
+                        let heal = spell.heal_amount;
+                        if heal > 0.0 {
+                            let (final_hp, max_hp) = {
+                                let tc =
+                                    connections.get_mut(&target_cid).expect("checked");
+                                tc.hp = (tc.hp + heal).min(tc.max_hp);
+                                regen::mark_dirty(tc);
+                                (tc.hp, tc.max_hp)
+                            };
+                            handlers::fan_out_health_update(
+                                &mut server,
+                                &in_world_recipients_now,
+                                target_entity_id,
+                                final_hp,
+                                max_hp,
+                            );
+                            tracing::info!(
+                                caster = intent.caster,
+                                target = target_entity_id,
+                                spell = %spell.name,
+                                heal,
+                                "ALLY heal applied"
+                            );
+                        }
+                        let mut ally_buff_changed = false;
+                        if spell.hot_hps > 0.0 && spell.hot_duration > 0.0 {
+                            apply_buff(
+                                connections.get_mut(&target_cid).expect("checked"),
+                                ActiveBuff::new_hot(
+                                    spell.name.clone(),
+                                    spell.hot_hps,
+                                    spell.hot_duration,
+                                    now,
+                                ),
+                            );
+                            ally_buff_changed = true;
+                        }
+                        if ally_buff_changed {
+                            if let Some(tc) = connections.get(&target_cid) {
+                                fan_out_server_buff_snapshot(
+                                    &mut server,
+                                    &in_world_recipients_now,
+                                    tc,
+                                );
+                            }
+                        }
+                    }
                     "ENEMY" => {
                         let Some(target_id) = intent.target_id else {
                             continue;
@@ -1829,6 +1892,34 @@ pub async fn run(
                                     &bag,
                                 );
                                 loot_bags.insert(bag_id, bag);
+                            }
+                        }
+                        // Sub-task 3: damage breaks mez on enemies.
+                        if dmg > 0 {
+                            entity.clear_mez();
+                        }
+                        // Sub-task 2: apply CC from spell fields (only to
+                        // living enemies; dead enemies ignore CC).
+                        if entity.is_alive() {
+                            if spell.cc_duration > 0.0 {
+                                entity.apply_cc(ActiveCc::new_mez(spell.cc_duration));
+                            }
+                            if spell.root_duration > 0.0 {
+                                entity.apply_cc(ActiveCc::new_root(spell.root_duration));
+                            }
+                            if spell.slow_amount > 0.0 && spell.slow_duration > 0.0 {
+                                entity.apply_cc(ActiveCc::new_snare(
+                                    spell.slow_amount,
+                                    spell.slow_duration,
+                                ));
+                            }
+                            if spell.attack_slow_amount > 0.0
+                                && spell.attack_slow_duration > 0.0
+                            {
+                                entity.apply_cc(ActiveCc::new_attack_slow(
+                                    spell.attack_slow_amount,
+                                    spell.attack_slow_duration,
+                                ));
                             }
                         }
                     }

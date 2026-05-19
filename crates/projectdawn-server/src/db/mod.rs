@@ -327,9 +327,12 @@ pub async fn delete_character(
     account_id: i64,
     char_id: i64,
 ) -> AuthResult<()> {
+    // Append _del_{id} to the name so the UNIQUE constraint frees the original
+    // name for a new character without requiring a schema migration.
     let res = sqlx::query(
         "UPDATE characters
-         SET deleted_at = CURRENT_TIMESTAMP
+         SET deleted_at = CURRENT_TIMESTAMP,
+             name = name || '_del_' || CAST(id AS TEXT)
          WHERE id = ?1 AND account_id = ?2 AND deleted_at IS NULL",
     )
     .bind(char_id)

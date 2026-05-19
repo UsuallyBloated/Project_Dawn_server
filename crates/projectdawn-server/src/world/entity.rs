@@ -15,6 +15,37 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CcKind {
+    Mez,
+    Root,
+    Snare { factor_pct: u8 }, // 0–100; 50 = half speed
+    AttackSlow { factor_pct: u8 }, // extra delay fraction × 100
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveCc {
+    pub kind: CcKind,
+    pub remaining: f32,
+}
+
+impl ActiveCc {
+    pub fn new_mez(duration: f32) -> Self {
+        Self { kind: CcKind::Mez, remaining: duration }
+    }
+    pub fn new_root(duration: f32) -> Self {
+        Self { kind: CcKind::Root, remaining: duration }
+    }
+    pub fn new_snare(slow_amount: f32, duration: f32) -> Self {
+        let factor_pct = (slow_amount.clamp(0.0, 1.0) * 100.0) as u8;
+        Self { kind: CcKind::Snare { factor_pct }, remaining: duration }
+    }
+    pub fn new_attack_slow(slow_amount: f32, duration: f32) -> Self {
+        let factor_pct = (slow_amount.clamp(0.0, 1.0) * 100.0) as u8;
+        Self { kind: CcKind::AttackSlow { factor_pct }, remaining: duration }
+    }
+}
+
 /// State machine for an `Entity`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnemyState {
@@ -69,6 +100,10 @@ pub struct Entity {
     /// `PerConnection.last_move_seq` — the client uses it to drop
     /// out-of-order updates on the unreliable channel.
     pub seq: u32,
+
+    /// Active crowd-control effects. Ticked every AI frame; empty is the
+    /// common case (no per-tick allocation cost when idle).
+    pub active_cc: Vec<ActiveCc>,
 }
 
 /// Outcome of one AI tick. Carries the events the tick loop needs to
@@ -117,6 +152,7 @@ impl Entity {
             state_entered_at: now,
             mob,
             seq: 0,
+            active_cc: Vec::new(),
         }
     }
 
@@ -141,7 +177,68 @@ impl Entity {
     }
 
     pub fn attack_interval(&self) -> f32 {
-        self.mob.attack_interval.unwrap_or(2.5)
+        let base = self.mob.attack_interval.unwrap_or(2.5);
+        // Attack slow adds fractional delay on top of the base interval.
+        let slow_mult = 1.0 + self.attack_slow_factor();
+        base * slow_mult
+    }
+
+    /// Tick all active CC durations down by `dt`. Call once per AI tick
+    /// before the state machine.
+    pub fn tick_cc(&mut self, dt: f32) {
+        self.active_cc.retain_mut(|cc| {
+            cc.remaining -= dt;
+            cc.remaining > 0.0
+        });
+    }
+
+    /// Apply a CC effect, replacing any existing instance of the same kind
+    /// (re-cast refreshes duration rather than stacking).
+    pub fn apply_cc(&mut self, cc: ActiveCc) {
+        let kind_disc = std::mem::discriminant(&cc.kind);
+        self.active_cc.retain(|c| std::mem::discriminant(&c.kind) != kind_disc);
+        self.active_cc.push(cc);
+    }
+
+    /// Clear all mez effects (called when the enemy takes damage).
+    pub fn clear_mez(&mut self) {
+        self.active_cc.retain(|c| !matches!(c.kind, CcKind::Mez));
+    }
+
+    pub fn is_mezzed(&self) -> bool {
+        self.active_cc.iter().any(|c| matches!(c.kind, CcKind::Mez))
+    }
+
+    pub fn is_rooted(&self) -> bool {
+        self.active_cc.iter().any(|c| matches!(c.kind, CcKind::Root))
+    }
+
+    /// Speed multiplier from snare (0.0 = full speed, 0.5 = half speed).
+    fn snare_factor(&self) -> f32 {
+        self.active_cc
+            .iter()
+            .filter_map(|c| {
+                if let CcKind::Snare { factor_pct } = c.kind {
+                    Some(factor_pct as f32 / 100.0)
+                } else {
+                    None
+                }
+            })
+            .fold(0.0_f32, f32::max)
+    }
+
+    /// Extra attack-interval fraction from attack-slow effects.
+    fn attack_slow_factor(&self) -> f32 {
+        self.active_cc
+            .iter()
+            .filter_map(|c| {
+                if let CcKind::AttackSlow { factor_pct } = c.kind {
+                    Some(factor_pct as f32 / 100.0)
+                } else {
+                    None
+                }
+            })
+            .fold(0.0_f32, f32::max)
     }
 
     /// Drive one AI tick. Mutates state / target / pos / last_attack_at;
@@ -160,9 +257,14 @@ impl Entity {
         dt: f32,
         now: Instant,
     ) -> AiEvents {
+        self.tick_cc(dt);
         let prev_target = self.target;
         let prev_pos = self.pos;
         let mut events = AiEvents::default();
+        // Mez skips the entire state machine (mob stands frozen).
+        if self.is_mezzed() {
+            return events;
+        }
         match self.state {
             EnemyState::Idle => self.tick_idle(players, now),
             EnemyState::Chase => self.tick_chase(players, dt, now),
@@ -209,7 +311,12 @@ impl Entity {
             self.transition(EnemyState::Attack, now);
             return;
         }
-        let step = self.mob.speed * dt;
+        // Root and snare block / slow movement.
+        if self.is_rooted() {
+            return;
+        }
+        let snare = self.snare_factor();
+        let step = self.mob.speed * (1.0 - snare) * dt;
         self.face_toward(target_pos);
         self.pos = self.pos.step_toward(target_pos, step);
     }

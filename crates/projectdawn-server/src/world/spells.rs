@@ -188,9 +188,9 @@ mod tests {
     }
 
     #[test]
-    fn healing_light_is_self_heal() {
+    fn healing_light_is_ally_heal() {
         let s = lookup("Healing Light").expect("Healing Light in table");
-        assert_eq!(s.target_type, "SELF");
+        assert_eq!(s.target_type, "ALLY");
         assert!((s.heal_amount - 60.0).abs() < 0.01);
     }
 

@@ -661,6 +661,23 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// Track 12 Piece A — player issues a command to their pet.
+    /// `command` is one of `protocol::world::pet_command::*` (Attack=2,
+    /// Back=3 are the MVP set; Follow=0 aliases to Back today).
+    /// `target_id` is required for ATTACK (enemy id); pass 0 for
+    /// commands that don't carry a target. The wire-side
+    /// representation is `Option<EntityId>`; 0 is mapped to `None`
+    /// so the GDScript caller doesn't need to know about nullables.
+    #[func]
+    fn send_pet_command(&mut self, command: i64, target_id: i64) -> bool {
+        let target = if target_id > 0 { Some(target_id as u64) } else { None };
+        let msg = ClientWorldMsg::PetCommand {
+            command: command as u8,
+            target_id: target,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
     #[func]
     fn send_buff_snapshot_broadcast(
         &mut self,

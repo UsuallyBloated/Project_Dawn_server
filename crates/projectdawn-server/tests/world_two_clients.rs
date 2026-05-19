@@ -263,6 +263,11 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
+    fn send_pet_command(&mut self, command: u8, target_id: Option<u64>) {
+        let msg = ClientWorldMsg::PetCommand { command, target_id };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
     async fn wait_for(
         &mut self,
         channel: u8,
@@ -1411,6 +1416,87 @@ async fn pet_attacks_owners_target() {
         .expect("skeleton inherits target and lands a Hit on the enemy");
     if let ServerWorldMsg::Hit { amount, .. } = pet_hit {
         assert_eq!(amount, 8, "skeleton template authored dmg is 8");
+    }
+}
+
+/// Track 12 Piece A — explicit `/pet attack` command locks the pet
+/// onto a specific enemy id, bypassing the `last_attacked_enemy`
+/// inheritance pipeline. Necromancer summons, then commands the
+/// pet to attack an enemy WITHOUT first hitting it themselves;
+/// assert a Hit with attacker=pet, target=that enemy arrives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pet_command_attack_locks_onto_target() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "sss", "Suun", "Human", "Necromancer").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Walk into camp 0; wait until at least one enemy aggros and
+    // hits the player so we have an enemy id to command on.
+    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
+    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
+    let walk_end = Instant::now() + Duration::from_millis(2_000);
+    let mut seq: u32 = 1;
+    while Instant::now() < walk_end {
+        a.send_move(seq, dir);
+        seq += 1;
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    let hit_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
+            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
+        })
+        .await
+        .expect("an enemy aggros and hits the player");
+    let enemy_id: u64 = match hit_evt {
+        ServerWorldMsg::Hit { attacker, .. } => attacker,
+        _ => unreachable!(),
+    };
+
+    // Summon Skeleton (cast_time 3.0s).
+    a.send_cast_start("Summon Skeleton", 3.0);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    tokio::time::sleep(Duration::from_millis(3100)).await;
+    a.send_cast_spell("Summon Skeleton", None);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    let pet_id: u64 = match a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+        })
+        .await
+        .expect("A receives own PetSpawn")
+    {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    // Issue ATTACK command. The player has NOT attacked the enemy
+    // themselves (only the enemy has attacked them) so without the
+    // explicit command, the pet would default to follow.
+    a.send_pet_command(protocol::world::pet_command::ATTACK, Some(enemy_id));
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let pet_hit = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(10), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
+                if *attacker == pet_id && *target == enemy_id)
+        })
+        .await
+        .expect("pet attacks the commanded target");
+    if let ServerWorldMsg::Hit { amount, .. } = pet_hit {
+        assert_eq!(amount, 8);
     }
 }
 

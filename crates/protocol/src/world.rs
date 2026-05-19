@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// `StaminaUpdate`); `ClientWorldMsg::ResourceUpdate` is removed because the
 /// authority flips and the client no longer broadcasts resources. One bump
 /// per track; individual sub-task commits append new variants under this id.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3037; // "PD_W0007"
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3038; // "PD_W0008"
 
 pub type EntityId = u64;
 pub type Sequence = u32;
@@ -223,6 +223,16 @@ pub enum ClientWorldMsg {
     GroupLeave,
     GroupKick {
         name: String,
+    },
+
+    /// Track 12 Piece A — player issues a command to their pet.
+    /// `command` is one of the values in `pet_command` (Attack=2,
+    /// Back=3 are the MVP set; Follow/Guard/Sit reserved for future
+    /// behaviours). `target_id` is required for Attack (enemy id);
+    /// ignored for the others.
+    PetCommand {
+        command: u8,
+        target_id: Option<EntityId>,
     },
 
     // GM
@@ -653,3 +663,15 @@ pub const LOOT_BAG_ID_BASE: EntityId = 2_000_000_000;
 /// (player < 1B, enemy < 2B, bag < 3B, pet ≥ 3B) cover the id
 /// space the client routes on.
 pub const PET_ID_BASE: EntityId = 3_000_000_000;
+
+/// Track 12 Piece A — pet command codes. Wire format: a single u8
+/// on `ClientWorldMsg::PetCommand.command`. Values reserved for
+/// future commands (Follow/Guard/Sit) are present so the server can
+/// add behaviour without a protocol bump; for now they're no-ops.
+pub mod pet_command {
+    pub const FOLLOW: u8 = 0;
+    pub const GUARD: u8 = 1;
+    pub const ATTACK: u8 = 2;
+    pub const BACK: u8 = 3;
+    pub const SIT: u8 = 4;
+}

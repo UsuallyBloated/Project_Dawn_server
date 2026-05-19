@@ -116,6 +116,17 @@ pub enum Outcome {
         leader: u64,
         target_name: String,
     },
+    /// Track 12 Piece A — player → server pet command. Tick loop
+    /// resolves the owner's pet, validates the target if `command ==
+    /// ATTACK`, then sets `pet.target` + `pet.command_at` (sticky
+    /// override that beats `last_attacked_enemy` inheritance until
+    /// it decays).
+    PetCommandIntent {
+        owner: u64,
+        command: u8,
+        target_id: Option<protocol::world::EntityId>,
+    },
+
     /// Track 5 sub-task 4 — player → server pickup intent for one slot
     /// of a loot bag. The tick loop validates bag existence + slot
     /// index + pickup range, removes the stack, sends `LootGranted`
@@ -549,6 +560,17 @@ pub fn handle_message(
             Outcome::LootAllIntent {
                 looter: conn.char_id as u64,
                 bag_id,
+            }
+        }
+
+        ClientWorldMsg::PetCommand { command, target_id } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::PetCommandIntent {
+                owner: conn.char_id as u64,
+                command,
+                target_id,
             }
         }
 

@@ -623,6 +623,12 @@ pub async fn run(
         // Verbatim queue; sub-task 4 is FFA loot so order matters for
         // contested bags (first arrival wins the slot).
         let mut loot_intents: Vec<LootIntent> = Vec::new();
+        // Track 12 Piece A — pet commands. Buffered to apply after
+        // message dispatch so we can mutate `enemies` (where pets
+        // live) without overlapping the handler's mutable
+        // `connections` borrow.
+        struct PetCommandI { owner: u64, command: u8, target_id: Option<EntityId> }
+        let mut pet_command_intents: Vec<PetCommandI> = Vec::new();
         for client_id in client_ids {
             // Skip clients whose Connected event is in the queue but whose
             // PerConnection row hasn't been built yet (load_character failed
@@ -722,6 +728,9 @@ pub async fn run(
                                 cast_name_at_dispatch,
                                 cast_set_at_at_dispatch,
                             });
+                        }
+                        Outcome::PetCommandIntent { owner, command, target_id } => {
+                            pet_command_intents.push(PetCommandI { owner, command, target_id });
                         }
                         Outcome::GroupInviteIntent { inviter, target_name } => {
                             group_invite_intents.push(GroupInviteI { inviter, target_name });
@@ -2452,6 +2461,58 @@ pub async fn run(
             }
         }
 
+        // 4hc. Track 12 Piece A — apply pet commands. Locate each
+        //      caster's pet in `enemies`; for Attack validate the
+        //      target enemy is alive; for Back clear the pet's
+        //      target. Both stamp `command_at` so the pre-AI
+        //      inheritance pass (4i) skips re-targeting from
+        //      `last_attacked_enemy` while the sticky window holds.
+        if !pet_command_intents.is_empty() {
+            for intent in pet_command_intents.drain(..) {
+                use protocol::world::pet_command as cmd;
+                let pet_id_opt: Option<EntityId> = enemies
+                    .iter()
+                    .find(|(_, e)| e.owner == Some(intent.owner) && e.is_alive())
+                    .map(|(id, _)| *id);
+                let Some(pet_id) = pet_id_opt else {
+                    tracing::debug!(owner = intent.owner, command = intent.command, "PetCommand dropped — no live pet");
+                    continue;
+                };
+                match intent.command {
+                    cmd::ATTACK => {
+                        let Some(target_id) = intent.target_id else {
+                            tracing::debug!(owner = intent.owner, "PetCommand ATTACK dropped — no target_id");
+                            continue;
+                        };
+                        let target_alive_enemy = enemies
+                            .get(&target_id)
+                            .map(|e| e.is_alive() && !e.is_pet())
+                            .unwrap_or(false);
+                        if !target_alive_enemy {
+                            tracing::debug!(owner = intent.owner, target = target_id, "PetCommand ATTACK dropped — target not a live enemy");
+                            continue;
+                        }
+                        if let Some(pet) = enemies.get_mut(&pet_id) {
+                            pet.target = Some(target_id);
+                            pet.command_at = Some(now);
+                        }
+                        tracing::info!(owner = intent.owner, pet_id, target = target_id, "PetCommand ATTACK");
+                    }
+                    cmd::BACK | cmd::FOLLOW => {
+                        if let Some(pet) = enemies.get_mut(&pet_id) {
+                            pet.target = None;
+                            pet.command_at = Some(now);
+                        }
+                        tracing::info!(owner = intent.owner, pet_id, "PetCommand BACK/FOLLOW");
+                    }
+                    _ => {
+                        // GUARD / SIT reserved for Track 12 Piece B+; ignored.
+                        tracing::debug!(owner = intent.owner, command = intent.command, "PetCommand variant not yet implemented");
+                    }
+                }
+            }
+        }
+
         // 4i. Enemy AI tick. Each alive enemy evaluates its state machine
         //     against the snapshot of in_world player positions, advances
         //     its own pos / target / state, and yields events for the
@@ -2493,10 +2554,22 @@ pub async fn run(
                 .collect();
             // Pre-pass: drive each pet's target from its owner's last
             // attack. None if the inheritance has decayed or the
-            // target is gone.
+            // target is gone. Track 12 Piece A — pets with a fresh
+            // `command_at` are excluded from re-inheritance: the
+            // commanded target sticks until the window decays or the
+            // owner explicitly issues another command.
+            const PET_COMMAND_STICKY_SECS: f32 = 30.0;
             let pet_target_updates: Vec<(EntityId, Option<EntityId>)> = enemies
                 .iter()
                 .filter(|(_, e)| e.is_pet() && e.is_alive())
+                .filter(|(_, e)| {
+                    // Skip pets under an active command.
+                    e.command_at
+                        .map(|t| {
+                            now.duration_since(t).as_secs_f32() > PET_COMMAND_STICKY_SECS
+                        })
+                        .unwrap_or(true)
+                })
                 .map(|(pet_id, pet)| {
                     let owner_id = pet.owner.expect("pet must have owner");
                     let owner_cid = owner_id as ClientId;
@@ -2519,6 +2592,17 @@ pub async fn run(
             for (pet_id, target) in pet_target_updates {
                 if let Some(pet) = enemies.get_mut(&pet_id) {
                     pet.target = target;
+                }
+            }
+            // Drop expired command stickiness so a stale Attack
+            // command doesn't keep the pet pinned to a dead target
+            // when the player just stops giving commands.
+            for pet in enemies.values_mut() {
+                if !pet.is_pet() { continue; }
+                if let Some(t) = pet.command_at {
+                    if now.duration_since(t).as_secs_f32() > PET_COMMAND_STICKY_SECS {
+                        pet.command_at = None;
+                    }
                 }
             }
             let mut target_changes: Vec<(EntityId, Option<EntityId>)> = Vec::new();

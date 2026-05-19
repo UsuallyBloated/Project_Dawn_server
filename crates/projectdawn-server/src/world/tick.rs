@@ -1351,6 +1351,15 @@ pub async fn run(
                 let amount = swing.amount.max(0);
                 entity.hp = (entity.hp - amount as f32).max(0.0);
                 *entity.aggro.entry(intent.attacker).or_insert(0.0) += amount as f32;
+                // Track 11.3 — record the attacker's last hit on an
+                // enemy so their pet (if any) can inherit the target
+                // on its next AI tick. Decayed by the pet's AI
+                // resolution step; refreshed on every swing.
+                let target_for_pet = intent.target_id;
+                if let Some(att) = connections.get_mut(&attacker_cid) {
+                    att.last_attacked_enemy = Some(target_for_pet);
+                    att.last_attacked_at = Some(now);
+                }
                 handlers::fan_out_hit(
                     &mut server,
                     &in_world_recipients_now,
@@ -2076,6 +2085,14 @@ pub async fn run(
                             dmg_type,
                             now,
                         );
+                        // Track 11.3 — refresh pet target inheritance
+                        // on every single-target damage spell too, so
+                        // a Necromancer casting Bone Shards at an
+                        // enemy directs the skeleton onto it.
+                        if let Some(att) = connections.get_mut(&caster_cid) {
+                            att.last_attacked_enemy = Some(target_id);
+                            att.last_attacked_at = Some(now);
+                        }
                     }
                     "AOE" => {
                         // Track 9 — server-authoritative AOE damage.
@@ -2440,12 +2457,58 @@ pub async fn run(
         //     its own pos / target / state, and yields events for the
         //     post-loop fan-out (target switch, melee swing). Position
         //     broadcasts ride the same step-6 fan-out as players.
+        //
+        //     Track 11 — pets share this loop. Before the per-entity
+        //     tick, resolve each pet's inherited target from its owner's
+        //     `last_attacked_enemy` (if fresh and the target is still a
+        //     live enemy). Pets also need a snapshot of all live enemy
+        //     positions so they can chase their target inside the
+        //     per-entity borrow.
         if !enemies.is_empty() && !in_world_recipients_now.is_empty() {
+            const PET_TARGET_DECAY_SECS: f32 = 10.0;
             let player_snapshots: Vec<(EntityId, Vec3f)> = connections
                 .values()
                 .filter(|c| c.in_world)
                 .map(|c| (c.char_id as u64, c.pos))
                 .collect();
+            // Snapshot live non-pet enemies so pets can read target
+            // position + alive-status without re-borrowing the map
+            // inside the per-entity loop. (id, pos, alive)
+            let enemy_target_snapshots: Vec<(EntityId, Vec3f, bool)> = enemies
+                .iter()
+                .filter(|(_, e)| !e.is_pet())
+                .map(|(id, e)| (*id, e.pos, e.is_alive()))
+                .collect();
+            // Pre-pass: drive each pet's target from its owner's last
+            // attack. None if the inheritance has decayed or the
+            // target is gone.
+            let pet_target_updates: Vec<(EntityId, Option<EntityId>)> = enemies
+                .iter()
+                .filter(|(_, e)| e.is_pet() && e.is_alive())
+                .map(|(pet_id, pet)| {
+                    let owner_id = pet.owner.expect("pet must have owner");
+                    let owner_cid = owner_id as ClientId;
+                    let owner = connections.get(&owner_cid);
+                    let inherited = owner.and_then(|c| {
+                        let attacked = c.last_attacked_enemy?;
+                        let at = c.last_attacked_at?;
+                        if now.duration_since(at).as_secs_f32() > PET_TARGET_DECAY_SECS {
+                            return None;
+                        }
+                        // Confirm the target is still a live enemy.
+                        let alive = enemy_target_snapshots
+                            .iter()
+                            .any(|(id, _, alive)| *id == attacked && *alive);
+                        if alive { Some(attacked) } else { None }
+                    });
+                    (*pet_id, inherited)
+                })
+                .collect();
+            for (pet_id, target) in pet_target_updates {
+                if let Some(pet) = enemies.get_mut(&pet_id) {
+                    pet.target = target;
+                }
+            }
             let mut target_changes: Vec<(EntityId, Option<EntityId>)> = Vec::new();
             let mut enemy_hits: Vec<(EntityId, HitIntent)> = Vec::new();
             // Track 7: collect enemy cell changes so the aoi grid stays
@@ -2457,7 +2520,7 @@ pub async fn run(
                     continue;
                 }
                 let old_enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
-                let events = entity.tick_ai(&player_snapshots, dt, now);
+                let events = entity.tick_ai(&player_snapshots, &enemy_target_snapshots, dt, now);
                 if let Some(new_target) = events.target_changed {
                     target_changes.push((entity.id, new_target));
                 }
@@ -2481,6 +2544,128 @@ pub async fn run(
                 );
             }
             for (attacker, hit) in enemy_hits {
+                // Track 11.3 — pet swings hit enemies. Attacker id
+                // identifies the source: pets are in the PET_ID_BASE
+                // partition. For pet→enemy hits we apply damage to
+                // the target enemy directly, fan Hit + HealthUpdate,
+                // and handle death (kill credit + loot routed to the
+                // pet's owner, not the pet itself, via the aggro map
+                // we accumulate under the owner's id).
+                if attacker >= protocol::world::PET_ID_BASE
+                    && hit.target >= protocol::world::ENEMY_ID_BASE
+                    && hit.target < protocol::world::LOOT_BAG_ID_BASE
+                {
+                    let owner_id_opt = enemies
+                        .get(&attacker)
+                        .and_then(|p| p.owner);
+                    let amount = hit.amount.max(0);
+                    if let Some(target_entity) = enemies.get_mut(&hit.target) {
+                        if !target_entity.is_alive() {
+                            continue;
+                        }
+                        target_entity.hp = (target_entity.hp - amount as f32).max(0.0);
+                        // Aggro credit under the owner so XP / top-
+                        // damager logic naturally routes to them
+                        // (pets don't level themselves).
+                        if let Some(owner) = owner_id_opt {
+                            *target_entity
+                                .aggro
+                                .entry(owner)
+                                .or_insert(0.0) += amount as f32;
+                        }
+                        let new_hp = target_entity.hp;
+                        let max_hp = target_entity.max_hp;
+                        let died = new_hp <= 0.0;
+                        let mob_xp = target_entity.mob.xp;
+                        let mob_name_dead = if died {
+                            target_entity.transition(EnemyState::Dead, now);
+                            Some(target_entity.mob.name.clone())
+                        } else {
+                            None
+                        };
+                        let death_pos = target_entity.pos;
+                        let credit_id_opt = if died {
+                            target_entity
+                                .aggro
+                                .iter()
+                                .max_by(|a, b| {
+                                    a.1.partial_cmp(b.1)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                })
+                                .map(|(&id, _)| id)
+                        } else {
+                            None
+                        };
+                        // dmg breaks mez on the victim, matching the
+                        // single-target ENEMY arm semantics.
+                        if amount > 0 {
+                            target_entity.clear_mez();
+                        }
+                        handlers::fan_out_hit(
+                            &mut server,
+                            &in_world_recipients_now,
+                            attacker,
+                            hit.target,
+                            amount,
+                            false,
+                            protocol::world::DamageType::Physical,
+                        );
+                        handlers::fan_out_health_update(
+                            &mut server,
+                            &in_world_recipients_now,
+                            hit.target,
+                            new_hp,
+                            max_hp,
+                        );
+                        if died {
+                            handlers::fan_out_entity_died(
+                                &mut server,
+                                &in_world_recipients_now,
+                                hit.target,
+                            );
+                            if let Some(credit_id) = credit_id_opt {
+                                if mob_xp > 0 && credit_id < protocol::world::ENEMY_ID_BASE {
+                                    let cid = credit_id as ClientId;
+                                    if connections.contains_key(&cid) {
+                                        handlers::send_xp_gained(
+                                            &mut server,
+                                            cid,
+                                            mob_xp,
+                                        );
+                                    }
+                                }
+                            }
+                            if let Some(mob_name) = mob_name_dead.as_ref() {
+                                if let Some(items) = loot::roll_for_mob(mob_name) {
+                                    let bag = LootBag::new(death_pos, items, now);
+                                    let bag_id = bag.id;
+                                    let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
+                                    aoi.insert(bag_id, bag_cell);
+                                    let visible = aoi.entities_visible_from(bag_cell);
+                                    let bag_recipients: Vec<ClientId> = in_world_recipients_now
+                                        .iter()
+                                        .copied()
+                                        .filter(|id| visible.contains(id))
+                                        .collect();
+                                    if !bag_recipients.is_empty() {
+                                        handlers::fan_out_loot_bag_spawn(
+                                            &mut server,
+                                            &bag_recipients,
+                                            &bag,
+                                        );
+                                    }
+                                    loot_bags.insert(bag.id, bag);
+                                    tracing::info!(
+                                        mob = %mob_name,
+                                        bag_id,
+                                        "loot bag spawned (pet kill)"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
                 // Track 6: apply HP delta server-side when the enemy's
                 // target is a player. The target_id space encodes
                 // players below ENEMY_ID_BASE — anything in that range

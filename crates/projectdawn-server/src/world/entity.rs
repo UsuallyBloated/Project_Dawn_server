@@ -301,6 +301,7 @@ impl Entity {
     pub fn tick_ai(
         &mut self,
         players: &[(EntityId, Vec3f)],
+        enemy_targets: &[(EntityId, Vec3f, bool)],
         dt: f32,
         now: Instant,
     ) -> AiEvents {
@@ -312,12 +313,20 @@ impl Entity {
         if self.is_mezzed() {
             return events;
         }
-        match self.state {
-            EnemyState::Idle => self.tick_idle(players, now),
-            EnemyState::Chase => self.tick_chase(players, dt, now),
-            EnemyState::Attack => self.tick_attack(players, now, &mut events),
-            EnemyState::Leash => self.tick_leash(dt, now),
-            EnemyState::Dead => {}
+        // Track 11 — pets run a distinct state machine. They follow
+        // their owner by default and inherit attack targets from the
+        // owner's last melee/spell hit (set by the tick loop before
+        // this AI pass runs).
+        if self.is_pet() {
+            self.tick_pet_ai(players, enemy_targets, dt, now, &mut events);
+        } else {
+            match self.state {
+                EnemyState::Idle => self.tick_idle(players, now),
+                EnemyState::Chase => self.tick_chase(players, dt, now),
+                EnemyState::Attack => self.tick_attack(players, now, &mut events),
+                EnemyState::Leash => self.tick_leash(dt, now),
+                EnemyState::Dead => {}
+            }
         }
         if self.target != prev_target {
             events.target_changed = Some(self.target);
@@ -328,6 +337,85 @@ impl Entity {
             events.moved = true;
         }
         events
+    }
+
+    /// Track 11 — pet AI. Follow owner unless owner has acquired an
+    /// enemy target recently (set externally by the tick loop into
+    /// `self.target`); in that case, chase + melee the target until
+    /// it dies or moves out of leash.
+    ///
+    /// The pet's `spawn_pos` is reused as a "home" reference but
+    /// follow doesn't leash to it (pets follow their owner across
+    /// the world). Leash transitions are skipped entirely; pets only
+    /// despawn when their owner disconnects (handled in the
+    /// transport disconnect arm).
+    fn tick_pet_ai(
+        &mut self,
+        players: &[(EntityId, Vec3f)],
+        enemy_targets: &[(EntityId, Vec3f, bool)],
+        dt: f32,
+        now: Instant,
+        events: &mut AiEvents,
+    ) {
+        const PET_FOLLOW_DISTANCE: f32 = 3.0;
+        let Some(owner_id) = self.owner else {
+            // Pet with no owner — pathological state, do nothing.
+            return;
+        };
+        let owner_pos_opt = player_pos(players, owner_id);
+        let target_info: Option<(Vec3f, bool)> = self.target.and_then(|tid| {
+            enemy_targets
+                .iter()
+                .find(|(id, _, _)| *id == tid)
+                .map(|(_, pos, alive)| (*pos, *alive))
+        });
+        // If we have a live target, engage it; otherwise follow owner.
+        match target_info {
+            Some((target_pos, true)) => {
+                let dist = self.pos.distance_to(target_pos);
+                let melee = self.melee_range();
+                if dist <= melee {
+                    // In melee range — swing on cadence.
+                    self.face_toward(target_pos);
+                    let due = match self.last_attack_at {
+                        None => true,
+                        Some(t) => {
+                            now.duration_since(t).as_secs_f32() >= self.attack_interval()
+                        }
+                    };
+                    if due {
+                        self.last_attack_at = Some(now);
+                        events.hit = Some(HitIntent {
+                            target: self.target.expect("had target_info"),
+                            amount: self.mob.dmg,
+                        });
+                    }
+                } else if !self.is_rooted() {
+                    let snare = self.snare_factor();
+                    let step = self.mob.speed * (1.0 - snare) * dt;
+                    self.face_toward(target_pos);
+                    self.pos = self.pos.step_toward(target_pos, step);
+                }
+            }
+            _ => {
+                // Drop dead/missing target then fall back to follow.
+                if target_info.is_some() {
+                    self.target = None;
+                }
+                let Some(owner_pos) = owner_pos_opt else {
+                    // Owner offline — stand still (cleanup runs on
+                    // disconnect, so this is short-lived).
+                    return;
+                };
+                let dist = self.pos.distance_to(owner_pos);
+                if dist > PET_FOLLOW_DISTANCE && !self.is_rooted() {
+                    let snare = self.snare_factor();
+                    let step = self.mob.speed * (1.0 - snare) * dt;
+                    self.face_toward(owner_pos);
+                    self.pos = self.pos.step_toward(owner_pos, step);
+                }
+            }
+        }
     }
 
     fn tick_idle(&mut self, players: &[(EntityId, Vec3f)], now: Instant) {

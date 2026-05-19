@@ -684,7 +684,7 @@ async fn enemy_aggros_chases_and_attacks_player() {
     // test in isolation (`cargo test ... enemy_aggros...`) and it
     // completes in ~3-4 s.
     let target_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(20), |m| {
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
             matches!(
                 m,
                 ServerWorldMsg::EntityTarget { target: Some(t), .. } if *t == a_char_id as u64
@@ -700,7 +700,7 @@ async fn enemy_aggros_chases_and_attacks_player() {
     }
 
     let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(20), |m| {
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
             matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
         })
         .await
@@ -762,7 +762,7 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     // the enemy partition). Generous timeout because parallel tests
     // in this file contend for CPU; isolated runtime is ~5 s.
     let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(20), |m| {
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
             matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
         })
         .await
@@ -1005,7 +1005,7 @@ async fn aoe_spell_damages_nearby_enemies() {
     // Wait for an enemy hit on us — proves an enemy chased into
     // melee range, which puts it well within Inferno's 5 m radius.
     let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(20), |m| {
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
             matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
         })
         .await
@@ -1230,6 +1230,187 @@ async fn pet_summon_visible_to_peer() {
         assert_eq!(level, 6);
         assert!((max_hp - 80.0).abs() < 0.01, "skeleton template authored hp is 80");
         assert!((hp - 80.0).abs() < 0.01, "fresh pet spawns at full hp");
+    }
+}
+
+/// Track 11.2 — pet follows its owner across the world. Necromancer
+/// summons the skeleton at spawn, then walks away. The peer sees
+/// Position updates for the pet id closing the gap to the owner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pet_follows_owner() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "zii", "Ziorel", "Human", "Necromancer").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "qqq", "Qqua", "Elf", "Cleric").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+
+    // Settle both clients in-world.
+    for _ in 0..6 {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Cast Summon Skeleton (cast_time 3.0s) following the gate flow.
+    a.send_cast_start("Summon Skeleton", 3.0);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    tokio::time::sleep(Duration::from_millis(3100)).await;
+    a.send_cast_spell("Summon Skeleton", None);
+    for _ in 0..6 {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let pet_id: u64 = match b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+        })
+        .await
+        .expect("B sees A's pet spawn")
+    {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    // Owner walks ~5 m east over 2 s. PET_FOLLOW_DISTANCE = 3.0 m,
+    // skeleton speed = 3.0 m/s, so the pet has plenty of headroom to
+    // close the gap. B should observe at least one Position update
+    // for the pet id with x > 0 (it spawned at owner_pos + 1.5 east,
+    // so x starts > 0; we want to see x KEEP increasing as the owner
+    // walks).
+    let dir = Vec3 { x: 1.0, y: 0.0, z: 0.0 };
+    let walk_end = Instant::now() + Duration::from_millis(2_500);
+    let mut seq: u32 = 1;
+    let mut max_pet_x: f32 = f32::MIN;
+    while Instant::now() < walk_end {
+        a.send_move(seq, dir);
+        seq += 1;
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        // Drain CHANNEL_POSITION on B for pet position updates as we
+        // walk; latch the highest x value we see.
+        while let Some(bytes) = b.client.receive_message(CHANNEL_POSITION) {
+            if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(
+                &bytes,
+                bincode_cfg(),
+            ) {
+                if let ServerWorldMsg::Position { id, pos, .. } = msg {
+                    if id == pet_id {
+                        max_pet_x = max_pet_x.max(pos.x);
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Pet spawned at ~(owner_pos.x + 1.5, _, _). Owner walked ~5 m
+    // east; the pet should have moved well past its spawn x to keep
+    // up. Use 3.0 as the threshold — generous to absorb tick jitter
+    // and the FOLLOW_DISTANCE hysteresis at the boundary.
+    assert!(
+        max_pet_x > 3.0,
+        "pet should follow owner east (saw max x = {max_pet_x})"
+    );
+}
+
+/// Track 11.3 — pet inherits owner's attack target and damages the
+/// enemy. Walk Necromancer A into camp 0 until an enemy is in melee,
+/// summon the skeleton, A swings on the enemy once to seed
+/// last_attacked_enemy, then the skeleton's swings produce Hit
+/// broadcasts with the pet id as attacker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pet_attacks_owners_target() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "rrr", "Rune", "Human", "Necromancer").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Walk toward camp 0's [20, 0, 5] for ~2 s.
+    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
+    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
+    let walk_end = Instant::now() + Duration::from_millis(2_000);
+    let mut seq: u32 = 1;
+    while Instant::now() < walk_end {
+        a.send_move(seq, dir);
+        seq += 1;
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Wait for an enemy hit on us — proves the AI walked an enemy into
+    // melee with us.
+    let hit_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
+            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
+        })
+        .await
+        .expect("an enemy locks on and swings");
+    let enemy_id: u64 = match hit_evt {
+        ServerWorldMsg::Hit { attacker, .. } => attacker,
+        _ => unreachable!(),
+    };
+
+    // Summon Skeleton (cast_time 3.0s).
+    a.send_cast_start("Summon Skeleton", 3.0);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    tokio::time::sleep(Duration::from_millis(3100)).await;
+    a.send_cast_spell("Summon Skeleton", None);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Latch the pet id from the PetSpawn the server fans to A as
+    // well (caster receives own PetSpawn — caller's AOI cell
+    // includes themselves).
+    let pet_id: u64 = match a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+        })
+        .await
+        .expect("A receives own PetSpawn")
+    {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    // Send one Attack against the enemy to seed last_attacked_enemy.
+    // Bare-handed swing; the server runs its own calc. We just need
+    // the attack to land server-side so the pet inherits the target.
+    a.send_attack(enemy_id, "", false, DamageType::Physical);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // The skeleton (speed 3 m/s) needs a moment to close to melee +
+    // its 2.2 s attack interval. Pump for up to ~8 s; once a Hit
+    // arrives with attacker=pet_id, target=enemy_id, the inheritance
+    // pipeline is proven end-to-end.
+    let pet_hit = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(10), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
+                if *attacker == pet_id && *target == enemy_id)
+        })
+        .await
+        .expect("skeleton inherits target and lands a Hit on the enemy");
+    if let ServerWorldMsg::Hit { amount, .. } = pet_hit {
+        assert_eq!(amount, 8, "skeleton template authored dmg is 8");
     }
 }
 

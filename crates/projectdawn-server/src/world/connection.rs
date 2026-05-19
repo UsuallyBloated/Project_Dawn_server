@@ -234,6 +234,14 @@ pub struct PerConnection {
     /// expirations + applies refresh buff_snapshot for the
     /// fan-out path.
     pub active_buffs: Vec<super::buffs::ActiveBuff>,
+
+    /// Track 11.3 — last enemy this player attacked. Pet AI reads this
+    /// to inherit the owner's target so the pet auto-engages whatever
+    /// the player is fighting. `last_attacked_at` decays the
+    /// inheritance after `PET_TARGET_DECAY_SECS` so the pet returns to
+    /// follow when the player stops attacking.
+    pub last_attacked_enemy: Option<protocol::world::EntityId>,
+    pub last_attacked_at: Option<Instant>,
 }
 
 impl PerConnection {
@@ -296,6 +304,8 @@ impl PerConnection {
             buff_snapshot: Vec::new(),
             buff_snapshot_set: false,
             active_buffs: Vec::new(),
+            last_attacked_enemy: None,
+            last_attacked_at: None,
         }
     }
 

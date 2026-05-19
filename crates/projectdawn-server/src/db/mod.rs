@@ -579,3 +579,68 @@ pub async fn checkpoint_resources(
     .await?;
     Ok(())
 }
+
+/// Track 13.1 — one row of `character_items`. `location` distinguishes
+/// `'base'` (Track 13.1, base inventory slots) from `'bag_<i>'`
+/// (Track 13.2) and `'equip'` (Track 13.3). For 13.1 only `'base'` is
+/// written; the wider semantics live in app code and the table is
+/// intentionally loose so future locations don't need another
+/// migration.
+#[derive(Debug, Clone, FromRow)]
+pub struct InventoryRow {
+    pub location: String,
+    pub slot: i32,
+    pub item_path: String,
+    pub count: i32,
+}
+
+/// Load every inventory row for a character. Returns an empty Vec for
+/// freshly-created characters (which never wrote any rows). Callers
+/// project this into the in-memory `PlayerInventory` shape.
+pub async fn load_inventory(
+    pool: &SqlitePool,
+    char_id: i64,
+) -> AuthResult<Vec<InventoryRow>> {
+    let rows: Vec<InventoryRow> = sqlx::query_as(
+        "SELECT location, slot, item_path, count
+         FROM character_items
+         WHERE char_id = ?1
+         ORDER BY location, slot",
+    )
+    .bind(char_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Persist the full inventory snapshot for `char_id`. Atomic delete +
+/// insert pattern — simpler than diffing in-memory state against the
+/// DB and the row count per character is tiny (≤ 8 base + a few bags
+/// in the worst case). The whole thing runs inside a transaction so a
+/// crash partway through leaves the DB consistent.
+pub async fn save_inventory(
+    pool: &SqlitePool,
+    char_id: i64,
+    rows: &[InventoryRow],
+) -> AuthResult<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM character_items WHERE char_id = ?1")
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await?;
+    for row in rows {
+        sqlx::query(
+            "INSERT INTO character_items (char_id, location, slot, item_path, count)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(char_id)
+        .bind(&row.location)
+        .bind(row.slot)
+        .bind(&row.item_path)
+        .bind(row.count)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}

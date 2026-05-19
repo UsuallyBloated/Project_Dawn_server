@@ -249,6 +249,15 @@ pub struct PerConnection {
     /// 30 % HP when this time has passed. Cleared on respawn or on
     /// disconnect.
     pub warder_respawn_at: Option<Instant>,
+
+    /// Track 13.1 — server-side inventory snapshot. Loaded from the
+    /// `character_items` table on `load_character`, mutated when
+    /// loot grants land (loot intent dispatch in `tick.rs`),
+    /// persisted on disconnect + the periodic checkpoint cadence.
+    /// `inventory_dirty` flips when add_item / future move/drop
+    /// mutates the snapshot; the persistence sweep clears it.
+    pub inventory: super::inventory::PlayerInventory,
+    pub inventory_dirty: bool,
 }
 
 impl PerConnection {
@@ -314,6 +323,8 @@ impl PerConnection {
             last_attacked_enemy: None,
             last_attacked_at: None,
             warder_respawn_at: None,
+            inventory: super::inventory::PlayerInventory::new(),
+            inventory_dirty: false,
         }
     }
 

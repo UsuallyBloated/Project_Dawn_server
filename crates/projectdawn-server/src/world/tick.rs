@@ -10,6 +10,7 @@ use super::{
     entity::{ActiveCc, Entity, EnemyState, HitIntent},
     groups::{self, GroupManager},
     handlers::{self, Outcome},
+    inventory,
     items,
     loot::{self, LootBag},
     persistence,
@@ -456,13 +457,32 @@ pub async fn run(
                                 server.disconnect(client_id);
                                 continue;
                             }
+                            // Track 13.1 — load any persisted inventory
+                            // rows. Failure here is non-fatal (logged
+                            // and the character keeps an empty
+                            // inventory snapshot); we don't want a
+                            // transient DB error to kick the client
+                            // out of the world.
+                            let inv_rows = match db::load_inventory(&pool, char_id).await {
+                                Ok(rows) => rows,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        char_id,
+                                        error = %e,
+                                        "load_inventory failed; defaulting to empty"
+                                    );
+                                    Vec::new()
+                                }
+                            };
                             connections.insert(
                                 client_id,
                                 PerConnection::from_spawn(spawn, now),
                             );
-                            // Set the real AOI cell from spawn position.
+                            // Set the real AOI cell from spawn position +
+                            // populate the inventory snapshot.
                             if let Some(conn) = connections.get_mut(&client_id) {
                                 conn.aoi_cell = aoi::cell_for(conn.pos.x, conn.pos.z);
+                                conn.inventory = inventory::PlayerInventory::from_rows(&inv_rows);
                             }
                         }
                         Err(e) => {
@@ -3270,9 +3290,37 @@ pub async fn run(
                     }
                 }
                 for (path, count) in granted {
+                    // Track 13.1 — server-side inventory mutation.
+                    // The wire shape is unchanged (LootGranted still
+                    // carries item_path + count and the client picks
+                    // the slot for now); 13.2 will narrow the slot
+                    // server-side and include it on the wire. Stack
+                    // overflow / inventory full just logs — the
+                    // client still accepts the grant and shows the
+                    // floating "+N item" pickup. 13.2 will reject
+                    // the intent server-side and stop the bag from
+                    // emptying when the player can't carry the
+                    // stack.
+                    let looter_cid = intent.looter as ClientId;
+                    if let Some(conn) = connections.get_mut(&looter_cid) {
+                        match conn.inventory.add_item(&path, count) {
+                            Ok(()) => {
+                                conn.inventory_dirty = true;
+                            }
+                            Err(e) => {
+                                tracing::info!(
+                                    looter = intent.looter,
+                                    item_path = %path,
+                                    count,
+                                    error = %e,
+                                    "server inventory add_item rejected; client still receives the grant for Track 13.1 compatibility",
+                                );
+                            }
+                        }
+                    }
                     handlers::send_loot_granted(
                         &mut server,
-                        intent.looter as ClientId,
+                        looter_cid,
                         path,
                         count,
                     );

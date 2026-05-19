@@ -20,6 +20,7 @@ mod connection;
 mod entity;
 mod groups;
 mod handlers;
+mod inventory;
 mod items;
 mod loot;
 mod persistence;

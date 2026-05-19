@@ -12,7 +12,9 @@ use sqlx::SqlitePool;
 /// Each row is its own UPDATE — keeps lock contention with the auth
 /// handlers' touch_session writes minimal under SQLite WAL. Track 6 added
 /// the resource path (hp/mp/stamina/xp/level) alongside position, since
-/// the server now mutates resources every regen tick.
+/// the server now mutates resources every regen tick. Track 13.1 added
+/// the inventory path (delete + insert per-character) for the server-
+/// side inventory snapshot.
 pub async fn checkpoint_dirty(pool: &SqlitePool, conns: &mut [&mut PerConnection]) {
     for conn in conns.iter_mut() {
         if conn.is_dirty_for_persist() {
@@ -55,6 +57,19 @@ pub async fn checkpoint_dirty(pool: &SqlitePool, conns: &mut [&mut PerConnection
                         char_id = conn.char_id,
                         error = %e,
                         "resource checkpoint failed; will retry next interval"
+                    );
+                }
+            }
+        }
+        if conn.inventory_dirty {
+            let rows = conn.inventory.to_rows();
+            match db::save_inventory(pool, conn.char_id, &rows).await {
+                Ok(()) => conn.inventory_dirty = false,
+                Err(e) => {
+                    tracing::warn!(
+                        char_id = conn.char_id,
+                        error = %e,
+                        "inventory checkpoint failed; will retry next interval"
                     );
                 }
             }

@@ -291,8 +291,10 @@ impl Entity {
     /// Drive one AI tick. Mutates state / target / pos / last_attack_at;
     /// returns the events the tick loop should fan out (target switch,
     /// melee swing, position broadcast trigger). The caller is responsible
-    /// for owning `players` (a snapshot of in-world player positions for
-    /// this tick — we don't borrow connections across the entity loop).
+    /// for owning `targets` (a snapshot of aggro-able entity positions —
+    /// players plus alive pets — for this tick; we don't borrow connections
+    /// across the entity loop) and `enemy_targets` (pet targets — alive
+    /// non-pet enemies, used by pet AI to chase its inherited target).
     ///
     /// Caster kiting and healer flee are not wired here; the starter zone
     /// has no caster or healer mobs (all 9 archetypes are melee). When
@@ -300,7 +302,7 @@ impl Entity {
     /// > 0.0` here.
     pub fn tick_ai(
         &mut self,
-        players: &[(EntityId, Vec3f)],
+        targets: &[(EntityId, Vec3f)],
         enemy_targets: &[(EntityId, Vec3f, bool)],
         dt: f32,
         now: Instant,
@@ -318,12 +320,12 @@ impl Entity {
         // owner's last melee/spell hit (set by the tick loop before
         // this AI pass runs).
         if self.is_pet() {
-            self.tick_pet_ai(players, enemy_targets, dt, now, &mut events);
+            self.tick_pet_ai(targets, enemy_targets, dt, now, &mut events);
         } else {
             match self.state {
-                EnemyState::Idle => self.tick_idle(players, now),
-                EnemyState::Chase => self.tick_chase(players, dt, now),
-                EnemyState::Attack => self.tick_attack(players, now, &mut events),
+                EnemyState::Idle => self.tick_idle(targets, now),
+                EnemyState::Chase => self.tick_chase(targets, dt, now),
+                EnemyState::Attack => self.tick_attack(targets, now, &mut events),
                 EnemyState::Leash => self.tick_leash(dt, now),
                 EnemyState::Dead => {}
             }
@@ -351,7 +353,7 @@ impl Entity {
     /// transport disconnect arm).
     fn tick_pet_ai(
         &mut self,
-        players: &[(EntityId, Vec3f)],
+        targets: &[(EntityId, Vec3f)],
         enemy_targets: &[(EntityId, Vec3f, bool)],
         dt: f32,
         now: Instant,
@@ -362,7 +364,7 @@ impl Entity {
             // Pet with no owner — pathological state, do nothing.
             return;
         };
-        let owner_pos_opt = player_pos(players, owner_id);
+        let owner_pos_opt = target_pos(targets, owner_id);
         let target_info: Option<(Vec3f, bool)> = self.target.and_then(|tid| {
             enemy_targets
                 .iter()
@@ -418,19 +420,19 @@ impl Entity {
         }
     }
 
-    fn tick_idle(&mut self, players: &[(EntityId, Vec3f)], now: Instant) {
-        if let Some((id, _)) = nearest_player_within(self.pos, players, self.mob.aggro) {
+    fn tick_idle(&mut self, targets: &[(EntityId, Vec3f)], now: Instant) {
+        if let Some((id, _)) = nearest_target_within(self.pos, targets, self.mob.aggro) {
             self.target = Some(id);
             self.transition(EnemyState::Chase, now);
         }
     }
 
-    fn tick_chase(&mut self, players: &[(EntityId, Vec3f)], dt: f32, now: Instant) {
+    fn tick_chase(&mut self, targets: &[(EntityId, Vec3f)], dt: f32, now: Instant) {
         let Some(target_id) = self.target else {
             self.transition(EnemyState::Leash, now);
             return;
         };
-        let Some(target_pos) = player_pos(players, target_id) else {
+        let Some(target_pos) = target_pos(targets, target_id) else {
             // Target left the world (disconnect, EnterWorld → out). Drop.
             self.target = None;
             self.transition(EnemyState::Leash, now);
@@ -458,7 +460,7 @@ impl Entity {
 
     fn tick_attack(
         &mut self,
-        players: &[(EntityId, Vec3f)],
+        targets: &[(EntityId, Vec3f)],
         now: Instant,
         events: &mut AiEvents,
     ) {
@@ -466,7 +468,7 @@ impl Entity {
             self.transition(EnemyState::Leash, now);
             return;
         };
-        let Some(target_pos) = player_pos(players, target_id) else {
+        let Some(target_pos) = target_pos(targets, target_id) else {
             self.target = None;
             self.transition(EnemyState::Leash, now);
             return;
@@ -516,13 +518,13 @@ impl Entity {
     }
 }
 
-fn nearest_player_within(
+fn nearest_target_within(
     origin: Vec3f,
-    players: &[(EntityId, Vec3f)],
+    targets: &[(EntityId, Vec3f)],
     radius: f32,
 ) -> Option<(EntityId, f32)> {
     let mut best: Option<(EntityId, f32)> = None;
-    for &(id, pos) in players {
+    for &(id, pos) in targets {
         let d = origin.distance_to(pos);
         if d > radius {
             continue;
@@ -536,8 +538,8 @@ fn nearest_player_within(
     best
 }
 
-fn player_pos(players: &[(EntityId, Vec3f)], id: EntityId) -> Option<Vec3f> {
-    players.iter().find(|(p, _)| *p == id).map(|(_, pos)| *pos)
+fn target_pos(targets: &[(EntityId, Vec3f)], id: EntityId) -> Option<Vec3f> {
+    targets.iter().find(|(p, _)| *p == id).map(|(_, pos)| *pos)
 }
 
 /// Monotonic enemy-id counter. Starts at `ENEMY_ID_BASE` and increments
@@ -603,5 +605,24 @@ mod tests {
         let later = now + std::time::Duration::from_millis(100);
         e.transition(EnemyState::Idle, later);
         assert_eq!(e.state_entered_at, now, "state_entered_at must not refresh");
+    }
+
+    /// Track 11.4 — enemy targets pets as valid aggro candidates.
+    /// When the targets slice contains only a pet id (no player), the
+    /// enemy's tick_idle should still pick it up and transition to
+    /// Chase. Verifies the rename from `players` to `targets` actually
+    /// extended the aggro pool to pets.
+    #[test]
+    fn enemy_aggros_on_pet_when_no_player_nearby() {
+        let now = Instant::now();
+        let mut e = Entity::from_spawn(0, Vec3f::ZERO, template(), now);
+        // Pet id sits in the dedicated partition; the value doesn't
+        // matter for aggro logic (tick_idle picks by distance, not id).
+        let pet_id = PET_ID_BASE + 17;
+        let targets = vec![(pet_id, Vec3f { x: 2.0, y: 0.0, z: 0.0 })];
+        let enemy_targets: Vec<(EntityId, Vec3f, bool)> = vec![];
+        let _events = e.tick_ai(&targets, &enemy_targets, 0.05, now);
+        assert_eq!(e.target, Some(pet_id), "enemy should aggro on nearest target regardless of id partition");
+        assert!(matches!(e.state, EnemyState::Chase), "transitioning Idle → Chase on acquisition");
     }
 }

@@ -2471,6 +2471,18 @@ pub async fn run(
                 .filter(|c| c.in_world)
                 .map(|c| (c.char_id as u64, c.pos))
                 .collect();
+            // Track 11.4 — enemies aggro on pets too. Build a combined
+            // targets slice (players + alive pets) so enemy tick_idle
+            // can pick the nearest of either. Pets share melee
+            // melee range / chase behaviour with players from the
+            // enemy's POV; the new enemy→pet hit dispatch below
+            // applies damage to pets.
+            let mut targets_for_enemy_ai: Vec<(EntityId, Vec3f)> = player_snapshots.clone();
+            for (id, entity) in enemies.iter() {
+                if entity.is_pet() && entity.is_alive() {
+                    targets_for_enemy_ai.push((*id, entity.pos));
+                }
+            }
             // Snapshot live non-pet enemies so pets can read target
             // position + alive-status without re-borrowing the map
             // inside the per-entity loop. (id, pos, alive)
@@ -2520,7 +2532,7 @@ pub async fn run(
                     continue;
                 }
                 let old_enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
-                let events = entity.tick_ai(&player_snapshots, &enemy_target_snapshots, dt, now);
+                let events = entity.tick_ai(&targets_for_enemy_ai, &enemy_target_snapshots, dt, now);
                 if let Some(new_target) = events.target_changed {
                     target_changes.push((entity.id, new_target));
                 }
@@ -2544,6 +2556,59 @@ pub async fn run(
                 );
             }
             for (attacker, hit) in enemy_hits {
+                // Track 11.4 — enemy → pet. Mirror of the enemy →
+                // player branch below but simpler: pets have no
+                // armor / absorb / shield buffs and no XP awarded
+                // on death. Just apply HP, fan Hit + HealthUpdate,
+                // and let the existing corpse-cleanup phase remove
+                // the pet from the world after the linger window.
+                if attacker >= protocol::world::ENEMY_ID_BASE
+                    && attacker < protocol::world::PET_ID_BASE
+                    && hit.target >= protocol::world::PET_ID_BASE
+                {
+                    let amount = hit.amount.max(0);
+                    if let Some(pet) = enemies.get_mut(&hit.target) {
+                        if !pet.is_alive() {
+                            continue;
+                        }
+                        pet.hp = (pet.hp - amount as f32).max(0.0);
+                        let new_hp = pet.hp;
+                        let max_hp = pet.max_hp;
+                        let died = new_hp <= 0.0;
+                        if died {
+                            pet.transition(EnemyState::Dead, now);
+                        }
+                        handlers::fan_out_hit(
+                            &mut server,
+                            &in_world_recipients_now,
+                            attacker,
+                            hit.target,
+                            amount,
+                            false,
+                            protocol::world::DamageType::Physical,
+                        );
+                        handlers::fan_out_health_update(
+                            &mut server,
+                            &in_world_recipients_now,
+                            hit.target,
+                            new_hp,
+                            max_hp,
+                        );
+                        if died {
+                            handlers::fan_out_entity_died(
+                                &mut server,
+                                &in_world_recipients_now,
+                                hit.target,
+                            );
+                            tracing::info!(
+                                pet_id = hit.target,
+                                killer = attacker,
+                                "pet killed by enemy"
+                            );
+                        }
+                    }
+                    continue;
+                }
                 // Track 11.3 — pet swings hit enemies. Attacker id
                 // identifies the source: pets are in the PET_ID_BASE
                 // partition. For pet→enemy hits we apply damage to

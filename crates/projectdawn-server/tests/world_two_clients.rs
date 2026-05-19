@@ -311,6 +311,24 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
+    fn send_equip_item(&mut self, src_location: &str, src_slot: u32, equip_slot: u8) {
+        let msg = ClientWorldMsg::EquipItem {
+            src_location: src_location.into(),
+            src_slot,
+            equip_slot,
+        };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
+    fn send_unequip_item(&mut self, equip_slot: u8, dst_location: &str, dst_slot: u32) {
+        let msg = ClientWorldMsg::UnequipItem {
+            equip_slot,
+            dst_location: dst_location.into(),
+            dst_slot,
+        };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
     async fn wait_for(
         &mut self,
         channel: u8,
@@ -1913,6 +1931,155 @@ async fn drop_item_creates_loot_bag_at_player_pos() {
         .await
         .expect("LootBag spawns with the dropped stack");
     let _ = bag_spawn;
+}
+
+/// Track 13.3 — EquipItem moves a base entry into the paperdoll.
+/// Seed a sword in base slot 0, send EquipItem(0 → equip slot 0),
+/// assert two Deltas land: base slot 0 cleared, equip slot 0 has
+/// the sword.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn equip_item_moves_base_to_paperdoll() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "eq1", "Equipper", "Human", "Warrior").await;
+    let db_url = h.db_url.clone();
+    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    projectdawn_server::db::save_inventory(
+        &pool,
+        a_char_id,
+        &[projectdawn_server::db::InventoryRow {
+            location: "base".into(),
+            slot: 0,
+            item_path: "res://items/sword.tres".into(),
+            count: 1,
+        }],
+    )
+    .await
+    .expect("seed");
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let _ = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+        })
+        .await
+        .expect("snapshot");
+
+    a.send_equip_item("base", 0, 0); // weapon slot
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let mut saw_base_clear = false;
+    let mut saw_equip_set = false;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while (!saw_base_clear || !saw_equip_set) && Instant::now() < deadline {
+        if let Some(msg) = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_millis(200), |m| {
+                matches!(m, ServerWorldMsg::InventoryDelta { .. })
+            })
+            .await
+        {
+            if let ServerWorldMsg::InventoryDelta { location, slot, item_path, .. } = msg {
+                if location == "base" && slot == 0 && item_path.is_none() {
+                    saw_base_clear = true;
+                }
+                if location == "equip"
+                    && slot == 0
+                    && item_path.as_deref() == Some("res://items/sword.tres")
+                {
+                    saw_equip_set = true;
+                }
+            }
+        }
+    }
+    assert!(
+        saw_base_clear && saw_equip_set,
+        "expected both deltas (base_clear={saw_base_clear}, equip_set={saw_equip_set})"
+    );
+}
+
+/// Track 13.3 — EquipItem with no source rejects silently. The wire
+/// round-trips, server returns no Delta. Mirrors the negative-path
+/// MoveItem test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn equip_item_empty_source_drops_silently() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "eq2", "Empty", "Human", "Warrior").await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let _ = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+        })
+        .await
+        .expect("snapshot");
+
+    a.send_equip_item("base", 0, 0);
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let stray = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { .. })
+        })
+        .await;
+    assert!(stray.is_none(), "EquipItem on empty source must not fan a Delta");
+}
+
+/// Track 13.3 — InventorySnapshot on EnterWorld includes persisted
+/// equip rows. Seed an equipped sword + a base cloth via DB, assert
+/// the snapshot's entries list contains both with the right
+/// location strings.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn snapshot_includes_persisted_equipment() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "eq3", "Equipsnap", "Human", "Warrior").await;
+    let db_url = h.db_url.clone();
+    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    projectdawn_server::db::save_inventory(
+        &pool,
+        a_char_id,
+        &[
+            projectdawn_server::db::InventoryRow {
+                location: "base".into(),
+                slot: 0,
+                item_path: "res://items/cloth.tres".into(),
+                count: 5,
+            },
+            projectdawn_server::db::InventoryRow {
+                location: "equip".into(),
+                slot: 0,
+                item_path: "res://items/sword.tres".into(),
+                count: 1,
+            },
+        ],
+    )
+    .await
+    .expect("seed");
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    let snap = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+        })
+        .await
+        .expect("snapshot");
+    if let ServerWorldMsg::InventorySnapshot { entries } = snap {
+        let has_base = entries
+            .iter()
+            .any(|(loc, _, path, count)| loc == "base" && path == "res://items/cloth.tres" && *count == 5);
+        let has_equip = entries
+            .iter()
+            .any(|(loc, slot, path, count)| {
+                loc == "equip" && *slot == 0 && path == "res://items/sword.tres" && *count == 1
+            });
+        assert!(has_base, "snapshot must include the base cloth row");
+        assert!(has_equip, "snapshot must include the equipped sword row");
+    }
 }
 
 /// Track 13.2 — MoveItem on a non-existent source slot is rejected

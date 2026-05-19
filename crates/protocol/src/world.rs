@@ -260,6 +260,29 @@ pub enum ClientWorldMsg {
         count: u32,
     },
 
+    /// Track 13.3 — equip the item at `(src_location, src_slot)`
+    /// into paperdoll slot `equip_slot`. `equip_slot` matches the
+    /// existing `protocol::world::EquipSlot` enum order (weapon=0,
+    /// offhand=1, head=2, chest=3, legs=4, feet=5, hands=6, ring=7,
+    /// neck=8). If the paperdoll slot is occupied, the existing
+    /// item is moved into `src_slot` (swap).
+    EquipItem {
+        src_location: String,
+        src_slot: u32,
+        equip_slot: u8,
+    },
+
+    /// Track 13.3 — unequip the item in paperdoll slot `equip_slot`
+    /// into `(dst_location, dst_slot)`. If dst is occupied, the
+    /// swap moves the dst item into the paperdoll slot (subject to
+    /// the same byte-range validation — item-vs-slot validation is
+    /// deferred until the server-side item registry lands).
+    UnequipItem {
+        equip_slot: u8,
+        dst_location: String,
+        dst_slot: u32,
+    },
+
     // GM
     GmCommand {
         line: String,

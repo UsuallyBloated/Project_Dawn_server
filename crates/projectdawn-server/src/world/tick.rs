@@ -730,6 +730,21 @@ pub async fn run(
             count: u32,
         }
         let mut drop_item_intents: Vec<DropItemI> = Vec::new();
+        // Track 13.3 — equip / unequip intents.
+        struct EquipItemI {
+            owner: u64,
+            src_location: String,
+            src_slot: u32,
+            equip_slot: u8,
+        }
+        let mut equip_item_intents: Vec<EquipItemI> = Vec::new();
+        struct UnequipItemI {
+            owner: u64,
+            equip_slot: u8,
+            dst_location: String,
+            dst_slot: u32,
+        }
+        let mut unequip_item_intents: Vec<UnequipItemI> = Vec::new();
         for client_id in client_ids {
             // Skip clients whose Connected event is in the queue but whose
             // PerConnection row hasn't been built yet (load_character failed
@@ -876,6 +891,32 @@ pub async fn run(
                                 location,
                                 slot,
                                 count,
+                            });
+                        }
+                        Outcome::EquipItemIntent {
+                            owner,
+                            src_location,
+                            src_slot,
+                            equip_slot,
+                        } => {
+                            equip_item_intents.push(EquipItemI {
+                                owner,
+                                src_location,
+                                src_slot,
+                                equip_slot,
+                            });
+                        }
+                        Outcome::UnequipItemIntent {
+                            owner,
+                            equip_slot,
+                            dst_location,
+                            dst_slot,
+                        } => {
+                            unequip_item_intents.push(UnequipItemI {
+                                owner,
+                                equip_slot,
+                                dst_location,
+                                dst_slot,
                             });
                         }
                         Outcome::GroupInviteIntent { inviter, target_name } => {
@@ -3061,6 +3102,168 @@ pub async fn run(
                     count,
                     bag_id,
                     "DropItem spawned loot bag"
+                );
+            }
+        }
+
+        // 4hg. Track 13.3 — apply equip-item intents. Validates src
+        //      is a base slot in range + equip_slot in range, moves
+        //      via `equip_from_base` (handles the swap-with-existing
+        //      case), fans an `InventoryDelta` per touched slot.
+        //
+        //      Item-vs-slot validation ("is this item a helm?") is
+        //      deferred until the server-side item registry lands.
+        //      For now the server only enforces byte-range slots.
+        //      Stat recompute (max_hp / max_mp / equipped_armor) is
+        //      also deferred for the same reason.
+        if !equip_item_intents.is_empty() {
+            for intent in equip_item_intents.drain(..) {
+                if intent.src_location != "base" {
+                    tracing::debug!(
+                        owner = intent.owner,
+                        src_loc = %intent.src_location,
+                        "EquipItem rejected — only 'base' src supported in Track 13.3"
+                    );
+                    continue;
+                }
+                let owner_cid = intent.owner as ClientId;
+                let Some(conn) = connections.get_mut(&owner_cid) else {
+                    continue;
+                };
+                let src = intent.src_slot as usize;
+                let touched = match conn
+                    .inventory
+                    .equip_from_base(src, intent.equip_slot)
+                {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::debug!(
+                            owner = intent.owner,
+                            src,
+                            equip_slot = intent.equip_slot,
+                            error = %e,
+                            "EquipItem rejected"
+                        );
+                        continue;
+                    }
+                };
+                conn.inventory_dirty = true;
+                let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
+                    .iter()
+                    .map(|&(loc, slot)| {
+                        let payload = match loc {
+                            "base" => conn
+                                .inventory
+                                .base
+                                .get(slot as usize)
+                                .and_then(|s| s.as_ref())
+                                .map(|e| (e.item_path.clone(), e.count)),
+                            "equip" => conn
+                                .inventory
+                                .equipment
+                                .get(&(slot as u8))
+                                .map(|e| (e.item_path.clone(), e.count)),
+                            _ => None,
+                        };
+                        (loc.to_string(), slot, payload)
+                    })
+                    .collect();
+                for (loc, slot, payload) in deltas {
+                    let (item_path, count) = match payload {
+                        Some((p, c)) => (Some(p), c),
+                        None => (None, 0),
+                    };
+                    handlers::send_inventory_delta(
+                        &mut server,
+                        owner_cid,
+                        loc,
+                        slot,
+                        item_path,
+                        count,
+                    );
+                }
+                tracing::debug!(
+                    owner = intent.owner,
+                    src,
+                    equip_slot = intent.equip_slot,
+                    "EquipItem applied"
+                );
+            }
+        }
+
+        // 4hh. Track 13.3 — apply unequip-item intents. Mirror of
+        //      4hg but goes the other direction (equip → base).
+        if !unequip_item_intents.is_empty() {
+            for intent in unequip_item_intents.drain(..) {
+                if intent.dst_location != "base" {
+                    tracing::debug!(
+                        owner = intent.owner,
+                        dst_loc = %intent.dst_location,
+                        "UnequipItem rejected — only 'base' dst supported in Track 13.3"
+                    );
+                    continue;
+                }
+                let owner_cid = intent.owner as ClientId;
+                let Some(conn) = connections.get_mut(&owner_cid) else {
+                    continue;
+                };
+                let dst = intent.dst_slot as usize;
+                let touched = match conn
+                    .inventory
+                    .unequip_to_base(intent.equip_slot, dst)
+                {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::debug!(
+                            owner = intent.owner,
+                            equip_slot = intent.equip_slot,
+                            dst,
+                            error = %e,
+                            "UnequipItem rejected"
+                        );
+                        continue;
+                    }
+                };
+                conn.inventory_dirty = true;
+                let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
+                    .iter()
+                    .map(|&(loc, slot)| {
+                        let payload = match loc {
+                            "base" => conn
+                                .inventory
+                                .base
+                                .get(slot as usize)
+                                .and_then(|s| s.as_ref())
+                                .map(|e| (e.item_path.clone(), e.count)),
+                            "equip" => conn
+                                .inventory
+                                .equipment
+                                .get(&(slot as u8))
+                                .map(|e| (e.item_path.clone(), e.count)),
+                            _ => None,
+                        };
+                        (loc.to_string(), slot, payload)
+                    })
+                    .collect();
+                for (loc, slot, payload) in deltas {
+                    let (item_path, count) = match payload {
+                        Some((p, c)) => (Some(p), c),
+                        None => (None, 0),
+                    };
+                    handlers::send_inventory_delta(
+                        &mut server,
+                        owner_cid,
+                        loc,
+                        slot,
+                        item_path,
+                        count,
+                    );
+                }
+                tracing::debug!(
+                    owner = intent.owner,
+                    equip_slot = intent.equip_slot,
+                    dst,
+                    "UnequipItem applied"
                 );
             }
         }

@@ -748,6 +748,42 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// Track 13.3 — equip the item at (src_location, src_slot) into
+    /// paperdoll slot `equip_slot`. equip_slot indexes match
+    /// `protocol::world::EquipSlot` (weapon=0, offhand=1, head=2,
+    /// chest=3, legs=4, feet=5, hands=6, ring=7, neck=8).
+    #[func]
+    fn send_equip_item(
+        &mut self,
+        src_location: GString,
+        src_slot: i64,
+        equip_slot: i64,
+    ) -> bool {
+        let msg = ClientWorldMsg::EquipItem {
+            src_location: src_location.to_string(),
+            src_slot: src_slot.max(0) as u32,
+            equip_slot: equip_slot.clamp(0, u8::MAX as i64) as u8,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// Track 13.3 — unequip paperdoll slot `equip_slot` into
+    /// (dst_location, dst_slot). Swap on dst-occupied.
+    #[func]
+    fn send_unequip_item(
+        &mut self,
+        equip_slot: i64,
+        dst_location: GString,
+        dst_slot: i64,
+    ) -> bool {
+        let msg = ClientWorldMsg::UnequipItem {
+            equip_slot: equip_slot.clamp(0, u8::MAX as i64) as u8,
+            dst_location: dst_location.to_string(),
+            dst_slot: dst_slot.max(0) as u32,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
     /// Track 12 Piece A — player issues a command to their pet.
     /// `command` is one of `protocol::world::pet_command::*` (Attack=2,
     /// Back=3 are the MVP set; Follow=0 aliases to Back today).

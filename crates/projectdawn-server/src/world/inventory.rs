@@ -11,12 +11,19 @@
 //! this module is the shape it converges to.
 
 use crate::db::InventoryRow;
+use std::collections::HashMap;
 
 /// Mirror of the client's `Inventory.BASE_SLOT_COUNT` constant. The
 /// 8 flat slots a player has before bags. The full inventory model
 /// adds per-bag rows (Track 13.2) and equipment (Track 13.3); the
 /// server tracks all three under different `location` strings.
 pub const BASE_SLOT_COUNT: usize = 8;
+
+/// Track 13.3 — paperdoll slot count. Matches the client's
+/// `Equipment.SLOTS` array length (weapon, offhand, head, chest,
+/// legs, feet, hands, ring, neck) and the
+/// `protocol::world::EquipSlot` enum order.
+pub const EQUIP_SLOT_COUNT: u8 = 9;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct InventoryEntry {
@@ -29,12 +36,20 @@ pub struct PlayerInventory {
     /// 8 base slots, parallel to the client's `Inventory.base_slots`.
     /// `None` is an empty slot.
     pub base: Vec<Option<InventoryEntry>>,
+    /// Track 13.3 — paperdoll. Sparse map keyed by equip-slot index;
+    /// only occupied slots have entries. Item-vs-slot validation
+    /// (e.g. "this is a weapon, not a helm") is deferred until the
+    /// server-side item registry lands; today the server just
+    /// trusts the client's chosen equip_slot index after range-
+    /// checking it against EQUIP_SLOT_COUNT.
+    pub equipment: HashMap<u8, InventoryEntry>,
 }
 
 impl Default for PlayerInventory {
     fn default() -> Self {
         Self {
             base: vec![None; BASE_SLOT_COUNT],
+            equipment: HashMap::new(),
         }
     }
 }
@@ -44,31 +59,49 @@ impl PlayerInventory {
         Self::default()
     }
 
-    /// Reconstruct from DB rows. Unknown locations (`'bag_*'`, `'equip'`)
-    /// are ignored for Track 13.1 — those land in 13.2 / 13.3. Out-of-
-    /// range base slots are dropped defensively.
+    /// Reconstruct from DB rows. Handles 'base' (Track 13.1) and
+    /// 'equip' (Track 13.3); 'bag_*' rows are still dropped (bag
+    /// support needs the server-side item registry). Out-of-range
+    /// slots are dropped defensively.
     pub fn from_rows(rows: &[InventoryRow]) -> Self {
         let mut inv = Self::default();
         for row in rows {
-            if row.location != "base" {
-                continue;
-            }
-            let idx = row.slot as usize;
-            if idx >= BASE_SLOT_COUNT {
-                continue;
-            }
             if row.count <= 0 || row.item_path.is_empty() {
                 continue;
             }
-            inv.base[idx] = Some(InventoryEntry {
-                item_path: row.item_path.clone(),
-                count: row.count as u32,
-            });
+            match row.location.as_str() {
+                "base" => {
+                    let idx = row.slot as usize;
+                    if idx >= BASE_SLOT_COUNT {
+                        continue;
+                    }
+                    inv.base[idx] = Some(InventoryEntry {
+                        item_path: row.item_path.clone(),
+                        count: row.count as u32,
+                    });
+                }
+                "equip" => {
+                    if row.slot < 0 || row.slot >= EQUIP_SLOT_COUNT as i32 {
+                        continue;
+                    }
+                    inv.equipment.insert(
+                        row.slot as u8,
+                        InventoryEntry {
+                            item_path: row.item_path.clone(),
+                            count: row.count as u32,
+                        },
+                    );
+                }
+                _ => {
+                    // 'bag_*' deferred to a later track.
+                }
+            }
         }
         inv
     }
 
     /// Project into DB rows for persistence. Only emits filled slots.
+    /// Emits 'base' rows + Track 13.3's 'equip' rows.
     pub fn to_rows(&self) -> Vec<InventoryRow> {
         let mut out = Vec::new();
         for (i, slot) in self.base.iter().enumerate() {
@@ -81,13 +114,21 @@ impl PlayerInventory {
                 });
             }
         }
+        for (slot, entry) in self.equipment.iter() {
+            out.push(InventoryRow {
+                location: "equip".to_string(),
+                slot: *slot as i32,
+                item_path: entry.item_path.clone(),
+                count: entry.count as i32,
+            });
+        }
         out
     }
 
     /// Track 13.2 — project to the wire shape used by
     /// `ServerWorldMsg::InventorySnapshot`. Parallel to `to_rows`
     /// but emits the protocol's (location, slot, item_path, count)
-    /// tuple instead of the DB row struct.
+    /// tuple. Includes Track 13.3 equipment entries.
     pub fn to_snapshot_entries(&self) -> Vec<(String, u32, String, u32)> {
         let mut out = Vec::new();
         for (i, slot) in self.base.iter().enumerate() {
@@ -99,6 +140,14 @@ impl PlayerInventory {
                     entry.count,
                 ));
             }
+        }
+        for (slot, entry) in self.equipment.iter() {
+            out.push((
+                "equip".to_string(),
+                *slot as u32,
+                entry.item_path.clone(),
+                entry.count,
+            ));
         }
         out
     }
@@ -197,6 +246,61 @@ impl PlayerInventory {
             }
         }
         Ok(vec![src, dst])
+    }
+
+    /// Track 13.3 — equip the entry at base slot `src` into
+    /// paperdoll slot `equip_slot`. If the paperdoll already holds
+    /// an item, swap it back into the source slot. Returns the
+    /// list of (location, slot) tuples touched so the caller fans
+    /// one `InventoryDelta` per slot.
+    pub fn equip_from_base(
+        &mut self,
+        src: usize,
+        equip_slot: u8,
+    ) -> Result<Vec<(&'static str, u32)>, &'static str> {
+        if src >= BASE_SLOT_COUNT {
+            return Err("base slot out of range");
+        }
+        if equip_slot >= EQUIP_SLOT_COUNT {
+            return Err("equip slot out of range");
+        }
+        let Some(src_entry) = self.base[src].take() else {
+            return Err("source slot empty");
+        };
+        let prev_equip = self.equipment.remove(&equip_slot);
+        self.equipment.insert(equip_slot, src_entry);
+        if let Some(prev) = prev_equip {
+            // Swap the previously equipped item back into the now-
+            // empty src slot.
+            self.base[src] = Some(prev);
+        }
+        Ok(vec![("base", src as u32), ("equip", equip_slot as u32)])
+    }
+
+    /// Track 13.3 — unequip paperdoll slot `equip_slot` into base
+    /// slot `dst`. If dst is occupied, swap it into the paperdoll
+    /// (same byte-range validation as equip; item-vs-slot validation
+    /// is deferred).
+    pub fn unequip_to_base(
+        &mut self,
+        equip_slot: u8,
+        dst: usize,
+    ) -> Result<Vec<(&'static str, u32)>, &'static str> {
+        if equip_slot >= EQUIP_SLOT_COUNT {
+            return Err("equip slot out of range");
+        }
+        if dst >= BASE_SLOT_COUNT {
+            return Err("base slot out of range");
+        }
+        let Some(equip_entry) = self.equipment.remove(&equip_slot) else {
+            return Err("equip slot empty");
+        };
+        let prev_base = self.base[dst].take();
+        self.base[dst] = Some(equip_entry);
+        if let Some(prev) = prev_base {
+            self.equipment.insert(equip_slot, prev);
+        }
+        Ok(vec![("base", dst as u32), ("equip", equip_slot as u32)])
     }
 
     /// Track 13.2.b — remove `count` of the entry at `(base, slot)`.
@@ -434,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn from_rows_ignores_unknown_locations() {
+    fn from_rows_handles_base_and_equip_skips_bag() {
         let rows = vec![
             InventoryRow {
                 location: "base".into(),
@@ -457,7 +561,75 @@ mod tests {
         ];
         let inv = PlayerInventory::from_rows(&rows);
         assert_eq!(inv.total_count_of("res://items/cloth.tres"), 5);
-        assert_eq!(inv.total_count_of("res://items/iron.tres"), 0, "bag_* skipped in 13.1");
-        assert_eq!(inv.total_count_of("res://items/sword.tres"), 0, "equip skipped in 13.1");
+        assert_eq!(inv.total_count_of("res://items/iron.tres"), 0, "bag_* still skipped");
+        assert_eq!(
+            inv.equipment.get(&4).map(|e| e.item_path.as_str()),
+            Some("res://items/sword.tres"),
+            "Track 13.3 honours 'equip' rows"
+        );
+    }
+
+    #[test]
+    fn equip_moves_from_base_to_paperdoll() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item("res://items/sword.tres", 1).unwrap();
+        let touched = inv.equip_from_base(0, 0).expect("equip");
+        assert_eq!(touched, vec![("base", 0u32), ("equip", 0u32)]);
+        assert!(inv.base[0].is_none());
+        assert_eq!(inv.equipment.get(&0).unwrap().item_path, "res://items/sword.tres");
+    }
+
+    #[test]
+    fn equip_swaps_with_existing_equipped() {
+        let mut inv = PlayerInventory::new();
+        inv.equipment.insert(0, InventoryEntry { item_path: "res://items/old_sword.tres".into(), count: 1 });
+        inv.add_item("res://items/new_sword.tres", 1).unwrap();
+        inv.equip_from_base(0, 0).expect("equip-swap");
+        assert_eq!(inv.equipment.get(&0).unwrap().item_path, "res://items/new_sword.tres");
+        assert_eq!(inv.base[0].as_ref().unwrap().item_path, "res://items/old_sword.tres", "old item returns to src slot");
+    }
+
+    #[test]
+    fn equip_rejects_empty_source() {
+        let mut inv = PlayerInventory::new();
+        let err = inv.equip_from_base(0, 0);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn equip_rejects_out_of_range_slots() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item("res://items/sword.tres", 1).unwrap();
+        assert!(inv.equip_from_base(0, EQUIP_SLOT_COUNT).is_err());
+        assert!(inv.equip_from_base(BASE_SLOT_COUNT, 0).is_err());
+    }
+
+    #[test]
+    fn unequip_moves_to_base() {
+        let mut inv = PlayerInventory::new();
+        inv.equipment.insert(0, InventoryEntry { item_path: "res://items/sword.tres".into(), count: 1 });
+        let touched = inv.unequip_to_base(0, 3).expect("unequip");
+        assert_eq!(touched, vec![("base", 3u32), ("equip", 0u32)]);
+        assert!(inv.equipment.get(&0).is_none());
+        assert_eq!(inv.base[3].as_ref().unwrap().item_path, "res://items/sword.tres");
+    }
+
+    #[test]
+    fn unequip_swaps_with_existing_base_slot() {
+        let mut inv = PlayerInventory::new();
+        inv.equipment.insert(0, InventoryEntry { item_path: "res://items/sword.tres".into(), count: 1 });
+        inv.add_item("res://items/cloth.tres", 5).unwrap();
+        // Unequip into slot 0 which holds cloth: cloth ends up
+        // equipped in slot 0 of paperdoll (no item-vs-slot check).
+        inv.unequip_to_base(0, 0).expect("unequip-swap");
+        assert_eq!(inv.base[0].as_ref().unwrap().item_path, "res://items/sword.tres");
+        assert_eq!(inv.equipment.get(&0).unwrap().item_path, "res://items/cloth.tres");
+    }
+
+    #[test]
+    fn unequip_rejects_empty_paperdoll_slot() {
+        let mut inv = PlayerInventory::new();
+        let err = inv.unequip_to_base(0, 0);
+        assert!(err.is_err());
     }
 }

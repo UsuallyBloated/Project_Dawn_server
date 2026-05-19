@@ -158,6 +158,25 @@ pub enum Outcome {
         count: u32,
     },
 
+    /// Track 13.3 — equip item from a base slot into a paperdoll
+    /// slot (potentially swapping with the previously equipped
+    /// item).
+    EquipItemIntent {
+        owner: u64,
+        src_location: String,
+        src_slot: u32,
+        equip_slot: u8,
+    },
+
+    /// Track 13.3 — unequip item from a paperdoll slot into a base
+    /// slot (potentially swapping with the previously held item).
+    UnequipItemIntent {
+        owner: u64,
+        equip_slot: u8,
+        dst_location: String,
+        dst_slot: u32,
+    },
+
     /// Track 5 sub-task 4 — player → server pickup intent for one slot
     /// of a loot bag. The tick loop validates bag existence + slot
     /// index + pickup range, removes the stack, sends `LootGranted`
@@ -656,6 +675,38 @@ pub fn handle_message(
                 location,
                 slot,
                 count,
+            }
+        }
+
+        ClientWorldMsg::EquipItem {
+            src_location,
+            src_slot,
+            equip_slot,
+        } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::EquipItemIntent {
+                owner: conn.char_id as u64,
+                src_location,
+                src_slot,
+                equip_slot,
+            }
+        }
+
+        ClientWorldMsg::UnequipItem {
+            equip_slot,
+            dst_location,
+            dst_slot,
+        } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::UnequipItemIntent {
+                owner: conn.char_id as u64,
+                equip_slot,
+                dst_location,
+                dst_slot,
             }
         }
 

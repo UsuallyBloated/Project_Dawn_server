@@ -114,6 +114,14 @@ pub struct Spell {
     #[serde(default)]
     pub pet_type: String,
 
+    // Track 12 Piece C — generic duration field (currently used by
+    // PET_CHARM spells for how long the target stays charmed; future
+    // mechanics with a single duration knob can reuse). Distinct
+    // from cc_duration / slow_duration / etc. which keep their own
+    // CC-specific fields.
+    #[serde(default)]
+    pub duration: f32,
+
     // Track 6 sub-task 4d — CC fields.
     #[serde(default)]
     pub cc_duration: f32,

@@ -1434,3 +1434,35 @@ cooldown = 30.0
 pet_type = "skeleton"
 min_level = 6
 classes = ["Necromancer"]
+
+# ══ Charms ══════════════════════════════════════════════════════════
+# Track 12 Piece C added the server-side PET_CHARM arm. Spells in
+# this section convert the targeted enemy into a player-owned pet
+# for `duration` seconds via id-partition re-key (EntityDespawn old
+# enemy id → PetSpawn fresh pet id at the same pos + HP).
+
+[[spell]]
+name = "Charm"
+target_type = "PET_CHARM"
+damage_type = "ARCANE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 40.0
+cast_time = 2.0
+cooldown = 60.0
+duration = 60.0
+min_level = 20
+classes = ["Enchanter"]
+
+[[spell]]
+name = "Siren's Song"
+target_type = "PET_CHARM"
+damage_type = "ARCANE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 30.0
+cast_time = 1.5
+cooldown = 45.0
+duration = 30.0
+min_level = 14
+classes = ["Bard"]

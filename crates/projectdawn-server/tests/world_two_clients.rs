@@ -1599,6 +1599,76 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
     let _ = switch_evt;
 }
 
+/// Track 12 Piece C — Enchanter's Charm converts a targeted enemy
+/// into a player-owned pet. Server fan-outs: EntityDespawn for the
+/// old enemy id, PetSpawn for a fresh pet id at the same pos with
+/// owner == caster.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn charm_converts_enemy_to_pet() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "ench", "Enchanted", "Human", "Enchanter").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Walk into camp 0 to aggro an enemy (gives us a target id).
+    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
+    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
+    let walk_end = Instant::now() + Duration::from_millis(2_000);
+    let mut seq: u32 = 1;
+    while Instant::now() < walk_end {
+        a.send_move(seq, dir);
+        seq += 1;
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    let hit_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
+            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
+        })
+        .await
+        .expect("enemy hits player");
+    let enemy_id: u64 = match hit_evt {
+        ServerWorldMsg::Hit { attacker, .. } => attacker,
+        _ => unreachable!(),
+    };
+
+    // Cast Charm (cast_time 2.0s, mana 40) following the gate flow.
+    a.send_cast_start("Charm", 2.0);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    a.send_cast_spell("Charm", Some(enemy_id));
+    for _ in 0..6 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let despawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id)
+        })
+        .await
+        .expect("old enemy id is despawned on charm");
+    let _ = despawn;
+
+    let pet_spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+        })
+        .await
+        .expect("a fresh pet id spawns for the caster");
+    if let ServerWorldMsg::PetSpawn { id, pet_name, .. } = pet_spawn {
+        assert!(id >= PET_ID_BASE, "charmed pet id must be in pet partition");
+        // Mob name preserved — charmed Decrepit Skeleton stays
+        // named "Decrepit Skeleton" on the pet entity.
+        assert_eq!(pet_name, "Decrepit Skeleton");
+    }
+}
+
 /// Track 12 Piece B — Beast Masters auto-summon a Wolf warder when
 /// they enter the world. No PET_SUMMON cast required; the server
 /// detects the class on first EnterWorld and spawns the warder

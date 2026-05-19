@@ -125,6 +125,12 @@ pub struct Entity {
     /// within `PET_COMMAND_STICKY_SECS`, so a commanded target isn't
     /// blown away every tick.
     pub command_at: Option<Instant>,
+
+    /// Track 12 Piece C — charm expiration. `Some(when)` on a pet
+    /// produced by the PET_CHARM re-key path; the charm-sweep
+    /// despawns the pet (mob "runs away") once this passes.
+    /// `None` for normal summoned pets and world-spawned enemies.
+    pub charm_expires_at: Option<Instant>,
 }
 
 /// Outcome of one AI tick. Carries the events the tick loop needs to
@@ -177,6 +183,7 @@ impl Entity {
             active_cc: Vec::new(),
             owner: None,
             command_at: None,
+            charm_expires_at: None,
         }
     }
 
@@ -214,6 +221,7 @@ impl Entity {
             active_cc: Vec::new(),
             owner: Some(owner),
             command_at: None,
+            charm_expires_at: None,
         }
     }
 

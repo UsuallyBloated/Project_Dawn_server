@@ -306,6 +306,56 @@ fn apply_spell_damage_to_enemy(
     true
 }
 
+/// Track 12 Piece B — spawn a player-owned pet at `spawn_pos`,
+/// despawning the owner's existing pet first. Used by the
+/// PET_SUMMON CastSpell arm, the Beast Master auto-summon on
+/// EnterWorld, and the warder death-respawn sweep. `hp_fraction`
+/// is 1.0 for fresh summons and 0.3 for the warder return.
+/// Returns the new pet's id.
+#[allow(clippy::too_many_arguments)]
+fn summon_pet_for_owner(
+    server: &mut RenetServer,
+    in_world_recipients: &[ClientId],
+    enemies: &mut HashMap<EntityId, Entity>,
+    aoi: &mut AoiGrid,
+    owner_id: EntityId,
+    spawn_pos: Vec3f,
+    template: crate::world::zones::MobTemplate,
+    hp_fraction: f32,
+    now: Instant,
+) -> EntityId {
+    // Despawn existing pet first (one-pet-per-owner). Mark Dead +
+    // fan EntityDied; corpse cleanup runs naturally next tick.
+    let existing_pet_id: Option<EntityId> = enemies
+        .iter()
+        .find(|(_, e)| e.owner == Some(owner_id) && e.is_alive())
+        .map(|(id, _)| *id);
+    if let Some(old_id) = existing_pet_id {
+        if let Some(old) = enemies.get_mut(&old_id) {
+            old.transition(EnemyState::Dead, now);
+        }
+        handlers::fan_out_entity_died(server, in_world_recipients, old_id);
+    }
+
+    let mut pet = Entity::from_pet_summon(owner_id, spawn_pos, template, now);
+    let new_hp = (pet.max_hp * hp_fraction.clamp(0.0, 1.0)).max(1.0);
+    pet.hp = new_hp;
+    let pet_id = pet.id;
+    let pet_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
+    aoi.insert(pet_id, pet_cell);
+    let visible = aoi.entities_visible_from(pet_cell);
+    let pet_recipients: Vec<ClientId> = in_world_recipients
+        .iter()
+        .copied()
+        .filter(|id| visible.contains(id))
+        .collect();
+    if !pet_recipients.is_empty() {
+        handlers::fan_out_pet_spawn(server, &pet_recipients, &pet);
+    }
+    enemies.insert(pet_id, pet);
+    pet_id
+}
+
 /// Track 5 sub-task 4 — buffered loot pickup intent. `Slot(None)` is
 /// the "take everything" variant; `Slot(Some(idx))` is the
 /// "take one specific slot" variant. Same buffering rationale as
@@ -1121,6 +1171,87 @@ pub async fn run(
             .filter(|(_, c)| c.in_world)
             .map(|(id, _)| *id)
             .collect();
+
+        // 4g2. Track 12 Piece B — auto-summon a warder for each
+        //      freshly-EnterWorld'd Beast Master. Runs once when
+        //      `newly_in_world` is non-empty so the spawn lands the
+        //      same tick the client's EntitySpawn fan-out happens;
+        //      AOI is already populated by the spawn loop above.
+        if !newly_in_world.is_empty() {
+            let beast_master_summons: Vec<(EntityId, Vec3f)> = newly_in_world
+                .iter()
+                .filter_map(|cid| {
+                    let conn = connections.get(cid)?;
+                    if conn.class.eq_ignore_ascii_case("Beast Master") && conn.in_world {
+                        Some((conn.char_id as u64, conn.pos))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for (owner_id, caster_pos) in beast_master_summons {
+                let Some(template) = pet_templates::lookup("warder") else { continue };
+                let spawn_pos = Vec3f {
+                    x: caster_pos.x + 1.5,
+                    y: caster_pos.y,
+                    z: caster_pos.z,
+                };
+                let pet_id = summon_pet_for_owner(
+                    &mut server,
+                    &in_world_recipients_now,
+                    &mut enemies,
+                    &mut aoi,
+                    owner_id,
+                    spawn_pos,
+                    template,
+                    1.0,
+                    now,
+                );
+                tracing::info!(owner = owner_id, pet_id, "Beast Master warder auto-summoned");
+            }
+        }
+
+        // 4g3. Track 12 Piece B — warder respawn sweep. Beast Masters
+        //      whose warder died get a fresh one at 30% HP after
+        //      WARDER_RETREAT_SECS (set on death; checked here).
+        //      Collected then drained so we don't overlap a
+        //      `connections` borrow with the `enemies` mutation in
+        //      the helper.
+        let due_warder_respawns: Vec<(EntityId, Vec3f)> = connections
+            .iter()
+            .filter_map(|(_, c)| {
+                if !c.in_world { return None; }
+                let due = c.warder_respawn_at?;
+                if now.duration_since(due).as_secs_f32() >= 0.0 {
+                    Some((c.char_id as u64, c.pos))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (owner_id, caster_pos) in due_warder_respawns {
+            let Some(template) = pet_templates::lookup("warder") else { continue };
+            let spawn_pos = Vec3f {
+                x: caster_pos.x + 1.5,
+                y: caster_pos.y,
+                z: caster_pos.z,
+            };
+            let pet_id = summon_pet_for_owner(
+                &mut server,
+                &in_world_recipients_now,
+                &mut enemies,
+                &mut aoi,
+                owner_id,
+                spawn_pos,
+                template,
+                0.3,
+                now,
+            );
+            if let Some(conn) = connections.get_mut(&(owner_id as ClientId)) {
+                conn.warder_respawn_at = None;
+            }
+            tracing::info!(owner = owner_id, pet_id, "warder respawned after retreat");
+        }
 
         // 4h. Apply player → server attack intents. The handler queued
         //     these without touching the enemies map; here we run the
@@ -2200,61 +2331,26 @@ pub async fn run(
                             continue;
                         };
                         let owner_id = intent.caster;
-                        // Despawn caster's existing pet, if any.
-                        let existing_pet_id: Option<EntityId> = enemies
-                            .iter()
-                            .find(|(_, e)| {
-                                e.owner == Some(owner_id) && e.is_alive()
-                            })
-                            .map(|(id, _)| *id);
-                        if let Some(old_id) = existing_pet_id {
-                            if let Some(old) = enemies.get_mut(&old_id) {
-                                old.transition(EnemyState::Dead, now);
-                            }
-                            handlers::fan_out_entity_died(
-                                &mut server,
-                                &in_world_recipients_now,
-                                old_id,
-                            );
-                            tracing::info!(
-                                owner = owner_id,
-                                old_pet = old_id,
-                                "dismissed existing pet on new summon"
-                            );
-                        }
-                        // Spawn the fresh pet at the caster's pos +
-                        // a small forward offset so it doesn't clip
-                        // into the player capsule. 1.5 m along yaw=0
-                        // for now (server has no caster facing yet).
+                        // Spawn at the caster's pos + 1.5 m east
+                        // offset so the pet doesn't clip the player
+                        // capsule. Helper handles despawn-existing,
+                        // AOI insert, fan-out, and map insert.
                         let spawn_pos = Vec3f {
                             x: caster_pos.x + 1.5,
                             y: caster_pos.y,
                             z: caster_pos.z,
                         };
-                        let pet = Entity::from_pet_summon(
+                        let pet_id = summon_pet_for_owner(
+                            &mut server,
+                            &in_world_recipients_now,
+                            &mut enemies,
+                            &mut aoi,
                             owner_id,
                             spawn_pos,
                             template,
+                            1.0,
                             now,
                         );
-                        let pet_id = pet.id;
-                        let pet_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
-                        aoi.insert(pet_id, pet_cell);
-                        let visible = aoi.entities_visible_from(pet_cell);
-                        let pet_recipients: Vec<ClientId> =
-                            in_world_recipients_now
-                                .iter()
-                                .copied()
-                                .filter(|id| visible.contains(id))
-                                .collect();
-                        if !pet_recipients.is_empty() {
-                            handlers::fan_out_pet_spawn(
-                                &mut server,
-                                &pet_recipients,
-                                &pet,
-                            );
-                        }
-                        enemies.insert(pet_id, pet);
                         tracing::info!(
                             owner = owner_id,
                             pet_id,
@@ -2686,6 +2782,33 @@ pub async fn run(
                             max_hp,
                         );
                         if died {
+                            // Track 12 Piece B — if this pet was a
+                            // Beast Master warder, schedule its
+                            // respawn on the owner. WARDER_RETREAT_SECS
+                            // matches the GDScript WarderAI constant.
+                            const WARDER_RETREAT_SECS: f32 = 15.0;
+                            let respawn_owner: Option<(ClientId, std::time::Instant)> =
+                                enemies.get(&hit.target).and_then(|p| {
+                                    if super::pet_templates::is_warder_template(&p.mob.name) {
+                                        let due = now
+                                            + std::time::Duration::from_secs_f32(
+                                                WARDER_RETREAT_SECS,
+                                            );
+                                        p.owner.map(|o| (o as ClientId, due))
+                                    } else {
+                                        None
+                                    }
+                                });
+                            if let Some((cid, due)) = respawn_owner {
+                                if let Some(conn) = connections.get_mut(&cid) {
+                                    conn.warder_respawn_at = Some(due);
+                                    tracing::info!(
+                                        owner = cid as u64,
+                                        retreat_secs = WARDER_RETREAT_SECS,
+                                        "warder retreating; respawn scheduled",
+                                    );
+                                }
+                            }
                             handlers::fan_out_entity_died(
                                 &mut server,
                                 &in_world_recipients_now,

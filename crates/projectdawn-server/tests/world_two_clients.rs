@@ -1599,6 +1599,53 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
     let _ = switch_evt;
 }
 
+/// Track 12 Piece B — Beast Masters auto-summon a Wolf warder when
+/// they enter the world. No PET_SUMMON cast required; the server
+/// detects the class on first EnterWorld and spawns the warder
+/// alongside the EntitySpawn fan-out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn beast_master_auto_summons_warder() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "bms", "Beastly", "Human", "Beast Master").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    let pet_spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+        })
+        .await
+        .expect("Beast Master receives an auto-summoned warder on EnterWorld");
+    if let ServerWorldMsg::PetSpawn { pet_name, level, max_hp, hp, .. } = pet_spawn {
+        assert_eq!(pet_name, "Wolf", "Beast Master's auto-summon is a Wolf warder");
+        assert_eq!(level, 5);
+        assert!((max_hp - 60.0).abs() < 0.01, "warder template hp is 60");
+        assert!((hp - 60.0).abs() < 0.01, "auto-summon spawns at full HP");
+    }
+}
+
+/// Track 12 Piece B — non-Beast-Master classes do NOT get an
+/// auto-summoned warder. Counter-test to make sure the class check
+/// is wired correctly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_beast_master_gets_no_auto_warder() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "wrr", "Warlock", "Human", "Warrior").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    let stray = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+        })
+        .await;
+    assert!(stray.is_none(), "Warrior must not receive an auto-summoned pet");
+}
+
 fn tick_one(client: &mut RenetClient, transport: &mut NetcodeClientTransport) {
     client.update(TICK_DT);
     if let Err(e) = transport.update(TICK_DT, client) {

@@ -25,8 +25,34 @@ pub fn lookup(pet_type: &str) -> Option<MobTemplate> {
             melee_range: Some(1.8),
             attack_interval: Some(2.2),
         }),
+        // Track 12 Piece B — Beast Master's Wolf warder. Faster and
+        // hits slightly less than the skeleton; the warder's edge is
+        // staying alive (Beast Masters can heal it via Spirit Mend)
+        // and the death-respawn mechanic that returns it at 30% HP
+        // after RETREAT_SECS rather than requiring a re-summon.
+        "warder" => Some(MobTemplate {
+            name: "Wolf".into(),
+            level: 5,
+            hp: 60.0,
+            dmg: 6,
+            xp: 0,
+            speed: 3.5,
+            aggro: 0.0,
+            leash: None,
+            melee_range: Some(1.8),
+            attack_interval: Some(2.0),
+        }),
         _ => None,
     }
+}
+
+/// Returns true if a freshly-spawned entity from this template should
+/// be treated as a Beast Master warder by the post-death respawn
+/// scheduler. Keyed off `mob.name` so the discriminator survives
+/// round-trips through the existing `MobTemplate` shape without
+/// needing a new enum on Entity.
+pub fn is_warder_template(mob_name: &str) -> bool {
+    mob_name == "Wolf"
 }
 
 #[cfg(test)]
@@ -38,6 +64,14 @@ mod tests {
         let t = lookup("skeleton").expect("skeleton template");
         assert_eq!(t.name, "Skeletal Warrior");
         assert!(t.hp > 0.0);
+    }
+
+    #[test]
+    fn warder_resolves_and_is_classified() {
+        let t = lookup("warder").expect("warder template");
+        assert_eq!(t.name, "Wolf");
+        assert!(is_warder_template(&t.name));
+        assert!(!is_warder_template("Skeletal Warrior"));
     }
 
     #[test]

@@ -242,6 +242,13 @@ pub struct PerConnection {
     /// follow when the player stops attacking.
     pub last_attacked_enemy: Option<protocol::world::EntityId>,
     pub last_attacked_at: Option<Instant>,
+
+    /// Track 12 Piece B — Beast Master warder respawn timer. Set
+    /// when the warder dies (`Some(now + WARDER_RETREAT_SECS)`);
+    /// the tick loop's pre-AI sweep auto-summons a fresh warder at
+    /// 30 % HP when this time has passed. Cleared on respawn or on
+    /// disconnect.
+    pub warder_respawn_at: Option<Instant>,
 }
 
 impl PerConnection {
@@ -306,6 +313,7 @@ impl PerConnection {
             active_buffs: Vec::new(),
             last_attacked_enemy: None,
             last_attacked_at: None,
+            warder_respawn_at: None,
         }
     }
 

@@ -3811,31 +3811,36 @@ pub async fn run(
                     }
                 }
                 for (path, count) in granted {
-                    // Track 13.2 — server-side inventory mutation +
-                    // authoritative slot pick. add_item_locating
-                    // returns the slot the new stack landed in
-                    // (stack target or first-empty). InventoryDelta
-                    // fan-out carries the slot so the client renders
-                    // the pickup in the exact spot the server chose,
-                    // avoiding the divergence Track 13.1 documented.
-                    // LootGranted still fires for the combat-log
-                    // line; the client's RemoteLootBagManager skips
-                    // the local add_item in launcher mode and
-                    // defers to InventoryDelta.
+                    // Track 13.2 / 14.1 — server-side inventory mutation
+                    // + authoritative slot pick. add_item_locating may
+                    // touch multiple slots (stack-top-up + spill into
+                    // new slots, each capped at the registry's
+                    // max_stack); we fan one InventoryDelta per
+                    // touched slot. Anything that doesn't fit becomes
+                    // `leftover`, which we refund to the loot bag so
+                    // the player can pick it up later.
                     let looter_cid = intent.looter as ClientId;
-                    let mut delta: Option<(u32, String, u32)> = None;
+                    let mut touched_deltas: Vec<(u32, String, u32)> = Vec::new();
+                    let mut placed_count: u32 = 0;
+                    let mut leftover_count: u32 = 0;
                     if let Some(conn) = connections.get_mut(&looter_cid) {
                         match conn.inventory.add_item_locating(&path, count) {
-                            Ok(slot_idx) => {
-                                conn.inventory_dirty = true;
-                                let entry = conn.inventory.base[slot_idx]
-                                    .as_ref()
-                                    .expect("just inserted");
-                                delta = Some((
-                                    slot_idx as u32,
-                                    entry.item_path.clone(),
-                                    entry.count,
-                                ));
+                            Ok((touched, leftover)) => {
+                                if !touched.is_empty() {
+                                    conn.inventory_dirty = true;
+                                }
+                                for slot_idx in &touched {
+                                    let entry = conn.inventory.base[*slot_idx]
+                                        .as_ref()
+                                        .expect("just inserted");
+                                    touched_deltas.push((
+                                        *slot_idx as u32,
+                                        entry.item_path.clone(),
+                                        entry.count,
+                                    ));
+                                }
+                                placed_count = count - leftover;
+                                leftover_count = leftover;
                             }
                             Err(e) => {
                                 tracing::info!(
@@ -3843,12 +3848,13 @@ pub async fn run(
                                     item_path = %path,
                                     count,
                                     error = %e,
-                                    "server inventory add_item rejected; client still receives LootGranted, no InventoryDelta",
+                                    "server inventory add_item rejected; loot stack refunded to bag",
                                 );
+                                leftover_count = count;
                             }
                         }
                     }
-                    if let Some((slot_idx, item_path, total_count)) = delta {
+                    for (slot_idx, item_path, total_count) in touched_deltas {
                         handlers::send_inventory_delta(
                             &mut server,
                             looter_cid,
@@ -3858,12 +3864,29 @@ pub async fn run(
                             total_count,
                         );
                     }
-                    handlers::send_loot_granted(
-                        &mut server,
-                        looter_cid,
-                        path,
-                        count,
-                    );
+                    if placed_count > 0 {
+                        handlers::send_loot_granted(
+                            &mut server,
+                            looter_cid,
+                            path.clone(),
+                            placed_count,
+                        );
+                    }
+                    if leftover_count > 0 {
+                        // Refund — push the unplaced portion back into
+                        // the bag so it stays available. Bag fan-out
+                        // below re-broadcasts the updated contents.
+                        bag.items.push(loot::LootItemStack {
+                            item_path: path,
+                            count: leftover_count,
+                        });
+                        tracing::info!(
+                            looter = intent.looter,
+                            bag_id = bag.id,
+                            leftover = leftover_count,
+                            "loot partially placed; remainder refunded to bag"
+                        );
+                    }
                 }
                 // Track 7: capture position before potentially removing the bag.
                 let bag_id = bag.id;

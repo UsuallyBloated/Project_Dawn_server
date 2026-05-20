@@ -258,6 +258,15 @@ pub struct PerConnection {
     /// mutates the snapshot; the persistence sweep clears it.
     pub inventory: super::inventory::PlayerInventory,
     pub inventory_dirty: bool,
+
+    /// Track 14.2 — last accumulated stat bonuses from equipped items.
+    /// `recompute_equipped_stats` reads this to know what to subtract
+    /// before re-summing across the current equipment map. Stays
+    /// orthogonal to `active_buffs` deltas: gear baseline lives here;
+    /// buffs add/undo on top of `conn.strength` / `conn.max_hp` /
+    /// etc. directly. Starts at zero; populated when load_inventory
+    /// completes (so persisted equip rebuilds bonuses on connect).
+    pub equip_stat_bonuses: super::inventory::EquipStatBonuses,
 }
 
 impl PerConnection {
@@ -325,6 +334,7 @@ impl PerConnection {
             warder_respawn_at: None,
             inventory: super::inventory::PlayerInventory::new(),
             inventory_dirty: false,
+            equip_stat_bonuses: super::inventory::EquipStatBonuses::default(),
         }
     }
 

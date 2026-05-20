@@ -375,14 +375,20 @@ pub fn handle_message(
         }
 
         ClientWorldMsg::EquipUpdate { armor } => {
+            // Track 14.2 — deprecated. The server now derives
+            // `equipped_armor` (and stat / max-HP / max-MP bonuses)
+            // from the registry via `inventory::recompute_equipped_stats`
+            // whenever the equipment map changes. Old clients still
+            // send this; we log + ignore. A later track removes it
+            // from the wire entirely.
             if !conn.ready {
                 return Outcome::Continue;
             }
-            conn.equipped_armor = armor.max(0);
-            tracing::info!(
+            tracing::debug!(
                 char_id = conn.char_id,
-                armor = conn.equipped_armor,
-                "equipment update — armor cached"
+                client_armor_claim = armor,
+                server_armor = conn.equipped_armor,
+                "EquipUpdate received — ignored (server-derived since Track 14.2)"
             );
             Outcome::Continue
         }

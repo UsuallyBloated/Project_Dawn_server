@@ -479,10 +479,15 @@ pub async fn run(
                                 PerConnection::from_spawn(spawn, now),
                             );
                             // Set the real AOI cell from spawn position +
-                            // populate the inventory snapshot.
+                            // populate the inventory snapshot. Track 14.2:
+                            // run the stat recompute pass so persisted
+                            // equipped items reapply their max-HP / armor /
+                            // stat bonuses before the EnterWorld snapshot
+                            // fans the resource update.
                             if let Some(conn) = connections.get_mut(&client_id) {
                                 conn.aoi_cell = aoi::cell_for(conn.pos.x, conn.pos.z);
                                 conn.inventory = inventory::PlayerInventory::from_rows(&inv_rows);
+                                let _ = inventory::recompute_equipped_stats(conn);
                             }
                         }
                         Err(e) => {
@@ -3106,16 +3111,14 @@ pub async fn run(
             }
         }
 
-        // 4hg. Track 13.3 — apply equip-item intents. Validates src
-        //      is a base slot in range + equip_slot in range, moves
-        //      via `equip_from_base` (handles the swap-with-existing
-        //      case), fans an `InventoryDelta` per touched slot.
-        //
-        //      Item-vs-slot validation ("is this item a helm?") is
-        //      deferred until the server-side item registry lands.
-        //      For now the server only enforces byte-range slots.
-        //      Stat recompute (max_hp / max_mp / equipped_armor) is
-        //      also deferred for the same reason.
+        // 4hg. Track 13.3 / 14.1 / 14.2 — apply equip-item intents.
+        //      Validates src is a base slot in range + equip_slot in
+        //      range; item type vs slot (Track 14.1) inside
+        //      `equip_from_base`; moves the entry; fans one
+        //      `InventoryDelta` per touched slot. Track 14.2 then
+        //      recomputes the connection's max HP / MP / stamina /
+        //      armor from the registry's stat affixes and fans
+        //      resource updates on max change.
         if !equip_item_intents.is_empty() {
             for intent in equip_item_intents.drain(..) {
                 if intent.src_location != "base" {
@@ -3148,6 +3151,7 @@ pub async fn run(
                     }
                 };
                 conn.inventory_dirty = true;
+                let recompute = inventory::recompute_equipped_stats(conn);
                 let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
                     .iter()
                     .map(|&(loc, slot)| {
@@ -3182,17 +3186,29 @@ pub async fn run(
                         count,
                     );
                 }
+                if recompute.any_resource_max_changed() {
+                    handlers::fan_out_resources(
+                        &mut server,
+                        &in_world_recipients_now,
+                        conn,
+                    );
+                }
                 tracing::debug!(
                     owner = intent.owner,
                     src,
                     equip_slot = intent.equip_slot,
+                    max_hp = conn.max_hp,
+                    max_mp = conn.max_mp,
+                    armor = conn.equipped_armor,
                     "EquipItem applied"
                 );
             }
         }
 
-        // 4hh. Track 13.3 — apply unequip-item intents. Mirror of
-        //      4hg but goes the other direction (equip → base).
+        // 4hh. Track 13.3 / 14.2 — apply unequip-item intents.
+        //      Mirror of 4hg in the other direction. Track 14.2
+        //      runs the same stat recompute + resource fan after
+        //      the mutation lands.
         if !unequip_item_intents.is_empty() {
             for intent in unequip_item_intents.drain(..) {
                 if intent.dst_location != "base" {
@@ -3225,6 +3241,7 @@ pub async fn run(
                     }
                 };
                 conn.inventory_dirty = true;
+                let recompute = inventory::recompute_equipped_stats(conn);
                 let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
                     .iter()
                     .map(|&(loc, slot)| {
@@ -3259,10 +3276,20 @@ pub async fn run(
                         count,
                     );
                 }
+                if recompute.any_resource_max_changed() {
+                    handlers::fan_out_resources(
+                        &mut server,
+                        &in_world_recipients_now,
+                        conn,
+                    );
+                }
                 tracing::debug!(
                     owner = intent.owner,
                     equip_slot = intent.equip_slot,
                     dst,
+                    max_hp = conn.max_hp,
+                    max_mp = conn.max_mp,
+                    armor = conn.equipped_armor,
                     "UnequipItem applied"
                 );
             }

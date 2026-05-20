@@ -1933,12 +1933,15 @@ async fn drop_item_creates_loot_bag_at_player_pos() {
     let _ = bag_spawn;
 }
 
-/// Track 13.3 — EquipItem moves a base entry into the paperdoll.
-/// Seed a sword in base slot 0, send EquipItem(0 → equip slot 0),
-/// assert two Deltas land: base slot 0 cleared, equip slot 0 has
-/// the sword.
+/// Track 13.3 / 14.1 — EquipItem moves a base entry into the
+/// paperdoll. Seed a registered weapon in base slot 0, send
+/// EquipItem(0 → equip slot 0), assert two Deltas land: base slot
+/// 0 cleared, equip slot 0 holds the weapon. The path has to be
+/// in items.toml or Track 14.1's `is_equippable_in_slot` check
+/// would reject the equip.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn equip_item_moves_base_to_paperdoll() {
+    const WEAPON: &str = "res://data/loot/items/iron_short_sword.tres";
     let h = start_both().await;
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "eq1", "Equipper", "Human", "Warrior").await;
@@ -1950,7 +1953,7 @@ async fn equip_item_moves_base_to_paperdoll() {
         &[projectdawn_server::db::InventoryRow {
             location: "base".into(),
             slot: 0,
-            item_path: "res://items/sword.tres".into(),
+            item_path: WEAPON.into(),
             count: 1,
         }],
     )
@@ -1986,7 +1989,7 @@ async fn equip_item_moves_base_to_paperdoll() {
                 }
                 if location == "equip"
                     && slot == 0
-                    && item_path.as_deref() == Some("res://items/sword.tres")
+                    && item_path.as_deref() == Some(WEAPON)
                 {
                     saw_equip_set = true;
                 }
@@ -1997,6 +2000,69 @@ async fn equip_item_moves_base_to_paperdoll() {
         saw_base_clear && saw_equip_set,
         "expected both deltas (base_clear={saw_base_clear}, equip_set={saw_equip_set})"
     );
+}
+
+/// Track 14.2 — equipping an item with +max_hp bonus fans a
+/// HealthUpdate carrying the new max. Iron Chain Vest in
+/// items.toml has `max_hp_bonus = 25.0`; a Human Warrior at
+/// level 1 has base max_hp = 200 (see char_data tests), so the
+/// post-equip max should land at 225. Asserts the post-equip
+/// fan-out hits the equipping player themselves — the initial
+/// EnterWorld snapshot only fans to peers, so without a peer
+/// the player wouldn't see their own max_hp until something
+/// changed it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn equip_increases_max_hp() {
+    const VEST: &str = "res://data/loot/items/iron_chain_vest.tres";
+    const HUMAN_WARRIOR_BASE_MAX_HP: f32 = 200.0;
+    const EXPECTED_MAX_HP: f32 = HUMAN_WARRIOR_BASE_MAX_HP + 25.0;
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "eq4", "Vestguy", "Human", "Warrior").await;
+    let db_url = h.db_url.clone();
+    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    projectdawn_server::db::save_inventory(
+        &pool,
+        a_char_id,
+        &[projectdawn_server::db::InventoryRow {
+            location: "base".into(),
+            slot: 0,
+            item_path: VEST.into(),
+            count: 1,
+        }],
+    )
+    .await
+    .expect("seed");
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let _ = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+        })
+        .await
+        .expect("snapshot");
+
+    a.send_equip_item("base", 0, 3); // chest slot
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let post = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(
+                m,
+                ServerWorldMsg::HealthUpdate { id, max_hp, .. }
+                    if *id == a_char_id as u64 && (*max_hp - EXPECTED_MAX_HP).abs() < 0.1
+            )
+        })
+        .await
+        .expect("HealthUpdate with vest-augmented max_hp");
+    if let ServerWorldMsg::HealthUpdate { max_hp, .. } = post {
+        assert!(
+            (max_hp - EXPECTED_MAX_HP).abs() < 0.1,
+            "expected max_hp = {EXPECTED_MAX_HP} (base 200 + 25 from vest), got {max_hp}"
+        );
+    }
 }
 
 /// Track 13.3 — EquipItem with no source rejects silently. The wire

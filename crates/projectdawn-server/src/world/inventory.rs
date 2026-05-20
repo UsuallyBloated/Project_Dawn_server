@@ -14,6 +14,116 @@ use crate::db::InventoryRow;
 use crate::world::items;
 use std::collections::HashMap;
 
+/// Track 14.2 — running totals of stat bonuses contributed by the
+/// currently-equipped item set. Cached on `PerConnection` so the
+/// recompute pass knows what to subtract before re-summing across
+/// the new equipment map. Kept distinct from buff deltas so spells
+/// like Bless can co-exist with equipment changes without either
+/// stomping the other.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EquipStatBonuses {
+    pub strength: i32,
+    pub dexterity: i32,
+    pub agility: i32,
+    pub intelligence: i32,
+    pub wisdom: i32,
+    pub charisma: i32,
+    pub constitution: i32,
+    pub max_hp: f32,
+    pub max_mp: f32,
+    pub max_stamina: f32,
+    pub armor: i32,
+}
+
+/// Track 14.2 — outcome flags from `recompute_equipped_stats`. The
+/// caller fans `HealthUpdate` / `ManaUpdate` / `StaminaUpdate` when
+/// the corresponding max moved so peers' target frames refresh.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RecomputeResult {
+    pub max_hp_changed: bool,
+    pub max_mp_changed: bool,
+    pub max_stamina_changed: bool,
+}
+
+impl RecomputeResult {
+    pub fn any_resource_max_changed(&self) -> bool {
+        self.max_hp_changed || self.max_mp_changed || self.max_stamina_changed
+    }
+}
+
+/// Track 14.2 — rebuild the effective stats / max resources / armor
+/// from the connection's equipment map. Diffs the new gear total
+/// against `conn.equip_stat_bonuses` and applies the signed delta
+/// directly to `conn.{strength, ..., max_hp, max_mp, max_stamina,
+/// equipped_armor}`. Current hp / mp / stamina are clamped against
+/// the new max when the max moves down (mirrors GDScript
+/// `set_hp(hp)` after `remove_item_bonuses`); current resources are
+/// NOT bumped when the max moves up — the player has to heal back
+/// into the new headroom, matching `apply_item_bonuses` which only
+/// touches `max_*` not the current value.
+///
+/// Items not in the registry contribute nothing — they're already
+/// rejected by `equip_from_base` (Track 14.1), so any orphaned
+/// path that slipped in via persistence simply leaves the bonuses
+/// at their prior state. Floors: max_hp >= 1, max_mp >= 0, max_stamina >= 1.
+pub fn recompute_equipped_stats(
+    conn: &mut crate::world::connection::PerConnection,
+) -> RecomputeResult {
+    let prev = conn.equip_stat_bonuses;
+    let mut next = EquipStatBonuses::default();
+    for entry in conn.inventory.equipment.values() {
+        let Some(item) = items::lookup(&entry.item_path) else {
+            continue;
+        };
+        next.strength     += item.str_bonus;
+        next.dexterity    += item.dex_bonus;
+        next.agility      += item.agi_bonus;
+        next.intelligence += item.int_bonus;
+        next.wisdom       += item.wis_bonus;
+        next.charisma     += item.cha_bonus;
+        next.constitution += item.con_bonus;
+        next.max_hp       += item.max_hp_bonus;
+        next.max_mp       += item.max_mp_bonus;
+        next.max_stamina  += item.max_stamina_bonus;
+        next.armor        += item.armor;
+    }
+    // Stats — straight signed-delta apply.
+    conn.strength     += next.strength     - prev.strength;
+    conn.dexterity    += next.dexterity    - prev.dexterity;
+    conn.agility      += next.agility      - prev.agility;
+    conn.intelligence += next.intelligence - prev.intelligence;
+    conn.wisdom       += next.wisdom       - prev.wisdom;
+    conn.charisma     += next.charisma     - prev.charisma;
+    conn.constitution += next.constitution - prev.constitution;
+
+    // Resource maxes — signed delta + floor. Current is clamped down
+    // if max dropped below it.
+    let prev_max_hp = conn.max_hp;
+    let prev_max_mp = conn.max_mp;
+    let prev_max_stamina = conn.max_stamina;
+    conn.max_hp      = (conn.max_hp      + (next.max_hp      - prev.max_hp     )).max(1.0);
+    conn.max_mp      = (conn.max_mp      + (next.max_mp      - prev.max_mp     )).max(0.0);
+    conn.max_stamina = (conn.max_stamina + (next.max_stamina - prev.max_stamina)).max(1.0);
+    if conn.hp > conn.max_hp {
+        conn.hp = conn.max_hp;
+    }
+    if conn.mp > conn.max_mp {
+        conn.mp = conn.max_mp;
+    }
+    if conn.stamina > conn.max_stamina {
+        conn.stamina = conn.max_stamina;
+    }
+
+    conn.equipped_armor = next.armor.max(0);
+    conn.equip_stat_bonuses = next;
+
+    RecomputeResult {
+        max_hp_changed:      conn.max_hp      != prev_max_hp,
+        max_mp_changed:      conn.max_mp      != prev_max_mp,
+        max_stamina_changed: conn.max_stamina != prev_max_stamina,
+    }
+}
+
 /// Mirror of the client's `Inventory.BASE_SLOT_COUNT` constant. The
 /// 8 flat slots a player has before bags. The full inventory model
 /// adds per-bag rows (Track 13.2) and equipment (Track 13.3); the
@@ -725,6 +835,179 @@ mod tests {
         let (touched2, leftover2) = inv.add_item_locating(POTION, 5).unwrap();
         assert_eq!(leftover2, 5, "no slot can accept more potions");
         assert!(touched2.is_empty(), "no slots touched on full reject");
+    }
+
+    // Track 14.2 — recompute helper tests. Build a minimal
+    // PerConnection via from_spawn + a synthetic CharacterSpawn so
+    // we can exercise the stat math against the real registry.
+    fn make_conn() -> crate::world::connection::PerConnection {
+        use crate::db::CharacterSpawn;
+        use std::time::Instant;
+        let spawn = CharacterSpawn {
+            char_id: 1, account_id: 1,
+            name: "Test".into(), race: "Human".into(), class: "Warrior".into(),
+            level: 1, xp: 0, xp_to_next: 100,
+            strength: 10, dexterity: 10, agility: 10, intelligence: 10,
+            wisdom: 10, charisma: 10, constitution: 10,
+            max_hp: 100.0, max_mp: 100.0, max_stamina: 100.0,
+            hp: 100.0, mp: 100.0, stamina: 100.0,
+            coins: 0, zone: None,
+            pos: (0.0, 0.0, 0.0), yaw: 0.0,
+        };
+        crate::world::connection::PerConnection::from_spawn(spawn, Instant::now())
+    }
+
+    #[test]
+    fn recompute_no_equipment_is_noop() {
+        let mut conn = make_conn();
+        let r = recompute_equipped_stats(&mut conn);
+        assert!(!r.any_resource_max_changed());
+        assert_eq!(conn.max_hp, 100.0);
+        assert_eq!(conn.equipped_armor, 0);
+        assert_eq!(conn.strength, 10);
+    }
+
+    #[test]
+    fn recompute_picks_up_chest_armor_and_stats() {
+        // Iron Chain Vest: armor=18, str_bonus=1, con_bonus=2,
+        // max_hp_bonus=25.0 (see items.toml).
+        let mut conn = make_conn();
+        conn.inventory.equipment.insert(
+            3,
+            InventoryEntry {
+                item_path: "res://data/loot/items/iron_chain_vest.tres".into(),
+                count: 1,
+            },
+        );
+        let r = recompute_equipped_stats(&mut conn);
+        assert_eq!(conn.equipped_armor, 18);
+        assert_eq!(conn.strength, 11, "+1 str from vest");
+        assert_eq!(conn.constitution, 12, "+2 con from vest");
+        assert_eq!(conn.max_hp, 125.0, "+25 max_hp from vest");
+        assert!(r.max_hp_changed);
+        // Current HP should NOT bump on equip — mirrors GDScript's
+        // apply_item_bonuses which only touches max_*.
+        assert_eq!(conn.hp, 100.0);
+    }
+
+    #[test]
+    fn recompute_unequip_reverses_stats_and_clamps_current_hp() {
+        let mut conn = make_conn();
+        // First: equip the vest.
+        conn.inventory.equipment.insert(
+            3,
+            InventoryEntry {
+                item_path: "res://data/loot/items/iron_chain_vest.tres".into(),
+                count: 1,
+            },
+        );
+        recompute_equipped_stats(&mut conn);
+        // Simulate the player healing into the bonus headroom.
+        conn.hp = 125.0;
+        assert_eq!(conn.max_hp, 125.0);
+        // Now: unequip — empty the paperdoll slot.
+        conn.inventory.equipment.remove(&3);
+        let r = recompute_equipped_stats(&mut conn);
+        assert_eq!(conn.max_hp, 100.0, "max_hp returns to base");
+        assert_eq!(conn.hp, 100.0, "current hp clamped down to new max");
+        assert_eq!(conn.equipped_armor, 0);
+        assert_eq!(conn.strength, 10, "str back to base");
+        assert_eq!(conn.constitution, 10, "con back to base");
+        assert!(r.max_hp_changed);
+    }
+
+    #[test]
+    fn recompute_unequip_below_current_does_not_drop_hp() {
+        // Player wears vest (max 125), is at hp 80. Unequip drops
+        // max to 100; current 80 < 100 so it stays put.
+        let mut conn = make_conn();
+        conn.inventory.equipment.insert(
+            3,
+            InventoryEntry {
+                item_path: "res://data/loot/items/iron_chain_vest.tres".into(),
+                count: 1,
+            },
+        );
+        recompute_equipped_stats(&mut conn);
+        conn.hp = 80.0;
+        conn.inventory.equipment.remove(&3);
+        recompute_equipped_stats(&mut conn);
+        assert_eq!(conn.hp, 80.0, "hp unchanged when below new max");
+        assert_eq!(conn.max_hp, 100.0);
+    }
+
+    #[test]
+    fn recompute_sums_across_multiple_pieces() {
+        // Vest (chest) + iron short sword (weapon) + cloth robe — wait,
+        // can't have two chests. Use vest + sword.
+        // Iron Short Sword: str_bonus=2 (per items.toml).
+        let mut conn = make_conn();
+        conn.inventory.equipment.insert(
+            0,
+            InventoryEntry {
+                item_path: "res://data/loot/items/iron_short_sword.tres".into(),
+                count: 1,
+            },
+        );
+        conn.inventory.equipment.insert(
+            3,
+            InventoryEntry {
+                item_path: "res://data/loot/items/iron_chain_vest.tres".into(),
+                count: 1,
+            },
+        );
+        recompute_equipped_stats(&mut conn);
+        // STR: base 10 + vest 1 + sword 2 = 13.
+        assert_eq!(conn.strength, 13);
+        // Armor: only the vest contributes (sword has no armor field).
+        assert_eq!(conn.equipped_armor, 18);
+    }
+
+    #[test]
+    fn recompute_ignores_unknown_item_paths() {
+        // An item path that isn't in the registry contributes
+        // nothing (and doesn't blow up). Equipment that survived
+        // a registry rename without re-export effectively becomes
+        // a no-op until the path is re-added.
+        let mut conn = make_conn();
+        conn.inventory.equipment.insert(
+            3,
+            InventoryEntry {
+                item_path: "res://nonexistent_chest.tres".into(),
+                count: 1,
+            },
+        );
+        let r = recompute_equipped_stats(&mut conn);
+        assert!(!r.any_resource_max_changed());
+        assert_eq!(conn.max_hp, 100.0);
+        assert_eq!(conn.equipped_armor, 0);
+    }
+
+    #[test]
+    fn recompute_orthogonal_to_external_max_hp_changes() {
+        // Simulate a Bless buff adding +30 max_hp via the buffs
+        // pathway (touches conn.max_hp directly without changing
+        // equip_stat_bonuses). A subsequent equip recompute should
+        // preserve the bless contribution and only add the gear
+        // delta on top — and a later unequip should leave the
+        // bless contribution intact.
+        let mut conn = make_conn();
+        conn.max_hp += 30.0; // bless applied externally.
+        assert_eq!(conn.max_hp, 130.0);
+        // Equip vest: +25 max_hp from gear, total should be 155.
+        conn.inventory.equipment.insert(
+            3,
+            InventoryEntry {
+                item_path: "res://data/loot/items/iron_chain_vest.tres".into(),
+                count: 1,
+            },
+        );
+        recompute_equipped_stats(&mut conn);
+        assert_eq!(conn.max_hp, 155.0, "bless 30 + gear 25 on top of base 100");
+        // Unequip vest: should drop by 25, back to 130 (bless intact).
+        conn.inventory.equipment.remove(&3);
+        recompute_equipped_stats(&mut conn);
+        assert_eq!(conn.max_hp, 130.0, "gear undone; bless preserved");
     }
 
     #[test]

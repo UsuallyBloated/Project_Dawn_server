@@ -2002,6 +2002,59 @@ async fn equip_item_moves_base_to_paperdoll() {
     );
 }
 
+/// Track 14.3 — a bag plus its contents persist across a
+/// reconnect. Seed `base[0] = Small Pouch` + `bag_0[2] = potions`
+/// via DB, EnterWorld, assert the InventorySnapshot includes both
+/// rows so the client can reconstruct the bag interior.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bag_contents_persist_across_reconnect() {
+    const POUCH: &str = "res://data/loot/items/small_pouch.tres";
+    const POTION: &str = "res://data/loot/items/minor_healing_potion.tres";
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "bag1", "Bagholder", "Human", "Warrior").await;
+    let db_url = h.db_url.clone();
+    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    projectdawn_server::db::save_inventory(
+        &pool,
+        a_char_id,
+        &[
+            projectdawn_server::db::InventoryRow {
+                location: "base".into(),
+                slot: 0,
+                item_path: POUCH.into(),
+                count: 1,
+            },
+            projectdawn_server::db::InventoryRow {
+                location: "bag_0".into(),
+                slot: 2,
+                item_path: POTION.into(),
+                count: 5,
+            },
+        ],
+    )
+    .await
+    .expect("seed");
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    let snap = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+        })
+        .await
+        .expect("snapshot");
+    if let ServerWorldMsg::InventorySnapshot { entries } = snap {
+        let has_bag = entries
+            .iter()
+            .any(|(loc, slot, path, _)| loc == "base" && *slot == 0 && path == POUCH);
+        let has_potion = entries.iter().any(|(loc, slot, path, count)| {
+            loc == "bag_0" && *slot == 2 && path == POTION && *count == 5
+        });
+        assert!(has_bag, "snapshot must include the parent pouch row");
+        assert!(has_potion, "snapshot must include the bag_0 inner stack");
+    }
+}
+
 /// Track 14.2 — equipping an item with +max_hp bonus fans a
 /// HealthUpdate carrying the new max. Iron Chain Vest in
 /// items.toml has `max_hp_bonus = 25.0`; a Human Warrior at

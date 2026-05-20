@@ -1084,6 +1084,14 @@ stack_size = 20
 vendor_price = 8
 
 [[item]]
+path = "res://data/loot/items/small_pouch.tres"
+name = "Small Pouch"
+item_type = "bag"
+stack_size = 1
+bag_num_slots = 4
+vendor_price = 20
+
+[[item]]
 path = "res://data/loot/items/smithing_hammer.tres"
 name = "Smithing Hammer"
 item_type = "misc"

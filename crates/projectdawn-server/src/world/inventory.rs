@@ -14,6 +14,45 @@ use crate::db::InventoryRow;
 use crate::world::items;
 use std::collections::HashMap;
 
+/// Track 14.3 — parse a `bag_<i>` location string to its base-slot
+/// index. Returns `None` for non-bag locations (`"base"`, `"equip"`)
+/// or malformed / out-of-range bag indices.
+fn parse_bag_location(loc: &str) -> Option<u8> {
+    let suffix = loc.strip_prefix("bag_")?;
+    let idx: u32 = suffix.parse().ok()?;
+    if idx >= BASE_SLOT_COUNT as u32 {
+        return None;
+    }
+    Some(idx as u8)
+}
+
+/// Track 14.3 — bag inner slots cannot hold a bag-typed item.
+/// Mirrors the GDScript "no bag-in-bag" rule (`Inventory.add_item`
+/// only places bags in base slots).
+fn is_bag_item(path: &str) -> bool {
+    items::bag_num_slots(path).is_some()
+}
+
+/// Track 14.3 — typed view of a wire `(location, slot)` pair.
+enum SlotRefInt {
+    Base(usize),
+    Bag(u8, usize),
+}
+
+fn parse_slot_ref(loc: &str, slot: u32) -> Result<SlotRefInt, &'static str> {
+    if loc == "base" {
+        let idx = slot as usize;
+        if idx >= BASE_SLOT_COUNT {
+            return Err("base slot out of range");
+        }
+        return Ok(SlotRefInt::Base(idx));
+    }
+    if let Some(base_idx) = parse_bag_location(loc) {
+        return Ok(SlotRefInt::Bag(base_idx, slot as usize));
+    }
+    Err("unsupported location")
+}
+
 /// Track 14.2 — running totals of stat bonuses contributed by the
 /// currently-equipped item set. Cached on `PerConnection` so the
 /// recompute pass knows what to subtract before re-summing across
@@ -148,12 +187,17 @@ pub struct PlayerInventory {
     /// `None` is an empty slot.
     pub base: Vec<Option<InventoryEntry>>,
     /// Track 13.3 — paperdoll. Sparse map keyed by equip-slot index;
-    /// only occupied slots have entries. Item-vs-slot validation
-    /// (e.g. "this is a weapon, not a helm") is deferred until the
-    /// server-side item registry lands; today the server just
-    /// trusts the client's chosen equip_slot index after range-
-    /// checking it against EQUIP_SLOT_COUNT.
+    /// only occupied slots have entries. Track 14.1 added the
+    /// item-vs-slot validation enforced inside `equip_from_base`.
     pub equipment: HashMap<u8, InventoryEntry>,
+    /// Track 14.3 — per-bag contents. Sparse map keyed by the
+    /// base-slot index that holds the bag-typed item. Each Vec is
+    /// sized at the bag's `bag_num_slots` (from the registry) at
+    /// the moment the bag was placed; entries are `None` for empty
+    /// slots. Removing the bag from `base` requires the
+    /// corresponding Vec to be all-`None`; rejection happens in
+    /// `move_across` / `move_base` before any mutation lands.
+    pub bags: HashMap<u8, Vec<Option<InventoryEntry>>>,
 }
 
 impl Default for PlayerInventory {
@@ -161,6 +205,7 @@ impl Default for PlayerInventory {
         Self {
             base: vec![None; BASE_SLOT_COUNT],
             equipment: HashMap::new(),
+            bags: HashMap::new(),
         }
     }
 }
@@ -170,12 +215,17 @@ impl PlayerInventory {
         Self::default()
     }
 
-    /// Reconstruct from DB rows. Handles 'base' (Track 13.1) and
-    /// 'equip' (Track 13.3); 'bag_*' rows are still dropped (bag
-    /// support needs the server-side item registry). Out-of-range
-    /// slots are dropped defensively.
+    /// Reconstruct from DB rows. Handles 'base' (Track 13.1),
+    /// 'equip' (Track 13.3), and 'bag_<i>' (Track 14.3). Two-pass:
+    /// base + equip first, then bag_<i> rows so each bag's parent
+    /// is in place (and its capacity known via the registry's
+    /// `bag_num_slots`) before its contents land. Out-of-range
+    /// slots and rows for a non-existent / non-bag parent are
+    /// silently dropped.
     pub fn from_rows(rows: &[InventoryRow]) -> Self {
         let mut inv = Self::default();
+        // Pass 1 — base + equip; initialise bag Vecs for any
+        // bag-typed base entries so pass 2's bag_<i> rows can land.
         for row in rows {
             if row.count <= 0 || row.item_path.is_empty() {
                 continue;
@@ -190,6 +240,7 @@ impl PlayerInventory {
                         item_path: row.item_path.clone(),
                         count: row.count as u32,
                     });
+                    inv.ensure_bag_init(idx);
                 }
                 "equip" => {
                     if row.slot < 0 || row.slot >= EQUIP_SLOT_COUNT as i32 {
@@ -203,16 +254,37 @@ impl PlayerInventory {
                         },
                     );
                 }
-                _ => {
-                    // 'bag_*' deferred to a later track.
-                }
+                _ => {} // bag_<i> rows handled below
             }
+        }
+        // Pass 2 — bag_<i> rows. Routes into the Vec initialised
+        // by pass 1's `ensure_bag_init`. Out-of-range bag slots
+        // (or rows pointing at a base slot that turned out not to
+        // hold a bag) drop silently.
+        for row in rows {
+            if row.count <= 0 || row.item_path.is_empty() {
+                continue;
+            }
+            let Some(base_idx) = parse_bag_location(&row.location) else {
+                continue;
+            };
+            let Some(arr) = inv.bags.get_mut(&base_idx) else {
+                continue;
+            };
+            let slot_idx = row.slot as usize;
+            if row.slot < 0 || slot_idx >= arr.len() {
+                continue;
+            }
+            arr[slot_idx] = Some(InventoryEntry {
+                item_path: row.item_path.clone(),
+                count: row.count as u32,
+            });
         }
         inv
     }
 
     /// Project into DB rows for persistence. Only emits filled slots.
-    /// Emits 'base' rows + Track 13.3's 'equip' rows.
+    /// Emits 'base' + 'equip' + 'bag_<i>' rows.
     pub fn to_rows(&self) -> Vec<InventoryRow> {
         let mut out = Vec::new();
         for (i, slot) in self.base.iter().enumerate() {
@@ -233,13 +305,25 @@ impl PlayerInventory {
                 count: entry.count as i32,
             });
         }
+        for (base_idx, arr) in self.bags.iter() {
+            for (slot_idx, slot) in arr.iter().enumerate() {
+                if let Some(entry) = slot {
+                    out.push(InventoryRow {
+                        location: format!("bag_{base_idx}"),
+                        slot: slot_idx as i32,
+                        item_path: entry.item_path.clone(),
+                        count: entry.count as i32,
+                    });
+                }
+            }
+        }
         out
     }
 
-    /// Track 13.2 — project to the wire shape used by
+    /// Track 13.2 / 14.3 — project to the wire shape used by
     /// `ServerWorldMsg::InventorySnapshot`. Parallel to `to_rows`
     /// but emits the protocol's (location, slot, item_path, count)
-    /// tuple. Includes Track 13.3 equipment entries.
+    /// tuple. Includes equip + bag_<i> entries.
     pub fn to_snapshot_entries(&self) -> Vec<(String, u32, String, u32)> {
         let mut out = Vec::new();
         for (i, slot) in self.base.iter().enumerate() {
@@ -260,7 +344,56 @@ impl PlayerInventory {
                 entry.count,
             ));
         }
+        for (base_idx, arr) in self.bags.iter() {
+            for (slot_idx, slot) in arr.iter().enumerate() {
+                if let Some(entry) = slot {
+                    out.push((
+                        format!("bag_{base_idx}"),
+                        slot_idx as u32,
+                        entry.item_path.clone(),
+                        entry.count,
+                    ));
+                }
+            }
+        }
         out
+    }
+
+    /// Track 14.3 — sync `bags[base_idx]` against whatever sits in
+    /// `base[base_idx]`. Called after every mutation that could
+    /// change a base entry. If the base slot now holds a bag-typed
+    /// item, allocate an empty Vec of the registry's
+    /// `bag_num_slots` (or leave the existing Vec untouched — see
+    /// the empty-required move rule). If it no longer holds a bag,
+    /// drop the Vec.
+    pub fn ensure_bag_init(&mut self, base_idx: usize) {
+        let key = base_idx as u8;
+        let Some(entry) = self.base.get(base_idx).and_then(|s| s.as_ref()) else {
+            self.bags.remove(&key);
+            return;
+        };
+        match items::bag_num_slots(&entry.item_path) {
+            Some(n) => {
+                self.bags
+                    .entry(key)
+                    .or_insert_with(|| vec![None; n as usize]);
+            }
+            None => {
+                self.bags.remove(&key);
+            }
+        }
+    }
+
+    /// Returns `true` when `base[idx]` holds a bag and the bag has
+    /// at least one occupied inner slot. Used by `move_base` /
+    /// `move_across` to enforce the "empty bag required to move
+    /// out" rule.
+    fn bag_at_base_is_nonempty(&self, base_idx: usize) -> bool {
+        let key = base_idx as u8;
+        match self.bags.get(&key) {
+            Some(arr) => arr.iter().any(|s| s.is_some()),
+            None => false,
+        }
     }
 
     /// Track 13.2 / 14.1 — drop `count` of `item_path` into the
@@ -321,6 +454,10 @@ impl PlayerInventory {
                 });
                 remaining -= put;
                 touched.push(i);
+                // Track 14.3 — bag-typed loot needs its inner Vec
+                // allocated so subsequent bag_<i> deltas have
+                // somewhere to land.
+                self.ensure_bag_init(i);
             }
         }
         Ok((touched, remaining))
@@ -383,6 +520,13 @@ impl PlayerInventory {
                 });
             }
         }
+        // Track 14.3 — split can't change item type at either slot,
+        // but ensure_bag_init keeps the bags map consistent if the
+        // src stack went to zero (clears the bags entry that
+        // shouldn't exist for a non-bag item anyway) and is cheap
+        // to call defensively.
+        self.ensure_bag_init(src);
+        self.ensure_bag_init(dst);
         Ok(vec![src, dst])
     }
 
@@ -425,13 +569,19 @@ impl PlayerInventory {
             // empty src slot.
             self.base[src] = Some(prev);
         }
+        // Track 14.3 — the source base slot just changed; if it
+        // had been a bag (it wasn't — bags aren't equippable) or
+        // is now a swapped-in non-bag, keep `bags` consistent.
+        self.ensure_bag_init(src);
         Ok(vec![("base", src as u32), ("equip", equip_slot as u32)])
     }
 
-    /// Track 13.3 — unequip paperdoll slot `equip_slot` into base
-    /// slot `dst`. If dst is occupied, swap it into the paperdoll
-    /// (same byte-range validation as equip; item-vs-slot validation
-    /// is deferred).
+    /// Track 13.3 / 14.3 — unequip paperdoll slot `equip_slot`
+    /// into base slot `dst`. If dst is occupied, the swap pushes
+    /// the displaced base item into the paperdoll — which means
+    /// it has to be equippable in that slot, OR the swap rejects
+    /// (Track 14.3 hardening: stops bags or consumables from
+    /// being pushed into the paperdoll via a swap unequip).
     pub fn unequip_to_base(
         &mut self,
         equip_slot: u8,
@@ -443,6 +593,14 @@ impl PlayerInventory {
         if dst >= BASE_SLOT_COUNT {
             return Err("base slot out of range");
         }
+        // Track 14.3 — if the swap would land an unsuitable item
+        // (bag, consumable, mismatched gear type) in the paperdoll,
+        // reject before any mutation.
+        if let Some(existing) = self.base.get(dst).and_then(|s| s.as_ref()) {
+            if !items::is_equippable_in_slot(&existing.item_path, equip_slot) {
+                return Err("base item not equippable in this slot");
+            }
+        }
         let Some(equip_entry) = self.equipment.remove(&equip_slot) else {
             return Err("equip slot empty");
         };
@@ -451,16 +609,23 @@ impl PlayerInventory {
         if let Some(prev) = prev_base {
             self.equipment.insert(equip_slot, prev);
         }
+        self.ensure_bag_init(dst);
         Ok(vec![("base", dst as u32), ("equip", equip_slot as u32)])
     }
 
-    /// Track 13.2.b — remove `count` of the entry at `(base, slot)`.
-    /// `count == 0` drops the whole stack. Returns the item_path
-    /// and actual quantity removed (capped by the stack), plus
-    /// whether the slot is now empty. None if the slot was already
-    /// empty.
+    /// Track 13.2.b / 14.3 — remove `count` of the entry at
+    /// `(base, slot)`. `count == 0` drops the whole stack. Returns
+    /// the item_path and actual quantity removed (capped by the
+    /// stack), plus whether the slot is now empty. `None` if the
+    /// slot was already empty or if the slot holds a non-empty
+    /// bag (drop would orphan the contents).
     pub fn drop_base(&mut self, slot: usize, count: u32) -> Option<(String, u32)> {
         if slot >= BASE_SLOT_COUNT {
+            return None;
+        }
+        // Track 14.3 — refuse to drop a bag that still has items
+        // inside. The client UI should empty it first.
+        if self.bag_at_base_is_nonempty(slot) {
             return None;
         }
         let entry = self.base.get_mut(slot)?.as_mut()?;
@@ -474,20 +639,37 @@ impl PlayerInventory {
         if entry.count == 0 {
             self.base[slot] = None;
         }
+        self.ensure_bag_init(slot);
         Some((path, to_remove))
     }
 
-    /// Track 13.2 — atomic move/swap between base slots. Move-to-empty
-    /// is a clean transfer; move-to-occupied with the same item_path
-    /// merges counts (caps at u32::MAX); move-to-occupied with a
-    /// different item_path is a swap. Returns the list of slots
-    /// touched so the caller fans one `InventoryDelta` per slot.
+    /// Track 13.2 / 14.3 — atomic move/swap between base slots.
+    /// Move-to-empty is a clean transfer; move-to-occupied with the
+    /// same item_path merges counts (caps at u32::MAX); move-to-
+    /// occupied with a different item_path is a swap.
+    ///
+    /// Track 14.3 — moving a bag in or out of a base slot requires
+    /// the bag to be empty. A non-empty bag at `src` rejects the
+    /// move (`bag must be emptied before moving`); a non-empty bag
+    /// at `dst` (during a same-path merge attempt the bag is the
+    /// src item, so this only triggers on swap) also rejects.
+    /// `ensure_bag_init` is called for both indices after the
+    /// mutation lands so the bags map stays consistent with the
+    /// new base content.
     pub fn move_base(&mut self, src: usize, dst: usize) -> Result<Vec<usize>, &'static str> {
         if src >= BASE_SLOT_COUNT || dst >= BASE_SLOT_COUNT {
             return Err("slot out of range");
         }
         if src == dst {
             return Ok(Vec::new());
+        }
+        // Bag-empty validation runs before any take/insert so a
+        // rejected move leaves the inventory untouched.
+        if self.bag_at_base_is_nonempty(src) {
+            return Err("bag must be emptied before moving");
+        }
+        if self.bag_at_base_is_nonempty(dst) {
+            return Err("destination bag must be emptied before swapping");
         }
         let src_entry = self.base[src].take();
         let Some(src_entry) = src_entry else {
@@ -511,7 +693,275 @@ impl PlayerInventory {
                 self.base[dst] = Some(src_entry);
             }
         }
+        self.ensure_bag_init(src);
+        self.ensure_bag_init(dst);
         Ok(vec![src, dst])
+    }
+
+    /// Track 14.3 — move/swap/merge between two inner slots of the
+    /// same bag (`bag_<i>` → `bag_<i>`). Same semantics as
+    /// `move_base` minus the bag-empty rule (we're inside the bag,
+    /// not moving the bag itself). Returns the touched
+    /// `(location, slot)` tuples for the InventoryDelta fan.
+    pub fn move_bag(
+        &mut self,
+        base_idx: usize,
+        src: usize,
+        dst: usize,
+    ) -> Result<Vec<(String, u32)>, &'static str> {
+        let key = base_idx as u8;
+        let arr = self
+            .bags
+            .get_mut(&key)
+            .ok_or("bag does not exist at base index")?;
+        if src >= arr.len() || dst >= arr.len() {
+            return Err("bag slot out of range");
+        }
+        if src == dst {
+            return Ok(Vec::new());
+        }
+        let src_entry = arr[src].take();
+        let Some(src_entry) = src_entry else {
+            return Err("source slot empty");
+        };
+        let dst_entry = arr[dst].take();
+        match dst_entry {
+            None => {
+                arr[dst] = Some(src_entry);
+            }
+            Some(existing) if existing.item_path == src_entry.item_path => {
+                let merged_count = existing.count.saturating_add(src_entry.count);
+                arr[dst] = Some(InventoryEntry {
+                    item_path: existing.item_path,
+                    count: merged_count,
+                });
+            }
+            Some(existing) => {
+                arr[src] = Some(existing);
+                arr[dst] = Some(src_entry);
+            }
+        }
+        let loc = format!("bag_{base_idx}");
+        Ok(vec![(loc.clone(), src as u32), (loc, dst as u32)])
+    }
+
+    /// Track 14.3 — top-level move dispatch. Resolves the
+    /// `(location, slot)` pair on each side and routes to the
+    /// appropriate inner helper. Supports every combination of
+    /// `"base"` and `"bag_<i>"`; `"equip"` locations stay on the
+    /// dedicated `equip_from_base` / `unequip_to_base` paths.
+    pub fn move_across(
+        &mut self,
+        src_loc: &str,
+        src_slot: u32,
+        dst_loc: &str,
+        dst_slot: u32,
+    ) -> Result<Vec<(String, u32)>, &'static str> {
+        let src = parse_slot_ref(src_loc, src_slot)?;
+        let dst = parse_slot_ref(dst_loc, dst_slot)?;
+        match (src, dst) {
+            (SlotRefInt::Base(s), SlotRefInt::Base(d)) => {
+                let touched = self.move_base(s, d)?;
+                Ok(touched
+                    .into_iter()
+                    .map(|i| ("base".to_string(), i as u32))
+                    .collect())
+            }
+            (SlotRefInt::Bag(b1, s), SlotRefInt::Bag(b2, d)) if b1 == b2 => {
+                self.move_bag(b1 as usize, s, d)
+            }
+            (SlotRefInt::Bag(b1, s), SlotRefInt::Bag(b2, d)) => {
+                self.move_bag_to_bag(b1, s, b2, d)
+            }
+            (SlotRefInt::Base(s), SlotRefInt::Bag(base_idx, d)) => {
+                self.move_base_to_bag(s, base_idx, d)
+            }
+            (SlotRefInt::Bag(base_idx, s), SlotRefInt::Base(d)) => {
+                self.move_bag_to_base(base_idx, s, d)
+            }
+        }
+    }
+
+    /// Track 14.3 — base → bag inner. Rejects bag-in-bag attempts
+    /// (the src item must not itself be a bag). Same merge / swap
+    /// semantics as the base ↔ base path; swap pushes the bag
+    /// inner's old item back into the source base slot, which is
+    /// safe (any item type can sit in base). `ensure_bag_init`
+    /// runs against the source slot afterwards in case a bag was
+    /// swapped out.
+    fn move_base_to_bag(
+        &mut self,
+        src: usize,
+        base_idx: u8,
+        dst: usize,
+    ) -> Result<Vec<(String, u32)>, &'static str> {
+        if src >= BASE_SLOT_COUNT {
+            return Err("base slot out of range");
+        }
+        let src_path = match self.base.get(src).and_then(|s| s.as_ref()) {
+            Some(e) => e.item_path.clone(),
+            None => return Err("source slot empty"),
+        };
+        if is_bag_item(&src_path) {
+            return Err("cannot place a bag inside a bag");
+        }
+        let arr = self
+            .bags
+            .get_mut(&base_idx)
+            .ok_or("destination bag does not exist")?;
+        if dst >= arr.len() {
+            return Err("bag slot out of range");
+        }
+        let src_entry = self.base[src].take().expect("checked above");
+        let dst_entry = arr[dst].take();
+        match dst_entry {
+            None => {
+                arr[dst] = Some(src_entry);
+            }
+            Some(existing) if existing.item_path == src_entry.item_path => {
+                let merged_count = existing.count.saturating_add(src_entry.count);
+                arr[dst] = Some(InventoryEntry {
+                    item_path: existing.item_path,
+                    count: merged_count,
+                });
+            }
+            Some(existing) => {
+                // Swap — bag inner's old item goes back to base[src].
+                self.base[src] = Some(existing);
+                arr[dst] = Some(src_entry);
+            }
+        }
+        self.ensure_bag_init(src);
+        Ok(vec![
+            ("base".to_string(), src as u32),
+            (format!("bag_{base_idx}"), dst as u32),
+        ])
+    }
+
+    /// Track 14.3 — bag inner → base. Inner items are never bags
+    /// (see `move_base_to_bag`), so the only ban here is when a
+    /// swap would push a bag from `base[dst]` back into the bag
+    /// inner slot. Empty-bag-required-to-move rule on dst applies
+    /// only when swapping a bag out — empty bag swap would land
+    /// the bag in the inner slot which is bag-in-bag and rejected.
+    fn move_bag_to_base(
+        &mut self,
+        base_idx: u8,
+        src: usize,
+        dst: usize,
+    ) -> Result<Vec<(String, u32)>, &'static str> {
+        if dst >= BASE_SLOT_COUNT {
+            return Err("base slot out of range");
+        }
+        let arr = self
+            .bags
+            .get_mut(&base_idx)
+            .ok_or("source bag does not exist")?;
+        if src >= arr.len() {
+            return Err("bag slot out of range");
+        }
+        // Inspect the swap target before pulling from the bag so we
+        // can reject cleanly.
+        if let Some(existing) = self.base.get(dst).and_then(|s| s.as_ref()) {
+            if is_bag_item(&existing.item_path) {
+                return Err("cannot swap a bag into another bag's inner slot");
+            }
+        }
+        let src_entry = arr[src].take().ok_or("source slot empty")?;
+        let dst_entry = self.base[dst].take();
+        match dst_entry {
+            None => {
+                self.base[dst] = Some(src_entry);
+            }
+            Some(existing) if existing.item_path == src_entry.item_path => {
+                let merged_count = existing.count.saturating_add(src_entry.count);
+                self.base[dst] = Some(InventoryEntry {
+                    item_path: existing.item_path,
+                    count: merged_count,
+                });
+            }
+            Some(existing) => {
+                // Swap — base[dst]'s item goes back to the bag inner.
+                // (We've already verified it isn't a bag.)
+                let arr = self
+                    .bags
+                    .get_mut(&base_idx)
+                    .expect("bag existed at start of fn");
+                arr[src] = Some(existing);
+                self.base[dst] = Some(src_entry);
+            }
+        }
+        self.ensure_bag_init(dst);
+        Ok(vec![
+            (format!("bag_{base_idx}"), src as u32),
+            ("base".to_string(), dst as u32),
+        ])
+    }
+
+    /// Track 14.3 — bag inner → different bag inner. Neither side
+    /// can hold a bag (bag-in-bag ban applies to both source and
+    /// destination on swap). Same merge / swap semantics as the
+    /// same-bag path.
+    fn move_bag_to_bag(
+        &mut self,
+        src_base: u8,
+        src_slot: usize,
+        dst_base: u8,
+        dst_slot: usize,
+    ) -> Result<Vec<(String, u32)>, &'static str> {
+        // Validate both bags exist + slots are in range before any
+        // mutation. Snapshot the src entry, peek the dst, then
+        // commit.
+        let src_entry = {
+            let arr = self
+                .bags
+                .get_mut(&src_base)
+                .ok_or("source bag does not exist")?;
+            if src_slot >= arr.len() {
+                return Err("source bag slot out of range");
+            }
+            arr[src_slot].take().ok_or("source slot empty")?
+        };
+        // Restore on any subsequent failure.
+        let restore = |inv: &mut Self, entry: InventoryEntry| {
+            if let Some(arr) = inv.bags.get_mut(&src_base) {
+                arr[src_slot] = Some(entry);
+            }
+        };
+        let dst_entry = {
+            let arr = match self.bags.get_mut(&dst_base) {
+                Some(a) => a,
+                None => {
+                    restore(self, src_entry);
+                    return Err("destination bag does not exist");
+                }
+            };
+            if dst_slot >= arr.len() {
+                restore(self, src_entry);
+                return Err("destination bag slot out of range");
+            }
+            arr[dst_slot].take()
+        };
+        match dst_entry {
+            None => {
+                self.bags.get_mut(&dst_base).expect("checked")[dst_slot] = Some(src_entry);
+            }
+            Some(existing) if existing.item_path == src_entry.item_path => {
+                let merged_count = existing.count.saturating_add(src_entry.count);
+                self.bags.get_mut(&dst_base).expect("checked")[dst_slot] = Some(InventoryEntry {
+                    item_path: existing.item_path,
+                    count: merged_count,
+                });
+            }
+            Some(existing) => {
+                self.bags.get_mut(&dst_base).expect("checked")[dst_slot] = Some(src_entry);
+                self.bags.get_mut(&src_base).expect("checked")[src_slot] = Some(existing);
+            }
+        }
+        Ok(vec![
+            (format!("bag_{src_base}"), src_slot as u32),
+            (format!("bag_{dst_base}"), dst_slot as u32),
+        ])
     }
 
     /// Convenience wrapper used by the unit tests below. Returns
@@ -1043,14 +1493,44 @@ mod tests {
 
     #[test]
     fn unequip_swaps_with_existing_base_slot() {
+        // Both items must be equippable in the target slot for the
+        // swap to land; Track 14.3 added the dst-equippable check.
         let mut inv = PlayerInventory::new();
-        inv.equipment.insert(0, InventoryEntry { item_path: "res://items/sword.tres".into(), count: 1 });
-        inv.add_item("res://items/cloth.tres", 5).unwrap();
-        // Unequip into slot 0 which holds cloth: cloth ends up
-        // equipped in slot 0 of paperdoll (no item-vs-slot check).
+        inv.equipment.insert(
+            0,
+            InventoryEntry { item_path: SWORD.into(), count: 1 },
+        );
+        inv.add_item("res://data/loot/items/iron_dagger.tres", 1).unwrap();
         inv.unequip_to_base(0, 0).expect("unequip-swap");
-        assert_eq!(inv.base[0].as_ref().unwrap().item_path, "res://items/sword.tres");
-        assert_eq!(inv.equipment.get(&0).unwrap().item_path, "res://items/cloth.tres");
+        assert_eq!(inv.base[0].as_ref().unwrap().item_path, SWORD);
+        assert_eq!(
+            inv.equipment.get(&0).unwrap().item_path,
+            "res://data/loot/items/iron_dagger.tres"
+        );
+    }
+
+    #[test]
+    fn unequip_rejects_swap_into_nonequippable_base() {
+        // Potion can't be equipped, so unequip-into-base-with-potion
+        // must reject without mutating either slot.
+        let mut inv = PlayerInventory::new();
+        inv.equipment.insert(
+            0,
+            InventoryEntry { item_path: SWORD.into(), count: 1 },
+        );
+        inv.add_item(POTION, 1).unwrap();
+        let err = inv.unequip_to_base(0, 0);
+        assert!(err.is_err());
+        assert_eq!(
+            inv.equipment.get(&0).unwrap().item_path,
+            SWORD,
+            "equip unchanged on reject"
+        );
+        assert_eq!(
+            inv.base[0].as_ref().unwrap().item_path,
+            POTION,
+            "base unchanged on reject"
+        );
     }
 
     #[test]
@@ -1058,5 +1538,224 @@ mod tests {
         let mut inv = PlayerInventory::new();
         let err = inv.unequip_to_base(0, 0);
         assert!(err.is_err());
+    }
+
+    // Track 14.3 — bag location tests.
+    const POUCH: &str = "res://data/loot/items/small_pouch.tres";
+
+    #[test]
+    fn ensure_bag_init_allocates_inner_vec_for_bag() {
+        let mut inv = PlayerInventory::new();
+        inv.base[3] = Some(InventoryEntry {
+            item_path: POUCH.into(),
+            count: 1,
+        });
+        inv.ensure_bag_init(3);
+        let arr = inv.bags.get(&3u8).expect("bag init");
+        assert_eq!(arr.len(), 4, "small_pouch has bag_num_slots=4");
+        assert!(arr.iter().all(|s| s.is_none()));
+    }
+
+    #[test]
+    fn ensure_bag_init_clears_when_base_no_longer_bag() {
+        let mut inv = PlayerInventory::new();
+        inv.base[3] = Some(InventoryEntry {
+            item_path: POUCH.into(),
+            count: 1,
+        });
+        inv.ensure_bag_init(3);
+        assert!(inv.bags.contains_key(&3u8));
+        inv.base[3] = Some(InventoryEntry {
+            item_path: SWORD.into(),
+            count: 1,
+        });
+        inv.ensure_bag_init(3);
+        assert!(!inv.bags.contains_key(&3u8));
+    }
+
+    #[test]
+    fn add_item_locating_initialises_bag_on_loot_grant() {
+        let mut inv = PlayerInventory::new();
+        let (touched, leftover) = inv.add_item_locating(POUCH, 1).unwrap();
+        assert_eq!(leftover, 0);
+        assert_eq!(touched, vec![0]);
+        assert!(
+            inv.bags.contains_key(&0u8),
+            "looted bag must allocate its inner Vec"
+        );
+    }
+
+    #[test]
+    fn move_bag_swaps_inner_slots() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item_locating(POUCH, 1).unwrap();
+        let bag = inv.bags.get_mut(&0u8).unwrap();
+        bag[0] = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 3,
+        });
+        bag[2] = Some(InventoryEntry {
+            item_path: SWORD.into(),
+            count: 1,
+        });
+        let touched = inv.move_bag(0, 0, 2).expect("swap");
+        assert_eq!(touched.len(), 2);
+        let bag = inv.bags.get(&0u8).unwrap();
+        assert_eq!(bag[0].as_ref().unwrap().item_path, SWORD);
+        assert_eq!(bag[2].as_ref().unwrap().item_path, POTION);
+    }
+
+    #[test]
+    fn move_base_rejects_non_empty_bag() {
+        let mut inv = PlayerInventory::new();
+        inv.base[0] = Some(InventoryEntry {
+            item_path: POUCH.into(),
+            count: 1,
+        });
+        inv.ensure_bag_init(0);
+        inv.bags.get_mut(&0u8).unwrap()[0] = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 2,
+        });
+        let err = inv.move_base(0, 4);
+        assert!(err.is_err(), "non-empty bag must reject move");
+        assert!(inv.base[4].is_none(), "destination untouched");
+        assert!(inv.base[0].is_some(), "source untouched");
+    }
+
+    #[test]
+    fn move_base_allows_empty_bag() {
+        let mut inv = PlayerInventory::new();
+        inv.base[0] = Some(InventoryEntry {
+            item_path: POUCH.into(),
+            count: 1,
+        });
+        inv.ensure_bag_init(0);
+        inv.move_base(0, 4).expect("empty bag moves");
+        assert_eq!(inv.base[4].as_ref().unwrap().item_path, POUCH);
+        assert!(inv.base[0].is_none());
+        assert!(
+            inv.bags.contains_key(&4u8),
+            "bag entry follows the bag to its new slot"
+        );
+        assert!(
+            !inv.bags.contains_key(&0u8),
+            "bag entry leaves the old slot"
+        );
+    }
+
+    #[test]
+    fn move_across_base_to_bag_rejects_bag_in_bag() {
+        // Putting a bag-typed item inside another bag's inner slot
+        // must reject — no bag-in-bag.
+        let mut inv = PlayerInventory::new();
+        inv.add_item_locating(POUCH, 1).unwrap(); // base[0] = pouch
+        inv.base[1] = Some(InventoryEntry {
+            item_path: POUCH.into(),
+            count: 1,
+        });
+        inv.ensure_bag_init(1);
+        // Source: base[1] = a (different) pouch. Dst: bag at base 0,
+        // inner slot 2.
+        let err = inv.move_across("base", 1, "bag_0", 2);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn move_across_base_to_bag_transfers_item() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item_locating(POUCH, 1).unwrap(); // base[0] = pouch
+        inv.base[1] = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 5,
+        });
+        let touched = inv
+            .move_across("base", 1, "bag_0", 2)
+            .expect("transfer");
+        assert_eq!(touched.len(), 2);
+        assert!(inv.base[1].is_none(), "source cleared");
+        assert_eq!(
+            inv.bags.get(&0u8).unwrap()[2].as_ref().unwrap().item_path,
+            POTION
+        );
+    }
+
+    #[test]
+    fn move_across_bag_to_base_swap_rejects_bag_dst() {
+        // base[1] holds a different pouch (a bag). Trying to swap
+        // a non-bag item out of bag 0 into base 1 would push the
+        // bag from base 1 into bag 0's inner slot → bag-in-bag.
+        let mut inv = PlayerInventory::new();
+        inv.add_item_locating(POUCH, 1).unwrap(); // base[0] = pouch
+        inv.bags.get_mut(&0u8).unwrap()[0] = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 3,
+        });
+        inv.base[1] = Some(InventoryEntry {
+            item_path: POUCH.into(),
+            count: 1,
+        });
+        inv.ensure_bag_init(1);
+        let err = inv.move_across("bag_0", 0, "base", 1);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn drop_base_rejects_non_empty_bag() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item_locating(POUCH, 1).unwrap();
+        inv.bags.get_mut(&0u8).unwrap()[0] = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 1,
+        });
+        assert!(
+            inv.drop_base(0, 0).is_none(),
+            "dropping a non-empty bag returns None"
+        );
+        assert!(inv.base[0].is_some(), "bag still in base after rejected drop");
+    }
+
+    #[test]
+    fn roundtrip_with_bag_contents() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item_locating(POUCH, 1).unwrap();
+        inv.bags.get_mut(&0u8).unwrap()[0] = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 3,
+        });
+        inv.bags.get_mut(&0u8).unwrap()[3] = Some(InventoryEntry {
+            item_path: SWORD.into(),
+            count: 1,
+        });
+        let rows = inv.to_rows();
+        // 1 base row (pouch) + 2 bag_0 rows.
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        let restored = PlayerInventory::from_rows(&rows);
+        assert_eq!(restored.base[0].as_ref().unwrap().item_path, POUCH);
+        let bag = restored.bags.get(&0u8).expect("bag restored");
+        assert_eq!(bag.len(), 4, "vec sized from registry's bag_num_slots");
+        assert_eq!(bag[0].as_ref().unwrap().item_path, POTION);
+        assert_eq!(bag[0].as_ref().unwrap().count, 3);
+        assert_eq!(bag[3].as_ref().unwrap().item_path, SWORD);
+        assert!(bag[1].is_none() && bag[2].is_none());
+    }
+
+    #[test]
+    fn snapshot_entries_include_bag_rows() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item_locating(POUCH, 1).unwrap();
+        inv.bags.get_mut(&0u8).unwrap()[1] = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 2,
+        });
+        let entries = inv.to_snapshot_entries();
+        let has_pouch = entries
+            .iter()
+            .any(|(loc, slot, p, _)| loc == "base" && *slot == 0 && p == POUCH);
+        let has_potion = entries.iter().any(|(loc, slot, p, c)| {
+            loc == "bag_0" && *slot == 1 && p == POTION && *c == 2
+        });
+        assert!(has_pouch);
+        assert!(has_potion);
     }
 }

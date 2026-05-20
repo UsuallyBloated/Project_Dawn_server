@@ -2875,38 +2875,35 @@ pub async fn run(
             }
         }
 
-        // 4hd. Track 13.2 — apply move-item intents. Validates src
-        //      + dst (both must be base slots for the MVP set;
-        //      bag_<i> and equip arrive in 13.2.b / 13.3), mutates
-        //      `conn.inventory`, fans one `InventoryDelta` per
-        //      touched slot. inventory_dirty flips so the next
-        //      checkpoint persists the new state.
+        // 4hd. Track 13.2 / 14.3 — apply move-item intents. Routes
+        //      through `move_across`, which handles every combination
+        //      of "base" and "bag_<i>" locations (equip slots stay
+        //      on the dedicated equip/unequip path). Touched slots
+        //      come back tagged with their location string so the
+        //      InventoryDelta fan-out uses the right address per
+        //      slot.
         if !move_item_intents.is_empty() {
             for intent in move_item_intents.drain(..) {
-                if intent.src_location != "base" || intent.dst_location != "base" {
-                    tracing::debug!(
-                        owner = intent.owner,
-                        src_loc = %intent.src_location,
-                        dst_loc = %intent.dst_location,
-                        "MoveItem rejected — non-base locations not yet supported"
-                    );
-                    continue;
-                }
                 let owner_cid = intent.owner as ClientId;
                 let Some(conn) = connections.get_mut(&owner_cid) else {
                     continue;
                 };
-                let src = intent.src_slot as usize;
-                let dst = intent.dst_slot as usize;
-                let touched = match conn.inventory.move_base(src, dst) {
+                let touched = match conn.inventory.move_across(
+                    &intent.src_location,
+                    intent.src_slot,
+                    &intent.dst_location,
+                    intent.dst_slot,
+                ) {
                     Ok(t) => t,
                     Err(e) => {
                         tracing::debug!(
                             owner = intent.owner,
-                            src,
-                            dst,
+                            src_loc = %intent.src_location,
+                            src_slot = intent.src_slot,
+                            dst_loc = %intent.dst_location,
+                            dst_slot = intent.dst_slot,
                             error = %e,
-                            "MoveItem rejected — move_base failed"
+                            "MoveItem rejected"
                         );
                         continue;
                     }
@@ -2915,21 +2912,34 @@ pub async fn run(
                     continue;
                 }
                 conn.inventory_dirty = true;
-                // Snapshot the touched slots so we can fan Deltas
-                // without re-borrowing conn mutably.
-                let deltas: Vec<(u32, Option<(String, u32)>)> = touched
+                // Snapshot the touched slot contents so we can fan
+                // Deltas without holding a mutable borrow on conn.
+                let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
                     .iter()
-                    .map(|&i| {
-                        let payload = conn
-                            .inventory
-                            .base
-                            .get(i)
-                            .and_then(|s| s.as_ref())
-                            .map(|e| (e.item_path.clone(), e.count));
-                        (i as u32, payload)
+                    .map(|(loc, slot)| {
+                        let payload = if loc == "base" {
+                            conn.inventory
+                                .base
+                                .get(*slot as usize)
+                                .and_then(|s| s.as_ref())
+                                .map(|e| (e.item_path.clone(), e.count))
+                        } else if let Some(base_idx) = loc
+                            .strip_prefix("bag_")
+                            .and_then(|s| s.parse::<u8>().ok())
+                        {
+                            conn.inventory
+                                .bags
+                                .get(&base_idx)
+                                .and_then(|arr| arr.get(*slot as usize))
+                                .and_then(|s| s.as_ref())
+                                .map(|e| (e.item_path.clone(), e.count))
+                        } else {
+                            None
+                        };
+                        (loc.clone(), *slot, payload)
                     })
                     .collect();
-                for (slot, payload) in deltas {
+                for (loc, slot, payload) in deltas {
                     let (item_path, count) = match payload {
                         Some((p, c)) => (Some(p), c),
                         None => (None, 0),
@@ -2937,7 +2947,7 @@ pub async fn run(
                     handlers::send_inventory_delta(
                         &mut server,
                         owner_cid,
-                        "base".to_string(),
+                        loc,
                         slot,
                         item_path,
                         count,
@@ -2945,8 +2955,10 @@ pub async fn run(
                 }
                 tracing::debug!(
                     owner = intent.owner,
-                    src,
-                    dst,
+                    src_loc = %intent.src_location,
+                    src_slot = intent.src_slot,
+                    dst_loc = %intent.dst_location,
+                    dst_slot = intent.dst_slot,
                     "MoveItem applied"
                 );
             }

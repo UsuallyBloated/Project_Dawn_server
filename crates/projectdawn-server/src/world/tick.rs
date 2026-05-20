@@ -189,7 +189,7 @@ fn fan_out_server_buff_snapshot(
 fn apply_spell_damage_to_enemy(
     server: &mut RenetServer,
     in_world_recipients: &[ClientId],
-    connections: &HashMap<ClientId, PerConnection>,
+    connections: &mut HashMap<ClientId, PerConnection>,
     enemies: &mut HashMap<EntityId, Entity>,
     loot_bags: &mut HashMap<EntityId, LootBag>,
     aoi: &mut AoiGrid,
@@ -199,7 +199,7 @@ fn apply_spell_damage_to_enemy(
     dmg_type: DamageType,
     now: Instant,
 ) -> bool {
-    let (died, credit_id_opt, mob_xp, death_pos, mob_name) = {
+    let (died, credit_id_opt, mob_xp, death_pos, mob_name, damage_done) = {
         let Some(entity) = enemies.get_mut(&target_id) else {
             return false;
         };
@@ -207,7 +207,9 @@ fn apply_spell_damage_to_enemy(
             return false;
         }
         let dmg = spell.base_damage.max(0.0) as i32;
+        let hp_before = entity.hp;
         entity.hp = (entity.hp - dmg as f32).max(0.0);
+        let damage_done = (hp_before - entity.hp).max(0.0);
         *entity.aggro.entry(caster_id).or_insert(0.0) += dmg as f32;
         // Track 12 Piece A2 — caster threat mirrors aggro for the
         // re-target check.
@@ -248,7 +250,7 @@ fn apply_spell_damage_to_enemy(
             let mob_xp = entity.mob.xp;
             let death_pos = entity.pos;
             let mob_name = entity.mob.name.clone();
-            (true, credit_id_opt, mob_xp, death_pos, mob_name)
+            (true, credit_id_opt, mob_xp, death_pos, mob_name, damage_done)
         } else {
             if dmg > 0 {
                 entity.clear_mez();
@@ -268,9 +270,33 @@ fn apply_spell_damage_to_enemy(
                     spell.attack_slow_duration,
                 ));
             }
-            (false, None, 0, entity.pos, String::new())
+            (false, None, 0, entity.pos, String::new(), damage_done)
         }
     };
+
+    // Track 14 follow-up — lifesteal. Spells with both base_damage
+    // and heal_amount (e.g. Lifetap, Soul Drain, Exsanguinate) heal
+    // the caster for `min(heal_amount, damage_done)`. Capping at
+    // damage_done matches the GDScript reference and stops a low-HP
+    // mob from over-healing the caster. Skipped when the caster
+    // isn't a connected player (NPC casters don't have HP we track).
+    if spell.heal_amount > 0.0 && damage_done > 0.0 {
+        let heal = spell.heal_amount.min(damage_done);
+        let caster_cid = caster_id as ClientId;
+        if let Some(caster) = connections.get_mut(&caster_cid) {
+            let prev_hp = caster.hp;
+            caster.hp = (caster.hp + heal).min(caster.max_hp);
+            if caster.hp != prev_hp {
+                handlers::fan_out_health_update(
+                    server,
+                    in_world_recipients,
+                    caster.char_id as u64,
+                    caster.hp,
+                    caster.max_hp,
+                );
+            }
+        }
+    }
 
     if died {
         if let Some(credit_id) = credit_id_opt {
@@ -2398,7 +2424,7 @@ pub async fn run(
                         apply_spell_damage_to_enemy(
                             &mut server,
                             &in_world_recipients_now,
-                            &connections,
+                            &mut connections,
                             &mut enemies,
                             &mut loot_bags,
                             &mut aoi,
@@ -2460,7 +2486,7 @@ pub async fn run(
                             if apply_spell_damage_to_enemy(
                                 &mut server,
                                 &in_world_recipients_now,
-                                &connections,
+                                &mut connections,
                                 &mut enemies,
                                 &mut loot_bags,
                                 &mut aoi,

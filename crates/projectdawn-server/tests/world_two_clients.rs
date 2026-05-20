@@ -2002,6 +2002,111 @@ async fn equip_item_moves_base_to_paperdoll() {
     );
 }
 
+/// Track 14 follow-up — lifesteal on an ENEMY-target spell heals
+/// the caster. Casts Lifetap Rk. II at an enemy in melee range
+/// and asserts a HealthUpdate for the caster arrives with hp
+/// strictly above the pre-cast baseline by more than natural
+/// regen could explain.
+///
+/// Setup wrinkle: Lifetap Rk. II requires level 10, so we SQL
+/// the freshly-provisioned character up to level 10 + drop their
+/// hp to a low starting value so the heal contribution is
+/// unambiguous against regen ticks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifesteal_spell_heals_caster() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "lsk", "Lifedrinker", "Human", "Shadow Knight").await;
+    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    sqlx::query("UPDATE characters SET level = 10, hp = 5.0 WHERE id = ?1")
+        .bind(a_char_id)
+        .execute(&pool)
+        .await
+        .expect("bump level + low hp");
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Walk toward camp 0's enemy spawn — same pattern as the AOE
+    // and aggro tests.
+    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
+    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
+    let walk_end = Instant::now() + Duration::from_millis(2_000);
+    let mut seq: u32 = 1;
+    while Instant::now() < walk_end {
+        a.send_move(seq, dir);
+        seq += 1;
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Wait for an enemy hit to confirm an enemy is in range. The
+    // attacker id is the spell target.
+    let hit_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
+            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
+        })
+        .await
+        .expect("enemy hits player");
+    let enemy_id: u64 = match hit_evt {
+        ServerWorldMsg::Hit { attacker, .. } => attacker,
+        _ => unreachable!(),
+    };
+    assert!(enemy_id >= ENEMY_ID_BASE, "attacker is an enemy id");
+
+    // Capture the latest caster HP from a self-HealthUpdate. The
+    // walk-and-take-hits phase has fanned several; the most recent
+    // is the baseline we need to compare against post-cast.
+    let mut baseline_hp: f32 = 0.0;
+    while let Some(msg) = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(200), |m| {
+            matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_char_id as u64)
+        })
+        .await
+    {
+        if let ServerWorldMsg::HealthUpdate { hp, .. } = msg {
+            baseline_hp = hp;
+        }
+    }
+
+    // Cast Lifetap Rk. II (cast_time 0.5s, base_damage 50,
+    // heal_amount 35).
+    a.send_cast_start("Lifetap Rk. II", 0.5);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    a.send_cast_spell("Lifetap Rk. II", Some(enemy_id));
+    for _ in 0..6 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // The lifesteal should bump caster HP well above baseline +
+    // regen-this-tick. Lifetap Rk. II heals up to 35; we require
+    // at least +20 to stay comfortably above any regen drift the
+    // tick loop ran in the meantime.
+    let post = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(
+                m,
+                ServerWorldMsg::HealthUpdate { id, hp, .. }
+                    if *id == a_char_id as u64 && *hp >= baseline_hp + 20.0
+            )
+        })
+        .await
+        .expect("caster HealthUpdate with lifesteal heal");
+    if let ServerWorldMsg::HealthUpdate { hp, .. } = post {
+        assert!(
+            hp >= baseline_hp + 20.0,
+            "expected hp >= {} (baseline {} + ≥20 lifesteal); got {}",
+            baseline_hp + 20.0,
+            baseline_hp,
+            hp,
+        );
+    }
+}
+
 /// Track 14.3 — a bag plus its contents persist across a
 /// reconnect. Seed `base[0] = Small Pouch` + `bag_0[2] = potions`
 /// via DB, EnterWorld, assert the InventorySnapshot includes both

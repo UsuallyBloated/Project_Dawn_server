@@ -16,7 +16,7 @@
 use bincode::config::standard as bincode_cfg;
 use futures_util::{SinkExt, StreamExt};
 use projectdawn_server::{auth, db, world, Config};
-use protocol::world::{ClientWorldMsg, DamageType, ServerWorldMsg, Vec3, ENEMY_ID_BASE, PET_ID_BASE};
+use protocol::world::{ClientWorldMsg, DamageType, ServerWorldMsg, SlotRef, Vec3, ENEMY_ID_BASE, PET_ID_BASE};
 use renet::{ConnectionConfig, RenetClient};
 use renet_netcode::{ClientAuthentication, ConnectToken, NetcodeClientTransport};
 use std::{
@@ -326,6 +326,20 @@ impl WorldClient {
             dst_location: dst_location.into(),
             dst_slot,
         };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
+    fn send_buy_item(&mut self, vendor_id: u64, item_name: &str, qty: u32) {
+        let msg = ClientWorldMsg::BuyItem {
+            vendor_id,
+            item_name: item_name.into(),
+            qty,
+        };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
+    fn send_sell_item(&mut self, slot: protocol::world::SlotRef, qty: u32) {
+        let msg = ClientWorldMsg::SellItem { slot, qty };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
@@ -2000,6 +2014,167 @@ async fn equip_item_moves_base_to_paperdoll() {
         saw_base_clear && saw_equip_set,
         "expected both deltas (base_clear={saw_base_clear}, equip_set={saw_equip_set})"
     );
+}
+
+/// Track 14 follow-up — BuyItem charges coins and grants the item
+/// via InventoryDelta + CoinsUpdate. Seed the player with 100
+/// coins, buy 3 Minor Healing Potions (price 12 ea = 36 total),
+/// assert the player ends with 64 coins + a 3-stack in base[0].
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buy_item_charges_coins_and_grants_stack() {
+    const POTION_NAME: &str = "Minor Healing Potion";
+    const POTION_PATH: &str = "res://data/loot/items/minor_healing_potion.tres";
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "buy1", "Buyer", "Human", "Warrior").await;
+    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    sqlx::query("UPDATE characters SET coins = 100 WHERE id = ?1")
+        .bind(a_char_id)
+        .execute(&pool)
+        .await
+        .expect("seed coins");
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let _ = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+        })
+        .await
+        .expect("initial snapshot");
+
+    // vendor_id is informational for now (no server NPCs); 0 is fine.
+    a.send_buy_item(0, POTION_NAME, 3);
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Inventory delta: base[0] = potion x3.
+    let delta = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(
+                m,
+                ServerWorldMsg::InventoryDelta { location, slot, item_path, count }
+                    if location == "base"
+                    && *slot == 0
+                    && item_path.as_deref() == Some(POTION_PATH)
+                    && *count == 3
+            )
+        })
+        .await
+        .expect("InventoryDelta with bought stack");
+    let _ = delta;
+
+    // Coins update: 100 - (12 * 3) = 64.
+    let coins = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::CoinsUpdate { coins } if *coins == 64)
+        })
+        .await
+        .expect("CoinsUpdate at 64");
+    let _ = coins;
+}
+
+/// Track 14 follow-up — BuyItem rejects when the player can't
+/// afford the purchase; no Delta / CoinsUpdate lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buy_item_rejects_insufficient_coins() {
+    const POTION_NAME: &str = "Minor Healing Potion";
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "buy2", "Poorguy", "Human", "Warrior").await;
+    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    sqlx::query("UPDATE characters SET coins = 5 WHERE id = ?1")
+        .bind(a_char_id)
+        .execute(&pool)
+        .await
+        .expect("seed coins");
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let _ = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+        })
+        .await
+        .expect("snapshot");
+
+    a.send_buy_item(0, POTION_NAME, 1);
+    for _ in 0..6 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // No InventoryDelta and no CoinsUpdate should land for a rejected buy.
+    let coins = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
+            matches!(m, ServerWorldMsg::CoinsUpdate { .. })
+        })
+        .await;
+    assert!(coins.is_none(), "rejected buy must not fire CoinsUpdate");
+}
+
+/// Track 14 follow-up — SellItem credits coins and fans an
+/// InventoryDelta that clears the slot. Seed a potion stack via DB,
+/// sell the whole stack, assert delta-cleared + coins = stack *
+/// (vendor_price / 2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sell_item_credits_coins_and_removes_stack() {
+    const POTION_PATH: &str = "res://data/loot/items/minor_healing_potion.tres";
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "sell1", "Seller", "Human", "Warrior").await;
+    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    // Seed inventory: 4 potions in base[0].
+    projectdawn_server::db::save_inventory(
+        &pool,
+        a_char_id,
+        &[projectdawn_server::db::InventoryRow {
+            location: "base".into(),
+            slot: 0,
+            item_path: POTION_PATH.into(),
+            count: 4,
+        }],
+    )
+    .await
+    .expect("seed inventory");
+    sqlx::query("UPDATE characters SET coins = 0 WHERE id = ?1")
+        .bind(a_char_id)
+        .execute(&pool)
+        .await
+        .expect("seed coins=0");
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let _ = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+        })
+        .await
+        .expect("snapshot");
+
+    // Sell all 4. Vendor price = 12; sell price = 6; total = 24.
+    a.send_sell_item(SlotRef::BaseSlot { idx: 0 }, 4);
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let delta = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(
+                m,
+                ServerWorldMsg::InventoryDelta { location, slot, item_path, count }
+                    if location == "base" && *slot == 0
+                    && item_path.is_none() && *count == 0
+            )
+        })
+        .await
+        .expect("InventoryDelta clears the slot");
+    let _ = delta;
+
+    let coins = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::CoinsUpdate { coins } if *coins == 24)
+        })
+        .await
+        .expect("CoinsUpdate at 24");
+    let _ = coins;
 }
 
 /// Track 14 follow-up — lifesteal on an ENEMY-target spell heals

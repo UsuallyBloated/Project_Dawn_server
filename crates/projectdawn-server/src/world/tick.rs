@@ -776,6 +776,20 @@ pub async fn run(
             dst_slot: u32,
         }
         let mut unequip_item_intents: Vec<UnequipItemI> = Vec::new();
+        struct BuyItemI {
+            owner: u64,
+            #[allow(dead_code)] // vendor stock validation lands once server NPCs do
+            vendor_id: EntityId,
+            item_name: String,
+            qty: u32,
+        }
+        let mut buy_item_intents: Vec<BuyItemI> = Vec::new();
+        struct SellItemI {
+            owner: u64,
+            slot: protocol::world::SlotRef,
+            qty: u32,
+        }
+        let mut sell_item_intents: Vec<SellItemI> = Vec::new();
         for client_id in client_ids {
             // Skip clients whose Connected event is in the queue but whose
             // PerConnection row hasn't been built yet (load_character failed
@@ -949,6 +963,22 @@ pub async fn run(
                                 dst_location,
                                 dst_slot,
                             });
+                        }
+                        Outcome::BuyItemIntent {
+                            owner,
+                            vendor_id,
+                            item_name,
+                            qty,
+                        } => {
+                            buy_item_intents.push(BuyItemI {
+                                owner,
+                                vendor_id,
+                                item_name,
+                                qty,
+                            });
+                        }
+                        Outcome::SellItemIntent { owner, slot, qty } => {
+                            sell_item_intents.push(SellItemI { owner, slot, qty });
                         }
                         Outcome::GroupInviteIntent { inviter, target_name } => {
                             group_invite_intents.push(GroupInviteI { inviter, target_name });
@@ -3329,6 +3359,266 @@ pub async fn run(
                     max_mp = conn.max_mp,
                     armor = conn.equipped_armor,
                     "UnequipItem applied"
+                );
+            }
+        }
+
+        // 4hi. Track 14 follow-up — apply vendor BuyItem intents.
+        //      Server validates: item exists, player has enough coins,
+        //      inventory has room. On success: deducts coins, grants
+        //      via add_item_locating, fans CoinsUpdate + one
+        //      InventoryDelta per touched slot. Stock-by-vendor
+        //      validation is deferred until server NPCs land (the
+        //      `vendor_id` field is informational for now).
+        if !buy_item_intents.is_empty() {
+            for intent in buy_item_intents.drain(..) {
+                let owner_cid = intent.owner as ClientId;
+                let Some(conn) = connections.get_mut(&owner_cid) else {
+                    continue;
+                };
+                let Some(item) = items::lookup_by_name(&intent.item_name) else {
+                    tracing::debug!(
+                        owner = intent.owner,
+                        item_name = %intent.item_name,
+                        "BuyItem rejected — unknown item name"
+                    );
+                    continue;
+                };
+                let unit_price = item.vendor_price as i64;
+                if unit_price <= 0 {
+                    tracing::debug!(
+                        owner = intent.owner,
+                        item_name = %intent.item_name,
+                        "BuyItem rejected — item has no vendor_price"
+                    );
+                    continue;
+                }
+                let total_cost = unit_price.saturating_mul(intent.qty as i64);
+                if conn.coins < total_cost {
+                    tracing::debug!(
+                        owner = intent.owner,
+                        item_name = %intent.item_name,
+                        coins = conn.coins,
+                        cost = total_cost,
+                        "BuyItem rejected — insufficient coins"
+                    );
+                    continue;
+                }
+                let item_path = item.path.clone();
+                let (touched, leftover) =
+                    match conn.inventory.add_item_locating(&item_path, intent.qty) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::debug!(
+                                owner = intent.owner,
+                                item_name = %intent.item_name,
+                                error = %e,
+                                "BuyItem rejected — add_item_locating error"
+                            );
+                            continue;
+                        }
+                    };
+                let placed = intent.qty - leftover;
+                if placed == 0 {
+                    tracing::debug!(
+                        owner = intent.owner,
+                        item_name = %intent.item_name,
+                        "BuyItem rejected — inventory full, no stack placed"
+                    );
+                    continue;
+                }
+                // Charge only for what we actually placed.
+                let actual_cost = unit_price.saturating_mul(placed as i64);
+                conn.coins -= actual_cost;
+                conn.inventory_dirty = true;
+                let coins_after = conn.coins;
+                let deltas: Vec<(u32, String, u32)> = touched
+                    .iter()
+                    .map(|&slot_idx| {
+                        let entry = conn.inventory.base[slot_idx]
+                            .as_ref()
+                            .expect("just inserted");
+                        (slot_idx as u32, entry.item_path.clone(), entry.count)
+                    })
+                    .collect();
+                for (slot_idx, path, count) in deltas {
+                    handlers::send_inventory_delta(
+                        &mut server,
+                        owner_cid,
+                        "base".to_string(),
+                        slot_idx,
+                        Some(path),
+                        count,
+                    );
+                }
+                handlers::send_coins_update(&mut server, owner_cid, coins_after);
+                if leftover > 0 {
+                    tracing::info!(
+                        owner = intent.owner,
+                        item_name = %intent.item_name,
+                        qty_requested = intent.qty,
+                        qty_placed = placed,
+                        leftover,
+                        "BuyItem partially filled — inventory ran out of room"
+                    );
+                }
+                tracing::debug!(
+                    owner = intent.owner,
+                    item_name = %intent.item_name,
+                    qty = placed,
+                    cost = actual_cost,
+                    coins_after,
+                    "BuyItem applied"
+                );
+            }
+        }
+
+        // 4hj. Track 14 follow-up — apply vendor SellItem intents.
+        //      Server: looks up the slot, validates item count, computes
+        //      sell price (vendor_price / 2 per unit, mirroring the
+        //      GDScript), credits coins, removes via drop_base /
+        //      bag-inner mutation, fans CoinsUpdate + InventoryDelta.
+        //      Equip-slot sells reject (player should unequip first).
+        if !sell_item_intents.is_empty() {
+            for intent in sell_item_intents.drain(..) {
+                let owner_cid = intent.owner as ClientId;
+                let Some(conn) = connections.get_mut(&owner_cid) else {
+                    continue;
+                };
+                // Resolve the slot reference + read the held item
+                // path/count without mutating yet so we can compute
+                // the price first.
+                let (location_str, slot_u32, item_path, available_count) = match intent.slot {
+                    protocol::world::SlotRef::BaseSlot { idx } => {
+                        let i = idx as usize;
+                        if i >= inventory::BASE_SLOT_COUNT {
+                            continue;
+                        }
+                        let Some(entry) = conn.inventory.base.get(i).and_then(|s| s.as_ref())
+                        else {
+                            tracing::debug!(
+                                owner = intent.owner,
+                                "SellItem rejected — base slot empty"
+                            );
+                            continue;
+                        };
+                        (
+                            "base".to_string(),
+                            i as u32,
+                            entry.item_path.clone(),
+                            entry.count,
+                        )
+                    }
+                    protocol::world::SlotRef::BagSlot { base, slot } => {
+                        let Some(arr) = conn.inventory.bags.get(&base) else {
+                            tracing::debug!(
+                                owner = intent.owner,
+                                "SellItem rejected — bag slot has no bag at base"
+                            );
+                            continue;
+                        };
+                        let Some(entry) = arr.get(slot as usize).and_then(|s| s.as_ref())
+                        else {
+                            tracing::debug!(
+                                owner = intent.owner,
+                                "SellItem rejected — bag slot empty"
+                            );
+                            continue;
+                        };
+                        (
+                            format!("bag_{base}"),
+                            slot as u32,
+                            entry.item_path.clone(),
+                            entry.count,
+                        )
+                    }
+                    protocol::world::SlotRef::EquipSlot(_) => {
+                        tracing::debug!(
+                            owner = intent.owner,
+                            "SellItem rejected — equip slot sells not supported"
+                        );
+                        continue;
+                    }
+                };
+                let Some(item) = items::lookup(&item_path) else {
+                    tracing::debug!(
+                        owner = intent.owner,
+                        item_path = %item_path,
+                        "SellItem rejected — unknown item path"
+                    );
+                    continue;
+                };
+                let unit_price = (item.vendor_price as i64) / 2;
+                if unit_price <= 0 {
+                    tracing::debug!(
+                        owner = intent.owner,
+                        item_path = %item_path,
+                        "SellItem rejected — item has no sell value"
+                    );
+                    continue;
+                }
+                let qty = intent.qty.min(available_count);
+                let total_credit = unit_price.saturating_mul(qty as i64);
+                // Refuse to sell a non-empty bag.
+                if let protocol::world::SlotRef::BaseSlot { idx } = intent.slot {
+                    if conn.inventory.bags.get(&idx).map_or(false, |arr| {
+                        arr.iter().any(|s| s.is_some())
+                    }) {
+                        tracing::debug!(
+                            owner = intent.owner,
+                            "SellItem rejected — bag has contents"
+                        );
+                        continue;
+                    }
+                }
+                // Mutate: subtract from the source slot.
+                let new_count = match intent.slot {
+                    protocol::world::SlotRef::BaseSlot { idx } => {
+                        let entry = conn.inventory.base[idx as usize].as_mut().expect("checked");
+                        entry.count -= qty;
+                        let nc = entry.count;
+                        if nc == 0 {
+                            conn.inventory.base[idx as usize] = None;
+                            conn.inventory.ensure_bag_init(idx as usize);
+                        }
+                        nc
+                    }
+                    protocol::world::SlotRef::BagSlot { base, slot } => {
+                        let arr = conn.inventory.bags.get_mut(&base).expect("checked");
+                        let entry = arr[slot as usize].as_mut().expect("checked");
+                        entry.count -= qty;
+                        let nc = entry.count;
+                        if nc == 0 {
+                            arr[slot as usize] = None;
+                        }
+                        nc
+                    }
+                    protocol::world::SlotRef::EquipSlot(_) => unreachable!(),
+                };
+                conn.coins = conn.coins.saturating_add(total_credit);
+                conn.inventory_dirty = true;
+                let coins_after = conn.coins;
+                let delta_item: Option<String> = if new_count > 0 {
+                    Some(item_path.clone())
+                } else {
+                    None
+                };
+                handlers::send_inventory_delta(
+                    &mut server,
+                    owner_cid,
+                    location_str,
+                    slot_u32,
+                    delta_item,
+                    new_count,
+                );
+                handlers::send_coins_update(&mut server, owner_cid, coins_after);
+                tracing::debug!(
+                    owner = intent.owner,
+                    item_path = %item_path,
+                    qty,
+                    credit = total_credit,
+                    coins_after,
+                    "SellItem applied"
                 );
             }
         }

@@ -177,6 +177,32 @@ pub enum Outcome {
         dst_slot: u32,
     },
 
+    /// Track 14 follow-up — buy `qty` of `item_name` from the
+    /// vendor identified by `vendor_id`. Server validates the item
+    /// exists in the registry, charges `vendor_price * qty` from
+    /// the player's coins, and grants the stack via
+    /// `add_item_locating`. The vendor_id is currently informational
+    /// (server doesn't yet have NPCs so stock-by-vendor validation
+    /// is deferred); registry price + coin balance + inventory cap
+    /// are all enforced.
+    BuyItemIntent {
+        owner: u64,
+        vendor_id: protocol::world::EntityId,
+        item_name: String,
+        qty: u32,
+    },
+
+    /// Track 14 follow-up — sell `qty` items from the player's
+    /// `slot` (base or bag). Server looks up the item, computes
+    /// `vendor_price / 2 * qty`, credits coins, removes from
+    /// inventory. Equip-slot sells are rejected (sell from your
+    /// paperdoll isn't a thing — unequip first).
+    SellItemIntent {
+        owner: u64,
+        slot: protocol::world::SlotRef,
+        qty: u32,
+    },
+
     /// Track 5 sub-task 4 — player → server pickup intent for one slot
     /// of a loot bag. The tick loop validates bag existence + slot
     /// index + pickup range, removes the stack, sends `LootGranted`
@@ -716,6 +742,33 @@ pub fn handle_message(
             }
         }
 
+        ClientWorldMsg::BuyItem {
+            vendor_id,
+            item_name,
+            qty,
+        } => {
+            if !conn.in_world || qty == 0 {
+                return Outcome::Continue;
+            }
+            Outcome::BuyItemIntent {
+                owner: conn.char_id as u64,
+                vendor_id,
+                item_name,
+                qty,
+            }
+        }
+
+        ClientWorldMsg::SellItem { slot, qty } => {
+            if !conn.in_world || qty == 0 {
+                return Outcome::Continue;
+            }
+            Outcome::SellItemIntent {
+                owner: conn.char_id as u64,
+                slot,
+                qty,
+            }
+        }
+
         // The other ~30 ClientWorldMsg variants land in later tracks.
         // Unknown-but-decoded messages: ignore, don't kick. Unknown-and-
         // failed-to-decode messages don't reach here (decode error is
@@ -1240,6 +1293,18 @@ pub fn fan_out_buff_snapshot(
     let Some(bytes) = encode(&msg) else { return };
     for recipient in recipients {
         server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+/// Track 14 follow-up — fan a `CoinsUpdate` privately to one
+/// client. Vendor BuyItem / SellItem use this after mutating
+/// `conn.coins`. Wire encoding is the existing scaffolded
+/// `ServerWorldMsg::CoinsUpdate { coins }` variant; gdext-net
+/// will decode it once the next DLL rebuild lands.
+pub fn send_coins_update(server: &mut RenetServer, client_id: ClientId, coins: i64) {
+    let msg = ServerWorldMsg::CoinsUpdate { coins };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(client_id, CHANNEL_SYSTEM, bytes);
     }
 }
 

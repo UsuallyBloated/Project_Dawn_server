@@ -175,6 +175,18 @@ pub fn lookup(path: &str) -> Option<&'static Item> {
     items().get(path)
 }
 
+/// Track 14 follow-up — look up an item by its human-readable name
+/// (matches `ItemData.item_name`). Used by the vendor BuyItem
+/// dispatch, which receives the item by display name. O(N) linear
+/// scan; 158 items today and the call site is one-shot per buy
+/// click, so we don't bother memoising a name → path index.
+pub fn lookup_by_name(name: &str) -> Option<&'static Item> {
+    if name.is_empty() {
+        return None;
+    }
+    items().values().find(|i| i.name == name)
+}
+
 /// Track 14.1 — equip-slot validation. Maps an item to whether it
 /// can sit in the given paperdoll slot. The slot indices match
 /// `protocol::world::EquipSlot` order (weapon=0, offhand=1, head=2,

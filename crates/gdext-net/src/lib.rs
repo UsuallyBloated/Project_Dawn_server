@@ -258,6 +258,13 @@ impl NetClient {
     #[signal]
     fn xp_gained(amount: i64, current: i64, to_next: i64);
 
+    /// Track 14 follow-up — server-authoritative coins. Fired after
+    /// vendor BuyItem / SellItem applies (and any future coin-mutating
+    /// flow lands). GDScript subscribers (PlayerStats) overwrite the
+    /// local coin count and emit `coins_changed`.
+    #[signal]
+    fn coins_update(coins: i64);
+
     /// Track 6 sub-task 5 — server forwarded a group invite. Client
     /// shows an accept/reject UI; on accept the GDScript handler
     /// fires `send_group_accept_invite(from_id)`.
@@ -784,6 +791,47 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// Track 14 follow-up — vendor purchase intent. `vendor_id` is
+    /// informational on the server today (no NPCs yet); price /
+    /// coin balance / inventory cap are enforced from the
+    /// item registry. `qty` of 0 is rejected by the server.
+    #[func]
+    fn send_buy_item(&mut self, vendor_id: i64, item_name: GString, qty: i64) -> bool {
+        let msg = ClientWorldMsg::BuyItem {
+            vendor_id: vendor_id as u64,
+            item_name: item_name.to_string(),
+            qty: qty.max(0) as u32,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// Track 14 follow-up — vendor sell intent. `location` is one of
+    /// "base" or "bag_<i>"; equip slots reject server-side. The
+    /// GDScript caller uses the same string `location` it'd use for
+    /// `send_move_item`, so the vendor UI never has to mint a typed
+    /// SlotRef.
+    #[func]
+    fn send_sell_item(&mut self, location: GString, slot: i64, qty: i64) -> bool {
+        let loc = location.to_string();
+        let slot_u8 = slot.clamp(0, u8::MAX as i64) as u8;
+        let slot_ref = if loc == "base" {
+            protocol::world::SlotRef::BaseSlot { idx: slot_u8 }
+        } else if let Some(rest) = loc.strip_prefix("bag_") {
+            let base: u8 = match rest.parse() {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+            protocol::world::SlotRef::BagSlot { base, slot: slot_u8 }
+        } else {
+            return false;
+        };
+        let msg = ClientWorldMsg::SellItem {
+            slot: slot_ref,
+            qty: qty.max(0) as u32,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
     /// Track 12 Piece A — player issues a command to their pet.
     /// `command` is one of `protocol::world::pet_command::*` (Attack=2,
     /// Back=3 are the MVP set; Follow=0 aliases to Back today).
@@ -956,6 +1004,9 @@ enum Incoming {
         amount: i32,
         current: i32,
         to_next: i32,
+    },
+    CoinsUpdate {
+        coins: i64,
     },
     GroupInvited {
         from_id: i64,
@@ -1381,6 +1432,10 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::CoinsUpdate { coins } => {
+                    self.base_mut()
+                        .emit_signal("coins_update", &[coins.to_variant()]);
+                }
                 Incoming::GroupInvited { from_id, from_name } => {
                     self.base_mut().emit_signal(
                         "group_invited",
@@ -1619,6 +1674,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             current,
             to_next,
         },
+        ServerWorldMsg::CoinsUpdate { coins } => Incoming::CoinsUpdate { coins },
         ServerWorldMsg::GroupInvited { from_id, from_name } => Incoming::GroupInvited {
             from_id: from_id as i64,
             from_name,

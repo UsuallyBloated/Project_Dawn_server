@@ -16,6 +16,7 @@ use super::{
     persistence,
     pet_templates,
     regen,
+    skills,
     spawn_points::Spawner,
     spells,
     ATTACK_RANGE_TOLERANCE, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL,
@@ -70,6 +71,8 @@ struct CastSpellIntent {
     target_id: Option<protocol::world::EntityId>,
     cast_name_at_dispatch: String,
     cast_set_at_at_dispatch: Option<Instant>,
+    /// Track 17.2 — caster pos at CastStart, for the movement gate.
+    cast_start_pos_at_dispatch: Vec3f,
 }
 
 /// Track 6 sub-task 4a — apply an active buff to a connection.
@@ -418,6 +421,10 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let _ = cfg; // Reserved for future config-driven tuning (max_clients live-reload, etc.).
 
+    // Track 18.1 — build the spell discipline lookup once at startup
+    // so casting-skill advance dispatch is a HashMap hit per cast.
+    skills::init_discipline_map();
+
     let mut connections: HashMap<ClientId, PerConnection> = HashMap::new();
     // Track 7 — AOI spatial index. Tracks which grid cell each in_world
     // entity (player, enemy, loot bag) occupies so position broadcasts
@@ -500,6 +507,19 @@ pub async fn run(
                                     Vec::new()
                                 }
                             };
+                            // Track 18.1 — load persisted skill scores
+                            // alongside inventory. Same non-fatal stance.
+                            let skill_rows = match db::load_skills(&pool, char_id).await {
+                                Ok(rows) => rows,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        char_id,
+                                        error = %e,
+                                        "load_skills failed; defaulting to starting values"
+                                    );
+                                    Vec::new()
+                                }
+                            };
                             connections.insert(
                                 client_id,
                                 PerConnection::from_spawn(spawn, now),
@@ -514,6 +534,25 @@ pub async fn run(
                                 conn.aoi_cell = aoi::cell_for(conn.pos.x, conn.pos.z);
                                 conn.inventory = inventory::PlayerInventory::from_rows(&inv_rows);
                                 let _ = inventory::recompute_equipped_stats(conn);
+                                // Track 18.1 — seed all three skill maps
+                                // with starting values (untrained classes
+                                // get 0; trainable classes get the L1 cap)
+                                // and then overlay persisted rows. New
+                                // characters with no DB rows still wind
+                                // up with the full key set populated; the
+                                // GDScript autoloads expect this shape.
+                                skills::seed_starting_scores(conn);
+                                for row in &skill_rows {
+                                    let map = match row.kind.as_str() {
+                                        "weapon" => Some(&mut conn.weapon_skills),
+                                        "armor" => Some(&mut conn.armor_skills),
+                                        "casting" => Some(&mut conn.casting_skills),
+                                        _ => None,
+                                    };
+                                    if let Some(m) = map {
+                                        m.insert(row.key.clone(), row.score);
+                                    }
+                                }
                             }
                         }
                         Err(e) => {
@@ -903,6 +942,7 @@ pub async fn run(
                             target_id,
                             cast_name_at_dispatch,
                             cast_set_at_at_dispatch,
+                            cast_start_pos_at_dispatch,
                         } => {
                             cast_spell_intents.push(CastSpellIntent {
                                 caster,
@@ -910,6 +950,7 @@ pub async fn run(
                                 target_id,
                                 cast_name_at_dispatch,
                                 cast_set_at_at_dispatch,
+                                cast_start_pos_at_dispatch,
                             });
                         }
                         Outcome::PetCommandIntent { owner, command, target_id } => {
@@ -1221,6 +1262,14 @@ pub async fn run(
             // in sync after this seed.
             if let Some(new_conn) = connections.get(new_id) {
                 handlers::send_coins_update(&mut server, *new_id, new_conn.coins);
+            }
+            // Track 18.1 — seed the new joiner with their three
+            // passive skill score maps (weapon / armor / casting).
+            // Without this the client autoloads sit at uninitialized
+            // dicts and the character window renders zeros until the
+            // first advance fires.
+            if let Some(new_conn) = connections.get(new_id) {
+                handlers::send_skill_progress_snapshot(&mut server, *new_id, new_conn);
             }
             // Track 5 sub-task 1B — seed the new joiner with alive enemies
             // in their AOI neighbourhood. Track 7: filter by aoi.can_see
@@ -1805,6 +1854,48 @@ pub async fn run(
                     att.last_attacked_enemy = Some(target_for_pet);
                     att.last_attacked_at = Some(now);
                 }
+                // Track 18.1 — weapon skill advance on a landed hit.
+                // Skill key from the weapon's `skill` field (defaults
+                // to `hand_to_hand` for fists / unrecognised items).
+                // Fan a SkillProgressUpdate privately if the roll
+                // lands; client mirrors the score for the character
+                // window.
+                let weapon_skill_key: String = items::lookup(&intent.weapon_path)
+                    .map(|w| {
+                        if w.skill.is_empty() {
+                            "hand_to_hand".to_string()
+                        } else {
+                            w.skill.clone()
+                        }
+                    })
+                    .unwrap_or_else(|| "hand_to_hand".to_string());
+                if let Some(att) = connections.get_mut(&attacker_cid) {
+                    if let Some(new_score) =
+                        skills::try_advance(att, skills::Skill::Weapon, &weapon_skill_key)
+                    {
+                        handlers::send_skill_progress_update(
+                            &mut server,
+                            attacker_cid,
+                            skills::Skill::Weapon.as_protocol(),
+                            weapon_skill_key.clone(),
+                            new_score,
+                        );
+                    }
+                    // Defense skill also advances on a successful
+                    // offensive swing (mirrors the GDScript Combat
+                    // path: defense ticks on connect AND on dodge).
+                    if let Some(new_score) =
+                        skills::try_advance(att, skills::Skill::Weapon, "defense")
+                    {
+                        handlers::send_skill_progress_update(
+                            &mut server,
+                            attacker_cid,
+                            skills::Skill::Weapon.as_protocol(),
+                            "defense".to_string(),
+                            new_score,
+                        );
+                    }
+                }
                 handlers::fan_out_hit(
                     &mut server,
                     &in_world_recipients_now,
@@ -1972,6 +2063,72 @@ pub async fn run(
                         );
                         continue;
                     }
+                    // Track 17.2 — movement-during-cast gate. Compare
+                    // current caster pos to the snapshot taken at
+                    // CastStart. >MAX_CAST_MOVE_DISTANCE cancels the
+                    // cast (client cancels its own cast on movement
+                    // already; this catches forged clients that omit
+                    // the cancel and keep the cast alive while running).
+                    //
+                    // Threshold is generous (5 m, vs ~4 m max coast
+                    // from STALE_MOVE_THRESHOLD) so a player who
+                    // stopped just before the cast doesn't get pinged
+                    // for the half-second of server-side drift their
+                    // last Move authorized. A continuously-moving
+                    // forged client easily clears the gate during a
+                    // multi-second cast.
+                    const MAX_CAST_MOVE_DISTANCE: f32 = 5.0;
+                    if let Some(caster_conn_now) = connections.get(&caster_cid) {
+                        let dx = caster_conn_now.pos.x - intent.cast_start_pos_at_dispatch.x;
+                        let dz = caster_conn_now.pos.z - intent.cast_start_pos_at_dispatch.z;
+                        let moved = (dx * dx + dz * dz).sqrt();
+                        if moved > MAX_CAST_MOVE_DISTANCE {
+                            tracing::info!(
+                                caster = intent.caster,
+                                spell = %spell.name,
+                                moved,
+                                "CastSpell rejected — moved during cast"
+                            );
+                            // Clear cast cache so the next cast isn't
+                            // gated by this stale in-flight state.
+                            if let Some(cc) = connections.get_mut(&caster_cid) {
+                                cc.cast_spell_name.clear();
+                                cc.cast_total_duration = 0.0;
+                                cc.cast_set_at = None;
+                            }
+                            handlers::fan_out_cast_fail(
+                                &mut server,
+                                &in_world_recipients_now,
+                                intent.caster,
+                                "interrupted (moved)".to_string(),
+                            );
+                            continue;
+                        }
+                    }
+                }
+                // Track 17.2 — per-player per-spell cooldown gate.
+                // Independent of cast-time (an instant cast still
+                // honours the spell's cooldown). Cleanup of expired
+                // entries happens lazily on the next lookup.
+                if let Some(caster_conn_now) = connections.get(&caster_cid) {
+                    if let Some(ready_at) = caster_conn_now.spell_cooldowns.get(&spell.name) {
+                        if now < *ready_at {
+                            let remaining = ready_at.duration_since(now).as_secs_f32();
+                            tracing::info!(
+                                caster = intent.caster,
+                                spell = %spell.name,
+                                remaining_secs = remaining,
+                                "CastSpell rejected — on cooldown"
+                            );
+                            handlers::fan_out_cast_fail(
+                                &mut server,
+                                &in_world_recipients_now,
+                                intent.caster,
+                                "Spell is on cooldown.".to_string(),
+                            );
+                            continue;
+                        }
+                    }
                 }
                 // Resolve caster's snapshot (immutable) — we need pos
                 // for range / AOE. mp deduction lands later under a
@@ -2001,6 +2158,10 @@ pub async fn run(
                 // CastSpell sent without a follow-up CastComplete (or
                 // before it arrives) doesn't leave stale state that
                 // gates the next timed cast.
+                // Track 17.2 — stamp the per-spell cooldown so the
+                // next cast of the same spell is rejected until it
+                // expires. Skipped when cooldown == 0 (most damage
+                // spells; cooldown matters mainly for utility / heals).
                 let (new_mp, new_hp_after_cost, max_hp) = {
                     let cc = connections.get_mut(&caster_cid).expect("checked");
                     cc.mp = (cc.mp - mana_cost).max(0.0);
@@ -2010,6 +2171,12 @@ pub async fn run(
                     cc.cast_spell_name.clear();
                     cc.cast_total_duration = 0.0;
                     cc.cast_set_at = None;
+                    if spell.cooldown > 0.0 {
+                        cc.spell_cooldowns.insert(
+                            spell.name.clone(),
+                            now + Duration::from_secs_f32(spell.cooldown),
+                        );
+                    }
                     regen::mark_dirty(cc);
                     (cc.mp, cc.hp, cc.max_hp)
                 };
@@ -2028,6 +2195,27 @@ pub async fn run(
                         new_hp_after_cost,
                         max_hp,
                     );
+                }
+
+                // Track 18.1 — casting skill advance. Discipline
+                // comes from the GDScript-mirrored DISCIPLINE map
+                // (base spell name lookup, Rank suffixes stripped).
+                // Channeling advances separately when an interrupt
+                // is survived; that path is server-side-pending and
+                // lands when the cast-interrupt formula is ported.
+                let discipline = skills::discipline_for_spell(&spell.name).to_string();
+                if let Some(cc) = connections.get_mut(&caster_cid) {
+                    if let Some(new_score) =
+                        skills::try_advance(cc, skills::Skill::Casting, &discipline)
+                    {
+                        handlers::send_skill_progress_update(
+                            &mut server,
+                            caster_cid,
+                            skills::Skill::Casting.as_protocol(),
+                            discipline.clone(),
+                            new_score,
+                        );
+                    }
                 }
 
                 match spell.target_type.as_str() {
@@ -4144,6 +4332,21 @@ pub async fn run(
                         .unwrap_or(true)
                 })
                 .map(|(pet_id, pet)| {
+                    // Track 16.0 bug 4 — only inherit when the pet has
+                    // no live target. The old pre-pass overrode every
+                    // tick, so a stale owner attack (>10s) would zero
+                    // out the pet's target mid-fight (pet wanders back
+                    // to owner). Keep the current target whenever it's
+                    // still alive.
+                    let current_alive = pet.target.and_then(|t| {
+                        enemy_target_snapshots
+                            .iter()
+                            .find(|(id, _, alive)| *id == t && *alive)
+                            .map(|_| t)
+                    });
+                    if current_alive.is_some() {
+                        return (*pet_id, current_alive);
+                    }
                     let owner_id = pet.owner.expect("pet must have owner");
                     let owner_cid = owner_id as ClientId;
                     let owner = connections.get(&owner_cid);
@@ -4490,6 +4693,55 @@ pub async fn run(
                             // owner-attacks path already populates.
                             target_conn.last_attacked_enemy = Some(attacker);
                             target_conn.last_attacked_at = Some(now);
+                            // Track 18.1 — armor skill advance: each
+                            // unique equipped armor_type gets one
+                            // try_advance roll per incoming hit. Also
+                            // gives the defender a dodge roll. Mirrors
+                            // GDScript ArmorSkills.try_advance_worn
+                            // plus WeaponSkills "dodge" path. Collect
+                            // armor types first (immutable borrow of
+                            // target_conn via its inventory map),
+                            // then drive try_advance (mutable borrow).
+                            let mut armor_types: Vec<String> = Vec::new();
+                            let mut seen: std::collections::HashSet<String> =
+                                std::collections::HashSet::new();
+                            for entry in target_conn.inventory.equipment.values() {
+                                if let Some(item) = items::lookup(&entry.item_path) {
+                                    if !item.armor_type.is_empty()
+                                        && seen.insert(item.armor_type.clone())
+                                    {
+                                        armor_types.push(item.armor_type.clone());
+                                    }
+                                }
+                            }
+                            for at in &armor_types {
+                                if let Some(new_score) = skills::try_advance(
+                                    target_conn,
+                                    skills::Skill::Armor,
+                                    at,
+                                ) {
+                                    handlers::send_skill_progress_update(
+                                        &mut server,
+                                        target_cid,
+                                        skills::Skill::Armor.as_protocol(),
+                                        at.clone(),
+                                        new_score,
+                                    );
+                                }
+                            }
+                            if let Some(new_score) = skills::try_advance(
+                                target_conn,
+                                skills::Skill::Weapon,
+                                "dodge",
+                            ) {
+                                handlers::send_skill_progress_update(
+                                    &mut server,
+                                    target_cid,
+                                    skills::Skill::Weapon.as_protocol(),
+                                    "dodge".to_string(),
+                                    new_score,
+                                );
+                            }
                             damaged_player = Some(hit.target);
                             tracing::info!(
                                 attacker,

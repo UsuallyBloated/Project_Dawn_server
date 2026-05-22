@@ -74,5 +74,43 @@ pub async fn checkpoint_dirty(pool: &SqlitePool, conns: &mut [&mut PerConnection
                 }
             }
         }
+        // Track 18.1 — passive skill scores. Rewrite the full set
+        // when any advance landed since last persist; one delete +
+        // ≤ 21 inserts per character is well within the SQLite WAL
+        // budget at the 60 s checkpoint cadence.
+        if conn.skills_dirty {
+            let mut rows: Vec<db::SkillRow> = Vec::new();
+            for (key, score) in &conn.weapon_skills {
+                rows.push(db::SkillRow {
+                    kind: "weapon".to_string(),
+                    key: key.clone(),
+                    score: *score,
+                });
+            }
+            for (key, score) in &conn.armor_skills {
+                rows.push(db::SkillRow {
+                    kind: "armor".to_string(),
+                    key: key.clone(),
+                    score: *score,
+                });
+            }
+            for (key, score) in &conn.casting_skills {
+                rows.push(db::SkillRow {
+                    kind: "casting".to_string(),
+                    key: key.clone(),
+                    score: *score,
+                });
+            }
+            match db::save_skills(pool, conn.char_id, &rows).await {
+                Ok(()) => conn.skills_dirty = false,
+                Err(e) => {
+                    tracing::warn!(
+                        char_id = conn.char_id,
+                        error = %e,
+                        "skill checkpoint failed; will retry next interval"
+                    );
+                }
+            }
+        }
     }
 }

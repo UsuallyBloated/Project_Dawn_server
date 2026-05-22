@@ -306,6 +306,27 @@ impl NetClient {
         durations: PackedFloat32Array,
     );
 
+    /// Track 18.1 — single-skill advance event. `kind` is 0 = weapon,
+    /// 1 = armor, 2 = casting. GDScript subscribers update the
+    /// matching autoload's cached score for `key` and emit
+    /// `skill_advanced` so the character window repaints.
+    #[signal]
+    fn skill_progress_update(kind: u8, key: GString, new_score: i32);
+
+    /// Track 18.1 — full skill snapshot fanned once on enter-world.
+    /// Each map is parallel arrays of (key, score). Subscribers
+    /// overwrite their local caches so the character window starts
+    /// with authoritative state.
+    #[signal]
+    fn skill_progress_snapshot(
+        weapon_keys: PackedStringArray,
+        weapon_scores: PackedInt32Array,
+        armor_keys: PackedStringArray,
+        armor_scores: PackedInt32Array,
+        casting_keys: PackedStringArray,
+        casting_scores: PackedInt32Array,
+    );
+
     /// Server-initiated app-layer Heartbeat (informational).
     #[signal]
     fn heartbeat();
@@ -1075,6 +1096,16 @@ enum Incoming {
         amount: i32,
         shield_name: String,
     },
+    SkillProgressUpdate {
+        kind: u8,
+        key: String,
+        new_score: u32,
+    },
+    SkillProgressSnapshot {
+        weapon: Vec<(String, u32)>,
+        armor: Vec<(String, u32)>,
+        casting: Vec<(String, u32)>,
+    },
     Raw {
         channel: u8,
         bytes: Vec<u8>,
@@ -1533,6 +1564,43 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::SkillProgressUpdate { kind, key, new_score } => {
+                    self.base_mut().emit_signal(
+                        "skill_progress_update",
+                        &[
+                            (kind as i64).to_variant(),
+                            GString::from(key.as_str()).to_variant(),
+                            (new_score as i32).to_variant(),
+                        ],
+                    );
+                }
+                Incoming::SkillProgressSnapshot { weapon, armor, casting } => {
+                    let split = |entries: &[(String, u32)]| -> (PackedStringArray, PackedInt32Array) {
+                        let mut keys = PackedStringArray::new();
+                        let mut scores = PackedInt32Array::new();
+                        keys.resize(entries.len());
+                        scores.resize(entries.len());
+                        for (i, (k, s)) in entries.iter().enumerate() {
+                            keys[i] = GString::from(k.as_str());
+                            scores[i] = *s as i32;
+                        }
+                        (keys, scores)
+                    };
+                    let (wk, ws) = split(&weapon);
+                    let (ak, asc) = split(&armor);
+                    let (ck, cs) = split(&casting);
+                    self.base_mut().emit_signal(
+                        "skill_progress_snapshot",
+                        &[
+                            wk.to_variant(),
+                            ws.to_variant(),
+                            ak.to_variant(),
+                            asc.to_variant(),
+                            ck.to_variant(),
+                            cs.to_variant(),
+                        ],
+                    );
+                }
                 Incoming::Raw { channel, bytes } => {
                     let pba = packed_byte_array_from(&bytes);
                     self.base_mut().emit_signal(
@@ -1751,6 +1819,16 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
                 amount,
                 shield_name,
             }
+        }
+        ServerWorldMsg::SkillProgressUpdate { kind, key, new_score } => {
+            Incoming::SkillProgressUpdate {
+                kind: kind as u8,
+                key,
+                new_score,
+            }
+        }
+        ServerWorldMsg::SkillProgressSnapshot { weapon, armor, casting } => {
+            Incoming::SkillProgressSnapshot { weapon, armor, casting }
         }
         // Other variants (BuffApplied, ChatMessage, ...) get
         // bubbled up raw. As their handlers land, add typed `match` arms here.

@@ -644,3 +644,59 @@ pub async fn save_inventory(
     tx.commit().await?;
     Ok(())
 }
+
+/// Track 18.1 — one row of `character_skills`. `kind` is one of
+/// `'weapon'`, `'armor'`, `'casting'`; `key` is the GDScript skill key
+/// (e.g. `'1h_slashing'`, `'cloth'`, `'evocation'`).
+#[derive(Debug, Clone, FromRow)]
+pub struct SkillRow {
+    pub kind: String,
+    pub key: String,
+    pub score: i32,
+}
+
+pub async fn load_skills(
+    pool: &SqlitePool,
+    char_id: i64,
+) -> AuthResult<Vec<SkillRow>> {
+    let rows: Vec<SkillRow> = sqlx::query_as(
+        "SELECT kind, key, score
+         FROM character_skills
+         WHERE char_id = ?1
+         ORDER BY kind, key",
+    )
+    .bind(char_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Persist all three score maps for `char_id`. Atomic delete + insert
+/// (same shape as `save_inventory`); ≤ 21 rows per character so
+/// rewriting the whole set is cheap. Called from the same checkpoint
+/// + disconnect cadence the inventory uses.
+pub async fn save_skills(
+    pool: &SqlitePool,
+    char_id: i64,
+    rows: &[SkillRow],
+) -> AuthResult<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM character_skills WHERE char_id = ?1")
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await?;
+    for row in rows {
+        sqlx::query(
+            "INSERT INTO character_skills (char_id, kind, key, score)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(char_id)
+        .bind(&row.kind)
+        .bind(&row.key)
+        .bind(row.score)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}

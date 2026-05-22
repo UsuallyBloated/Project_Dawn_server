@@ -16,7 +16,7 @@
 use bincode::config::standard as bincode_cfg;
 use futures_util::{SinkExt, StreamExt};
 use projectdawn_server::{auth, db, world, Config};
-use protocol::world::{ClientWorldMsg, DamageType, ServerWorldMsg, SlotRef, Vec3, ENEMY_ID_BASE, PET_ID_BASE};
+use protocol::world::{ClientWorldMsg, DamageType, ServerWorldMsg, SkillKind, SlotRef, Vec3, ENEMY_ID_BASE, PET_ID_BASE};
 use renet::{ConnectionConfig, RenetClient};
 use renet_netcode::{ClientAuthentication, ConnectToken, NetcodeClientTransport};
 use std::{
@@ -2524,6 +2524,217 @@ async fn move_item_empty_source_drops_silently() {
         })
         .await;
     assert!(stray.is_none(), "MoveItem on empty source must not fan an InventoryDelta");
+}
+
+/// Track 17.2 — per-spell cooldown gate. Cast Healing Wave (6 s
+/// cooldown) once successfully, then immediately cast it again
+/// following the full cast-time flow. The second cast should land
+/// well after the cast-time gate but be rejected by the cooldown
+/// gate with a "Spell is on cooldown." reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cast_spell_rejected_during_cooldown() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "cdc", "Cooler", "Human", "Cleric").await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // First cast — full gate flow (CastStart → wait → CastSpell).
+    a.send_cast_start("Healing Wave", 1.0);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    a.send_cast_spell("Healing Wave", None);
+    for _ in 0..6 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Confirm the first cast landed (BuffSnapshot includes Healing Wave).
+    let _snap = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::BuffSnapshot { target, buffs }
+                if *target == a_char_id as u64
+                    && buffs.iter().any(|(n, _)| n == "Healing Wave"))
+        })
+        .await
+        .expect("first Healing Wave cast lands");
+
+    // Second cast — same full flow, fired well inside the 6 s
+    // cooldown window. Should be rejected with the cooldown reason.
+    a.send_cast_start("Healing Wave", 1.0);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    a.send_cast_spell("Healing Wave", None);
+    for _ in 0..6 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let fail = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64 && reason == "Spell is on cooldown.")
+        })
+        .await
+        .expect("second cast within the cooldown window is rejected");
+    if let ServerWorldMsg::CastFail { reason, .. } = fail {
+        assert_eq!(reason, "Spell is on cooldown.");
+    }
+}
+
+/// Track 17.2 — movement-during-cast gate. Send CastStart at the
+/// spawn position, then walk well past the 1 m gate threshold while
+/// the cast bar runs, then send CastSpell after the cast time elapsed.
+/// The cast-time gate passes (enough time elapsed); the movement gate
+/// rejects with an "interrupted (moved)" reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cast_spell_rejected_when_caster_moved_during_cast() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "mvc", "Walker", "Human", "Cleric").await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    a.send_cast_start("Healing Wave", 1.0);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    // Walk forward for the full cast duration. MAX_MOVE_SPEED × 1.1 s
+    // ≈ 8 m on the server — well past the 1 m gate.
+    for seq in 1..=22u32 {
+        a.send_move(seq, Vec3 { x: 0.0, y: 0.0, z: 1.0 });
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    a.send_cast_spell("Healing Wave", None);
+    for _ in 0..6 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let fail = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64 && reason.starts_with("interrupted"))
+        })
+        .await
+        .expect("cast is rejected when caster moved past the gate threshold");
+    if let ServerWorldMsg::CastFail { reason, .. } = fail {
+        assert_eq!(reason, "interrupted (moved)");
+    }
+
+    // Confirm the buff did NOT apply — there should be no BuffSnapshot
+    // containing Healing Wave after the rejection.
+    let snap = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
+            matches!(m, ServerWorldMsg::BuffSnapshot { target, buffs }
+                if *target == a_char_id as u64
+                    && buffs.iter().any(|(n, _)| n == "Healing Wave"))
+        })
+        .await;
+    assert!(snap.is_none(), "movement-interrupted cast must not apply the buff");
+}
+
+/// Track 18.1 — on EnterWorld the server fans a SkillProgressSnapshot
+/// containing the player's three score maps. The lib unit tests verify
+/// the cap math; this test verifies the wire shape and that the seed
+/// matches WeaponSkills' starting values for the character's class.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn skill_progress_snapshot_seeded_on_enter_world() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "skl", "Skiller", "Human", "Warrior").await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    let snap = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::SkillProgressSnapshot { .. })
+        })
+        .await
+        .expect("SkillProgressSnapshot arrives on EnterWorld");
+
+    if let ServerWorldMsg::SkillProgressSnapshot { weapon, armor, casting } = snap {
+        // Shape: 10 weapon keys, 5 armor keys, 6 casting keys (one per
+        // GDScript definition entry, regardless of whether the class
+        // can train it).
+        assert_eq!(weapon.len(), 10, "weapon map has 10 keys");
+        assert_eq!(armor.len(), 5, "armor map has 5 keys");
+        assert_eq!(casting.len(), 6, "casting map has 6 keys");
+
+        // Warrior 1h_slashing starts at cap(L1) = max(1, 250/60) = 4.
+        let weapon_map: std::collections::HashMap<String, u32> = weapon.into_iter().collect();
+        assert_eq!(weapon_map.get("1h_slashing").copied(), Some(4));
+        // Warrior plate starts at cap(L1) = max(1, 250/60) = 4.
+        let armor_map: std::collections::HashMap<String, u32> = armor.into_iter().collect();
+        assert_eq!(armor_map.get("plate").copied(), Some(4));
+        // Warrior has no casting; all six rows present at 0.
+        let casting_map: std::collections::HashMap<String, u32> = casting.into_iter().collect();
+        for key in &["evocation", "alteration", "abjuration", "conjuration", "divination", "channeling"] {
+            assert_eq!(casting_map.get(*key).copied(), Some(0), "warrior casting {} is 0", key);
+        }
+    }
+}
+
+/// Track 18.1 — `character_skills` rows survive disconnect and are
+/// re-applied on reconnect. We pre-write a row directly to SQLite
+/// before EnterWorld so the load path overlays our value on top of
+/// the seed_starting_scores baseline; the snapshot must reflect the
+/// pre-written score. Mirrors the bag_contents_persist_across_reconnect
+/// pattern from Track 14.3.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn skill_progress_persists_load_path() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "skp", "Sklp", "Human", "Cleric").await;
+
+    // Pre-seed a non-default casting score via direct SQL. Mimics what
+    // the server's save path would write at checkpoint / disconnect
+    // after an in-flight advance — proves the load + snapshot path
+    // independently of the rng-driven try_advance roll.
+    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    sqlx::query(
+        "INSERT INTO character_skills (char_id, kind, key, score)
+         VALUES (?1, 'casting', 'alteration', 17)",
+    )
+    .bind(a_char_id)
+    .execute(&pool)
+    .await
+    .expect("seed alteration row");
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    let snap = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::SkillProgressSnapshot { .. })
+        })
+        .await
+        .expect("SkillProgressSnapshot arrives");
+
+    if let ServerWorldMsg::SkillProgressSnapshot { casting, .. } = snap {
+        let casting_map: std::collections::HashMap<String, u32> = casting.into_iter().collect();
+        assert_eq!(
+            casting_map.get("alteration").copied(),
+            Some(17),
+            "persisted alteration score overlays the L1 default"
+        );
+    }
 }
 
 fn tick_one(client: &mut RenetClient, transport: &mut NetcodeClientTransport) {

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// `StaminaUpdate`); `ClientWorldMsg::ResourceUpdate` is removed because the
 /// authority flips and the client no longer broadcasts resources. One bump
 /// per track; individual sub-task commits append new variants under this id.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3039; // "PD_W0009"
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3130; // "PD_W0010"
 
 pub type EntityId = u64;
 pub type Sequence = u32;
@@ -43,6 +43,18 @@ pub enum DamageType {
     Spirit,
     Shadow,
     Poison,
+}
+
+/// Track 18.1 — passive skill kind. Server fans
+/// `SkillProgressUpdate` per advance and `SkillProgressSnapshot` once
+/// on enter-world to seed the client's display cache. Mirrors the
+/// three GDScript autoloads (WeaponSkills, ArmorSkills, CastingSkills).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum SkillKind {
+    Weapon = 0,
+    Armor = 1,
+    Casting = 2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -728,6 +740,26 @@ pub enum ServerWorldMsg {
         slot: u32,
         item_path: Option<String>,
         count: u32,
+    },
+
+    /// Track 18.1 — single-skill advance event. Fanned privately when
+    /// a `skills::try_advance` roll lands. `new_score` is the post-
+    /// increment value; the client computes the cap locally from
+    /// class + level.
+    SkillProgressUpdate {
+        kind: SkillKind,
+        key: String,
+        new_score: u32,
+    },
+
+    /// Track 18.1 — full skill score snapshot. Fanned privately once
+    /// on enter-world to seed the client's three skill autoload caches
+    /// (the GDScript `_skills` dicts). Each list is parallel arrays of
+    /// (key, score) for the corresponding `SkillKind`.
+    SkillProgressSnapshot {
+        weapon: Vec<(String, u32)>,
+        armor: Vec<(String, u32)>,
+        casting: Vec<(String, u32)>,
     },
 }
 

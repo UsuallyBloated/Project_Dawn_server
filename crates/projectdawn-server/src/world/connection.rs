@@ -2,6 +2,7 @@
 //! `client_id` (which equals the renet `ConnectToken.client_id` we minted,
 //! which equals the player's `char_id`).
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -218,6 +219,20 @@ pub struct PerConnection {
     pub cast_total_duration: f32,
     pub cast_set_at: Option<Instant>,
 
+    /// Track 17.2 — caster's position at the moment CastStartBroadcast
+    /// arrived. The CastSpell gate compares this against `pos` at gate
+    /// time; >MAX_CAST_MOVE_DISTANCE rejects the cast. Closes the
+    /// "forged client casts while running" hole the cast-time gate
+    /// alone couldn't catch.
+    pub cast_start_pos: Vec3f,
+
+    /// Track 17.2 — per-spell cooldown map. CastSpell rejects a cast
+    /// whose entry is in the future; a successful cast writes the
+    /// next-ready instant from `spells.toml::cooldown`. Spell-name
+    /// keyed (matches `cast_spell_name`); cleared on disconnect via
+    /// `connections.remove(&cid)`.
+    pub spell_cooldowns: HashMap<String, Instant>,
+
     /// Track 4 sub-task 3 — last buff snapshot the client broadcast.
     /// Used to seed new joiners; live updates fan out via the
     /// BuffSnapshotFanOut outcome. Empty Vec = "no active buffs".
@@ -258,6 +273,18 @@ pub struct PerConnection {
     /// mutates the snapshot; the persistence sweep clears it.
     pub inventory: super::inventory::PlayerInventory,
     pub inventory_dirty: bool,
+
+    /// Track 18.1 — server-side passive skill scores. Three parallel
+    /// maps mirror WeaponSkills / ArmorSkills / CastingSkills on the
+    /// client. Seeded from `character_skills` at load (`seed_starting_scores`
+    /// fills untrained classes' rows with 0); mutated on the attack /
+    /// cast / armor-hit paths via `skills::try_advance`; persisted on
+    /// checkpoint + disconnect cadence. `skills_dirty` flips when any
+    /// score changes; the persistence sweep clears it.
+    pub weapon_skills: HashMap<String, i32>,
+    pub armor_skills: HashMap<String, i32>,
+    pub casting_skills: HashMap<String, i32>,
+    pub skills_dirty: bool,
 
     /// Track 14.2 — last accumulated stat bonuses from equipped items.
     /// `recompute_equipped_stats` reads this to know what to subtract
@@ -326,6 +353,8 @@ impl PerConnection {
             cast_spell_name: String::new(),
             cast_total_duration: 0.0,
             cast_set_at: None,
+            cast_start_pos: Vec3f::ZERO,
+            spell_cooldowns: HashMap::new(),
             buff_snapshot: Vec::new(),
             buff_snapshot_set: false,
             active_buffs: Vec::new(),
@@ -335,6 +364,10 @@ impl PerConnection {
             inventory: super::inventory::PlayerInventory::new(),
             inventory_dirty: false,
             equip_stat_bonuses: super::inventory::EquipStatBonuses::default(),
+            weapon_skills: HashMap::new(),
+            armor_skills: HashMap::new(),
+            casting_skills: HashMap::new(),
+            skills_dirty: false,
         }
     }
 

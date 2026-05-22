@@ -26,6 +26,7 @@ mod loot;
 mod persistence;
 mod pet_templates;
 mod regen;
+mod skills;
 mod spawn_points;
 mod spells;
 mod tick;

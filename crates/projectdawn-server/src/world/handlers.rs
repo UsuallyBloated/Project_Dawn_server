@@ -96,6 +96,10 @@ pub enum Outcome {
         target_id: Option<protocol::world::EntityId>,
         cast_name_at_dispatch: String,
         cast_set_at_at_dispatch: Option<std::time::Instant>,
+        /// Track 17.2 — caster pos at CastStart time, snapshotted at
+        /// dispatch for the movement-during-cast gate. Vec3f::ZERO when
+        /// no cast was in flight (instant casts skip the gate anyway).
+        cast_start_pos_at_dispatch: super::connection::Vec3f,
     },
 
     /// Track 6 sub-task 5 — player → server group intents. The tick
@@ -370,6 +374,9 @@ pub fn handle_message(
             conn.cast_spell_name = spell_name.clone();
             conn.cast_total_duration = duration;
             conn.cast_set_at = Some(now);
+            // Track 17.2 — snapshot the caster's position so the
+            // CastSpell gate can reject movement-during-cast forgeries.
+            conn.cast_start_pos = conn.pos;
             Outcome::CastStartFanOut { spell_name, duration }
         }
 
@@ -647,14 +654,18 @@ pub fn handle_message(
             }
             // Track 10 — snapshot the cast cache state *now*, before
             // any CastCompleteBroadcast in the same batch wipes it.
+            // Track 17.2 — also snapshot cast_start_pos for the
+            // movement gate.
             let cast_name_at_dispatch = conn.cast_spell_name.clone();
             let cast_set_at_at_dispatch = conn.cast_set_at;
+            let cast_start_pos_at_dispatch = conn.cast_start_pos;
             Outcome::CastSpellIntent {
                 caster: conn.char_id as u64,
                 spell_name,
                 target_id,
                 cast_name_at_dispatch,
                 cast_set_at_at_dispatch,
+                cast_start_pos_at_dispatch,
             }
         }
 
@@ -1417,6 +1428,46 @@ pub fn fan_out_buff_snapshot(
 /// will decode it once the next DLL rebuild lands.
 pub fn send_coins_update(server: &mut RenetServer, client_id: ClientId, coins: i64) {
     let msg = ServerWorldMsg::CoinsUpdate { coins };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(client_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// Track 18.1 — fan a per-skill advance event privately to the
+/// owning client. Called from the attack / cast / armor-hit paths
+/// when `skills::try_advance` returns Some.
+pub fn send_skill_progress_update(
+    server: &mut RenetServer,
+    client_id: ClientId,
+    kind: protocol::world::SkillKind,
+    key: String,
+    new_score: i32,
+) {
+    let msg = ServerWorldMsg::SkillProgressUpdate {
+        kind,
+        key,
+        new_score: new_score.max(0) as u32,
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(client_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// Track 18.1 — seed the connecting client with all three skill
+/// score maps. Sent on enter-world right after the inventory + coin
+/// seeds so the GDScript autoloads have authoritative starting state
+/// before any try_advance roll fires.
+pub fn send_skill_progress_snapshot(
+    server: &mut RenetServer,
+    client_id: ClientId,
+    conn: &PerConnection,
+) {
+    let (weapon, armor, casting) = super::skills::snapshot(conn);
+    let msg = ServerWorldMsg::SkillProgressSnapshot {
+        weapon,
+        armor,
+        casting,
+    };
     if let Some(bytes) = encode(&msg) {
         server.send_message(client_id, CHANNEL_SYSTEM, bytes);
     }

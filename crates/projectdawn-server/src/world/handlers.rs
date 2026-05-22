@@ -158,6 +158,40 @@ pub enum Outcome {
         count: u32,
     },
 
+    /// Track 15.1 — destroy `count` items outright (no loot bag, no
+    /// recovery). `count == 0` removes the whole stack.
+    DestroyItemIntent {
+        owner: u64,
+        location: String,
+        slot: u32,
+        count: u32,
+    },
+
+    /// Track 15.2 — consume one unit of the entry at
+    /// `(location, slot)`. Server validates the item is a consumable
+    /// (food / drink / heal-on-use), decrements the stack, fans
+    /// `InventoryDelta`, and applies the heal / food-buff / drink-buff
+    /// via the existing buff + resource pipeline (fans
+    /// `HealthUpdate` / `ManaUpdate` / `BuffSnapshot` as appropriate).
+    UseConsumableIntent {
+        owner: u64,
+        location: String,
+        slot: u32,
+    },
+
+    /// Track 15.2 follow-up — server-side GM `/give` so client-only
+    /// items stop diverging from server inventory. Pre-parsed in the
+    /// dispatch arm: the line `give <item name> [qty]` becomes
+    /// `(item_name, qty)`. Apply phase looks up the item by name and
+    /// calls `add_item_locating`, then fans `InventoryDelta` per
+    /// touched slot. Until the accounts table grows an `is_gm` flag,
+    /// any in-world client can issue this.
+    GmGiveIntent {
+        owner: u64,
+        item_name: String,
+        qty: u32,
+    },
+
     /// Track 13.3 — equip item from a base slot into a paperdoll
     /// slot (potentially swapping with the previously equipped
     /// item).
@@ -710,6 +744,45 @@ pub fn handle_message(
             }
         }
 
+        ClientWorldMsg::DestroyItem {
+            location,
+            slot,
+            count,
+        } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::DestroyItemIntent {
+                owner: conn.char_id as u64,
+                location,
+                slot,
+                count,
+            }
+        }
+
+        ClientWorldMsg::UseConsumable { slot } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            // SlotRef → wire `(location, slot)` tuple the apply phase
+            // already understands. Equip-slot consumables aren't a
+            // thing (no consumable is equippable) — reject early.
+            let (location, slot_idx): (String, u32) = match slot {
+                protocol::world::SlotRef::BaseSlot { idx } => ("base".to_string(), idx as u32),
+                protocol::world::SlotRef::BagSlot { base, slot } => {
+                    (format!("bag_{base}"), slot as u32)
+                }
+                protocol::world::SlotRef::EquipSlot(_) => {
+                    return Outcome::Continue;
+                }
+            };
+            Outcome::UseConsumableIntent {
+                owner: conn.char_id as u64,
+                location,
+                slot: slot_idx,
+            }
+        }
+
         ClientWorldMsg::EquipItem {
             src_location,
             src_slot,
@@ -767,6 +840,47 @@ pub fn handle_message(
                 slot,
                 qty,
             }
+        }
+
+        ClientWorldMsg::GmCommand { line } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            // Parse `give <item name> [qty]`. Trailing integer = stack
+            // count; multi-word names with spaces remain intact. Matches
+            // the GDScript `/give` parser in hud.gd.
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("give ") {
+                let mut tokens: Vec<&str> = rest.split_whitespace().collect();
+                if tokens.is_empty() {
+                    return Outcome::Continue;
+                }
+                let qty: u32 = if tokens.len() > 1 {
+                    if let Ok(n) = tokens[tokens.len() - 1].parse::<u32>() {
+                        tokens.pop();
+                        n
+                    } else {
+                        1
+                    }
+                } else {
+                    1
+                };
+                if qty == 0 {
+                    return Outcome::Continue;
+                }
+                let item_name = tokens.join(" ");
+                if item_name.is_empty() {
+                    return Outcome::Continue;
+                }
+                return Outcome::GmGiveIntent {
+                    owner: conn.char_id as u64,
+                    item_name,
+                    qty,
+                };
+            }
+            // Unknown gm sub-command — log and drop.
+            tracing::info!(char_id = conn.char_id, %line, "unknown GmCommand");
+            Outcome::Continue
         }
 
         // The other ~30 ClientWorldMsg variants land in later tracks.

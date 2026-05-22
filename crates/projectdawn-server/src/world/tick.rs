@@ -7,7 +7,7 @@ use super::{
     buffs::{self, ActiveBuff},
     combat,
     connection::{PerConnection, Vec3f},
-    entity::{ActiveCc, Entity, EnemyState, HitIntent},
+    entity::{self, ActiveCc, Entity, EnemyState, HitIntent},
     groups::{self, GroupManager},
     handlers::{self, Outcome},
     inventory,
@@ -761,6 +761,28 @@ pub async fn run(
             count: u32,
         }
         let mut drop_item_intents: Vec<DropItemI> = Vec::new();
+        // Track 15.1 — destroy intents (no loot bag).
+        struct DestroyItemI {
+            owner: u64,
+            location: String,
+            slot: u32,
+            count: u32,
+        }
+        let mut destroy_item_intents: Vec<DestroyItemI> = Vec::new();
+        // Track 15.2 — use-consumable intents.
+        struct UseConsumableI {
+            owner: u64,
+            location: String,
+            slot: u32,
+        }
+        let mut use_consumable_intents: Vec<UseConsumableI> = Vec::new();
+        // Track 15.2 follow-up — GM /give intents (server-side spawn).
+        struct GmGiveI {
+            owner: u64,
+            item_name: String,
+            qty: u32,
+        }
+        let mut gm_give_intents: Vec<GmGiveI> = Vec::new();
         // Track 13.3 — equip / unequip intents.
         struct EquipItemI {
             owner: u64,
@@ -936,6 +958,41 @@ pub async fn run(
                                 location,
                                 slot,
                                 count,
+                            });
+                        }
+                        Outcome::DestroyItemIntent {
+                            owner,
+                            location,
+                            slot,
+                            count,
+                        } => {
+                            destroy_item_intents.push(DestroyItemI {
+                                owner,
+                                location,
+                                slot,
+                                count,
+                            });
+                        }
+                        Outcome::UseConsumableIntent {
+                            owner,
+                            location,
+                            slot,
+                        } => {
+                            use_consumable_intents.push(UseConsumableI {
+                                owner,
+                                location,
+                                slot,
+                            });
+                        }
+                        Outcome::GmGiveIntent {
+                            owner,
+                            item_name,
+                            qty,
+                        } => {
+                            gm_give_intents.push(GmGiveI {
+                                owner,
+                                item_name,
+                                qty,
                             });
                         }
                         Outcome::EquipItemIntent {
@@ -1155,6 +1212,15 @@ pub async fn run(
             if let Some(new_conn) = connections.get(new_id) {
                 let entries = new_conn.inventory.to_snapshot_entries();
                 handlers::send_inventory_snapshot(&mut server, *new_id, entries);
+            }
+            // Track 15.1 follow-up — seed the new joiner with their
+            // own coin balance. Without this the client sits at the
+            // default PlayerStats.coins (0) and the vendor pre-flight
+            // "you don't have enough coins" check fires for every
+            // purchase. Buy/sell apply phases will keep the client
+            // in sync after this seed.
+            if let Some(new_conn) = connections.get(new_id) {
+                handlers::send_coins_update(&mut server, *new_id, new_conn.coins);
             }
             // Track 5 sub-task 1B — seed the new joiner with alive enemies
             // in their AOI neighbourhood. Track 7: filter by aoi.can_see
@@ -2913,6 +2979,10 @@ pub async fn run(
                         if let Some(pet) = enemies.get_mut(&pet_id) {
                             pet.target = Some(target_id);
                             pet.command_at = Some(now);
+                            // ATTACK implies "engage" — restore Follow
+                            // stance so the pet chases / returns to
+                            // the owner after the kill.
+                            pet.stance = entity::PetStance::Follow;
                         }
                         tracing::info!(owner = intent.owner, pet_id, target = target_id, "PetCommand ATTACK");
                     }
@@ -2920,11 +2990,34 @@ pub async fn run(
                         if let Some(pet) = enemies.get_mut(&pet_id) {
                             pet.target = None;
                             pet.command_at = Some(now);
+                            pet.stance = entity::PetStance::Follow;
                         }
                         tracing::info!(owner = intent.owner, pet_id, "PetCommand BACK/FOLLOW");
                     }
+                    cmd::GUARD => {
+                        if let Some(pet) = enemies.get_mut(&pet_id) {
+                            // Park the pet at its current spot. Drop
+                            // any inherited target so the pet doesn't
+                            // immediately chase off — Guard only
+                            // engages via incoming damage or a follow-
+                            // up Attack command.
+                            pet.target = None;
+                            pet.command_at = Some(now);
+                            pet.stance = entity::PetStance::Guard;
+                        }
+                        tracing::info!(owner = intent.owner, pet_id, "PetCommand GUARD");
+                    }
+                    cmd::SIT => {
+                        if let Some(pet) = enemies.get_mut(&pet_id) {
+                            // Full passive: drop target, stand still,
+                            // ignore incoming damage retargeting.
+                            pet.target = None;
+                            pet.command_at = Some(now);
+                            pet.stance = entity::PetStance::Sit;
+                        }
+                        tracing::info!(owner = intent.owner, pet_id, "PetCommand SIT");
+                    }
                     _ => {
-                        // GUARD / SIT reserved for Track 12 Piece B+; ignored.
                         tracing::debug!(owner = intent.owner, command = intent.command, "PetCommand variant not yet implemented");
                     }
                 }
@@ -2952,7 +3045,7 @@ pub async fn run(
                 ) {
                     Ok(t) => t,
                     Err(e) => {
-                        tracing::debug!(
+                        tracing::info!(
                             owner = intent.owner,
                             src_loc = %intent.src_location,
                             src_slot = intent.src_slot,
@@ -3009,7 +3102,7 @@ pub async fn run(
                         count,
                     );
                 }
-                tracing::debug!(
+                tracing::info!(
                     owner = intent.owner,
                     src_loc = %intent.src_location,
                     src_slot = intent.src_slot,
@@ -3179,38 +3272,31 @@ pub async fn run(
             }
         }
 
-        // 4hg. Track 13.3 / 14.1 / 14.2 — apply equip-item intents.
-        //      Validates src is a base slot in range + equip_slot in
-        //      range; item type vs slot (Track 14.1) inside
-        //      `equip_from_base`; moves the entry; fans one
-        //      `InventoryDelta` per touched slot. Track 14.2 then
-        //      recomputes the connection's max HP / MP / stamina /
-        //      armor from the registry's stat affixes and fans
-        //      resource updates on max change.
+        // 4hg. Track 13.3 / 14.1 / 14.2 / 15.1 — apply equip-item
+        //      intents. Validates src location (base or bag_<i>) +
+        //      slot in range + equip_slot in range; item type vs
+        //      slot validation lives inside `equip_from_location`;
+        //      moves the entry; fans one `InventoryDelta` per
+        //      touched slot. Track 14.2 then recomputes the
+        //      connection's max HP / MP / stamina / armor from the
+        //      registry's stat affixes and fans resource updates on
+        //      max change.
         if !equip_item_intents.is_empty() {
             for intent in equip_item_intents.drain(..) {
-                if intent.src_location != "base" {
-                    tracing::debug!(
-                        owner = intent.owner,
-                        src_loc = %intent.src_location,
-                        "EquipItem rejected — only 'base' src supported in Track 13.3"
-                    );
-                    continue;
-                }
                 let owner_cid = intent.owner as ClientId;
                 let Some(conn) = connections.get_mut(&owner_cid) else {
                     continue;
                 };
-                let src = intent.src_slot as usize;
                 let touched = match conn
                     .inventory
-                    .equip_from_base(src, intent.equip_slot)
+                    .equip_from_location(&intent.src_location, intent.src_slot, intent.equip_slot)
                 {
                     Ok(t) => t,
                     Err(e) => {
-                        tracing::debug!(
+                        tracing::info!(
                             owner = intent.owner,
-                            src,
+                            src_loc = %intent.src_location,
+                            src_slot = intent.src_slot,
                             equip_slot = intent.equip_slot,
                             error = %e,
                             "EquipItem rejected"
@@ -3222,22 +3308,31 @@ pub async fn run(
                 let recompute = inventory::recompute_equipped_stats(conn);
                 let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
                     .iter()
-                    .map(|&(loc, slot)| {
-                        let payload = match loc {
-                            "base" => conn
-                                .inventory
+                    .map(|(loc, slot)| {
+                        let payload = if loc == "base" {
+                            conn.inventory
                                 .base
-                                .get(slot as usize)
+                                .get(*slot as usize)
                                 .and_then(|s| s.as_ref())
-                                .map(|e| (e.item_path.clone(), e.count)),
-                            "equip" => conn
-                                .inventory
+                                .map(|e| (e.item_path.clone(), e.count))
+                        } else if loc == "equip" {
+                            conn.inventory
                                 .equipment
-                                .get(&(slot as u8))
-                                .map(|e| (e.item_path.clone(), e.count)),
-                            _ => None,
+                                .get(&(*slot as u8))
+                                .map(|e| (e.item_path.clone(), e.count))
+                        } else if let Some(base_idx) =
+                            loc.strip_prefix("bag_").and_then(|s| s.parse::<u8>().ok())
+                        {
+                            conn.inventory
+                                .bags
+                                .get(&base_idx)
+                                .and_then(|arr| arr.get(*slot as usize))
+                                .and_then(|s| s.as_ref())
+                                .map(|e| (e.item_path.clone(), e.count))
+                        } else {
+                            None
                         };
-                        (loc.to_string(), slot, payload)
+                        (loc.clone(), *slot, payload)
                     })
                     .collect();
                 for (loc, slot, payload) in deltas {
@@ -3261,9 +3356,10 @@ pub async fn run(
                         conn,
                     );
                 }
-                tracing::debug!(
+                tracing::info!(
                     owner = intent.owner,
-                    src,
+                    src_loc = %intent.src_location,
+                    src_slot = intent.src_slot,
                     equip_slot = intent.equip_slot,
                     max_hp = conn.max_hp,
                     max_mp = conn.max_mp,
@@ -3298,7 +3394,7 @@ pub async fn run(
                 {
                     Ok(t) => t,
                     Err(e) => {
-                        tracing::debug!(
+                        tracing::info!(
                             owner = intent.owner,
                             equip_slot = intent.equip_slot,
                             dst,
@@ -3351,7 +3447,7 @@ pub async fn run(
                         conn,
                     );
                 }
-                tracing::debug!(
+                tracing::info!(
                     owner = intent.owner,
                     equip_slot = intent.equip_slot,
                     dst,
@@ -3359,6 +3455,368 @@ pub async fn run(
                     max_mp = conn.max_mp,
                     armor = conn.equipped_armor,
                     "UnequipItem applied"
+                );
+            }
+        }
+
+        // 4hh-bis. Track 15.1 — apply destroy-item intents. Decrements
+        //      `count` from `(location, slot)` (0 = whole stack) and
+        //      fans a single `InventoryDelta` for the touched slot.
+        //      Unlike `DropItem` this does NOT spawn a loot bag; the
+        //      item is gone for good. Used by trash cell + Destroy
+        //      button UI in launcher mode.
+        if !destroy_item_intents.is_empty() {
+            for intent in destroy_item_intents.drain(..) {
+                let owner_cid = intent.owner as ClientId;
+                let Some(conn) = connections.get_mut(&owner_cid) else {
+                    continue;
+                };
+                let destroyed = match conn
+                    .inventory
+                    .destroy_at(&intent.location, intent.slot, intent.count)
+                {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::debug!(
+                            owner = intent.owner,
+                            loc = %intent.location,
+                            slot = intent.slot,
+                            error = %e,
+                            "DestroyItem rejected"
+                        );
+                        continue;
+                    }
+                };
+                conn.inventory_dirty = true;
+                let (item_path, count) = destroyed;
+                let payload = if intent.location == "base" {
+                    conn.inventory
+                        .base
+                        .get(intent.slot as usize)
+                        .and_then(|s| s.as_ref())
+                        .map(|e| (e.item_path.clone(), e.count))
+                } else if let Some(base_idx) = intent
+                    .location
+                    .strip_prefix("bag_")
+                    .and_then(|s| s.parse::<u8>().ok())
+                {
+                    conn.inventory
+                        .bags
+                        .get(&base_idx)
+                        .and_then(|arr| arr.get(intent.slot as usize))
+                        .and_then(|s| s.as_ref())
+                        .map(|e| (e.item_path.clone(), e.count))
+                } else {
+                    None
+                };
+                let (delta_path, delta_count) = match payload {
+                    Some((p, c)) => (Some(p), c),
+                    None => (None, 0),
+                };
+                handlers::send_inventory_delta(
+                    &mut server,
+                    owner_cid,
+                    intent.location.clone(),
+                    intent.slot,
+                    delta_path,
+                    delta_count,
+                );
+                tracing::info!(
+                    owner = intent.owner,
+                    loc = %intent.location,
+                    slot = intent.slot,
+                    %item_path,
+                    count,
+                    "DestroyItem applied"
+                );
+            }
+        }
+
+        // 4hh-tris. Track 15.2 — apply use-consumable intents. Looks
+        //      up the item, validates it's consumable, decrements one
+        //      from the stack, fans `InventoryDelta`, applies the
+        //      effect (heal-on-use / food / drink) via the buff
+        //      pipeline, fans `HealthUpdate` / `ManaUpdate` /
+        //      `BuffSnapshot` as needed.
+        if !use_consumable_intents.is_empty() {
+            for intent in use_consumable_intents.drain(..) {
+                let owner_cid = intent.owner as ClientId;
+                let Some(conn) = connections.get_mut(&owner_cid) else {
+                    continue;
+                };
+                // Peek the item so we know what effect to apply
+                // BEFORE the decrement removes it from the slot.
+                let peek_path: Option<String> = if intent.location == "base" {
+                    conn.inventory
+                        .base
+                        .get(intent.slot as usize)
+                        .and_then(|s| s.as_ref())
+                        .map(|e| e.item_path.clone())
+                } else if let Some(base_idx) = intent
+                    .location
+                    .strip_prefix("bag_")
+                    .and_then(|s| s.parse::<u8>().ok())
+                {
+                    conn.inventory
+                        .bags
+                        .get(&base_idx)
+                        .and_then(|arr| arr.get(intent.slot as usize))
+                        .and_then(|s| s.as_ref())
+                        .map(|e| e.item_path.clone())
+                } else {
+                    None
+                };
+                let Some(item_path) = peek_path else {
+                    tracing::debug!(
+                        owner = intent.owner,
+                        loc = %intent.location,
+                        slot = intent.slot,
+                        "UseConsumable rejected — slot empty"
+                    );
+                    continue;
+                };
+                let Some(item) = items::lookup(&item_path) else {
+                    tracing::debug!(
+                        owner = intent.owner,
+                        %item_path,
+                        "UseConsumable rejected — unknown item path"
+                    );
+                    continue;
+                };
+                let is_heal_potion = item.heal_on_use > 0.0 || item.mp_on_use > 0.0;
+                if !item.is_food && !item.is_drink && !is_heal_potion {
+                    tracing::debug!(
+                        owner = intent.owner,
+                        %item_path,
+                        "UseConsumable rejected — item is not consumable"
+                    );
+                    continue;
+                }
+                // Track 15.2 — match the client's "already eating /
+                // drinking" rule: a same-kind food/drink buff already
+                // present rejects without consuming the stack.
+                if item.is_food
+                    && conn
+                        .active_buffs
+                        .iter()
+                        .any(|b| b.name.starts_with("Food: "))
+                {
+                    tracing::debug!(owner = intent.owner, "UseConsumable rejected — already eating");
+                    continue;
+                }
+                if item.is_drink
+                    && conn
+                        .active_buffs
+                        .iter()
+                        .any(|b| b.name.starts_with("Drink: "))
+                {
+                    tracing::debug!(owner = intent.owner, "UseConsumable rejected — already drinking");
+                    continue;
+                }
+                // Decrement-and-fan first so the UI loses the slot
+                // immediately; the heal / buff effect lands right
+                // after. Snapshot item fields we'll need post-decrement
+                // (since `items::lookup` borrows the registry, not
+                // `conn`, this is just convenience).
+                let item_name = item.name.clone();
+                let food_hp = item.food_hp_regen;
+                let food_mp = item.food_mp_regen;
+                let food_dur = item.food_duration;
+                let heal_amt = item.heal_on_use;
+                let mp_amt = item.mp_on_use;
+                let is_food = item.is_food;
+                let is_drink = item.is_drink;
+                let _ = match conn.inventory.decrement_at(&intent.location, intent.slot) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::debug!(
+                            owner = intent.owner,
+                            loc = %intent.location,
+                            slot = intent.slot,
+                            error = %e,
+                            "UseConsumable rejected — decrement failed"
+                        );
+                        continue;
+                    }
+                };
+                conn.inventory_dirty = true;
+                // Inventory Delta for the touched slot.
+                let payload = if intent.location == "base" {
+                    conn.inventory
+                        .base
+                        .get(intent.slot as usize)
+                        .and_then(|s| s.as_ref())
+                        .map(|e| (e.item_path.clone(), e.count))
+                } else if let Some(base_idx) = intent
+                    .location
+                    .strip_prefix("bag_")
+                    .and_then(|s| s.parse::<u8>().ok())
+                {
+                    conn.inventory
+                        .bags
+                        .get(&base_idx)
+                        .and_then(|arr| arr.get(intent.slot as usize))
+                        .and_then(|s| s.as_ref())
+                        .map(|e| (e.item_path.clone(), e.count))
+                } else {
+                    None
+                };
+                let (delta_path, delta_count) = match payload {
+                    Some((p, c)) => (Some(p), c),
+                    None => (None, 0),
+                };
+                handlers::send_inventory_delta(
+                    &mut server,
+                    owner_cid,
+                    intent.location.clone(),
+                    intent.slot,
+                    delta_path,
+                    delta_count,
+                );
+                // Apply the effect.
+                let mut buffs_changed = false;
+                if heal_amt > 0.0 {
+                    let before = conn.hp;
+                    conn.hp = (conn.hp + heal_amt).min(conn.max_hp);
+                    if conn.hp != before {
+                        handlers::fan_out_health_update(
+                            &mut server,
+                            &in_world_recipients_now,
+                            conn.char_id as u64,
+                            conn.hp,
+                            conn.max_hp,
+                        );
+                    }
+                }
+                if mp_amt > 0.0 {
+                    let before = conn.mp;
+                    conn.mp = (conn.mp + mp_amt).min(conn.max_mp);
+                    if conn.mp != before {
+                        handlers::fan_out_mana_update(
+                            &mut server,
+                            &in_world_recipients_now,
+                            conn.char_id as u64,
+                            conn.mp,
+                            conn.max_mp,
+                        );
+                    }
+                }
+                if (is_food || is_drink) && food_dur > 0.0 {
+                    // Mirror the client's BuffManager naming so the
+                    // client-side bar shows "Food: <name>" / "Drink:
+                    // <name>" after the BuffSnapshot lands.
+                    let prefix = if is_food { "Food" } else { "Drink" };
+                    if food_hp > 0.0 {
+                        let name = format!("{prefix}: {item_name}");
+                        apply_buff(
+                            conn,
+                            buffs::ActiveBuff::new_hot(name, food_hp, food_dur, now),
+                        );
+                        buffs_changed = true;
+                    }
+                    if food_mp > 0.0 {
+                        // Distinct name so the MP-regen leg doesn't
+                        // collide with the HP-regen entry under the
+                        // same key (apply_buff is keyed by name).
+                        let name = format!("{prefix} MP: {item_name}");
+                        apply_buff(
+                            conn,
+                            buffs::ActiveBuff::new_mp_regen(name, food_mp, food_dur, now),
+                        );
+                        buffs_changed = true;
+                    }
+                }
+                if buffs_changed {
+                    fan_out_server_buff_snapshot(
+                        &mut server,
+                        &in_world_recipients_now,
+                        conn,
+                    );
+                }
+                tracing::info!(
+                    owner = intent.owner,
+                    loc = %intent.location,
+                    slot = intent.slot,
+                    %item_path,
+                    is_food,
+                    is_drink,
+                    heal_amt,
+                    mp_amt,
+                    "UseConsumable applied"
+                );
+            }
+        }
+
+        // 4hh-quad. Track 15.2 follow-up — apply GM /give intents.
+        //      Server-side spawn of a stack into the player's
+        //      inventory by item display name. Looks up via
+        //      `items::lookup_by_name`; adds via `add_item_locating`
+        //      (caps stacks at registry max_stack, spills into new
+        //      slots); fans `InventoryDelta` per touched slot. Unknown
+        //      names or full-inventory cases reject with an INFO log.
+        if !gm_give_intents.is_empty() {
+            for intent in gm_give_intents.drain(..) {
+                let owner_cid = intent.owner as ClientId;
+                let Some(conn) = connections.get_mut(&owner_cid) else {
+                    continue;
+                };
+                let Some(item) = items::lookup_by_name(&intent.item_name) else {
+                    tracing::info!(
+                        owner = intent.owner,
+                        item_name = %intent.item_name,
+                        "GmGive rejected — unknown item name"
+                    );
+                    continue;
+                };
+                let item_path = item.path.clone();
+                let (touched, leftover) =
+                    match conn.inventory.add_item_locating(&item_path, intent.qty) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::info!(
+                                owner = intent.owner,
+                                item_name = %intent.item_name,
+                                error = %e,
+                                "GmGive rejected — add_item_locating error"
+                            );
+                            continue;
+                        }
+                    };
+                let placed = intent.qty - leftover;
+                if placed == 0 {
+                    tracing::info!(
+                        owner = intent.owner,
+                        item_name = %intent.item_name,
+                        "GmGive rejected — inventory full, no stack placed"
+                    );
+                    continue;
+                }
+                conn.inventory_dirty = true;
+                let deltas: Vec<(u32, String, u32)> = touched
+                    .iter()
+                    .map(|&slot_idx| {
+                        let entry = conn.inventory.base[slot_idx]
+                            .as_ref()
+                            .expect("just inserted");
+                        (slot_idx as u32, entry.item_path.clone(), entry.count)
+                    })
+                    .collect();
+                for (slot_idx, path, count) in deltas {
+                    handlers::send_inventory_delta(
+                        &mut server,
+                        owner_cid,
+                        "base".to_string(),
+                        slot_idx,
+                        Some(path),
+                        count,
+                    );
+                }
+                tracing::info!(
+                    owner = intent.owner,
+                    item_name = %intent.item_name,
+                    qty = placed,
+                    leftover,
+                    "GmGive applied"
                 );
             }
         }
@@ -3377,7 +3835,7 @@ pub async fn run(
                     continue;
                 };
                 let Some(item) = items::lookup_by_name(&intent.item_name) else {
-                    tracing::debug!(
+                    tracing::info!(
                         owner = intent.owner,
                         item_name = %intent.item_name,
                         "BuyItem rejected — unknown item name"
@@ -3386,7 +3844,7 @@ pub async fn run(
                 };
                 let unit_price = item.vendor_price as i64;
                 if unit_price <= 0 {
-                    tracing::debug!(
+                    tracing::info!(
                         owner = intent.owner,
                         item_name = %intent.item_name,
                         "BuyItem rejected — item has no vendor_price"
@@ -3395,7 +3853,7 @@ pub async fn run(
                 }
                 let total_cost = unit_price.saturating_mul(intent.qty as i64);
                 if conn.coins < total_cost {
-                    tracing::debug!(
+                    tracing::info!(
                         owner = intent.owner,
                         item_name = %intent.item_name,
                         coins = conn.coins,
@@ -3409,7 +3867,7 @@ pub async fn run(
                     match conn.inventory.add_item_locating(&item_path, intent.qty) {
                         Ok(t) => t,
                         Err(e) => {
-                            tracing::debug!(
+                            tracing::info!(
                                 owner = intent.owner,
                                 item_name = %intent.item_name,
                                 error = %e,
@@ -3420,7 +3878,7 @@ pub async fn run(
                     };
                 let placed = intent.qty - leftover;
                 if placed == 0 {
-                    tracing::debug!(
+                    tracing::info!(
                         owner = intent.owner,
                         item_name = %intent.item_name,
                         "BuyItem rejected — inventory full, no stack placed"
@@ -3462,7 +3920,7 @@ pub async fn run(
                         "BuyItem partially filled — inventory ran out of room"
                     );
                 }
-                tracing::debug!(
+                tracing::info!(
                     owner = intent.owner,
                     item_name = %intent.item_name,
                     qty = placed,
@@ -3496,7 +3954,7 @@ pub async fn run(
                         }
                         let Some(entry) = conn.inventory.base.get(i).and_then(|s| s.as_ref())
                         else {
-                            tracing::debug!(
+                            tracing::info!(
                                 owner = intent.owner,
                                 "SellItem rejected — base slot empty"
                             );
@@ -3511,7 +3969,7 @@ pub async fn run(
                     }
                     protocol::world::SlotRef::BagSlot { base, slot } => {
                         let Some(arr) = conn.inventory.bags.get(&base) else {
-                            tracing::debug!(
+                            tracing::info!(
                                 owner = intent.owner,
                                 "SellItem rejected — bag slot has no bag at base"
                             );
@@ -3519,7 +3977,7 @@ pub async fn run(
                         };
                         let Some(entry) = arr.get(slot as usize).and_then(|s| s.as_ref())
                         else {
-                            tracing::debug!(
+                            tracing::info!(
                                 owner = intent.owner,
                                 "SellItem rejected — bag slot empty"
                             );
@@ -3533,7 +3991,7 @@ pub async fn run(
                         )
                     }
                     protocol::world::SlotRef::EquipSlot(_) => {
-                        tracing::debug!(
+                        tracing::info!(
                             owner = intent.owner,
                             "SellItem rejected — equip slot sells not supported"
                         );
@@ -3541,7 +3999,7 @@ pub async fn run(
                     }
                 };
                 let Some(item) = items::lookup(&item_path) else {
-                    tracing::debug!(
+                    tracing::info!(
                         owner = intent.owner,
                         item_path = %item_path,
                         "SellItem rejected — unknown item path"
@@ -3550,7 +4008,7 @@ pub async fn run(
                 };
                 let unit_price = (item.vendor_price as i64) / 2;
                 if unit_price <= 0 {
-                    tracing::debug!(
+                    tracing::info!(
                         owner = intent.owner,
                         item_path = %item_path,
                         "SellItem rejected — item has no sell value"
@@ -3564,7 +4022,7 @@ pub async fn run(
                     if conn.inventory.bags.get(&idx).map_or(false, |arr| {
                         arr.iter().any(|s| s.is_some())
                     }) {
-                        tracing::debug!(
+                        tracing::info!(
                             owner = intent.owner,
                             "SellItem rejected — bag has contents"
                         );
@@ -3612,7 +4070,7 @@ pub async fn run(
                     new_count,
                 );
                 handlers::send_coins_update(&mut server, owner_cid, coins_after);
-                tracing::debug!(
+                tracing::info!(
                     owner = intent.owner,
                     item_path = %item_path,
                     qty,
@@ -3672,6 +4130,11 @@ pub async fn run(
             let pet_target_updates: Vec<(EntityId, Option<EntityId>)> = enemies
                 .iter()
                 .filter(|(_, e)| e.is_pet() && e.is_alive())
+                // Track 15.3 — Guard / Sit pets never auto-inherit
+                // from the owner's last attack. They only engage via
+                // an explicit /pet attack or (for Guard) by being
+                // attacked themselves.
+                .filter(|(_, e)| e.stance == entity::PetStance::Follow)
                 .filter(|(_, e)| {
                     // Skip pets under an active command.
                     e.command_at
@@ -3771,6 +4234,19 @@ pub async fn run(
                         let died = new_hp <= 0.0;
                         if died {
                             pet.transition(EnemyState::Dead, now);
+                        }
+                        // Track 15.3 — Guard pets retaliate on
+                        // incoming damage when they don't already
+                        // have a target. Follow stance gets its
+                        // target via the owner-inheritance pre-pass
+                        // (or by being commanded); Sit ignores
+                        // incoming damage on purpose.
+                        if !died
+                            && pet.stance == entity::PetStance::Guard
+                            && pet.target.is_none()
+                        {
+                            pet.target = Some(attacker);
+                            pet.command_at = Some(now);
                         }
                         handlers::fan_out_hit(
                             &mut server,
@@ -4004,7 +4480,26 @@ pub async fn run(
                             shield_name_pve = buffs::first_damage_shield_name(&target_conn.active_buffs).map(|s| s.to_string());
                             target_conn.hp = (target_conn.hp - reduced as f32).max(0.0);
                             regen::mark_dirty(target_conn);
+                            // Track 15.2 follow-up — feed the pet
+                            // inheritance pre-pass so a FOLLOW-stance
+                            // pet auto-engages whatever's hitting its
+                            // owner (matches player behaviour: pet
+                            // helps when you're being attacked, not
+                            // only when you swing). Uses the same
+                            // last_attacked_enemy/at fields the
+                            // owner-attacks path already populates.
+                            target_conn.last_attacked_enemy = Some(attacker);
+                            target_conn.last_attacked_at = Some(now);
                             damaged_player = Some(hit.target);
+                            tracing::info!(
+                                attacker,
+                                target = hit.target,
+                                raw_amount = hit.amount,
+                                reduced,
+                                armor = target_conn.equipped_armor,
+                                hp_after = target_conn.hp,
+                                "player damaged by enemy"
+                            );
                             reduced
                         } else {
                             hit.amount

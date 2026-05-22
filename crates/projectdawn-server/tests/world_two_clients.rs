@@ -2095,6 +2095,15 @@ async fn buy_item_rejects_insufficient_coins() {
         })
         .await
         .expect("snapshot");
+    // Track 15.1 — drain the initial CoinsUpdate seed fired on
+    // EnterWorld so it doesn't contaminate the "rejected buy must
+    // not fire CoinsUpdate" assertion below.
+    let _ = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::CoinsUpdate { .. })
+        })
+        .await
+        .expect("initial coins seed");
 
     a.send_buy_item(0, POTION_NAME, 1);
     for _ in 0..6 {

@@ -755,6 +755,44 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// Track 15.1 — destroy `count` of the entry at (location, slot)
+    /// outright. `count <= 0` destroys the whole stack. No loot bag
+    /// is spawned (distinct from `send_drop_item`).
+    #[func]
+    fn send_destroy_item(&mut self, location: GString, slot: i64, count: i64) -> bool {
+        let msg = ClientWorldMsg::DestroyItem {
+            location: location.to_string(),
+            slot: slot.max(0) as u32,
+            count: count.max(0) as u32,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// Track 15.2 — consume one unit of the entry at (location, slot).
+    /// Server validates the item is a consumable, decrements one,
+    /// fans `InventoryDelta`, and applies the heal / food / drink
+    /// effect through the existing buff + resource pipeline. The
+    /// GDScript caller uses the same string `location` shape as
+    /// `send_move_item` / `send_sell_item`.
+    #[func]
+    fn send_use_consumable(&mut self, location: GString, slot: i64) -> bool {
+        let loc = location.to_string();
+        let slot_u8 = slot.clamp(0, u8::MAX as i64) as u8;
+        let slot_ref = if loc == "base" {
+            protocol::world::SlotRef::BaseSlot { idx: slot_u8 }
+        } else if let Some(rest) = loc.strip_prefix("bag_") {
+            let base: u8 = match rest.parse() {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+            protocol::world::SlotRef::BagSlot { base, slot: slot_u8 }
+        } else {
+            return false;
+        };
+        let msg = ClientWorldMsg::UseConsumable { slot: slot_ref };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
     /// Track 13.3 — equip the item at (src_location, src_slot) into
     /// paperdoll slot `equip_slot`. equip_slot indexes match
     /// `protocol::world::EquipSlot` (weapon=0, offhand=1, head=2,
@@ -828,6 +866,19 @@ impl NetClient {
         let msg = ClientWorldMsg::SellItem {
             slot: slot_ref,
             qty: qty.max(0) as u32,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// Track 15.2 follow-up — server-side GM command. The whole line
+    /// (e.g. "give Crude Ale 3") rides the wire as a single string;
+    /// the server parses it. Used by the client `/give` chat command
+    /// in launcher mode so items appear in the server's inventory
+    /// (matching client UI state) instead of being client-only.
+    #[func]
+    fn send_gm_command(&mut self, line: GString) -> bool {
+        let msg = ClientWorldMsg::GmCommand {
+            line: line.to_string(),
         };
         self.send_app(CHANNEL_SYSTEM, &msg)
     }

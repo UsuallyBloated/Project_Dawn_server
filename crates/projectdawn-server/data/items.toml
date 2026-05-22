@@ -333,6 +333,7 @@ path = "res://data/loot/items/crude_health_potion.tres"
 name = "Crude Health Potion"
 item_type = "consumable"
 stack_size = 10
+heal_on_use = 30.0
 vendor_price = 8
 
 [[item]]

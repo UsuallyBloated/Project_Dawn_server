@@ -46,6 +46,23 @@ impl ActiveCc {
     }
 }
 
+/// Track 15.3 — pet stance. Only meaningful for pets (`owner.is_some()`);
+/// non-pet enemies leave this at `Follow` (the default) and the
+/// non-pet AI never reads it. `Follow` is legacy follow-the-owner-
+/// and-inherit-target behaviour. `Guard` parks the pet at its current
+/// position (no following, but still chases commanded / inherited
+/// targets if attacked; the inheritance pre-pass in `tick.rs` skips
+/// auto-inheritance from owner attacks). `Sit` is full passive — pet
+/// drops any current target, doesn't follow, doesn't aggro on
+/// incoming damage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PetStance {
+    #[default]
+    Follow,
+    Guard,
+    Sit,
+}
+
 /// State machine for an `Entity`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnemyState {
@@ -131,6 +148,12 @@ pub struct Entity {
     /// despawns the pet (mob "runs away") once this passes.
     /// `None` for normal summoned pets and world-spawned enemies.
     pub charm_expires_at: Option<Instant>,
+
+    /// Track 15.3 — pet stance. Set by `PetCommand::Guard` / `Sit` /
+    /// `Back` (the latter restores Follow). Defaults to Follow on
+    /// spawn. Non-pet entities leave this at Follow and the AI never
+    /// reads it.
+    pub stance: PetStance,
 }
 
 /// Outcome of one AI tick. Carries the events the tick loop needs to
@@ -184,6 +207,7 @@ impl Entity {
             owner: None,
             command_at: None,
             charm_expires_at: None,
+            stance: PetStance::Follow,
         }
     }
 
@@ -222,6 +246,7 @@ impl Entity {
             owner: Some(owner),
             command_at: None,
             charm_expires_at: None,
+            stance: PetStance::Follow,
         }
     }
 
@@ -390,6 +415,17 @@ impl Entity {
             // Pet with no owner — pathological state, do nothing.
             return;
         };
+        // Track 15.3 — SIT drops any current target and stands still
+        // before anything else runs. The tick.rs inheritance pre-pass
+        // already skips non-Follow stances, but a pre-existing target
+        // (commanded or inherited before stance change) still needs
+        // clearing here.
+        if self.stance == PetStance::Sit {
+            if self.target.is_some() {
+                self.target = None;
+            }
+            return;
+        }
         let owner_pos_opt = target_pos(targets, owner_id);
         let target_info: Option<(Vec3f, bool)> = self.target.and_then(|tid| {
             enemy_targets
@@ -397,7 +433,8 @@ impl Entity {
                 .find(|(id, _, _)| *id == tid)
                 .map(|(_, pos, alive)| (*pos, *alive))
         });
-        // If we have a live target, engage it; otherwise follow owner.
+        // If we have a live target, engage it; otherwise follow owner
+        // (Follow stance) or hold position (Guard stance).
         match target_info {
             Some((target_pos, true)) => {
                 let dist = self.pos.distance_to(target_pos);
@@ -426,9 +463,16 @@ impl Entity {
                 }
             }
             _ => {
-                // Drop dead/missing target then fall back to follow.
+                // Drop dead/missing target.
                 if target_info.is_some() {
                     self.target = None;
+                }
+                // Track 15.3 — Guard stance pins the pet at its
+                // current position. No follow; just stand here until
+                // commanded otherwise or the inheritance/damage path
+                // re-targets us.
+                if self.stance == PetStance::Guard {
+                    return;
                 }
                 let Some(owner_pos) = owner_pos_opt else {
                     // Owner offline — stand still (cleanup runs on

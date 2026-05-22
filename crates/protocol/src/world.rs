@@ -260,6 +260,17 @@ pub enum ClientWorldMsg {
         count: u32,
     },
 
+    /// Track 15.1 — destroy `count` of the entry at `(location, slot)`
+    /// outright. `count == 0` destroys the whole stack. Distinct from
+    /// `DropItem`: no loot bag is spawned, the item is gone. Used by
+    /// the trash cell / Destroy button UI to remove items the player
+    /// doesn't want without polluting the ground with despawning bags.
+    DestroyItem {
+        location: String,
+        slot: u32,
+        count: u32,
+    },
+
     /// Track 13.3 — equip the item at `(src_location, src_slot)`
     /// into paperdoll slot `equip_slot`. `equip_slot` matches the
     /// existing `protocol::world::EquipSlot` enum order (weapon=0,

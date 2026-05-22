@@ -530,52 +530,6 @@ impl PlayerInventory {
         Ok(vec![src, dst])
     }
 
-    /// Track 13.3 / 14.1 — equip the entry at base slot `src` into
-    /// paperdoll slot `equip_slot`. If the paperdoll already holds
-    /// an item, swap it back into the source slot. Returns the
-    /// list of (location, slot) tuples touched so the caller fans
-    /// one `InventoryDelta` per slot.
-    ///
-    /// Track 14.1 — validates that the source item's type matches
-    /// the chosen paperdoll slot via `items::is_equippable_in_slot`.
-    /// Wrong-slot equips reject before any mutation. Item paths not
-    /// in the registry reject too (the server only equips items it
-    /// has authored data for).
-    pub fn equip_from_base(
-        &mut self,
-        src: usize,
-        equip_slot: u8,
-    ) -> Result<Vec<(&'static str, u32)>, &'static str> {
-        if src >= BASE_SLOT_COUNT {
-            return Err("base slot out of range");
-        }
-        if equip_slot >= EQUIP_SLOT_COUNT {
-            return Err("equip slot out of range");
-        }
-        // Inspect the source item first; reject early on type
-        // mismatch so we don't have to roll the swap back.
-        let src_path = match self.base[src].as_ref() {
-            Some(e) => e.item_path.clone(),
-            None => return Err("source slot empty"),
-        };
-        if !items::is_equippable_in_slot(&src_path, equip_slot) {
-            return Err("item not equippable in this slot");
-        }
-        let src_entry = self.base[src].take().expect("checked above");
-        let prev_equip = self.equipment.remove(&equip_slot);
-        self.equipment.insert(equip_slot, src_entry);
-        if let Some(prev) = prev_equip {
-            // Swap the previously equipped item back into the now-
-            // empty src slot.
-            self.base[src] = Some(prev);
-        }
-        // Track 14.3 — the source base slot just changed; if it
-        // had been a bag (it wasn't — bags aren't equippable) or
-        // is now a swapped-in non-bag, keep `bags` consistent.
-        self.ensure_bag_init(src);
-        Ok(vec![("base", src as u32), ("equip", equip_slot as u32)])
-    }
-
     /// Track 13.3 / 14.3 — unequip paperdoll slot `equip_slot`
     /// into base slot `dst`. If dst is occupied, the swap pushes
     /// the displaced base item into the paperdoll — which means
@@ -641,6 +595,172 @@ impl PlayerInventory {
         }
         self.ensure_bag_init(slot);
         Some((path, to_remove))
+    }
+
+    /// Track 15.1 — equip from any inventory location (base or bag
+    /// inner). Generalisation of `equip_from_base`: the wire's
+    /// `(src_location, src_slot)` can now address bag inner slots so
+    /// the client doesn't need a base-bridge hop. Item-type validation
+    /// reuses `items::is_equippable_in_slot`; swap pushes the
+    /// previously-equipped item back into the same source location.
+    pub fn equip_from_location(
+        &mut self,
+        src_loc: &str,
+        src_slot: u32,
+        equip_slot: u8,
+    ) -> Result<Vec<(String, u32)>, &'static str> {
+        if equip_slot >= EQUIP_SLOT_COUNT {
+            return Err("equip slot out of range");
+        }
+        let src = parse_slot_ref(src_loc, src_slot)?;
+        // Peek the src item to validate equippability before any mutation.
+        let src_path = match src {
+            SlotRefInt::Base(s) => match self.base.get(s).and_then(|e| e.as_ref()) {
+                Some(e) => e.item_path.clone(),
+                None => return Err("source slot empty"),
+            },
+            SlotRefInt::Bag(b, s) => {
+                let arr = self.bags.get(&b).ok_or("source bag does not exist")?;
+                if s >= arr.len() {
+                    return Err("bag slot out of range");
+                }
+                match arr[s].as_ref() {
+                    Some(e) => e.item_path.clone(),
+                    None => return Err("source slot empty"),
+                }
+            }
+        };
+        if !items::is_equippable_in_slot(&src_path, equip_slot) {
+            return Err("item not equippable in this slot");
+        }
+        // Take src, swap with paperdoll.
+        let src_entry = match src {
+            SlotRefInt::Base(s) => self.base[s].take().expect("checked above"),
+            SlotRefInt::Bag(b, s) => self
+                .bags
+                .get_mut(&b)
+                .expect("checked above")[s]
+                .take()
+                .expect("checked above"),
+        };
+        let prev_equip = self.equipment.remove(&equip_slot);
+        self.equipment.insert(equip_slot, src_entry);
+        if let Some(prev) = prev_equip {
+            match src {
+                SlotRefInt::Base(s) => self.base[s] = Some(prev),
+                SlotRefInt::Bag(b, s) => {
+                    self.bags.get_mut(&b).expect("checked above")[s] = Some(prev);
+                }
+            }
+        }
+        if let SlotRefInt::Base(s) = src {
+            self.ensure_bag_init(s);
+        }
+        let touched_src = match src {
+            SlotRefInt::Base(s) => ("base".to_string(), s as u32),
+            SlotRefInt::Bag(b, s) => (format!("bag_{b}"), s as u32),
+        };
+        Ok(vec![touched_src, ("equip".to_string(), equip_slot as u32)])
+    }
+
+    /// Track 15.1 — destroy `count` of the entry at `(location, slot)`
+    /// outright (no loot bag, no recovery). `count == 0` removes the
+    /// whole stack. Rejects bag-typed slots that still hold items
+    /// (mirrors `drop_base`'s safety). Returns the destroyed
+    /// `(item_path, count)` so the caller can log + fan a single
+    /// `InventoryDelta` for the touched slot.
+    pub fn destroy_at(
+        &mut self,
+        loc: &str,
+        slot: u32,
+        count: u32,
+    ) -> Result<(String, u32), &'static str> {
+        let parsed = parse_slot_ref(loc, slot)?;
+        match parsed {
+            SlotRefInt::Base(s) => {
+                if self.bag_at_base_is_nonempty(s) {
+                    return Err("bag must be emptied before destroying");
+                }
+                let entry = self
+                    .base
+                    .get_mut(s)
+                    .and_then(|e| e.as_mut())
+                    .ok_or("source slot empty")?;
+                let path = entry.item_path.clone();
+                let to_remove = if count == 0 || count >= entry.count {
+                    entry.count
+                } else {
+                    count
+                };
+                entry.count -= to_remove;
+                if entry.count == 0 {
+                    self.base[s] = None;
+                }
+                self.ensure_bag_init(s);
+                Ok((path, to_remove))
+            }
+            SlotRefInt::Bag(b, s) => {
+                let arr = self.bags.get_mut(&b).ok_or("source bag does not exist")?;
+                if s >= arr.len() {
+                    return Err("bag slot out of range");
+                }
+                let entry = arr[s].as_mut().ok_or("source slot empty")?;
+                let path = entry.item_path.clone();
+                let to_remove = if count == 0 || count >= entry.count {
+                    entry.count
+                } else {
+                    count
+                };
+                entry.count -= to_remove;
+                if entry.count == 0 {
+                    arr[s] = None;
+                }
+                Ok((path, to_remove))
+            }
+        }
+    }
+
+    /// Track 15.2 — consume one unit from `(location, slot)` for the
+    /// use-consumable flow. Caller is responsible for validating the
+    /// item is actually a consumable (`heal_on_use`, `is_food`,
+    /// `is_drink`) before calling — this just performs the
+    /// inventory mutation. Returns the consumed `item_path` so the
+    /// apply phase can look up the effect deltas.
+    pub fn decrement_at(
+        &mut self,
+        loc: &str,
+        slot: u32,
+    ) -> Result<String, &'static str> {
+        let parsed = parse_slot_ref(loc, slot)?;
+        match parsed {
+            SlotRefInt::Base(s) => {
+                let entry = self
+                    .base
+                    .get_mut(s)
+                    .and_then(|e| e.as_mut())
+                    .ok_or("source slot empty")?;
+                let path = entry.item_path.clone();
+                entry.count -= 1;
+                if entry.count == 0 {
+                    self.base[s] = None;
+                }
+                self.ensure_bag_init(s);
+                Ok(path)
+            }
+            SlotRefInt::Bag(b, s) => {
+                let arr = self.bags.get_mut(&b).ok_or("source bag does not exist")?;
+                if s >= arr.len() {
+                    return Err("bag slot out of range");
+                }
+                let entry = arr[s].as_mut().ok_or("source slot empty")?;
+                let path = entry.item_path.clone();
+                entry.count -= 1;
+                if entry.count == 0 {
+                    arr[s] = None;
+                }
+                Ok(path)
+            }
+        }
     }
 
     /// Track 13.2 / 14.3 — atomic move/swap between base slots.
@@ -1182,8 +1302,8 @@ mod tests {
     fn equip_moves_from_base_to_paperdoll() {
         let mut inv = PlayerInventory::new();
         inv.add_item(SWORD, 1).unwrap();
-        let touched = inv.equip_from_base(0, 0).expect("equip");
-        assert_eq!(touched, vec![("base", 0u32), ("equip", 0u32)]);
+        let touched = inv.equip_from_location("base", 0, 0).expect("equip");
+        assert_eq!(touched, vec![("base".to_string(), 0u32), ("equip".to_string(), 0u32)]);
         assert!(inv.base[0].is_none());
         assert_eq!(inv.equipment.get(&0).unwrap().item_path, SWORD);
     }
@@ -1196,7 +1316,7 @@ mod tests {
             InventoryEntry { item_path: "res://data/loot/items/iron_dagger.tres".into(), count: 1 },
         );
         inv.add_item(SWORD, 1).unwrap();
-        inv.equip_from_base(0, 0).expect("equip-swap");
+        inv.equip_from_location("base", 0, 0).expect("equip-swap");
         assert_eq!(inv.equipment.get(&0).unwrap().item_path, SWORD);
         assert_eq!(
             inv.base[0].as_ref().unwrap().item_path,
@@ -1208,7 +1328,7 @@ mod tests {
     #[test]
     fn equip_rejects_empty_source() {
         let mut inv = PlayerInventory::new();
-        let err = inv.equip_from_base(0, 0);
+        let err = inv.equip_from_location("base", 0, 0);
         assert!(err.is_err());
     }
 
@@ -1216,8 +1336,8 @@ mod tests {
     fn equip_rejects_out_of_range_slots() {
         let mut inv = PlayerInventory::new();
         inv.add_item(SWORD, 1).unwrap();
-        assert!(inv.equip_from_base(0, EQUIP_SLOT_COUNT).is_err());
-        assert!(inv.equip_from_base(BASE_SLOT_COUNT, 0).is_err());
+        assert!(inv.equip_from_location("base", 0, EQUIP_SLOT_COUNT).is_err());
+        assert!(inv.equip_from_location("base", BASE_SLOT_COUNT as u32, 0).is_err());
     }
 
     #[test]
@@ -1226,7 +1346,7 @@ mod tests {
         // without mutating either slot.
         let mut inv = PlayerInventory::new();
         inv.add_item(ROBE, 1).unwrap();
-        let err = inv.equip_from_base(0, 0);
+        let err = inv.equip_from_location("base", 0, 0);
         assert!(err.is_err(), "robe into weapon slot must reject");
         assert_eq!(
             inv.base[0].as_ref().unwrap().item_path,
@@ -1242,7 +1362,7 @@ mod tests {
         let mut inv = PlayerInventory::new();
         inv.add_item(POTION, 1).unwrap();
         for slot in 0..EQUIP_SLOT_COUNT {
-            assert!(inv.equip_from_base(0, slot).is_err());
+            assert!(inv.equip_from_location("base", 0, slot).is_err());
         }
         assert_eq!(inv.base[0].as_ref().unwrap().item_path, POTION);
     }
@@ -1257,7 +1377,7 @@ mod tests {
             item_path: "res://items/forged_lies.tres".into(),
             count: 1,
         });
-        assert!(inv.equip_from_base(0, 0).is_err());
+        assert!(inv.equip_from_location("base", 0, 0).is_err());
     }
 
     #[test]

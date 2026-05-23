@@ -1146,6 +1146,22 @@ cooldown = 3.0
 min_level = 6
 classes = ["Shadow Knight"]
 
+# Track 20D — base Lifetap. The Rk. II below was added in Track 9's
+# fill-in pass but the base spell (min_level 4) was overlooked, so
+# Shadow Knight casts at levels 4-9 logged "unknown spell name" on
+# the server and rendered a phantom damage number client-side.
+[[spell]]
+name = "Lifetap"
+target_type = "ENEMY"
+damage_type = "SHADOW"
+base_damage = 35.0
+heal_amount = 25.0
+mana_cost = 30.0
+cast_time = 0.5
+cooldown = 6.0
+min_level = 4
+classes = ["Shadow Knight"]
+
 [[spell]]
 name = "Lifetap Rk. II"
 target_type = "ENEMY"
@@ -1182,6 +1198,36 @@ cast_time = 0.0
 cooldown = 3.0
 min_level = 14
 classes = ["Necromancer"]
+
+# Track 20D — base Soul Drain. Same gap as base Lifetap: Necromancer
+# casts at levels 4-9 were dropped server-side. Bind Affinity (next)
+# uses target_type "BIND" which the server doesn't have a dedicated
+# arm for, but it falls through the "not yet processed" default after
+# mana deduction — that's the intended behaviour for now since the
+# bind point itself is still client-side state.
+[[spell]]
+name = "Soul Drain"
+target_type = "ENEMY"
+damage_type = "SHADOW"
+base_damage = 40.0
+heal_amount = 15.0
+mana_cost = 28.0
+cast_time = 0.5
+cooldown = 6.0
+min_level = 4
+classes = ["Necromancer"]
+
+[[spell]]
+name = "Bind Affinity"
+target_type = "BIND"
+damage_type = "NONE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 30.0
+cast_time = 3.0
+cooldown = 0.0
+min_level = 1
+classes = ["Wizard", "Druid", "Cleric", "Shaman", "Necromancer", "Magician", "Sorcerer", "Enchanter", "Blood Mage", "Bard"]
 
 [[spell]]
 name = "Soul Drain Rk. II"

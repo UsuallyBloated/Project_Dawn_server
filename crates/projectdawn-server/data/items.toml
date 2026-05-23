@@ -108,6 +108,20 @@ stack_size = 20
 vendor_price = 2
 
 [[item]]
+path = "res://data/loot/items/bonecrushers_war_axe.tres"
+name = "Bonecrusher's War Axe"
+item_type = "weapon"
+rarity = 2
+stack_size = 1
+damage_min = 12
+damage_max = 24
+weapon_delay = 3.2
+skill = "2h_blunt"
+is_two_handed = true
+str_bonus = 5
+vendor_price = 220
+
+[[item]]
 path = "res://data/loot/items/bread_loaf.tres"
 name = "Bread Loaf"
 item_type = "consumable"
@@ -131,6 +145,17 @@ damage_max = 11
 skill = "2h_blunt"
 int_bonus = 1
 vendor_price = 50
+
+[[item]]
+path = "res://data/loot/items/chitinous_ring.tres"
+name = "Chitinous Ring"
+item_type = "ring"
+rarity = 2
+stack_size = 1
+agi_bonus = 4
+con_bonus = 3
+max_hp_bonus = 30.0
+vendor_price = 160
 
 [[item]]
 path = "res://data/loot/items/cloth_cap.tres"
@@ -344,6 +369,20 @@ stack_size = 20
 vendor_price = 10
 
 [[item]]
+path = "res://data/loot/items/cursed_femur.tres"
+name = "Cursed Femur"
+item_type = "weapon"
+rarity = 2
+stack_size = 1
+damage_min = 14
+damage_max = 26
+weapon_delay = 2.8
+skill = "1h_blunt"
+str_bonus = 6
+max_hp_bonus = 20.0
+vendor_price = 260
+
+[[item]]
 path = "res://data/loot/items/damaged_wolf_pelt.tres"
 name = "Damaged Wolf Pelt"
 item_type = "misc"
@@ -461,6 +500,14 @@ name = "Fresh Wolf Pelt"
 item_type = "misc"
 stack_size = 5
 vendor_price = 10
+
+[[item]]
+path = "res://data/loot/items/gnoll_chiefs_seal.tres"
+name = "Gnoll Chief's Seal"
+item_type = "misc"
+rarity = 1
+stack_size = 1
+vendor_price = 25
 
 [[item]]
 path = "res://data/loot/items/gnoll_meat.tres"
@@ -830,6 +877,24 @@ stack_size = 1
 vendor_price = 8
 
 [[item]]
+path = "res://data/loot/items/predators_collar.tres"
+name = "Predator's Collar"
+item_type = "neck"
+rarity = 1
+stack_size = 1
+str_bonus = 3
+agi_bonus = 2
+vendor_price = 85
+
+[[item]]
+path = "res://data/loot/items/pristine_venom_sac.tres"
+name = "Pristine Venom Sac"
+item_type = "misc"
+rarity = 1
+stack_size = 1
+vendor_price = 35
+
+[[item]]
 path = "res://data/loot/items/pristine_wolf_pelt.tres"
 name = "Pristine Wolf Pelt"
 item_type = "misc"
@@ -850,6 +915,14 @@ name = "Raw Egg"
 item_type = "misc"
 stack_size = 20
 vendor_price = 3
+
+[[item]]
+path = "res://data/loot/items/rotfangs_fang.tres"
+name = "Rotfang's Fang"
+item_type = "misc"
+rarity = 1
+stack_size = 1
+vendor_price = 20
 
 [[item]]
 path = "res://data/loot/items/rough_emerald.tres"
@@ -980,6 +1053,14 @@ str_bonus = 1
 vendor_price = 4
 
 [[item]]
+path = "res://data/loot/items/sable_wing_membrane.tres"
+name = "Sable Wing Membrane"
+item_type = "misc"
+rarity = 1
+stack_size = 1
+vendor_price = 15
+
+[[item]]
 path = "res://data/loot/items/salt.tres"
 name = "Salt"
 item_type = "misc"
@@ -1018,6 +1099,17 @@ item_type = "misc"
 rarity = 1
 stack_size = 10
 vendor_price = 18
+
+[[item]]
+path = "res://data/loot/items/shadow_signet.tres"
+name = "Shadow Signet"
+item_type = "ring"
+rarity = 1
+stack_size = 1
+agi_bonus = 3
+int_bonus = 2
+max_mp_bonus = 20.0
+vendor_price = 120
 
 [[item]]
 path = "res://data/loot/items/silver_ingot.tres"
@@ -1216,6 +1308,14 @@ stack_size = 1
 armor = 1
 armor_type = "cloth"
 vendor_price = 2
+
+[[item]]
+path = "res://data/loot/items/undying_marrow.tres"
+name = "Undying Marrow"
+item_type = "misc"
+rarity = 2
+stack_size = 1
+vendor_price = 60
 
 [[item]]
 path = "res://data/loot/items/unfired_pottery.tres"

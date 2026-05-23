@@ -341,6 +341,21 @@ pub fn init_discipline_map() {
     DISCIPLINE_MAP.get_or_init(build_discipline_map);
 }
 
+/// Track 19A — incoming-damage interrupt chance for a caster, scaled
+/// by the channeling skill. Mirrors GDScript
+/// `CastingSkills.get_interrupt_chance`: 70 % at score 0, decaying
+/// to 10 % at cap. cap == 0 (non-caster) returns 1.0 — they always
+/// get interrupted, which prevents fighters from accidentally
+/// channeling out of a stun. Caller compares against a uniform roll;
+/// success → interrupt, failure → channeling advance.
+pub fn channeling_interrupt_chance(score: i32, cap: i32) -> f32 {
+    if cap == 0 {
+        return 1.0;
+    }
+    let ratio = (score as f32) / (cap as f32);
+    (0.70 - ratio * 0.60).max(0.10)
+}
+
 /// Snapshot a connection's score maps for fan-out to the client on
 /// enter-world. Returns three parallel vectors (key, score) sorted by
 /// key for deterministic ordering.
@@ -383,6 +398,20 @@ mod tests {
         assert_eq!(starting_value(Skill::Weapon, "Warrior", "1h_slashing"), 4);
         // Untrained class returns 0
         assert_eq!(starting_value(Skill::Weapon, "Magician", "archery"), 0);
+    }
+
+    #[test]
+    fn channeling_interrupt_chance_bounds() {
+        // Untrained / non-caster: always interrupted.
+        assert!((channeling_interrupt_chance(0, 0) - 1.0).abs() < 1e-6);
+        // Score 0 / cap 100 → 0.70.
+        assert!((channeling_interrupt_chance(0, 100) - 0.70).abs() < 1e-6);
+        // Score 100 / cap 100 → max(0.10, 0.70 - 0.60) = 0.10.
+        assert!((channeling_interrupt_chance(100, 100) - 0.10).abs() < 1e-6);
+        // Score 50 / cap 100 → 0.70 - 0.30 = 0.40.
+        assert!((channeling_interrupt_chance(50, 100) - 0.40).abs() < 1e-6);
+        // Cap clamp: even at over-cap score, floor is 0.10.
+        assert!((channeling_interrupt_chance(200, 100) - 0.10).abs() < 1e-6);
     }
 
     #[test]

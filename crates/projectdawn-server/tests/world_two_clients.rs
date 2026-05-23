@@ -263,6 +263,10 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
+    fn send_pvp_toggle(&mut self, on: bool) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::PvpToggle { on });
+    }
+
     fn send_pet_command(&mut self, command: u8, target_id: Option<u64>) {
         let msg = ClientWorldMsg::PetCommand { command, target_id };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
@@ -2650,6 +2654,71 @@ async fn cast_spell_rejected_when_caster_moved_during_cast() {
         })
         .await;
     assert!(snap.is_none(), "movement-interrupted cast must not apply the buff");
+}
+
+/// Track 19A — a hit on a casting player rolls the channeling-based
+/// interrupt; for a non-caster (Warrior, channeling cap = 0) the
+/// chance is 1.0 → always interrupted. Using PvP path avoids the
+/// flaky AI-walks-into-melee timing. A: Warrior; B: Warrior (any
+/// attacker works). Both /pvp on, A "starts" a long cast via a
+/// CastStartBroadcast (server doesn't validate class on CastStart;
+/// validation happens at CastSpell). B attacks A; server fans
+/// CastFail("interrupted (hit during cast)") to A.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cast_interrupted_by_incoming_pvp_hit() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "intv", "Inta", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "intw", "Intb", "Human", "Warrior").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+
+    // Both clients enter world + flip /pvp on.
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    a.send_pvp_toggle(true);
+    b.send_pvp_toggle(true);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // A "starts" a 5-second cast — long enough to keep the cast
+    // cache populated until B's attack lands. Warrior has channeling
+    // cap = 0, so the on-hit interrupt chance is 1.0 (deterministic).
+    a.send_cast_start("Fake Long Cast", 5.0);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    // B attacks A. Both spawned at the same DB-loaded position so
+    // they're in melee range immediately; bare-fist attack uses the
+    // default melee envelope.
+    b.send_attack(a_char_id as u64, "", false, DamageType::Physical);
+    for _ in 0..6 {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let fail = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64
+                    && reason == "interrupted (hit during cast)")
+        })
+        .await
+        .expect("Warrior with no channeling skill is always interrupted on incoming hit");
+    if let ServerWorldMsg::CastFail { reason, .. } = fail {
+        assert_eq!(reason, "interrupted (hit during cast)");
+    }
 }
 
 /// Track 18.1 — on EnterWorld the server fans a SkillProgressSnapshot

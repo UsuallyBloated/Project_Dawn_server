@@ -25,6 +25,7 @@ use super::{
 };
 use crate::{db, Config};
 use protocol::world::{DamageType, EntityId, KickCode};
+use rand::Rng;
 use renet::{ClientId, RenetServer, ServerEvent};
 use renet_netcode::NetcodeServerTransport;
 use sqlx::SqlitePool;
@@ -65,6 +66,45 @@ struct AttackIntent {
 /// for this spell actually ran for long enough; snapshotted at
 /// dispatch (not gate) time so a same-batch CastCompleteBroadcast
 /// doesn't blank the cache before the gate fires.
+/// Track 19A — outcome of the on-hit cast-interrupt roll.
+/// `Interrupted` means the cast cache was cleared; caller fans
+/// `CastFail`. `Survived` means channeling advanced (or didn't);
+/// caller fans a `SkillProgressUpdate` when `advanced_to` is Some.
+/// `NotCasting` skips both.
+enum InterruptOutcome {
+    NotCasting,
+    Interrupted { spell_name: String },
+    Survived { advanced_to: Option<i32> },
+}
+
+/// Track 19A — roll the channeling-based interrupt on a target who
+/// just took damage. Mirrors GDScript `Spells.try_interrupt_cast` +
+/// `_finish_cast`'s "advance on survival" path. Mutates the conn's
+/// cast cache + channeling score in place; caller handles fan-out.
+fn roll_cast_interrupt(conn: &mut PerConnection) -> InterruptOutcome {
+    if conn.cast_spell_name.is_empty() || conn.cast_set_at.is_none() {
+        return InterruptOutcome::NotCasting;
+    }
+    let cap = skills::cap_for(
+        skills::Skill::Casting,
+        &conn.class,
+        conn.level,
+        "channeling",
+    );
+    let score = conn.casting_skills.get("channeling").copied().unwrap_or(0);
+    let chance = skills::channeling_interrupt_chance(score, cap);
+    if rand::thread_rng().gen::<f32>() < chance {
+        let spell_name = conn.cast_spell_name.clone();
+        conn.cast_spell_name.clear();
+        conn.cast_total_duration = 0.0;
+        conn.cast_set_at = None;
+        InterruptOutcome::Interrupted { spell_name }
+    } else {
+        let advanced_to = skills::try_advance(conn, skills::Skill::Casting, "channeling");
+        InterruptOutcome::Survived { advanced_to }
+    }
+}
+
 struct CastSpellIntent {
     caster: u64,
     spell_name: String,
@@ -1774,6 +1814,40 @@ pub async fn run(
                         target_hp = new_hp,
                         "PvP attack applied"
                     );
+                    // Track 19A — PvP hit can interrupt a cast too.
+                    // Re-borrow target_conn now that the damage block
+                    // has released it; same helper as the enemy arm.
+                    if let Some(tc) = connections.get_mut(&target_cid) {
+                        let interrupt_outcome = roll_cast_interrupt(tc);
+                        match &interrupt_outcome {
+                            InterruptOutcome::Interrupted { spell_name } => {
+                                handlers::fan_out_cast_fail(
+                                    &mut server,
+                                    &in_world_recipients_now,
+                                    intent.target_id,
+                                    "interrupted (hit during cast)".to_string(),
+                                );
+                                tracing::info!(
+                                    caster = intent.target_id,
+                                    spell = %spell_name,
+                                    "PvP cast interrupted by incoming damage"
+                                );
+                            }
+                            InterruptOutcome::Survived {
+                                advanced_to: Some(new_score),
+                            } => {
+                                handlers::send_skill_progress_update(
+                                    &mut server,
+                                    target_cid,
+                                    skills::Skill::Casting.as_protocol(),
+                                    "channeling".to_string(),
+                                    *new_score,
+                                );
+                            }
+                            InterruptOutcome::Survived { advanced_to: None }
+                            | InterruptOutcome::NotCasting => {}
+                        }
+                    }
                     handlers::fan_out_hit(
                         &mut server,
                         &in_world_recipients_now,
@@ -4741,6 +4815,40 @@ pub async fn run(
                                     "dodge".to_string(),
                                     new_score,
                                 );
+                            }
+                            // Track 19A — channeling-based cast interrupt
+                            // on a hit landing during a cast. Helper
+                            // mutates the cast cache + channeling score;
+                            // we fan CastFail / SkillProgressUpdate
+                            // based on the outcome.
+                            let interrupt_outcome = roll_cast_interrupt(target_conn);
+                            match &interrupt_outcome {
+                                InterruptOutcome::Interrupted { spell_name } => {
+                                    handlers::fan_out_cast_fail(
+                                        &mut server,
+                                        &in_world_recipients_now,
+                                        hit.target,
+                                        "interrupted (hit during cast)".to_string(),
+                                    );
+                                    tracing::info!(
+                                        caster = hit.target,
+                                        spell = %spell_name,
+                                        "cast interrupted by incoming damage"
+                                    );
+                                }
+                                InterruptOutcome::Survived {
+                                    advanced_to: Some(new_score),
+                                } => {
+                                    handlers::send_skill_progress_update(
+                                        &mut server,
+                                        target_cid,
+                                        skills::Skill::Casting.as_protocol(),
+                                        "channeling".to_string(),
+                                        *new_score,
+                                    );
+                                }
+                                InterruptOutcome::Survived { advanced_to: None }
+                                | InterruptOutcome::NotCasting => {}
                             }
                             damaged_player = Some(hit.target);
                             tracing::info!(

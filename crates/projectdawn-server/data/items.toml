@@ -136,6 +136,14 @@ stack_size = 10
 vendor_price = 22
 
 [[item]]
+path = "res://data/loot/items/brown_steed_whistle.tres"
+name = "Brown Steed Whistle"
+item_type = "misc"
+rarity = 1
+stack_size = 1
+vendor_price = 350
+
+[[item]]
 path = "res://data/loot/items/carved_staff.tres"
 name = "Carved Staff"
 item_type = "weapon"

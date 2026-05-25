@@ -784,6 +784,10 @@ pub async fn run(
         // Dedup-on-insert in case the dying client somehow sends Death
         // twice in one tick.
         let mut death_fanouts: Vec<ClientId> = Vec::new();
+        // Track 22.H — player target broadcasts queued for the
+        // post-dispatch fan-out (which needs the in_world recipients
+        // list, not available inside the per-message dispatch).
+        let mut player_target_fanouts: Vec<(ClientId, Option<EntityId>)> = Vec::new();
         // Track 5 sub-task 3 — player → server attack intents queued for
         // the apply phase after dispatch. Verbatim queue (each swing is
         // a distinct event; coalescing would silently drop multi-hit
@@ -960,6 +964,13 @@ pub async fn run(
                             if !death_fanouts.contains(&client_id) {
                                 death_fanouts.push(client_id);
                             }
+                        }
+                        Outcome::PlayerTargetFanOut { target } => {
+                            // Track 22.H — queue for the post-dispatch
+                            // sweep where in_world_recipients_now is
+                            // computed. Drain happens alongside the
+                            // other fan-outs.
+                            player_target_fanouts.push((client_id, target));
                         }
                         Outcome::AttackIntent {
                             attacker,
@@ -1478,6 +1489,25 @@ pub async fn run(
             handlers::fan_out_entity_died(&mut server, &recipients, entity_id);
         }
 
+        // Track 22.H — player target fan-out. Fan an EntityTarget per
+        // queued SetTarget intent, skipping the sender (they already
+        // know their own choice) and clients flagged for disconnect.
+        for (sender_id, target) in player_target_fanouts.drain(..) {
+            if to_disconnect.contains(&sender_id) {
+                continue;
+            }
+            let Some(sender) = connections.get(&sender_id) else {
+                continue;
+            };
+            let entity_id = sender.char_id as u64;
+            let recipients: Vec<ClientId> = in_world_recipients
+                .iter()
+                .filter(|id| **id != sender_id)
+                .copied()
+                .collect();
+            handlers::fan_out_entity_target(&mut server, &recipients, entity_id, target);
+        }
+
         // 4g. Enemy spawner phase. Tick the respawn timers; for any spawn
         //     point that fires this frame, instantiate the entity, register
         //     it in the world map, and fan EnemySpawn out to every in_world
@@ -1801,6 +1831,39 @@ pub async fn run(
                                         reflect_dmg,
                                         name.clone(),
                                     );
+                                }
+                                // Track 22.E — reflected damage also
+                                // interrupts an in-flight cast. Classic
+                                // EQ: any incoming damage rolls the
+                                // channeling check, regardless of source.
+                                let outcome = roll_cast_interrupt(att);
+                                match &outcome {
+                                    InterruptOutcome::Interrupted { spell_name } => {
+                                        handlers::fan_out_cast_fail(
+                                            &mut server,
+                                            &in_world_recipients_now,
+                                            intent.attacker,
+                                            "interrupted (hit during cast)".to_string(),
+                                        );
+                                        tracing::info!(
+                                            caster = intent.attacker,
+                                            spell = %spell_name,
+                                            "PvP cast interrupted by damage shield reflect"
+                                        );
+                                    }
+                                    InterruptOutcome::Survived {
+                                        advanced_to: Some(new_score),
+                                    } => {
+                                        handlers::send_skill_progress_update(
+                                            &mut server,
+                                            attacker_cid,
+                                            skills::Skill::Casting.as_protocol(),
+                                            "channeling".to_string(),
+                                            *new_score,
+                                        );
+                                    }
+                                    InterruptOutcome::Survived { advanced_to: None }
+                                    | InterruptOutcome::NotCasting => {}
                                 }
                             }
                         }
@@ -2655,6 +2718,40 @@ pub async fn run(
                                 applied,
                                 "PvP spell applied"
                             );
+                            // Track 22.E — PvP spell damage interrupts
+                            // the target's cast (mirror of the PvP
+                            // melee interrupt wired in Track 19A).
+                            if let Some(tc) = connections.get_mut(&target_cid) {
+                                let outcome = roll_cast_interrupt(tc);
+                                match &outcome {
+                                    InterruptOutcome::Interrupted { spell_name } => {
+                                        handlers::fan_out_cast_fail(
+                                            &mut server,
+                                            &in_world_recipients_now,
+                                            target_id,
+                                            "interrupted (hit during cast)".to_string(),
+                                        );
+                                        tracing::info!(
+                                            caster = target_id,
+                                            spell = %spell_name,
+                                            "PvP cast interrupted by incoming spell damage"
+                                        );
+                                    }
+                                    InterruptOutcome::Survived {
+                                        advanced_to: Some(new_score),
+                                    } => {
+                                        handlers::send_skill_progress_update(
+                                            &mut server,
+                                            target_cid,
+                                            skills::Skill::Casting.as_protocol(),
+                                            "channeling".to_string(),
+                                            *new_score,
+                                        );
+                                    }
+                                    InterruptOutcome::Survived { advanced_to: None }
+                                    | InterruptOutcome::NotCasting => {}
+                                }
+                            }
                             // Damage shield reflects to caster.
                             if shield_back > 0.0 {
                                 if let Some(att) = connections.get_mut(&caster_cid) {
@@ -2679,6 +2776,31 @@ pub async fn run(
                                                 intent.caster,
                                                 reflect_dmg,
                                                 name.clone(),
+                                            );
+                                        }
+                                        // Track 22.E — shield reflect
+                                        // damage also interrupts the
+                                        // caster (their own thorns
+                                        // hits their cast). Note this
+                                        // is rarely meaningful since
+                                        // CastSpell already cleared
+                                        // cast_spell_name above when
+                                        // the cast resolved — left
+                                        // here for the case where a
+                                        // future spell type leaves
+                                        // the cache populated.
+                                        let outcome = roll_cast_interrupt(att);
+                                        if let InterruptOutcome::Interrupted { spell_name } = &outcome {
+                                            handlers::fan_out_cast_fail(
+                                                &mut server,
+                                                &in_world_recipients_now,
+                                                intent.caster,
+                                                "interrupted (hit during cast)".to_string(),
+                                            );
+                                            tracing::info!(
+                                                caster = intent.caster,
+                                                spell = %spell_name,
+                                                "PvP caster interrupted by own shield reflect"
                                             );
                                         }
                                     }

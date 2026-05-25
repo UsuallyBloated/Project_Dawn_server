@@ -152,12 +152,21 @@ pub fn cap_for(skill: Skill, player_class: &str, level: i32, key: &str) -> i32 {
     (mc * level / MAX_LEVEL).max(1)
 }
 
-/// Starting value for a fresh character at level 1. Matches
-/// `get_starting_value` in the GDScript files (cap at level 1, i.e.
-/// untrained-but-allowed classes start at 1; classes that can't
-/// train the skill start at 0).
+/// Starting value for a fresh character at level 1. Track 22.F
+/// rebalance: previously equal to the L1 cap, which meant
+/// `try_advance` chance = 0 until the character levelled up enough
+/// for the cap to outpace the score. Now starts at roughly a
+/// quarter of the L1 cap so the player has immediate headroom to
+/// train. Classes that can't train the skill at all (cap == 0)
+/// still start at 0.
 pub fn starting_value(skill: Skill, player_class: &str, key: &str) -> i32 {
-    cap_for(skill, player_class, 1, key)
+    let cap = cap_for(skill, player_class, 1, key);
+    if cap == 0 {
+        return 0;
+    }
+    // cap / 4 with a floor of 1 so trainable classes always have at
+    // least one point on day-one to read.
+    (cap / 4).max(1)
 }
 
 fn current_score(conn: &PerConnection, skill: Skill, key: &str) -> i32 {
@@ -393,10 +402,15 @@ mod tests {
     }
 
     #[test]
-    fn starting_value_matches_gdscript_pattern() {
-        // Warrior 1h_slashing starts at cap(L1) = max(1, 250*1/60) = 4
-        assert_eq!(starting_value(Skill::Weapon, "Warrior", "1h_slashing"), 4);
-        // Untrained class returns 0
+    fn starting_value_quarter_of_cap_with_floor() {
+        // Track 22.F: starting score is cap(L1) / 4 with a floor of 1.
+        // Warrior 1h_slashing: L1 cap = max(1, 250/60) = 4 → 4/4 = 1.
+        assert_eq!(starting_value(Skill::Weapon, "Warrior", "1h_slashing"), 1);
+        // Warrior plate: L1 cap = 4 → 1 (floor kicks in identically).
+        assert_eq!(starting_value(Skill::Armor, "Warrior", "plate"), 1);
+        // Cleric alteration: L1 cap = max(1, 200/60) = 3 → 3/4 = 0, floor → 1.
+        assert_eq!(starting_value(Skill::Casting, "Cleric", "alteration"), 1);
+        // Untrained class returns 0 (cap == 0 sentinel)
         assert_eq!(starting_value(Skill::Weapon, "Magician", "archery"), 0);
     }
 

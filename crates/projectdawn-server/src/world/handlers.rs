@@ -65,6 +65,12 @@ pub enum Outcome {
     /// Track 4 sub-task 5 — dying client signaled HP-zero. Tick loop fans
     /// out EntityDied to in_world peers.
     DeathFanOut,
+    /// Track 22.H — player retargeted. Tick loop fans an `EntityTarget`
+    /// (reused from the enemy-target broadcast) so peers' ToT frames
+    /// can resolve what the tracked remote player is attacking.
+    PlayerTargetFanOut {
+        target: Option<protocol::world::EntityId>,
+    },
     /// Track 6 sub-task 2 — player → server attack intent. The handler
     /// has already validated `conn.in_world` and the message decoded
     /// cleanly; the tick loop runs `combat::calc_swing` against the
@@ -419,6 +425,19 @@ pub fn handle_message(
                 return Outcome::Continue;
             }
             Outcome::EvadeFanOut { target }
+        }
+
+        ClientWorldMsg::SetTarget { target_id } => {
+            // Track 22.H — peer target broadcast. The local client
+            // fires this whenever the player retargets so peers can
+            // render the target-of-target frame for tracked remote
+            // players. Server reuses the existing EntityTarget
+            // ServerWorldMsg variant (already used by enemy AI).
+            if !conn.ready {
+                return Outcome::Continue;
+            }
+            conn.current_target = target_id;
+            Outcome::PlayerTargetFanOut { target: target_id }
         }
 
         ClientWorldMsg::DeathBroadcast => {

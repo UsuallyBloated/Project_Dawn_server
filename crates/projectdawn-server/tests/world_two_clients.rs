@@ -2747,12 +2747,13 @@ async fn skill_progress_snapshot_seeded_on_enter_world() {
         assert_eq!(armor.len(), 5, "armor map has 5 keys");
         assert_eq!(casting.len(), 6, "casting map has 6 keys");
 
-        // Warrior 1h_slashing starts at cap(L1) = max(1, 250/60) = 4.
+        // Track 22.F rebalance: starting score is cap(L1) / 4 with
+        // a floor of 1. Warrior 1h_slashing L1 cap = 4 → 4/4 = 1.
         let weapon_map: std::collections::HashMap<String, u32> = weapon.into_iter().collect();
-        assert_eq!(weapon_map.get("1h_slashing").copied(), Some(4));
-        // Warrior plate starts at cap(L1) = max(1, 250/60) = 4.
+        assert_eq!(weapon_map.get("1h_slashing").copied(), Some(1));
+        // Warrior plate L1 cap = 4 → 4/4 = 1 (same floor).
         let armor_map: std::collections::HashMap<String, u32> = armor.into_iter().collect();
-        assert_eq!(armor_map.get("plate").copied(), Some(4));
+        assert_eq!(armor_map.get("plate").copied(), Some(1));
         // Warrior has no casting; all six rows present at 0.
         let casting_map: std::collections::HashMap<String, u32> = casting.into_iter().collect();
         for key in &["evocation", "alteration", "abjuration", "conjuration", "divination", "channeling"] {

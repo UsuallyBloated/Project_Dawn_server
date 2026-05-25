@@ -250,6 +250,12 @@ pub struct PerConnection {
     /// fan-out path.
     pub active_buffs: Vec<super::buffs::ActiveBuff>,
 
+    /// Track 22.H — the player's current target id (peer / enemy /
+    /// pet / none). Fanned to AOI peers as `EntityTarget` on every
+    /// `SetTarget` intent so the target-of-target HUD frame can
+    /// resolve what tracked remote players are attacking.
+    pub current_target: Option<protocol::world::EntityId>,
+
     /// Track 11.3 — last enemy this player attacked. Pet AI reads this
     /// to inherit the owner's target so the pet auto-engages whatever
     /// the player is fighting. `last_attacked_at` decays the
@@ -360,6 +366,7 @@ impl PerConnection {
             active_buffs: Vec::new(),
             last_attacked_enemy: None,
             last_attacked_at: None,
+            current_target: None,
             warder_respawn_at: None,
             inventory: super::inventory::PlayerInventory::new(),
             inventory_dirty: false,

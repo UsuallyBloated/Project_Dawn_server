@@ -646,6 +646,17 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// Track 22.H — peer target broadcast. Server fans EntityTarget
+    /// to AOI peers so the target-of-target HUD frame can resolve
+    /// what tracked remote players are attacking. `target_id == 0`
+    /// (or negative) encodes "no target" (None on the wire).
+    #[func]
+    fn send_set_target(&mut self, target_id: i64) -> bool {
+        let opt = if target_id <= 0 { None } else { Some(target_id as u64) };
+        let msg = ClientWorldMsg::SetTarget { target_id: opt };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
     /// Track 6 sub-task 5 — group intents. The server's intent sweep
     /// resolves names against the connections map (NOCASE), so the
     /// inviter doesn't need the target's char_id. Accept carries the

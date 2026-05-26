@@ -753,6 +753,82 @@ cooldown = 6.0
 min_level = 1
 classes = ["Bard"]
 
+# Twist songs — server gates the cast (mana, cooldown, class) but the
+# per-pulse effects (speed, accuracy/crit, heal, haste, mp regen, attack
+# slow) are applied client-side by the BardSongs autoload, so base_damage
+# and heal_amount stay 0 here.
+[[spell]]
+name = "Selos' Melody"
+target_type = "SELF"
+damage_type = "ARCANE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 10.0
+cast_time = 0.0
+cooldown = 0.5
+min_level = 1
+classes = ["Bard"]
+
+[[spell]]
+name = "Anthem of the Hunt"
+target_type = "SELF"
+damage_type = "SPIRIT"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 10.0
+cast_time = 0.0
+cooldown = 0.5
+min_level = 8
+classes = ["Bard"]
+
+[[spell]]
+name = "Poet's Mending"
+target_type = "SELF"
+damage_type = "SPIRIT"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 10.0
+cast_time = 0.0
+cooldown = 0.5
+min_level = 4
+classes = ["Bard"]
+
+[[spell]]
+name = "Wanderer's Chord"
+target_type = "SELF"
+damage_type = "SPIRIT"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 10.0
+cast_time = 0.0
+cooldown = 0.5
+min_level = 6
+classes = ["Bard"]
+
+[[spell]]
+name = "Mana Weave"
+target_type = "SELF"
+damage_type = "ARCANE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 0.0
+cast_time = 0.0
+cooldown = 0.5
+min_level = 10
+classes = ["Bard"]
+
+[[spell]]
+name = "Aria of Dismay"
+target_type = "ENEMY"
+damage_type = "ARCANE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 10.0
+cast_time = 0.0
+cooldown = 0.5
+min_level = 16
+classes = ["Bard"]
+
 # ── Ranger ──────────────────────────────────────────────────────────
 [[spell]]
 name = "Hunter's Mark"

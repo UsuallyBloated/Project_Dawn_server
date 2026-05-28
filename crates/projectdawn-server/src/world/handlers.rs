@@ -280,6 +280,13 @@ pub enum Outcome {
         speaker: String,
         target_name: Option<String>,
     },
+    /// Player → server inspect request. Tick loop looks up the target's
+    /// connection by char_id, reads `inventory.equipment`, and sends
+    /// `InspectResult` back to the inspector only (using the dispatch
+    /// `client_id` directly, so this variant carries only the target).
+    InspectIntent {
+        target_char_id: i64,
+    },
 }
 
 pub fn handle_message(
@@ -933,6 +940,13 @@ pub fn handle_message(
         // Unknown-but-decoded messages: ignore, don't kick. Unknown-and-
         // failed-to-decode messages don't reach here (decode error is
         // logged in tick.rs).
+        ClientWorldMsg::InspectPlayer { target_char_id } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::InspectIntent { target_char_id }
+        }
+
         ClientWorldMsg::Chat { channel, text, target_name } => {
             if !conn.in_world {
                 return Outcome::Continue;
@@ -1210,6 +1224,23 @@ pub fn fan_out_chat_message(
     };
     for &recipient_id in recipients {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+pub fn send_inspect_result(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    target_char_id: i64,
+    target_name: String,
+    slots: Vec<(u8, String)>,
+) {
+    let msg = ServerWorldMsg::InspectResult {
+        target_char_id,
+        target_name,
+        slots,
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
     }
 }
 

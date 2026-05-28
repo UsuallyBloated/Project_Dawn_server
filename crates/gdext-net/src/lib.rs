@@ -339,6 +339,19 @@ impl NetClient {
     #[signal]
     fn chat_message(speaker: GString, channel: i64, text: GString, lang: GString);
 
+    /// Reply to a `send_inspect_player` request. `slot_keys` are
+    /// `EquipSlot` discriminants (Weapon=0, Offhand=1, Head=2, Chest=3,
+    /// Legs=4, Feet=5, Hands=6, Ring=7, Neck=8); `item_paths` are the
+    /// matching `.tres` resource paths. Empty arrays mean the target
+    /// wasn't found or wasn't in-world.
+    #[signal]
+    fn inspect_result(
+        target_char_id: i64,
+        target_name: GString,
+        slot_keys: PackedInt32Array,
+        item_paths: PackedStringArray,
+    );
+
     /// Catch-all for ServerWorldMsg variants slice 1 doesn't decode into a
     /// typed signal yet. GDScript can ignore until a future track wires them.
     #[signal]
@@ -523,6 +536,14 @@ impl NetClient {
             text: text.to_string(),
             target_name: target_opt,
         };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// Request the equipped-items snapshot for another in-world player.
+    /// Server replies privately with `inspect_result`.
+    #[func]
+    fn send_inspect_player(&mut self, target_char_id: i64) -> bool {
+        let msg = ClientWorldMsg::InspectPlayer { target_char_id };
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
@@ -1151,6 +1172,11 @@ enum Incoming {
         text: String,
         lang: String,
     },
+    InspectResult {
+        target_char_id: i64,
+        target_name: String,
+        slots: Vec<(u8, String)>,
+    },
     Raw {
         channel: u8,
         bytes: Vec<u8>,
@@ -1657,6 +1683,25 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::InspectResult { target_char_id, target_name, slots } => {
+                    let mut keys = PackedInt32Array::new();
+                    let mut paths = PackedStringArray::new();
+                    keys.resize(slots.len());
+                    paths.resize(slots.len());
+                    for (i, (slot, path)) in slots.iter().enumerate() {
+                        keys[i] = *slot as i32;
+                        paths[i] = GString::from(path.as_str());
+                    }
+                    self.base_mut().emit_signal(
+                        "inspect_result",
+                        &[
+                            target_char_id.to_variant(),
+                            GString::from(target_name.as_str()).to_variant(),
+                            keys.to_variant(),
+                            paths.to_variant(),
+                        ],
+                    );
+                }
                 Incoming::Raw { channel, bytes } => {
                     let pba = packed_byte_array_from(&bytes);
                     self.base_mut().emit_signal(
@@ -1893,6 +1938,9 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
                 text,
                 lang,
             }
+        }
+        ServerWorldMsg::InspectResult { target_char_id, target_name, slots } => {
+            Incoming::InspectResult { target_char_id, target_name, slots }
         }
         // Other variants get bubbled up raw. As their handlers land, add
         // typed `match` arms here.

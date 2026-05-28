@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// `StaminaUpdate`); `ClientWorldMsg::ResourceUpdate` is removed because the
 /// authority flips and the client no longer broadcasts resources. One bump
 /// per track; individual sub-task commits append new variants under this id.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3131; // "PD_W0011"
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3132; // "PD_W0012"
 
 pub type EntityId = u64;
 pub type Sequence = u32;
@@ -217,6 +217,13 @@ pub enum ClientWorldMsg {
         // target up by name and fans `ChatMessage` to that one
         // connection. Other channels ignore this field.
         target_name: Option<String>,
+    },
+    /// Request the equipment snapshot of another in-world player. Server
+    /// validates source is in-world, looks up the target by char_id,
+    /// and replies privately with `InspectResult`. Bag contents are not
+    /// included — only the paperdoll slots are public.
+    InspectPlayer {
+        target_char_id: i64,
     },
     Sit,
     Stand,
@@ -616,6 +623,16 @@ pub enum ServerWorldMsg {
         channel: ChatChannel,
         text: String,
         lang: String,
+    },
+
+    /// Reply to `ClientWorldMsg::InspectPlayer`. `slots` is a list of
+    /// `(equip_slot_discriminant, item_path)` pairs for each occupied
+    /// paperdoll slot on the inspected player. The unequipped slots
+    /// are omitted; client renders those as "—".
+    InspectResult {
+        target_char_id: i64,
+        target_name: String,
+        slots: Vec<(u8, String)>,
     },
 
     // System

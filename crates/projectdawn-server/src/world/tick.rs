@@ -793,6 +793,8 @@ pub async fn run(
         // recipients and resolve the sender's connection for Tell
         // bounce-backs when the target name doesn't match.
         let mut chat_fanouts: Vec<(ClientId, protocol::world::ChatChannel, String, String, Option<String>)> = Vec::new();
+        // Player-inspect requests. `(inspector_client_id, target_char_id)`.
+        let mut inspect_intents: Vec<(ClientId, i64)> = Vec::new();
         // Track 5 sub-task 3 — player → server attack intents queued for
         // the apply phase after dispatch. Verbatim queue (each swing is
         // a distinct event; coalescing would silently drop multi-hit
@@ -979,6 +981,9 @@ pub async fn run(
                         }
                         Outcome::ChatFanOut { channel, text, speaker, target_name } => {
                             chat_fanouts.push((client_id, channel, text, speaker, target_name));
+                        }
+                        Outcome::InspectIntent { target_char_id } => {
+                            inspect_intents.push((client_id, target_char_id));
                         }
                         Outcome::AttackIntent {
                             attacker,
@@ -1595,6 +1600,39 @@ pub async fn run(
                 }
                 _ => {}
             }
+        }
+
+        // Inspect-player drain. Look up target by char_id, ensure they're
+        // in-world, pack their paperdoll slot map into `(slot, item_path)`
+        // pairs and send back to the inspector only. Empty result for
+        // unknown / offline targets — client renders "—" everywhere.
+        for (inspector_id, target_char_id) in inspect_intents.drain(..) {
+            if to_disconnect.contains(&inspector_id) {
+                continue;
+            }
+            let target = connections
+                .iter()
+                .find(|(_, c)| c.char_id == target_char_id && c.in_world);
+            let (target_name, slots) = match target {
+                Some((_, c)) => {
+                    let mut slots: Vec<(u8, String)> = c
+                        .inventory
+                        .equipment
+                        .iter()
+                        .map(|(slot, entry)| (*slot, entry.item_path.clone()))
+                        .collect();
+                    slots.sort_by_key(|(slot, _)| *slot);
+                    (c.name.clone(), slots)
+                }
+                None => (String::new(), Vec::new()),
+            };
+            handlers::send_inspect_result(
+                &mut server,
+                inspector_id,
+                target_char_id,
+                target_name,
+                slots,
+            );
         }
 
         // 4g. Enemy spawner phase. Tick the respawn timers; for any spawn

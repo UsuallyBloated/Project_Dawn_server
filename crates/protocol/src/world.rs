@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// `StaminaUpdate`); `ClientWorldMsg::ResourceUpdate` is removed because the
 /// authority flips and the client no longer broadcasts resources. One bump
 /// per track; individual sub-task commits append new variants under this id.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3130; // "PD_W0010"
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3131; // "PD_W0011"
 
 pub type EntityId = u64;
 pub type Sequence = u32;
@@ -67,6 +67,9 @@ pub enum ChatChannel {
     Raid,
     Auction,
     System,
+    // Added in PD_W0011. Kept at the end so existing variants' bincode
+    // discriminants stay stable.
+    Shout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +213,10 @@ pub enum ClientWorldMsg {
     Chat {
         channel: ChatChannel,
         text: String,
+        // Only populated for `ChatChannel::Tell`. Server looks the
+        // target up by name and fans `ChatMessage` to that one
+        // connection. Other channels ignore this field.
+        target_name: Option<String>,
     },
     Sit,
     Stand,

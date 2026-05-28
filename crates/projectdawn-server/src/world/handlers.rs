@@ -264,6 +264,22 @@ pub enum Outcome {
         looter: u64,
         bag_id: protocol::world::EntityId,
     },
+    /// Player → server chat. Handler returns this; the tick loop fans
+    /// `ChatMessage` to recipients based on `channel`:
+    /// - Say  → in-AOI peers (3×3 cell neighbourhood, sender excluded)
+    /// - Shout / Ooc → every in-world peer (sender excluded)
+    /// - Tell → the one connection whose `name` matches `target_name`
+    ///   (case-insensitive). On no-match the tick loop sends a system
+    ///   `ChatMessage` back to the sender.
+    /// - Other channels (Group, Guild, Raid, Auction, System) are
+    ///   intentionally ignored here — Group is RPC-driven by
+    ///   GroupManager today; the others are unimplemented.
+    ChatFanOut {
+        channel: protocol::world::ChatChannel,
+        text: String,
+        speaker: String,
+        target_name: Option<String>,
+    },
 }
 
 pub fn handle_message(
@@ -917,6 +933,26 @@ pub fn handle_message(
         // Unknown-but-decoded messages: ignore, don't kick. Unknown-and-
         // failed-to-decode messages don't reach here (decode error is
         // logged in tick.rs).
+        ClientWorldMsg::Chat { channel, text, target_name } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            // Hard cap to keep payloads sane. Clients should validate but
+            // a hostile or buggy client could still try to flood.
+            const MAX_CHAT_LEN: usize = 512;
+            let trimmed = if text.len() > MAX_CHAT_LEN {
+                text[..MAX_CHAT_LEN].to_string()
+            } else {
+                text
+            };
+            Outcome::ChatFanOut {
+                channel,
+                text: trimmed,
+                speaker: conn.name.clone(),
+                target_name,
+            }
+        }
+
         _ => Outcome::Continue,
     }
 }
@@ -1142,6 +1178,33 @@ pub fn fan_out_entity_target(
         return;
     }
     let msg = ServerWorldMsg::EntityTarget { id, target };
+    let Some(bytes) = encode(&msg) else {
+        return;
+    };
+    for &recipient_id in recipients {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+pub fn fan_out_chat_message(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    speaker: &str,
+    channel: protocol::world::ChatChannel,
+    text: &str,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::ChatMessage {
+        speaker: speaker.to_string(),
+        channel,
+        text: text.to_string(),
+        // Language gating isn't wired up server-side yet; empty string
+        // tells the client "no specific language", which falls back to
+        // the receiver's native rendering.
+        lang: String::new(),
+    };
     let Some(bytes) = encode(&msg) else {
         return;
     };

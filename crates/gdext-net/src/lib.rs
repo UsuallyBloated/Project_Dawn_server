@@ -331,6 +331,14 @@ impl NetClient {
     #[signal]
     fn heartbeat();
 
+    /// Inbound chat message fanned by the server. `channel` is the
+    /// `ChatChannel` enum encoded as an int matching its discriminant
+    /// (Say=0, Ooc=1, Group=2, Tell=3, Guild=4, Raid=5, Auction=6,
+    /// System=7, Shout=8). GDScript subscribers route into CombatLog
+    /// based on channel.
+    #[signal]
+    fn chat_message(speaker: GString, channel: i64, text: GString, lang: GString);
+
     /// Catch-all for ServerWorldMsg variants slice 1 doesn't decode into a
     /// typed signal yet. GDScript can ignore until a future track wires them.
     #[signal]
@@ -496,6 +504,26 @@ impl NetClient {
     #[func]
     fn send_sit(&mut self) -> bool {
         self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::Sit)
+    }
+
+    /// Outbound chat. `channel` matches the discriminant emitted by the
+    /// `chat_message` receive signal (Say=0, Ooc=1, Tell=3, Shout=8 are
+    /// the wired-up ones; other values fan back to the sender only via
+    /// the server's drop-through). `target_name` is empty for everything
+    /// except Tell. Returns false on unknown channel or send failure.
+    #[func]
+    fn send_chat(&mut self, channel: i64, text: GString, target_name: GString) -> bool {
+        let Some(ch) = int_to_chat_channel(channel) else {
+            return false;
+        };
+        let target = target_name.to_string();
+        let target_opt = if target.is_empty() { None } else { Some(target) };
+        let msg = ClientWorldMsg::Chat {
+            channel: ch,
+            text: text.to_string(),
+            target_name: target_opt,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
     /// Track 6 — owning client stands up. Pair to `send_sit`.
@@ -1117,6 +1145,12 @@ enum Incoming {
         armor: Vec<(String, u32)>,
         casting: Vec<(String, u32)>,
     },
+    ChatMessage {
+        speaker: String,
+        channel: i64,
+        text: String,
+        lang: String,
+    },
     Raw {
         channel: u8,
         bytes: Vec<u8>,
@@ -1612,6 +1646,17 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::ChatMessage { speaker, channel, text, lang } => {
+                    self.base_mut().emit_signal(
+                        "chat_message",
+                        &[
+                            GString::from(speaker.as_str()).to_variant(),
+                            channel.to_variant(),
+                            GString::from(text.as_str()).to_variant(),
+                            GString::from(lang.as_str()).to_variant(),
+                        ],
+                    );
+                }
                 Incoming::Raw { channel, bytes } => {
                     let pba = packed_byte_array_from(&bytes);
                     self.base_mut().emit_signal(
@@ -1841,13 +1886,52 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
         ServerWorldMsg::SkillProgressSnapshot { weapon, armor, casting } => {
             Incoming::SkillProgressSnapshot { weapon, armor, casting }
         }
-        // Other variants (BuffApplied, ChatMessage, ...) get
-        // bubbled up raw. As their handlers land, add typed `match` arms here.
+        ServerWorldMsg::ChatMessage { speaker, channel: ch, text, lang } => {
+            Incoming::ChatMessage {
+                speaker,
+                channel: chat_channel_to_int(ch),
+                text,
+                lang,
+            }
+        }
+        // Other variants get bubbled up raw. As their handlers land, add
+        // typed `match` arms here.
         _ => Incoming::Raw {
             channel,
             bytes: raw.to_vec(),
         },
     }
+}
+
+fn chat_channel_to_int(channel: protocol::world::ChatChannel) -> i64 {
+    use protocol::world::ChatChannel as C;
+    match channel {
+        C::Say => 0,
+        C::Ooc => 1,
+        C::Group => 2,
+        C::Tell => 3,
+        C::Guild => 4,
+        C::Raid => 5,
+        C::Auction => 6,
+        C::System => 7,
+        C::Shout => 8,
+    }
+}
+
+fn int_to_chat_channel(value: i64) -> Option<protocol::world::ChatChannel> {
+    use protocol::world::ChatChannel as C;
+    Some(match value {
+        0 => C::Say,
+        1 => C::Ooc,
+        2 => C::Group,
+        3 => C::Tell,
+        4 => C::Guild,
+        5 => C::Raid,
+        6 => C::Auction,
+        7 => C::System,
+        8 => C::Shout,
+        _ => return None,
+    })
 }
 
 /// DamageType u8-discriminant conversion. Kept inside this crate so the

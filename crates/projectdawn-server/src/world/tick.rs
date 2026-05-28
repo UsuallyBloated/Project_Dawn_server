@@ -788,6 +788,11 @@ pub async fn run(
         // post-dispatch fan-out (which needs the in_world recipients
         // list, not available inside the per-message dispatch).
         let mut player_target_fanouts: Vec<(ClientId, Option<EntityId>)> = Vec::new();
+        // Chat fan-out queue. Each entry carries the sender's client id
+        // so the drain step can exclude the sender from broadcast
+        // recipients and resolve the sender's connection for Tell
+        // bounce-backs when the target name doesn't match.
+        let mut chat_fanouts: Vec<(ClientId, protocol::world::ChatChannel, String, String, Option<String>)> = Vec::new();
         // Track 5 sub-task 3 — player → server attack intents queued for
         // the apply phase after dispatch. Verbatim queue (each swing is
         // a distinct event; coalescing would silently drop multi-hit
@@ -971,6 +976,9 @@ pub async fn run(
                             // computed. Drain happens alongside the
                             // other fan-outs.
                             player_target_fanouts.push((client_id, target));
+                        }
+                        Outcome::ChatFanOut { channel, text, speaker, target_name } => {
+                            chat_fanouts.push((client_id, channel, text, speaker, target_name));
                         }
                         Outcome::AttackIntent {
                             attacker,
@@ -1506,6 +1514,71 @@ pub async fn run(
                 .copied()
                 .collect();
             handlers::fan_out_entity_target(&mut server, &recipients, entity_id, target);
+        }
+
+        // Chat fan-out. Recipient set depends on channel:
+        // - Say: AOI 3×3 neighbourhood of the sender, sender excluded.
+        // - Shout / Ooc: every in-world client, sender excluded.
+        // - Tell: the one connection whose `name` matches `target_name`
+        //   case-insensitively. If not found, fan a system message back
+        //   to the sender so they know the tell didn't land.
+        // - Other channels are ignored at this layer.
+        for (sender_id, channel, text, speaker, target_name) in chat_fanouts.drain(..) {
+            if to_disconnect.contains(&sender_id) {
+                continue;
+            }
+            use protocol::world::ChatChannel;
+            match channel {
+                ChatChannel::Say => {
+                    let Some(sender) = connections.get(&sender_id) else {
+                        continue;
+                    };
+                    let sender_cell = sender.aoi_cell;
+                    let visible = aoi.entities_visible_from(sender_cell);
+                    let recipients: Vec<ClientId> = connections
+                        .iter()
+                        .filter(|(id, c)| {
+                            **id != sender_id && c.in_world && visible.contains(&(c.char_id as u64))
+                        })
+                        .map(|(id, _)| *id)
+                        .collect();
+                    handlers::fan_out_chat_message(&mut server, &recipients, &speaker, channel, &text);
+                }
+                ChatChannel::Shout | ChatChannel::Ooc => {
+                    let recipients: Vec<ClientId> = in_world_recipients
+                        .iter()
+                        .filter(|id| **id != sender_id)
+                        .copied()
+                        .collect();
+                    handlers::fan_out_chat_message(&mut server, &recipients, &speaker, channel, &text);
+                }
+                ChatChannel::Tell => {
+                    let Some(target) = target_name.as_deref() else {
+                        continue;
+                    };
+                    let target_lower = target.to_lowercase();
+                    let recipient_id = connections
+                        .iter()
+                        .find(|(_, c)| c.in_world && c.name.to_lowercase() == target_lower)
+                        .map(|(id, _)| *id);
+                    if let Some(rid) = recipient_id {
+                        handlers::fan_out_chat_message(&mut server, &[rid], &speaker, channel, &text);
+                    } else {
+                        // Bounce: tell the sender the target isn't online.
+                        // Use System channel so the client can colour it
+                        // distinctly from a real tell.
+                        let bounce = format!("{} is not currently playing.", target);
+                        handlers::fan_out_chat_message(
+                            &mut server,
+                            &[sender_id],
+                            "",
+                            ChatChannel::System,
+                            &bounce,
+                        );
+                    }
+                }
+                _ => {}
+            }
         }
 
         // 4g. Enemy spawner phase. Tick the respawn timers; for any spawn

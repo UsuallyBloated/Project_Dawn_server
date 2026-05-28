@@ -1552,6 +1552,22 @@ pub async fn run(
                         .collect();
                     handlers::fan_out_chat_message(&mut server, &recipients, &speaker, channel, &text);
                 }
+                ChatChannel::Group => {
+                    // Fan to every member of the sender's group (except
+                    // the sender themself, who added the local echo).
+                    let Some(group) = group_manager.group_of(sender_id) else {
+                        continue; // sender isn't in a group
+                    };
+                    let recipients: Vec<ClientId> = group.members
+                        .iter()
+                        .filter(|id| {
+                            **id != sender_id
+                                && connections.get(*id).map_or(false, |c| c.in_world)
+                        })
+                        .copied()
+                        .collect();
+                    handlers::fan_out_chat_message(&mut server, &recipients, &speaker, channel, &text);
+                }
                 ChatChannel::Tell => {
                     let Some(target) = target_name.as_deref() else {
                         continue;

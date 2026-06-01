@@ -2693,14 +2693,80 @@ pub async fn run(
                         }
                     }
                     "ALLY" => {
-                        // target_id == 0 or absent → self-heal. Any non-zero
-                        // target below ENEMY_ID_BASE is treated as a player
-                        // char_id; anything ≥ ENEMY_ID_BASE is rejected (you
-                        // can't ALLY-heal an enemy or loot bag).
-                        let target_entity_id = intent
-                            .target_id
-                            .filter(|&id| id > 0 && id < protocol::world::ENEMY_ID_BASE)
-                            .unwrap_or(intent.caster);
+                        use protocol::world::{ENEMY_ID_BASE, LOOT_BAG_ID_BASE, PET_ID_BASE};
+                        let raw_target = intent.target_id.unwrap_or(0);
+                        // Pet ALLY heal: any pet whose owner is in-world is
+                        // a valid heal target. No group requirement —
+                        // Beast Master can support a stranger's warder.
+                        if raw_target >= PET_ID_BASE {
+                            let pet_alive = enemies
+                                .get(&raw_target)
+                                .map_or(false, |p| p.is_alive() && p.owner.is_some());
+                            if !pet_alive {
+                                handlers::fan_out_cast_fail(
+                                    &mut server,
+                                    &[caster_cid],
+                                    intent.caster,
+                                    "That pet is no longer in the world.".to_string(),
+                                );
+                                continue;
+                            }
+                            let heal = spell.heal_amount;
+                            if heal > 0.0 {
+                                if let Some(pet) = enemies.get_mut(&raw_target) {
+                                    pet.hp = (pet.hp + heal).min(pet.max_hp);
+                                    let new_hp = pet.hp;
+                                    let max_hp = pet.max_hp;
+                                    handlers::fan_out_health_update(
+                                        &mut server,
+                                        &in_world_recipients_now,
+                                        raw_target,
+                                        new_hp,
+                                        max_hp,
+                                    );
+                                    tracing::info!(
+                                        caster = intent.caster,
+                                        target = raw_target,
+                                        spell = %spell.name,
+                                        heal,
+                                        "ALLY pet heal applied"
+                                    );
+                                }
+                            }
+                            // HoT / buff path skipped for pets — pets don't
+                            // have an active_buffs field on Entity yet
+                            // (see ALLY-includes-pets scope notes).
+                            continue;
+                        }
+                        // Loot bags / out-of-range / unknown high ids are
+                        // not heal targets.
+                        if raw_target >= LOOT_BAG_ID_BASE {
+                            handlers::fan_out_cast_fail(
+                                &mut server,
+                                &[caster_cid],
+                                intent.caster,
+                                "Cannot heal that target.".to_string(),
+                            );
+                            continue;
+                        }
+                        // NPC enemy → explicit reject so the player sees a
+                        // chat line instead of a silent no-op.
+                        if raw_target >= ENEMY_ID_BASE {
+                            handlers::fan_out_cast_fail(
+                                &mut server,
+                                &[caster_cid],
+                                intent.caster,
+                                "Cannot heal enemies.".to_string(),
+                            );
+                            continue;
+                        }
+                        // raw_target == 0 → self-heal. raw_target > 0 and
+                        // below ENEMY_ID_BASE is a player char_id.
+                        let target_entity_id = if raw_target > 0 {
+                            raw_target
+                        } else {
+                            intent.caster
+                        };
                         let target_cid = target_entity_id as ClientId;
                         let target_ok = connections
                             .get(&target_cid)

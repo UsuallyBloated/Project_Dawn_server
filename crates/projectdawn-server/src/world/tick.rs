@@ -1738,7 +1738,12 @@ pub async fn run(
             .filter_map(|(_, c)| {
                 if !c.in_world { return None; }
                 let due = c.warder_respawn_at?;
-                if now.duration_since(due).as_secs_f32() >= 0.0 {
+                // `Instant::duration_since` saturates to zero when the
+                // argument is in the future, so the previous
+                // `>= 0.0` check was always true and the warder
+                // respawned on the next tick instead of after the
+                // WARDER_RETREAT_SECS retreat.
+                if now >= due {
                     Some((c.char_id as u64, c.pos))
                 } else {
                     None

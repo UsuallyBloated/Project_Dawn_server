@@ -127,6 +127,9 @@ name = "Bread Loaf"
 item_type = "consumable"
 stack_size = 10
 vendor_price = 4
+is_food = true
+food_hp_regen = 4.0
+food_duration = 180.0
 
 [[item]]
 path = "res://data/loot/items/bronze_ingot.tres"
@@ -1338,6 +1341,9 @@ name = "Water Flask"
 item_type = "consumable"
 stack_size = 10
 vendor_price = 3
+is_drink = true
+food_mp_regen = 5.0
+food_duration = 180.0
 
 [[item]]
 path = "res://data/loot/items/wild_berries.tres"

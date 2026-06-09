@@ -22,12 +22,18 @@ use std::time::{Duration, Instant};
 // Match GDScript constants. Mirrors are documented in regen.gd's
 // `TICK_INTERVAL` / `*_BASE_REGEN` / `*_SCALE` block — kept identical so
 // Test Room single-player and launcher mode show the same numbers.
-const HP_BASE_REGEN: f32 = 2.0;
-const HP_CON_SCALE: f32 = 0.15;
-const MP_BASE_REGEN: f32 = 2.0;
-const MP_WIS_SCALE: f32 = 0.20;
-const ST_BASE_REGEN: f32 = 3.0;
-const ST_AGI_SCALE: f32 = 0.10;
+//
+// Round-7 playtest request: default regen disabled until a target
+// number is decided. All BASE + SCALE constants set to 0 so out-of-
+// combat HP / MP / Stamina don't refill at all. Sitting multipliers
+// stay, but multiplying 0 still yields 0 — food / drink / Lich /
+// Clarity buffs are additive and still apply.
+const HP_BASE_REGEN: f32 = 0.0;
+const HP_CON_SCALE: f32 = 0.0;
+const MP_BASE_REGEN: f32 = 0.0;
+const MP_WIS_SCALE: f32 = 0.0;
+const ST_BASE_REGEN: f32 = 0.0;
+const ST_AGI_SCALE: f32 = 0.0;
 const SITTING_HP_MULT: f32 = 5.0;
 const SITTING_MP_MULT: f32 = 5.0;
 const SITTING_ST_MULT: f32 = 3.0;

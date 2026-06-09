@@ -479,6 +479,13 @@ pub fn handle_message(
             conn.cast_total_duration = 0.0;
             conn.cast_set_at = None;
             conn.hp = 0.0;
+            // Round-7 playtest fix — food / drink and other timed buffs
+            // shouldn't survive a death. The client's BuffManager
+            // already calls clear_all on PlayerDeath.player_died, but
+            // those buffs are server-authoritative in launcher mode —
+            // without clearing here too the next BuffSnapshot fan-out
+            // restores them on the corpse.
+            conn.active_buffs.clear();
             super::regen::mark_dirty(conn);
             Outcome::DeathFanOut
         }

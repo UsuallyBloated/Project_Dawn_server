@@ -242,7 +242,7 @@ fn apply_spell_damage_to_enemy(
     dmg_type: DamageType,
     now: Instant,
 ) -> bool {
-    let (died, credit_id_opt, mob_xp, death_pos, mob_name, damage_done) = {
+    let (died, credit_id_opt, mob_xp, death_pos, mob_name, damage_done, warder_owner_opt) = {
         let Some(entity) = enemies.get_mut(&target_id) else {
             return false;
         };
@@ -293,7 +293,13 @@ fn apply_spell_damage_to_enemy(
             let mob_xp = entity.mob.xp;
             let death_pos = entity.pos;
             let mob_name = entity.mob.name.clone();
-            (true, credit_id_opt, mob_xp, death_pos, mob_name, damage_done)
+            let warder_owner_opt: Option<EntityId> =
+                if super::pet_templates::is_warder_template(&entity.mob.name) {
+                    entity.owner
+                } else {
+                    None
+                };
+            (true, credit_id_opt, mob_xp, death_pos, mob_name, damage_done, warder_owner_opt)
         } else {
             if dmg > 0 {
                 entity.clear_mez();
@@ -313,7 +319,7 @@ fn apply_spell_damage_to_enemy(
                     spell.attack_slow_duration,
                 ));
             }
-            (false, None, 0, entity.pos, String::new(), damage_done)
+            (false, None, 0, entity.pos, String::new(), damage_done, None)
         }
     };
 
@@ -342,6 +348,23 @@ fn apply_spell_damage_to_enemy(
     }
 
     if died {
+        // Warder respawn — mirrors the melee path. If the dying entity
+        // is a Beast Master warder, schedule the owner's
+        // warder_respawn_at so the warder-respawn sweep brings it back.
+        if let Some(owner_id) = warder_owner_opt {
+            const WARDER_RETREAT_SECS: f32 = 15.0;
+            let due = now + std::time::Duration::from_secs_f32(WARDER_RETREAT_SECS);
+            let owner_cid = owner_id as ClientId;
+            if let Some(conn) = connections.get_mut(&owner_cid) {
+                conn.warder_respawn_at = Some(due);
+                tracing::info!(
+                    owner = owner_cid as u64,
+                    killer = caster_id,
+                    retreat_secs = WARDER_RETREAT_SECS,
+                    "warder retreating after spell kill",
+                );
+            }
+        }
         if let Some(credit_id) = credit_id_opt {
             if mob_xp > 0 {
                 let cid = credit_id as ClientId;
@@ -1309,6 +1332,37 @@ pub async fn run(
                     );
                 }
             }
+            // Round-7B fix — seed the new joiner with PetSpawn for every
+            // *existing* pet owned by a visible peer. Without this, a
+            // pet auto-summoned before the new client entered world
+            // never reaches them — the auto-summon's fan_out_pet_spawn
+            // only targets `in_world_recipients_now`, which doesn't
+            // include the not-yet-arrived player. Playtest report:
+            // Boring saw Fun's pet but Fun never saw Boring's pet,
+            // and the asymmetry tracked back to spawn ordering.
+            for (entity_id, entity) in enemies.iter() {
+                if !entity.is_pet() || !entity.is_alive() {
+                    continue;
+                }
+                let Some(owner_id) = entity.owner else { continue };
+                let owner_cid = owner_id as ClientId;
+                // Only seed pets whose owner is a peer the new client
+                // can see — matches the player EntitySpawn gate above.
+                if !peer_ids.contains(&owner_cid) {
+                    continue;
+                }
+                handlers::fan_out_pet_spawn(
+                    &mut server,
+                    std::slice::from_ref(new_id),
+                    entity,
+                );
+                tracing::debug!(
+                    new_client = *new_id as u64,
+                    pet_id = *entity_id,
+                    owner = owner_id,
+                    "EnterWorld seeded existing pet to new client"
+                );
+            }
             // Track 13.2 — seed the new joiner with their own inventory
             // snapshot. Private message; peers don't see it. Always
             // fans (even if the snapshot is empty) so the client knows
@@ -1873,14 +1927,26 @@ pub async fn run(
                                 }
                         })
                         .unwrap_or(false);
-                    if !allowed_pvp || !target_in_range_alive {
-                        if !allowed_pvp {
-                            tracing::debug!(
-                                attacker = intent.attacker,
-                                target = intent.target_id,
-                                "PvP not authorized, fanning Miss"
-                            );
-                        }
+                    if !allowed_pvp {
+                        let name = connections
+                            .get(&target_cid)
+                            .map(|c| c.name.clone())
+                            .unwrap_or_else(|| "that target".to_string());
+                        handlers::fan_out_chat_message(
+                            &mut server,
+                            &[attacker_cid],
+                            "",
+                            protocol::world::ChatChannel::System,
+                            &format!("Unable to attack {}.", name),
+                        );
+                        tracing::debug!(
+                            attacker = intent.attacker,
+                            target = intent.target_id,
+                            "PvP not authorized"
+                        );
+                        continue;
+                    }
+                    if !target_in_range_alive {
                         handlers::fan_out_miss(
                             &mut server,
                             &in_world_recipients_now,
@@ -2062,6 +2128,73 @@ pub async fn run(
                     continue;
                 }
 
+                // Pet PvP gate. Pets inherit their owner's PvP flag —
+                // a player can't damage another player's pet unless
+                // can_attack between the players would already allow
+                // a direct hit. NPC-owned pets (none today, but
+                // charm/PetSummon paths exist) and regular mobs have
+                // `entity.owner == None` and fall through. Look up
+                // owner first via an immutable borrow so the
+                // mutable damage borrow below remains valid.
+                if intent.target_id >= protocol::world::PET_ID_BASE {
+                    let pet_owner = enemies.get(&intent.target_id).and_then(|e| e.owner);
+                    if let Some(owner_id) = pet_owner {
+                        let owner_cid = owner_id as ClientId;
+                        let allowed = if owner_cid == attacker_cid {
+                            false  // attacking your own pet — defensive guard
+                        } else {
+                            match (
+                                connections.get(&attacker_cid),
+                                connections.get(&owner_cid),
+                            ) {
+                                (Some(a), Some(o)) => combat::can_attack(
+                                    a, o,
+                                    a.zone.as_deref(),
+                                    o.zone.as_deref(),
+                                ),
+                                _ => false,
+                            }
+                        };
+                        if !allowed {
+                            // Resolve "Owner's PetName." for the chat
+                            // line. Owner name lives on the connection;
+                            // pet display name lives on the Entity's mob
+                            // template. Either may be missing if the
+                            // owner just disconnected or the pet's
+                            // template lookup is degraded — fall back
+                            // to a generic message in that case.
+                            let owner_name = connections
+                                .get(&(owner_id as ClientId))
+                                .map(|c| c.name.clone())
+                                .unwrap_or_default();
+                            let pet_name = enemies
+                                .get(&intent.target_id)
+                                .map(|p| p.mob.name.clone())
+                                .unwrap_or_default();
+                            let line = if !owner_name.is_empty() && !pet_name.is_empty() {
+                                format!("Unable to attack {}'s {}.", owner_name, pet_name)
+                            } else if !pet_name.is_empty() {
+                                format!("Unable to attack the {}.", pet_name)
+                            } else {
+                                "Unable to attack that target.".to_string()
+                            };
+                            handlers::fan_out_chat_message(
+                                &mut server,
+                                &[attacker_cid],
+                                "",
+                                protocol::world::ChatChannel::System,
+                                &line,
+                            );
+                            tracing::debug!(
+                                attacker = intent.attacker,
+                                target = intent.target_id,
+                                owner = owner_id,
+                                "PvP not authorized vs pet"
+                            );
+                            continue;
+                        }
+                    }
+                }
                 let Some(entity) = enemies.get_mut(&intent.target_id) else {
                     handlers::fan_out_miss(
                         &mut server,
@@ -2188,6 +2321,28 @@ pub async fn run(
                         &in_world_recipients_now,
                         entity.id,
                     );
+                    // Warder respawn — if a player kill (PvP or
+                    // accidental) drops a Beast Master warder, schedule
+                    // the same retreat-and-respawn the enemy-kill path
+                    // at line ~5011 uses. Without this the pet stays
+                    // dead until the owner re-zones.
+                    if super::pet_templates::is_warder_template(&entity.mob.name) {
+                        if let Some(owner_id) = entity.owner {
+                            const WARDER_RETREAT_SECS: f32 = 15.0;
+                            let due = now
+                                + std::time::Duration::from_secs_f32(WARDER_RETREAT_SECS);
+                            let owner_cid = owner_id as ClientId;
+                            if let Some(conn) = connections.get_mut(&owner_cid) {
+                                conn.warder_respawn_at = Some(due);
+                                tracing::info!(
+                                    owner = owner_cid as u64,
+                                    killer = intent.attacker,
+                                    retreat_secs = WARDER_RETREAT_SECS,
+                                    "warder retreating after player kill",
+                                );
+                            }
+                        }
+                    }
                     // Kill credit: pick the top damager from the aggro
                     // table and send a private XpGained. Solo-only
                     // semantics — the legacy enet GroupManager path
@@ -2711,6 +2866,61 @@ pub async fn run(
                                 );
                                 continue;
                             }
+                            // PvP heal gate. If the caster and the pet's
+                            // owner are mutually attackable (can_attack
+                            // returns true), the pet is treated as a
+                            // hostile target for heal purposes — same
+                            // gate as direct attacks, just mirrored.
+                            // Stops a healer from topping up the duel
+                            // partner's warder mid-fight.
+                            let pet_owner = enemies
+                                .get(&raw_target)
+                                .and_then(|p| p.owner);
+                            if let Some(owner_id) = pet_owner {
+                                if owner_id != intent.caster {
+                                    let owner_cid = owner_id as ClientId;
+                                    let hostile = match (
+                                        connections.get(&caster_cid),
+                                        connections.get(&owner_cid),
+                                    ) {
+                                        (Some(a), Some(o)) => combat::can_attack(
+                                            a, o,
+                                            a.zone.as_deref(),
+                                            o.zone.as_deref(),
+                                        ),
+                                        _ => false,
+                                    };
+                                    if hostile {
+                                        let owner_name = connections
+                                            .get(&owner_cid)
+                                            .map(|c| c.name.clone())
+                                            .unwrap_or_default();
+                                        let pet_name = enemies
+                                            .get(&raw_target)
+                                            .map(|p| p.mob.name.clone())
+                                            .unwrap_or_default();
+                                        let line = if !owner_name.is_empty() && !pet_name.is_empty() {
+                                            format!("You cannot heal {}'s {}.", owner_name, pet_name)
+                                        } else {
+                                            "You cannot heal an enemy's pet.".to_string()
+                                        };
+                                        handlers::fan_out_chat_message(
+                                            &mut server,
+                                            &[caster_cid],
+                                            "",
+                                            protocol::world::ChatChannel::System,
+                                            &line,
+                                        );
+                                        tracing::debug!(
+                                            caster = intent.caster,
+                                            target = raw_target,
+                                            owner = owner_id,
+                                            "ALLY pet heal rejected — PvP gate"
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
                             let heal = spell.heal_amount;
                             if heal > 0.0 {
                                 if let Some(pet) = enemies.get_mut(&raw_target) {
@@ -2773,6 +2983,48 @@ pub async fn run(
                             .map_or(false, |c| c.in_world && c.hp > 0.0);
                         if !target_ok {
                             continue;
+                        }
+                        // PvP heal gate (player target). If caster and
+                        // target are mutually attackable, treat the
+                        // target as hostile for heal purposes. Self-
+                        // heal (caster == target) bypasses naturally
+                        // since combat::can_attack rejects same-id.
+                        if target_cid != caster_cid {
+                            let hostile = match (
+                                connections.get(&caster_cid),
+                                connections.get(&target_cid),
+                            ) {
+                                (Some(a), Some(t)) => combat::can_attack(
+                                    a, t,
+                                    a.zone.as_deref(),
+                                    t.zone.as_deref(),
+                                ),
+                                _ => false,
+                            };
+                            if hostile {
+                                let t_name = connections
+                                    .get(&target_cid)
+                                    .map(|c| c.name.clone())
+                                    .unwrap_or_default();
+                                let line = if !t_name.is_empty() {
+                                    format!("You cannot heal {}.", t_name)
+                                } else {
+                                    "You cannot heal an enemy.".to_string()
+                                };
+                                handlers::fan_out_chat_message(
+                                    &mut server,
+                                    &[caster_cid],
+                                    "",
+                                    protocol::world::ChatChannel::System,
+                                    &line,
+                                );
+                                tracing::debug!(
+                                    caster = intent.caster,
+                                    target = target_entity_id,
+                                    "ALLY heal rejected — PvP gate"
+                                );
+                                continue;
+                            }
                         }
                         let heal = spell.heal_amount;
                         if heal > 0.0 {
@@ -2844,6 +3096,17 @@ pub async fn run(
                                 _ => false,
                             };
                             if !pvp_ok {
+                                let name = connections
+                                    .get(&target_cid)
+                                    .map(|c| c.name.clone())
+                                    .unwrap_or_else(|| "that target".to_string());
+                                handlers::fan_out_chat_message(
+                                    &mut server,
+                                    &[caster_cid],
+                                    "",
+                                    protocol::world::ChatChannel::System,
+                                    &format!("Unable to attack {}.", name),
+                                );
                                 tracing::debug!(
                                     caster = intent.caster,
                                     target = target_id,
@@ -3099,6 +3362,63 @@ pub async fn run(
                         if !in_range {
                             continue;
                         }
+                        // Pet PvP gate, mirroring the melee/ranged path.
+                        // Spell hits on another player's pet require
+                        // can_attack between the caster and the pet's
+                        // owner.
+                        if target_id >= protocol::world::PET_ID_BASE {
+                            let pet_owner = enemies.get(&target_id).and_then(|e| e.owner);
+                            if let Some(owner_id) = pet_owner {
+                                let owner_cid = owner_id as ClientId;
+                                let allowed = if owner_cid == caster_cid {
+                                    false  // own pet — defensive guard
+                                } else {
+                                    match (
+                                        connections.get(&caster_cid),
+                                        connections.get(&owner_cid),
+                                    ) {
+                                        (Some(a), Some(o)) => combat::can_attack(
+                                            a, o,
+                                            a.zone.as_deref(),
+                                            o.zone.as_deref(),
+                                        ),
+                                        _ => false,
+                                    }
+                                };
+                                if !allowed {
+                                    let owner_name = connections
+                                        .get(&(owner_id as ClientId))
+                                        .map(|c| c.name.clone())
+                                        .unwrap_or_default();
+                                    let pet_name = enemies
+                                        .get(&target_id)
+                                        .map(|p| p.mob.name.clone())
+                                        .unwrap_or_default();
+                                    let line = if !owner_name.is_empty() && !pet_name.is_empty() {
+                                        format!("Unable to attack {}'s {}.", owner_name, pet_name)
+                                    } else if !pet_name.is_empty() {
+                                        format!("Unable to attack the {}.", pet_name)
+                                    } else {
+                                        "Unable to attack that target.".to_string()
+                                    };
+                                    handlers::fan_out_chat_message(
+                                        &mut server,
+                                        &[caster_cid],
+                                        "",
+                                        protocol::world::ChatChannel::System,
+                                        &line,
+                                    );
+                                    tracing::debug!(
+                                        caster = intent.caster,
+                                        target = target_id,
+                                        owner = owner_id,
+                                        spell = %spell.name,
+                                        "PvP spell not authorized vs pet"
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
                         apply_spell_damage_to_enemy(
                             &mut server,
                             &in_world_recipients_now,
@@ -3112,6 +3432,20 @@ pub async fn run(
                             dmg_type,
                             now,
                         );
+                        // Visibility log for PvP spell-on-pet. The
+                        // pet-target path doesn't reach the
+                        // "PvP spell applied" trace at line ~3002 (which
+                        // is in the player-target arm), so without this
+                        // line a spell-on-pet hit is invisible in
+                        // server.log and hard to triage.
+                        if target_id >= protocol::world::PET_ID_BASE {
+                            tracing::info!(
+                                caster = intent.caster,
+                                target = target_id,
+                                spell = %spell.name,
+                                "PvP spell applied vs pet"
+                            );
+                        }
                         // Track 11.3 — refresh pet target inheritance
                         // on every single-target damage spell too, so
                         // a Necromancer casting Bone Shards at an
@@ -3550,13 +3884,140 @@ pub async fn run(
                             tracing::debug!(owner = intent.owner, "PetCommand ATTACK dropped — no target_id");
                             continue;
                         };
-                        let target_alive_enemy = enemies
-                            .get(&target_id)
-                            .map(|e| e.is_alive() && !e.is_pet())
-                            .unwrap_or(false);
-                        if !target_alive_enemy {
-                            tracing::debug!(owner = intent.owner, target = target_id, "PetCommand ATTACK dropped — target not a live enemy");
+                        // Pet-on-player engage: target ids below
+                        // ENEMY_ID_BASE are player char_ids. PvP rules
+                        // mirror direct player-on-player melee (both
+                        // need /pvp on, can't target self).
+                        if target_id < protocol::world::ENEMY_ID_BASE {
+                            let owner_cid = intent.owner as ClientId;
+                            let target_cid = target_id as ClientId;
+                            let allowed = if target_cid == owner_cid {
+                                false
+                            } else {
+                                match (
+                                    connections.get(&owner_cid),
+                                    connections.get(&target_cid),
+                                ) {
+                                    (Some(a), Some(t)) if t.in_world && t.hp > 0.0 => combat::can_attack(
+                                        a, t,
+                                        a.zone.as_deref(),
+                                        t.zone.as_deref(),
+                                    ),
+                                    _ => false,
+                                }
+                            };
+                            if !allowed {
+                                let t_name = connections
+                                    .get(&target_cid)
+                                    .map(|c| c.name.clone())
+                                    .unwrap_or_default();
+                                let line = if !t_name.is_empty() {
+                                    format!("Unable to attack {}.", t_name)
+                                } else {
+                                    "Unable to attack that target.".to_string()
+                                };
+                                handlers::fan_out_chat_message(
+                                    &mut server,
+                                    &[owner_cid],
+                                    "",
+                                    protocol::world::ChatChannel::System,
+                                    &line,
+                                );
+                                tracing::debug!(
+                                    owner = intent.owner,
+                                    target = target_id,
+                                    "PetCommand ATTACK rejected — player PvP gate"
+                                );
+                                continue;
+                            }
+                            if let Some(pet) = enemies.get_mut(&pet_id) {
+                                pet.target = Some(target_id);
+                                pet.command_at = Some(now);
+                                pet.stance = entity::PetStance::Follow;
+                            }
+                            tracing::info!(owner = intent.owner, pet_id, target = target_id, "PetCommand ATTACK (player)");
                             continue;
+                        }
+                        // Resolve target's liveness, owner (for pet
+                        // targets), and pet-ness in one immutable
+                        // lookup so the PvP gate below can run before
+                        // the mutable pet-borrow at line ~3767.
+                        let (target_alive, target_owner_opt, target_is_pet) =
+                            match enemies.get(&target_id) {
+                                Some(e) => (e.is_alive(), e.owner, e.is_pet()),
+                                None => (false, None, false),
+                            };
+                        if !target_alive {
+                            tracing::debug!(owner = intent.owner, target = target_id, "PetCommand ATTACK dropped — target not alive");
+                            continue;
+                        }
+                        // Pet-on-pet engage: owner cannot point their
+                        // pet at their own pet, and the two owners must
+                        // both have /pvp on (mirrors the player-on-pet
+                        // gate at line ~2085). Rejection routes the
+                        // same "Unable to attack" line to the owner so
+                        // the failure mode matches direct attacks.
+                        if target_is_pet {
+                            let owner_cid = intent.owner as ClientId;
+                            // Own pet — refuse with a distinct line so
+                            // the player isn't confused by an
+                            // "Unable to attack Self's Wolf." rejection.
+                            if target_owner_opt == Some(intent.owner) {
+                                handlers::fan_out_chat_message(
+                                    &mut server,
+                                    &[owner_cid],
+                                    "",
+                                    protocol::world::ChatChannel::System,
+                                    "Your pet won't attack itself.",
+                                );
+                                continue;
+                            }
+                            let allowed = match target_owner_opt {
+                                Some(t_owner) => {
+                                    let t_cid = t_owner as ClientId;
+                                    match (
+                                        connections.get(&owner_cid),
+                                        connections.get(&t_cid),
+                                    ) {
+                                        (Some(a), Some(b)) => combat::can_attack(
+                                            a, b,
+                                            a.zone.as_deref(),
+                                            b.zone.as_deref(),
+                                        ),
+                                        _ => false,
+                                    }
+                                }
+                                None => true, // unowned pet (charm etc.) — treat as enemy
+                            };
+                            if !allowed {
+                                let t_owner_name = target_owner_opt
+                                    .and_then(|id| connections.get(&(id as ClientId)).map(|c| c.name.clone()))
+                                    .unwrap_or_default();
+                                let pet_name = enemies
+                                    .get(&target_id)
+                                    .map(|p| p.mob.name.clone())
+                                    .unwrap_or_default();
+                                let line = if !t_owner_name.is_empty() && !pet_name.is_empty() {
+                                    format!("Unable to attack {}'s {}.", t_owner_name, pet_name)
+                                } else if !pet_name.is_empty() {
+                                    format!("Unable to attack the {}.", pet_name)
+                                } else {
+                                    "Unable to attack that target.".to_string()
+                                };
+                                handlers::fan_out_chat_message(
+                                    &mut server,
+                                    &[owner_cid],
+                                    "",
+                                    protocol::world::ChatChannel::System,
+                                    &line,
+                                );
+                                tracing::debug!(
+                                    owner = intent.owner,
+                                    target = target_id,
+                                    "PetCommand ATTACK rejected — pet PvP gate"
+                                );
+                                continue;
+                            }
                         }
                         if let Some(pet) = enemies.get_mut(&pet_id) {
                             pet.target = Some(target_id);
@@ -4694,14 +5155,23 @@ pub async fn run(
                     targets_for_enemy_ai.push((*id, entity.pos));
                 }
             }
-            // Snapshot live non-pet enemies so pets can read target
-            // position + alive-status without re-borrowing the map
-            // inside the per-entity loop. (id, pos, alive)
-            let enemy_target_snapshots: Vec<(EntityId, Vec3f, bool)> = enemies
+            // Snapshot live enemies (mobs AND pets) plus players so pet
+            // AI can read its target's position + alive-status without
+            // re-borrowing the map inside the per-entity loop. Pets and
+            // players were excluded pre-Round-4 because pet AI only
+            // engaged NPC mobs; /pet attack on a peer player or peer's
+            // pet now passes the PvP gate at command time, so the
+            // snapshot has to cover all three target classes or the pet
+            // just stands still (no target_info → falls back to follow).
+            let mut enemy_target_snapshots: Vec<(EntityId, Vec3f, bool)> = enemies
                 .iter()
-                .filter(|(_, e)| !e.is_pet())
                 .map(|(id, e)| (*id, e.pos, e.is_alive()))
                 .collect();
+            for c in connections.values() {
+                if c.in_world {
+                    enemy_target_snapshots.push((c.char_id as u64, c.pos, c.hp > 0.0));
+                }
+            }
             // Pre-pass: drive each pet's target from its owner's last
             // attack. None if the inheritance has decayed or the
             // target is gone. Track 12 Piece A — pets with a fresh
@@ -4767,12 +5237,38 @@ pub async fn run(
             // Drop expired command stickiness so a stale Attack
             // command doesn't keep the pet pinned to a dead target
             // when the player just stops giving commands.
+            //
+            // Additionally, clear the sticky as soon as a Follow-stance
+            // pet (no target) reaches its owner — the /pet back case.
+            // Without this, the 30 s window blocks inheritance for
+            // several seconds AFTER the pet has visibly arrived,
+            // making the player feel like the pet "forgot" how to
+            // engage. Round-5 playtest feedback: re-engage should kick
+            // in the moment the pet is in close proximity to the
+            // owner. Guard / Sit stances keep their sticky (those
+            // stances *intentionally* suppress inheritance).
+            const PET_BACK_HOME_DISTANCE: f32 = 4.0;
             for pet in enemies.values_mut() {
                 if !pet.is_pet() { continue; }
-                if let Some(t) = pet.command_at {
-                    if now.duration_since(t).as_secs_f32() > PET_COMMAND_STICKY_SECS {
-                        pet.command_at = None;
-                    }
+                let Some(t) = pet.command_at else { continue; };
+                if now.duration_since(t).as_secs_f32() > PET_COMMAND_STICKY_SECS {
+                    pet.command_at = None;
+                    continue;
+                }
+                if pet.target.is_some() {
+                    continue;
+                }
+                if pet.stance != entity::PetStance::Follow {
+                    continue;
+                }
+                let Some(owner_id) = pet.owner else { continue; };
+                let Some(owner_pos) = connections
+                    .get(&(owner_id as ClientId))
+                    .filter(|c| c.in_world)
+                    .map(|c| c.pos)
+                else { continue; };
+                if pet.pos.distance_to(owner_pos) <= PET_BACK_HOME_DISTANCE {
+                    pet.command_at = None;
                 }
             }
             let mut target_changes: Vec<(EntityId, Option<EntityId>)> = Vec::new();
@@ -4912,7 +5408,8 @@ pub async fn run(
                 // we accumulate under the owner's id).
                 if attacker >= protocol::world::PET_ID_BASE
                     && hit.target >= protocol::world::ENEMY_ID_BASE
-                    && hit.target < protocol::world::LOOT_BAG_ID_BASE
+                    && (hit.target < protocol::world::LOOT_BAG_ID_BASE
+                        || hit.target >= protocol::world::PET_ID_BASE)
                 {
                     let owner_id_opt = enemies
                         .get(&attacker)
@@ -4948,6 +5445,15 @@ pub async fn run(
                         let mob_name_dead = if died {
                             target_entity.transition(EnemyState::Dead, now);
                             Some(target_entity.mob.name.clone())
+                        } else {
+                            None
+                        };
+                        // Capture the dying entity's owner so a
+                        // warder-template kill can schedule the
+                        // owner's respawn after the borrow drops. None
+                        // for NPC enemies; Some for pets.
+                        let dead_pet_owner_opt: Option<EntityId> = if died {
+                            target_entity.owner
                         } else {
                             None
                         };
@@ -4991,6 +5497,29 @@ pub async fn run(
                                 &in_world_recipients_now,
                                 hit.target,
                             );
+                            // Warder respawn — if a pet kills another
+                            // pet that's a Beast Master warder, schedule
+                            // the same retreat-and-respawn the melee /
+                            // spell paths use.
+                            if let Some(mob_name) = mob_name_dead.as_ref() {
+                                if super::pet_templates::is_warder_template(mob_name) {
+                                    if let Some(owner_id) = dead_pet_owner_opt {
+                                        const WARDER_RETREAT_SECS: f32 = 15.0;
+                                        let due = now
+                                            + std::time::Duration::from_secs_f32(WARDER_RETREAT_SECS);
+                                        let owner_cid = owner_id as ClientId;
+                                        if let Some(conn) = connections.get_mut(&owner_cid) {
+                                            conn.warder_respawn_at = Some(due);
+                                            tracing::info!(
+                                                owner = owner_cid as u64,
+                                                killer = attacker,
+                                                retreat_secs = WARDER_RETREAT_SECS,
+                                                "warder retreating after pet kill",
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             if let Some(credit_id) = credit_id_opt {
                                 if mob_xp > 0 && credit_id < protocol::world::ENEMY_ID_BASE {
                                     let cid = credit_id as ClientId;

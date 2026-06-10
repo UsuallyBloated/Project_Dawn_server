@@ -135,4 +135,14 @@ impl GroupManager {
         let gid = self.member_to_group.get(&member)?;
         self.groups.get(gid)
     }
+
+    /// True if both members belong to the same group. The ALLY heal/buff
+    /// PvP gate uses this so group-mates can always support each other,
+    /// even when both have `/pvp` flagged on.
+    pub fn same_group(&self, a: ClientId, b: ClientId) -> bool {
+        match (self.member_to_group.get(&a), self.member_to_group.get(&b)) {
+            (Some(ga), Some(gb)) => ga == gb,
+            _ => false,
+        }
+    }
 }

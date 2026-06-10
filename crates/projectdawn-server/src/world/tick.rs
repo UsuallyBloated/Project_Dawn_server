@@ -197,6 +197,119 @@ fn apply_absorb_exclusive(conn: &mut PerConnection, buff: ActiveBuff) {
     conn.active_buffs.push(buff);
 }
 
+/// Apply every beneficial buff a spell grants to one recipient — the
+/// caster for a SELF spell, the targeted ally for an ALLY spell. Covers
+/// HoT, MP-regen, speed, haste, damage shield, absorb, accuracy/crit, and
+/// primary stat buffs. Lich Form and the self heal/damage are NOT here:
+/// Lich is a SELF-only toggle and the heal lands before this in each arm.
+/// Returns true if the active set changed so the caller fans a
+/// BuffSnapshot. `mark_dirty` is called for stat/MP changes so the next
+/// regen tick fans the updated max HP/MP caps.
+fn apply_player_spell_buffs(conn: &mut PerConnection, spell: &spells::Spell, now: Instant) -> bool {
+    let mut changed = false;
+    if spell.hot_hps > 0.0 && spell.hot_duration > 0.0 {
+        apply_buff(
+            conn,
+            ActiveBuff::new_hot(spell.name.clone(), spell.hot_hps, spell.hot_duration, now),
+        );
+        changed = true;
+    }
+    if spell.mp_regen_hps > 0.0 && spell.mp_regen_duration > 0.0 {
+        apply_mp_regen_exclusive(
+            conn,
+            ActiveBuff::new_mp_regen(
+                spell.name.clone(),
+                spell.mp_regen_hps,
+                spell.mp_regen_duration,
+                now,
+            ),
+        );
+        changed = true;
+    }
+    if spell.move_speed_mult > 0.0 && spell.move_speed_duration > 0.0 {
+        apply_buff(
+            conn,
+            ActiveBuff::new_speed(
+                spell.name.clone(),
+                spell.move_speed_mult,
+                spell.move_speed_duration,
+                now,
+            ),
+        );
+        changed = true;
+    }
+    if spell.haste_amount > 0.0 && spell.haste_duration > 0.0 {
+        apply_buff(
+            conn,
+            ActiveBuff::new_haste(spell.name.clone(), spell.haste_amount, spell.haste_duration, now),
+        );
+        changed = true;
+    }
+    if spell.damage_shield_amount > 0.0 && spell.damage_shield_duration > 0.0 {
+        apply_damage_shield_exclusive(
+            conn,
+            ActiveBuff::new_damage_shield(
+                spell.name.clone(),
+                spell.damage_shield_amount,
+                spell.damage_shield_duration,
+                now,
+            ),
+        );
+        changed = true;
+    }
+    if spell.absorb_amount > 0.0 {
+        apply_absorb_exclusive(
+            conn,
+            ActiveBuff::new_absorb(spell.name.clone(), spell.absorb_amount, now),
+        );
+        changed = true;
+    }
+    if (spell.accuracy_buff > 0.0 || spell.crit_buff > 0.0) && spell.stat_buff_duration > 0.0 {
+        apply_buff(
+            conn,
+            ActiveBuff::new_accuracy_crit(
+                spell.name.clone(),
+                spell.accuracy_buff,
+                spell.crit_buff,
+                spell.stat_buff_duration,
+                now,
+            ),
+        );
+        changed = true;
+    }
+    if spell.primary_stat_buff_duration > 0.0 {
+        let any_nonzero = spell.str_buff != 0
+            || spell.agi_buff != 0
+            || spell.int_buff != 0
+            || spell.wis_buff != 0
+            || spell.con_buff != 0
+            || spell.max_hp_buff != 0.0
+            || spell.max_mp_buff != 0.0;
+        if any_nonzero {
+            apply_stat_buff(
+                conn,
+                ActiveBuff::new_stat_buff(
+                    spell.name.clone(),
+                    spell.str_buff,
+                    spell.agi_buff,
+                    spell.int_buff,
+                    spell.wis_buff,
+                    spell.con_buff,
+                    spell.max_hp_buff,
+                    spell.max_mp_buff,
+                    spell.primary_stat_buff_duration,
+                    now,
+                ),
+            );
+            // max_hp / max_mp may have changed — mark resources dirty so
+            // the next regen tick fans HealthUpdate / ManaUpdate.
+            regen::mark_dirty(conn);
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Track 6 sub-task 4a — rebuild conn.buff_snapshot from
 /// active_buffs and fan a BuffSnapshot to in-world peers. Server is
 /// authoritative on buff state now; the client-driven
@@ -2568,6 +2681,15 @@ pub async fn run(
                         cost = spell.mana_cost,
                         "spell cast rejected — insufficient mana"
                     );
+                    // Tell the caster so they see "Cast failed: Not enough
+                    // mana." instead of a silent no-op behind the optimistic
+                    // local "You cast X" line.
+                    handlers::fan_out_cast_fail(
+                        &mut server,
+                        &in_world_recipients_now,
+                        intent.caster,
+                        "Not enough mana.".to_string(),
+                    );
                     continue;
                 }
                 let caster_pos = caster_conn.pos;
@@ -2678,35 +2800,13 @@ pub async fn run(
                                 "spell self effect applied"
                             );
                         }
-                        // Track 6 sub-task 4a — apply buffs to caster.
-                        // HoT, MP regen, Lich Form. Push onto
-                        // conn.active_buffs (overwrites same-name to
-                        // refresh duration). Snapshot fans below.
+                        // Track 6 — apply caster buffs. Lich Form is a
+                        // SELF-only toggle handled inline; the rest of the
+                        // beneficial buffs (HoT / MP-regen / speed / haste /
+                        // shield / absorb / accuracy / primary stat) flow
+                        // through the shared apply_player_spell_buffs so the
+                        // SELF and ALLY arms stay in lockstep.
                         let mut buff_changed = false;
-                        if spell.hot_hps > 0.0 && spell.hot_duration > 0.0 {
-                            apply_buff(
-                                connections.get_mut(&caster_cid).expect("checked"),
-                                ActiveBuff::new_hot(
-                                    spell.name.clone(),
-                                    spell.hot_hps,
-                                    spell.hot_duration,
-                                    now,
-                                ),
-                            );
-                            buff_changed = true;
-                        }
-                        if spell.mp_regen_hps > 0.0 && spell.mp_regen_duration > 0.0 {
-                            apply_mp_regen_exclusive(
-                                connections.get_mut(&caster_cid).expect("checked"),
-                                ActiveBuff::new_mp_regen(
-                                    spell.name.clone(),
-                                    spell.mp_regen_hps,
-                                    spell.mp_regen_duration,
-                                    now,
-                                ),
-                            );
-                            buff_changed = true;
-                        }
                         if spell.is_lich_form {
                             // Toggle semantics — second cast clears.
                             let cc = connections.get_mut(&caster_cid).expect("checked");
@@ -2724,118 +2824,12 @@ pub async fn run(
                             }
                             buff_changed = true;
                         }
-                        // Track 6 sub-task 4c — combat-modifier buffs.
-                        // Speed / Haste / DamageShield / Absorb /
-                        // AccuracyCrit. All apply on the caster (SELF
-                        // target). Refresh same-name on re-cast.
-                        if spell.move_speed_mult > 0.0 && spell.move_speed_duration > 0.0 {
-                            apply_buff(
-                                connections.get_mut(&caster_cid).expect("checked"),
-                                ActiveBuff::new_speed(
-                                    spell.name.clone(),
-                                    spell.move_speed_mult,
-                                    spell.move_speed_duration,
-                                    now,
-                                ),
-                            );
+                        if apply_player_spell_buffs(
+                            connections.get_mut(&caster_cid).expect("checked"),
+                            spell,
+                            now,
+                        ) {
                             buff_changed = true;
-                        }
-                        if spell.haste_amount > 0.0 && spell.haste_duration > 0.0 {
-                            apply_buff(
-                                connections.get_mut(&caster_cid).expect("checked"),
-                                ActiveBuff::new_haste(
-                                    spell.name.clone(),
-                                    spell.haste_amount,
-                                    spell.haste_duration,
-                                    now,
-                                ),
-                            );
-                            buff_changed = true;
-                        }
-                        if spell.damage_shield_amount > 0.0 && spell.damage_shield_duration > 0.0 {
-                            apply_damage_shield_exclusive(
-                                connections.get_mut(&caster_cid).expect("checked"),
-                                ActiveBuff::new_damage_shield(
-                                    spell.name.clone(),
-                                    spell.damage_shield_amount,
-                                    spell.damage_shield_duration,
-                                    now,
-                                ),
-                            );
-                            buff_changed = true;
-                        }
-                        if spell.absorb_amount > 0.0 {
-                            apply_absorb_exclusive(
-                                connections.get_mut(&caster_cid).expect("checked"),
-                                ActiveBuff::new_absorb(
-                                    spell.name.clone(),
-                                    spell.absorb_amount,
-                                    now,
-                                ),
-                            );
-                            buff_changed = true;
-                            tracing::info!(
-                                caster = intent.caster,
-                                spell = %spell.name,
-                                pool = spell.absorb_amount,
-                                "absorb buff applied"
-                            );
-                        }
-                        if (spell.accuracy_buff > 0.0 || spell.crit_buff > 0.0)
-                            && spell.stat_buff_duration > 0.0
-                        {
-                            apply_buff(
-                                connections.get_mut(&caster_cid).expect("checked"),
-                                ActiveBuff::new_accuracy_crit(
-                                    spell.name.clone(),
-                                    spell.accuracy_buff,
-                                    spell.crit_buff,
-                                    spell.stat_buff_duration,
-                                    now,
-                                ),
-                            );
-                            buff_changed = true;
-                        }
-                        // Track 6 sub-task 4b — primary stat buff. Any
-                        // spell with primary_stat_buff_duration > 0 +
-                        // at least one non-zero stat delta pushes a
-                        // StatBuff. apply_stat_buff handles refresh
-                        // (undo old deltas before applying new ones)
-                        // so re-cast doesn't double-stack.
-                        if spell.primary_stat_buff_duration > 0.0 {
-                            let any_nonzero = spell.str_buff != 0
-                                || spell.agi_buff != 0
-                                || spell.int_buff != 0
-                                || spell.wis_buff != 0
-                                || spell.con_buff != 0
-                                || spell.max_hp_buff != 0.0
-                                || spell.max_mp_buff != 0.0;
-                            if any_nonzero {
-                                let buff = ActiveBuff::new_stat_buff(
-                                    spell.name.clone(),
-                                    spell.str_buff,
-                                    spell.agi_buff,
-                                    spell.int_buff,
-                                    spell.wis_buff,
-                                    spell.con_buff,
-                                    spell.max_hp_buff,
-                                    spell.max_mp_buff,
-                                    spell.primary_stat_buff_duration,
-                                    now,
-                                );
-                                apply_stat_buff(
-                                    connections.get_mut(&caster_cid).expect("checked"),
-                                    buff,
-                                );
-                                // max_hp / max_mp may have changed —
-                                // mark resources dirty so the next
-                                // regen tick fans HealthUpdate /
-                                // ManaUpdate reflecting the new caps.
-                                regen::mark_dirty(
-                                    connections.get_mut(&caster_cid).expect("checked"),
-                                );
-                                buff_changed = true;
-                            }
                         }
                         if buff_changed {
                             if let Some(cc) = connections.get(&caster_cid) {
@@ -2890,7 +2884,11 @@ pub async fn run(
                                         ),
                                         _ => false,
                                     };
-                                    if hostile {
+                                    // Group-mates can always support each other —
+                                    // a shared /pvp flag never blocks healing a
+                                    // group-mate's pet.
+                                    let allied = group_manager.same_group(caster_cid, owner_cid);
+                                    if hostile && !allied {
                                         let owner_name = connections
                                             .get(&owner_cid)
                                             .map(|c| c.name.clone())
@@ -3001,7 +2999,11 @@ pub async fn run(
                                 ),
                                 _ => false,
                             };
-                            if hostile {
+                            // Group-mates can always heal/buff each other; a
+                            // shared /pvp flag doesn't make a group-mate a
+                            // valid beneficial-cast block.
+                            let allied = group_manager.same_group(caster_cid, target_cid);
+                            if hostile && !allied {
                                 let t_name = connections
                                     .get(&target_cid)
                                     .map(|c| c.name.clone())
@@ -3050,19 +3052,17 @@ pub async fn run(
                                 "ALLY heal applied"
                             );
                         }
-                        let mut ally_buff_changed = false;
-                        if spell.hot_hps > 0.0 && spell.hot_duration > 0.0 {
-                            apply_buff(
-                                connections.get_mut(&target_cid).expect("checked"),
-                                ActiveBuff::new_hot(
-                                    spell.name.clone(),
-                                    spell.hot_hps,
-                                    spell.hot_duration,
-                                    now,
-                                ),
-                            );
-                            ally_buff_changed = true;
-                        }
+                        // Apply HoT + every beneficial buff to the ally,
+                        // same set the SELF arm grants the caster. Stat
+                        // buffs mutate the target conn's effective stats
+                        // (combat math reads them); the fanned BuffSnapshot
+                        // lets the target's client reconstruct the buff
+                        // locally (BuffManager.reconcile_with_server_snapshot).
+                        let ally_buff_changed = apply_player_spell_buffs(
+                            connections.get_mut(&target_cid).expect("checked"),
+                            spell,
+                            now,
+                        );
                         if ally_buff_changed {
                             if let Some(tc) = connections.get(&target_cid) {
                                 fan_out_server_buff_snapshot(
@@ -3071,6 +3071,12 @@ pub async fn run(
                                     tc,
                                 );
                             }
+                            tracing::info!(
+                                caster = intent.caster,
+                                target = target_entity_id,
+                                spell = %spell.name,
+                                "ALLY buff applied"
+                            );
                         }
                     }
                     "ENEMY" => {

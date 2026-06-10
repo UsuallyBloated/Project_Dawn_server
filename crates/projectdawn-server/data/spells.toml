@@ -215,7 +215,7 @@ classes = ["Druid"]
 # caster's per-tick mana recovery for the duration.
 [[spell]]
 name = "Clarity"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "ARCANE"
 base_damage = 0.0
 heal_amount = 0.0
@@ -263,7 +263,7 @@ classes = ["Necromancer"]
 # math reads conn.strength/etc directly so buffed values flow through.
 [[spell]]
 name = "Bless"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "HOLY"
 base_damage = 0.0
 heal_amount = 0.0
@@ -277,7 +277,7 @@ classes = ["Cleric", "Paladin"]
 
 [[spell]]
 name = "Valor"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "HOLY"
 base_damage = 0.0
 heal_amount = 0.0
@@ -292,7 +292,7 @@ classes = ["Cleric"]
 
 [[spell]]
 name = "Spirit of the Bear"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "SPIRIT"
 base_damage = 0.0
 heal_amount = 0.0
@@ -307,7 +307,7 @@ classes = ["Shaman"]
 
 [[spell]]
 name = "Gift of Insight"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "SPIRIT"
 base_damage = 0.0
 heal_amount = 0.0
@@ -322,7 +322,7 @@ classes = ["Shaman"]
 
 [[spell]]
 name = "Strength"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "ARCANE"
 base_damage = 0.0
 heal_amount = 0.0
@@ -336,7 +336,7 @@ classes = ["Enchanter"]
 
 [[spell]]
 name = "Brilliance"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "ARCANE"
 base_damage = 0.0
 heal_amount = 0.0
@@ -353,7 +353,7 @@ classes = ["Enchanter"]
 # Speed buff (Spirit of Wolf). 40% faster move for 60s.
 [[spell]]
 name = "Spirit of Wolf"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "SPIRIT"
 base_damage = 0.0
 heal_amount = 0.0
@@ -369,7 +369,7 @@ classes = ["Druid", "Shaman"]
 # auto-attack timer is client-paced, so no behavioral effect yet.
 [[spell]]
 name = "Haste"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "ARCANE"
 base_damage = 0.0
 heal_amount = 0.0
@@ -384,7 +384,7 @@ classes = ["Enchanter"]
 # Damage shield — Thorns (8 dmg/hit, 600s).
 [[spell]]
 name = "Thorns"
-target_type = "SELF"
+target_type = "ALLY"
 damage_type = "NATURE"
 base_damage = 0.0
 heal_amount = 0.0

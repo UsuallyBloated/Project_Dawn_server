@@ -544,12 +544,19 @@ pub fn handle_message(
             }
             let delta = amount.max(0) as f32;
             conn.hp = (conn.hp + delta).min(conn.max_hp);
+            // The Test Panel "Full Heal" dev button backs this message;
+            // restore MP + stamina too. These are server-authoritative, so a
+            // client-only set leaves the server's mp drained and casts keep
+            // rejecting — this is the only path that actually tops mana off.
+            // mark_dirty fans HealthUpdate / ManaUpdate / StaminaUpdate.
+            conn.mp = conn.max_mp;
+            conn.stamina = conn.max_stamina;
             super::regen::mark_dirty(conn);
             tracing::info!(
                 char_id = conn.char_id,
                 amount = delta,
                 new_hp = conn.hp,
-                "dev heal self"
+                "dev full restore (hp/mp/stamina)"
             );
             Outcome::Continue
         }

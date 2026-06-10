@@ -310,6 +310,53 @@ fn apply_player_spell_buffs(conn: &mut PerConnection, spell: &spells::Spell, now
     changed
 }
 
+/// Track 13 — apply the pet-relevant beneficial buffs a spell grants to a
+/// pet (ALLY buff cast on it). Mirrors `apply_player_spell_buffs` minus
+/// the effects pets have no model for: mp regen (no mana pool),
+/// accuracy/crit (no crit model), absorb (self-only spells). StatBuff
+/// mutates the pet's stats + max_hp via `Entity::apply_buff`. Returns true
+/// if anything was added so the caller fans a BuffSnapshot.
+fn apply_pet_spell_buffs(pet: &mut Entity, spell: &spells::Spell, now: Instant) -> bool {
+    let mut changed = false;
+    if spell.hot_hps > 0.0 && spell.hot_duration > 0.0 {
+        pet.apply_buff(ActiveBuff::new_hot(
+            spell.name.clone(), spell.hot_hps, spell.hot_duration, now,
+        ));
+        changed = true;
+    }
+    if spell.move_speed_mult > 0.0 && spell.move_speed_duration > 0.0 {
+        pet.apply_buff(ActiveBuff::new_speed(
+            spell.name.clone(), spell.move_speed_mult, spell.move_speed_duration, now,
+        ));
+        changed = true;
+    }
+    if spell.haste_amount > 0.0 && spell.haste_duration > 0.0 {
+        pet.apply_buff(ActiveBuff::new_haste(
+            spell.name.clone(), spell.haste_amount, spell.haste_duration, now,
+        ));
+        changed = true;
+    }
+    if spell.damage_shield_amount > 0.0 && spell.damage_shield_duration > 0.0 {
+        pet.apply_buff(ActiveBuff::new_damage_shield(
+            spell.name.clone(), spell.damage_shield_amount, spell.damage_shield_duration, now,
+        ));
+        changed = true;
+    }
+    if spell.primary_stat_buff_duration > 0.0 {
+        let any_nonzero = spell.str_buff != 0 || spell.agi_buff != 0 || spell.int_buff != 0
+            || spell.wis_buff != 0 || spell.con_buff != 0 || spell.max_hp_buff != 0.0;
+        if any_nonzero {
+            pet.apply_buff(ActiveBuff::new_stat_buff(
+                spell.name.clone(), spell.str_buff, spell.agi_buff, spell.int_buff,
+                spell.wis_buff, spell.con_buff, spell.max_hp_buff, spell.max_mp_buff,
+                spell.primary_stat_buff_duration, now,
+            ));
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Track 6 sub-task 4a — rebuild conn.buff_snapshot from
 /// active_buffs and fan a BuffSnapshot to in-world peers. Server is
 /// authoritative on buff state now; the client-driven
@@ -323,6 +370,27 @@ fn fan_out_server_buff_snapshot(
     let payload = buffs::snapshot_pairs(&conn.active_buffs);
     let msg = protocol::world::ServerWorldMsg::BuffSnapshot {
         target: conn.char_id as u64,
+        buffs: payload,
+    };
+    let Ok(bytes) = bincode::serde::encode_to_vec(&msg, bincode::config::standard()) else {
+        return;
+    };
+    for &recipient in recipients {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+/// Track 13 — fan a BuffSnapshot for a pet's active buffs under the pet
+/// id, so the owner + bystanders render its buff bar (the client routes
+/// the snapshot by id partition). Mirror of `fan_out_server_buff_snapshot`.
+fn fan_out_pet_buff_snapshot(
+    server: &mut renet::RenetServer,
+    recipients: &[renet::ClientId],
+    pet: &Entity,
+) {
+    let payload = buffs::snapshot_pairs(&pet.active_buffs);
+    let msg = protocol::world::ServerWorldMsg::BuffSnapshot {
+        target: pet.id,
         buffs: payload,
     };
     let Ok(bytes) = bincode::serde::encode_to_vec(&msg, bincode::config::standard()) else {
@@ -2941,9 +3009,40 @@ pub async fn run(
                                     );
                                 }
                             }
-                            // HoT / buff path skipped for pets — pets don't
-                            // have an active_buffs field on Entity yet
-                            // (see ALLY-includes-pets scope notes).
+                            // Track 13 — apply the pet-relevant buff set
+                            // (HoT / speed / haste / damage shield / stat)
+                            // to the pet and fan a BuffSnapshot under the
+                            // pet id.
+                            let mut pet_buff_changed = false;
+                            if let Some(pet) = enemies.get_mut(&raw_target) {
+                                pet_buff_changed = apply_pet_spell_buffs(pet, spell, now);
+                            }
+                            if pet_buff_changed {
+                                if let Some(pet) = enemies.get(&raw_target) {
+                                    // Valor-style buffs grow max_hp — fan a
+                                    // HealthUpdate so the bar shows the new cap.
+                                    if spell.max_hp_buff != 0.0 {
+                                        handlers::fan_out_health_update(
+                                            &mut server,
+                                            &in_world_recipients_now,
+                                            raw_target,
+                                            pet.hp,
+                                            pet.max_hp,
+                                        );
+                                    }
+                                    fan_out_pet_buff_snapshot(
+                                        &mut server,
+                                        &in_world_recipients_now,
+                                        pet,
+                                    );
+                                    tracing::info!(
+                                        caster = intent.caster,
+                                        target = raw_target,
+                                        spell = %spell.name,
+                                        "ALLY pet buff applied"
+                                    );
+                                }
+                            }
                             continue;
                         }
                         // Loot bags / out-of-range / unknown high ids are
@@ -5313,11 +5412,16 @@ pub async fn run(
             }
             for (attacker, hit) in enemy_hits {
                 // Track 11.4 — enemy → pet. Mirror of the enemy →
-                // player branch below but simpler: pets have no
-                // armor / absorb / shield buffs and no XP awarded
-                // on death. Just apply HP, fan Hit + HealthUpdate,
-                // and let the existing corpse-cleanup phase remove
-                // the pet from the world after the linger window.
+                // player branch below but simpler: pets have no armor /
+                // absorb and no XP awarded on death. Just apply HP, fan
+                // Hit + HealthUpdate, and let corpse-cleanup remove the
+                // pet after the linger window.
+                // Track 13 note: a pet CAN now carry a Thorns damage
+                // shield (it's tracked + shown), but reflecting it onto
+                // the attacking enemy is deferred — a reflect-kill would
+                // need kill-credit / loot routing to the pet's owner,
+                // which is its own slice. Haste / speed / stat / HoT pet
+                // buffs are fully wired.
                 if attacker >= protocol::world::ENEMY_ID_BASE
                     && attacker < protocol::world::PET_ID_BASE
                     && hit.target >= protocol::world::PET_ID_BASE
@@ -6287,6 +6391,39 @@ pub async fn run(
             for id in buff_snapshot_dirty {
                 if let Some(conn) = connections.get(&(id as ClientId)) {
                     fan_out_server_buff_snapshot(&mut server, &recipients, conn);
+                }
+            }
+        }
+
+        // 5a-pet. Track 13 — pet buff tick. HoT heal + stat-buff expiry
+        // for each pet's active_buffs. Collect the changed pets first, then
+        // fan HealthUpdate / BuffSnapshot once the mut borrow drops.
+        let mut pet_buff_changed: Vec<(EntityId, bool, bool)> = Vec::new();
+        for entity in enemies.values_mut() {
+            if entity.active_buffs.is_empty() {
+                continue;
+            }
+            let (hp_changed, set_changed) = entity.tick_buffs(dt);
+            if hp_changed || set_changed {
+                pet_buff_changed.push((entity.id, hp_changed, set_changed));
+            }
+        }
+        if !pet_buff_changed.is_empty() {
+            let recipients: Vec<ClientId> = connections
+                .iter()
+                .filter(|(_, c)| c.in_world)
+                .map(|(id, _)| *id)
+                .collect();
+            for (pet_id, hp_changed, set_changed) in pet_buff_changed {
+                if let Some(pet) = enemies.get(&pet_id) {
+                    if hp_changed {
+                        handlers::fan_out_health_update(
+                            &mut server, &recipients, pet_id, pet.hp, pet.max_hp,
+                        );
+                    }
+                    if set_changed {
+                        fan_out_pet_buff_snapshot(&mut server, &recipients, pet);
+                    }
                 }
             }
         }

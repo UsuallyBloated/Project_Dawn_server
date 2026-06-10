@@ -9,6 +9,7 @@
 //! remains the legacy single-player Test Room implementation; the
 //! launcher-mode client will be a render-only consumer (sub-task 2).
 
+use super::buffs::{ActiveBuff, BuffEffect};
 use super::{connection::Vec3f, zones::MobTemplate};
 use protocol::world::{EntityId, ENEMY_ID_BASE, PET_ID_BASE};
 use std::collections::HashMap;
@@ -154,6 +155,35 @@ pub struct Entity {
     /// spawn. Non-pet entities leave this at Follow and the AI never
     /// reads it.
     pub stance: PetStance,
+
+    /// Track 13 — primary stats. `stats` is the live value (base +
+    /// active buff deltas); `base_stats` is the unbuffed baseline.
+    /// World enemies leave both at zero (they never read stats); pets
+    /// get a level-derived base on summon. Melee damage adds the STR
+    /// buff delta `(stats.strength - base_stats.strength) / 5` on top of
+    /// `mob.dmg`, mirroring `combat::calc_swing` while preserving the
+    /// authored pet damage when unbuffed (delta 0).
+    pub stats: PrimaryStats,
+    pub base_stats: PrimaryStats,
+
+    /// Track 13 — beneficial buffs applied to a pet (ALLY buffs cast on
+    /// it). Empty for world enemies (never buffed). Ticked alongside the
+    /// AI; StatBuff entries also mutate `stats` / `max_hp` on apply and
+    /// undo on expire. Pet-irrelevant effects (mp regen, accuracy/crit)
+    /// aren't routed here — pets have no mana / crit model.
+    pub active_buffs: Vec<ActiveBuff>,
+}
+
+/// Track 13 — five-stat block carried by an Entity. Used by pets so
+/// ALLY stat buffs apply the same way they do to a player
+/// `PerConnection`; zero for world enemies.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PrimaryStats {
+    pub strength: i32,
+    pub agility: i32,
+    pub intelligence: i32,
+    pub wisdom: i32,
+    pub constitution: i32,
 }
 
 /// Outcome of one AI tick. Carries the events the tick loop needs to
@@ -208,6 +238,9 @@ impl Entity {
             command_at: None,
             charm_expires_at: None,
             stance: PetStance::Follow,
+            stats: PrimaryStats::default(),
+            base_stats: PrimaryStats::default(),
+            active_buffs: Vec::new(),
         }
     }
 
@@ -226,6 +259,18 @@ impl Entity {
     ) -> Self {
         let id = mint_pet_id();
         let hp = mob.hp;
+        // Track 13 — pets get a level-derived primary-stat baseline so
+        // ALLY stat buffs have something to add to. The absolute value is
+        // display-facing only; melee damage uses the buff delta over this
+        // baseline, so an unbuffed pet still deals exactly `mob.dmg`.
+        let s = 50 + mob.level as i32 * 2;
+        let base = PrimaryStats {
+            strength: s,
+            agility: s,
+            intelligence: s,
+            wisdom: s,
+            constitution: s,
+        };
         Self {
             id,
             spawn_point_idx: usize::MAX,
@@ -247,7 +292,116 @@ impl Entity {
             command_at: None,
             charm_expires_at: None,
             stance: PetStance::Follow,
+            stats: base,
+            base_stats: base,
+            active_buffs: Vec::new(),
         }
+    }
+
+    /// Track 13 — add a stat buff's deltas to the pet's live stats +
+    /// max_hp. Mirror of `buffs::apply_stat_deltas` for a connection.
+    /// `max_mp_delta` is ignored — pets have no mana pool.
+    pub fn apply_stat_deltas(&mut self, s: i32, a: i32, i: i32, w: i32, c: i32, max_hp_delta: f32) {
+        self.stats.strength += s;
+        self.stats.agility += a;
+        self.stats.intelligence += i;
+        self.stats.wisdom += w;
+        self.stats.constitution += c;
+        self.max_hp = (self.max_hp + max_hp_delta).max(1.0);
+    }
+
+    /// Track 13 — reverse a stat buff's deltas (expire / refresh).
+    /// Clamps current hp against the reduced max_hp.
+    pub fn undo_stat_deltas(&mut self, s: i32, a: i32, i: i32, w: i32, c: i32, max_hp_delta: f32) {
+        self.stats.strength -= s;
+        self.stats.agility -= a;
+        self.stats.intelligence -= i;
+        self.stats.wisdom -= w;
+        self.stats.constitution -= c;
+        self.max_hp = (self.max_hp - max_hp_delta).max(1.0);
+        if self.hp > self.max_hp {
+            self.hp = self.max_hp;
+        }
+    }
+
+    /// Track 13 — apply (or refresh) a buff on this pet. A same-named
+    /// re-cast undoes the old stat deltas before applying the new ones,
+    /// so refresh never double-stacks. Mirrors the connection-side
+    /// `apply_buff` + `apply_stat_buff` in tick.rs.
+    pub fn apply_buff(&mut self, buff: ActiveBuff) {
+        if let Some(idx) = self.active_buffs.iter().position(|b| b.name == buff.name) {
+            if let BuffEffect::StatBuff {
+                strength, agility, intelligence, wisdom, constitution, max_hp_delta, ..
+            } = self.active_buffs[idx].effect
+            {
+                self.undo_stat_deltas(strength, agility, intelligence, wisdom, constitution, max_hp_delta);
+            }
+            self.active_buffs.remove(idx);
+        }
+        if let BuffEffect::StatBuff {
+            strength, agility, intelligence, wisdom, constitution, max_hp_delta, ..
+        } = buff.effect
+        {
+            self.apply_stat_deltas(strength, agility, intelligence, wisdom, constitution, max_hp_delta);
+        }
+        self.active_buffs.push(buff);
+    }
+
+    /// Track 13 — tick this pet's active buffs by `dt`: apply HoT heal,
+    /// decrement durations, and remove + undo expired entries (StatBuff
+    /// deltas are reversed on expire). Returns `(hp_changed, set_changed)`
+    /// so the caller fans a HealthUpdate / BuffSnapshot. No-op (returns
+    /// false,false) when there are no buffs — the common case for enemies.
+    pub fn tick_buffs(&mut self, dt: f32) -> (bool, bool) {
+        if self.active_buffs.is_empty() {
+            return (false, false);
+        }
+        // Decrement durations + accumulate whole-HP HoT heals (sub-1-HP
+        // remainders carry in tick_acc, matching the connection buff tick).
+        let mut heal: f32 = 0.0;
+        for b in self.active_buffs.iter_mut() {
+            b.remaining -= dt;
+            if let BuffEffect::Hot { hps } = b.effect {
+                b.tick_acc += hps * dt;
+                if b.tick_acc >= 1.0 {
+                    let whole = b.tick_acc.floor();
+                    b.tick_acc -= whole;
+                    heal += whole;
+                }
+            }
+        }
+        // Remove expired; reverse StatBuff deltas first so stats/max_hp
+        // return to baseline.
+        let mut set_changed = false;
+        let mut i = 0;
+        while i < self.active_buffs.len() {
+            if self.active_buffs[i].remaining <= 0.0 {
+                if let BuffEffect::StatBuff {
+                    strength, agility, intelligence, wisdom, constitution, max_hp_delta, ..
+                } = self.active_buffs[i].effect
+                {
+                    self.undo_stat_deltas(strength, agility, intelligence, wisdom, constitution, max_hp_delta);
+                }
+                self.active_buffs.remove(i);
+                set_changed = true;
+            } else {
+                i += 1;
+            }
+        }
+        let mut hp_changed = false;
+        if heal > 0.0 {
+            let new_hp = (self.hp + heal).min(self.max_hp);
+            if new_hp != self.hp {
+                self.hp = new_hp;
+                hp_changed = true;
+            }
+        }
+        // A stat-buff expire may have lowered max_hp (and clamped hp) — fan
+        // a HealthUpdate so the bar reflects the new cap.
+        if set_changed {
+            hp_changed = true;
+        }
+        (hp_changed, set_changed)
     }
 
     pub fn is_pet(&self) -> bool {
@@ -276,9 +430,46 @@ impl Entity {
 
     pub fn attack_interval(&self) -> f32 {
         let base = self.mob.attack_interval.unwrap_or(2.5);
-        // Attack slow adds fractional delay on top of the base interval.
+        // Attack slow adds fractional delay; haste divides it out. Pet
+        // attack pacing is server-driven (unlike players, who pace their
+        // swings locally), so a pet's Haste buff actually speeds it up here.
         let slow_mult = 1.0 + self.attack_slow_factor();
-        base * slow_mult
+        base * slow_mult / (1.0 + self.haste_total())
+    }
+
+    /// Track 13 — sum of active Haste buff amounts (0.0 if none).
+    fn haste_total(&self) -> f32 {
+        self.active_buffs
+            .iter()
+            .filter_map(|b| match b.effect {
+                BuffEffect::Haste { amount } => Some(amount),
+                _ => None,
+            })
+            .sum()
+    }
+
+    /// Track 13 — base move speed scaled by the highest active Speed buff
+    /// (Spirit of Wolf). 1.0× for enemies and unbuffed pets.
+    pub fn move_speed(&self) -> f32 {
+        let mut mult = 1.0_f32;
+        for b in &self.active_buffs {
+            if let BuffEffect::Speed { mult: m } = b.effect {
+                if m > mult {
+                    mult = m;
+                }
+            }
+        }
+        self.mob.speed * mult
+    }
+
+    /// Track 13 — melee swing damage: `mob.dmg` plus the STR buff bonus
+    /// (current STR over the unbuffed baseline, `/5` like the player
+    /// formula in `combat::calc_swing`). Unbuffed entities — every world
+    /// enemy, and any pet with no stat buff — return `mob.dmg` unchanged.
+    /// Floored at 1.
+    pub fn melee_swing_damage(&self) -> i32 {
+        let str_bonus = (self.stats.strength - self.base_stats.strength) / 5;
+        (self.mob.dmg + str_bonus).max(1)
     }
 
     /// Tick all active CC durations down by `dt`. Call once per AI tick
@@ -452,12 +643,12 @@ impl Entity {
                         self.last_attack_at = Some(now);
                         events.hit = Some(HitIntent {
                             target: self.target.expect("had target_info"),
-                            amount: self.mob.dmg,
+                            amount: self.melee_swing_damage(),
                         });
                     }
                 } else if !self.is_rooted() {
                     let snare = self.snare_factor();
-                    let step = self.mob.speed * (1.0 - snare) * dt;
+                    let step = self.move_speed() * (1.0 - snare) * dt;
                     self.face_toward(target_pos);
                     self.pos = self.pos.step_toward(target_pos, step);
                 }
@@ -482,7 +673,7 @@ impl Entity {
                 let dist = self.pos.distance_to(owner_pos);
                 if dist > PET_FOLLOW_DISTANCE && !self.is_rooted() {
                     let snare = self.snare_factor();
-                    let step = self.mob.speed * (1.0 - snare) * dt;
+                    let step = self.move_speed() * (1.0 - snare) * dt;
                     self.face_toward(owner_pos);
                     self.pos = self.pos.step_toward(owner_pos, step);
                 }
@@ -561,7 +752,7 @@ impl Entity {
             self.last_attack_at = Some(now);
             events.hit = Some(HitIntent {
                 target: target_id,
-                amount: self.mob.dmg,
+                amount: self.melee_swing_damage(),
             });
         }
     }
@@ -682,6 +873,29 @@ mod tests {
             melee_range: None,
             attack_interval: None,
         }
+    }
+
+    #[test]
+    fn melee_swing_is_mob_dmg_when_unbuffed() {
+        let now = Instant::now();
+        // World enemy: zero stats → delta 0 → exactly mob.dmg.
+        let enemy = Entity::from_spawn(0, Vec3f::ZERO, template(), now);
+        assert_eq!(enemy.melee_swing_damage(), template().dmg);
+        // Pet: level-derived baseline, but unbuffed (stats == base_stats)
+        // → still exactly mob.dmg, so no rebalance of existing pets.
+        let pet = Entity::from_pet_summon(1, Vec3f::ZERO, template(), now);
+        assert_eq!(pet.stats.strength, pet.base_stats.strength);
+        assert_eq!(pet.melee_swing_damage(), template().dmg);
+    }
+
+    #[test]
+    fn str_buff_adds_one_fifth_to_pet_melee() {
+        let now = Instant::now();
+        let mut pet = Entity::from_pet_summon(1, Vec3f::ZERO, template(), now);
+        // +12 STR (a Strength buff) over the baseline → +2 melee dmg,
+        // matching the player formula (str/5).
+        pet.stats.strength += 12;
+        assert_eq!(pet.melee_swing_damage(), template().dmg + 12 / 5);
     }
 
     #[test]

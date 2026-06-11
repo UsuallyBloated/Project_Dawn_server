@@ -5416,17 +5416,19 @@ pub async fn run(
                 // absorb and no XP awarded on death. Just apply HP, fan
                 // Hit + HealthUpdate, and let corpse-cleanup remove the
                 // pet after the linger window.
-                // Track 13 note: a pet CAN now carry a Thorns damage
-                // shield (it's tracked + shown), but reflecting it onto
-                // the attacking enemy is deferred — a reflect-kill would
-                // need kill-credit / loot routing to the pet's owner,
-                // which is its own slice. Haste / speed / stat / HoT pet
-                // buffs are fully wired.
+                // Track 13: a pet carries its buffs here too — a Thorns
+                // damage shield reflects onto the attacker below (mirrors
+                // the enemy→player reflect; a reflect-kill drops the enemy
+                // with no XP/loot, same as the player path).
                 if attacker >= protocol::world::ENEMY_ID_BASE
                     && attacker < protocol::world::PET_ID_BASE
                     && hit.target >= protocol::world::PET_ID_BASE
                 {
                     let amount = hit.amount.max(0);
+                    // Track 13 — Thorns reflect: captured while the pet is
+                    // borrowed, applied to the attacker after the borrow drops.
+                    let mut pet_shield: f32 = 0.0;
+                    let mut pet_shield_name: Option<String> = None;
                     if let Some(pet) = enemies.get_mut(&hit.target) {
                         if !pet.is_alive() {
                             continue;
@@ -5435,6 +5437,9 @@ pub async fn run(
                         let new_hp = pet.hp;
                         let max_hp = pet.max_hp;
                         let died = new_hp <= 0.0;
+                        pet_shield = buffs::damage_shield_total(&pet.active_buffs);
+                        pet_shield_name =
+                            buffs::first_damage_shield_name(&pet.active_buffs).map(|s| s.to_string());
                         if died {
                             pet.transition(EnemyState::Dead, now);
                         }
@@ -5505,6 +5510,43 @@ pub async fn run(
                                 killer = attacker,
                                 "pet killed by enemy"
                             );
+                        }
+                    }
+                    // Track 13 — Thorns reflect on a pet: the enemy that
+                    // struck a shielded pet takes the shield damage back.
+                    // Mirrors the enemy→player reflect; a reflect-kill just
+                    // drops the enemy (no XP/loot, same as the player path).
+                    if pet_shield > 0.0 {
+                        if let Some(att_entity) = enemies.get_mut(&attacker) {
+                            if att_entity.is_alive() {
+                                let dmg = pet_shield as i32;
+                                att_entity.hp = (att_entity.hp - dmg as f32).max(0.0);
+                                handlers::fan_out_health_update(
+                                    &mut server,
+                                    &in_world_recipients_now,
+                                    attacker,
+                                    att_entity.hp,
+                                    att_entity.max_hp,
+                                );
+                                if let Some(name) = pet_shield_name.as_ref() {
+                                    handlers::fan_out_damage_shield_trigger(
+                                        &mut server,
+                                        &in_world_recipients_now,
+                                        hit.target,
+                                        attacker,
+                                        dmg,
+                                        name.clone(),
+                                    );
+                                }
+                                if att_entity.hp <= 0.0 {
+                                    att_entity.transition(EnemyState::Dead, now);
+                                    handlers::fan_out_entity_died(
+                                        &mut server,
+                                        &in_world_recipients_now,
+                                        attacker,
+                                    );
+                                }
+                            }
                         }
                     }
                     continue;

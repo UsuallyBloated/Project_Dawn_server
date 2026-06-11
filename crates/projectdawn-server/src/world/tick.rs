@@ -3581,14 +3581,46 @@ pub async fn run(
                         let visible = aoi.entities_visible_from(caster_cell);
                         let mut victims: Vec<EntityId> = Vec::new();
                         for id in visible {
-                            if id < protocol::world::ENEMY_ID_BASE
-                                || id >= protocol::world::LOOT_BAG_ID_BASE
-                            {
+                            // Eligible AOE victims: world enemies
+                            // [ENEMY_ID_BASE, LOOT_BAG_ID_BASE) and pets
+                            // [PET_ID_BASE, …). Players (< ENEMY_ID_BASE) and
+                            // loot bags ([LOOT_BAG_ID_BASE, PET_ID_BASE)) are
+                            // excluded. Pets are included so AOE hits them like
+                            // melee/single-target does — the owner PvP gate
+                            // below decides whether each pet is actually hit.
+                            let is_enemy = id >= protocol::world::ENEMY_ID_BASE
+                                && id < protocol::world::LOOT_BAG_ID_BASE;
+                            let is_pet = id >= protocol::world::PET_ID_BASE;
+                            if !is_enemy && !is_pet {
                                 continue;
                             }
                             if let Some(entity) = enemies.get(&id) {
                                 if !entity.is_alive() {
                                     continue;
+                                }
+                                // Pet PvP gate (mirrors the single-target
+                                // melee/spell paths): a player-owned pet is
+                                // only a valid AOE victim if the caster
+                                // could attack its owner directly — and
+                                // never the caster's own pet. NPC mobs
+                                // (owner None) are always eligible.
+                                if let Some(owner_id) = entity.owner {
+                                    let owner_cid = owner_id as ClientId;
+                                    let allowed = owner_cid != caster_cid
+                                        && match (
+                                            connections.get(&caster_cid),
+                                            connections.get(&owner_cid),
+                                        ) {
+                                            (Some(a), Some(o)) => combat::can_attack(
+                                                a, o,
+                                                a.zone.as_deref(),
+                                                o.zone.as_deref(),
+                                            ),
+                                            _ => false,
+                                        };
+                                    if !allowed {
+                                        continue;
+                                    }
                                 }
                                 let dx = entity.pos.x - caster_pos.x;
                                 let dy = entity.pos.y - caster_pos.y;
@@ -5000,11 +5032,11 @@ pub async fn run(
                     continue;
                 }
                 let total_cost = unit_price.saturating_mul(intent.qty as i64);
-                if conn.coins < total_cost {
+                if !conn.coins.can_afford(total_cost) {
                     tracing::info!(
                         owner = intent.owner,
                         item_name = %intent.item_name,
-                        coins = conn.coins,
+                        coins = conn.coins.total_copper(),
                         cost = total_cost,
                         "BuyItem rejected — insufficient coins"
                     );
@@ -5033,9 +5065,11 @@ pub async fn run(
                     );
                     continue;
                 }
-                // Charge only for what we actually placed.
+                // Charge only for what we actually placed. The pre-flight
+                // can_afford check above used total_cost ≥ actual_cost, so this
+                // spend always succeeds; make-change handles tier breaking.
                 let actual_cost = unit_price.saturating_mul(placed as i64);
-                conn.coins -= actual_cost;
+                conn.coins.spend(actual_cost);
                 conn.inventory_dirty = true;
                 let coins_after = conn.coins;
                 let deltas: Vec<(u32, String, u32)> = touched
@@ -5073,7 +5107,7 @@ pub async fn run(
                     item_name = %intent.item_name,
                     qty = placed,
                     cost = actual_cost,
-                    coins_after,
+                    coins_after = coins_after.total_copper(),
                     "BuyItem applied"
                 );
             }
@@ -5201,7 +5235,7 @@ pub async fn run(
                     }
                     protocol::world::SlotRef::EquipSlot(_) => unreachable!(),
                 };
-                conn.coins = conn.coins.saturating_add(total_credit);
+                conn.coins.add_payout(total_credit);
                 conn.inventory_dirty = true;
                 let coins_after = conn.coins;
                 let delta_item: Option<String> = if new_count > 0 {
@@ -5223,7 +5257,7 @@ pub async fn run(
                     item_path = %item_path,
                     qty,
                     credit = total_credit,
-                    coins_after,
+                    coins_after = coins_after.total_copper(),
                     "SellItem applied"
                 );
             }

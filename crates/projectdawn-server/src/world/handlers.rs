@@ -561,6 +561,28 @@ pub fn handle_message(
             Outcome::Continue
         }
 
+        ClientWorldMsg::GiveCoins { platinum, gold, silver, copper } => {
+            if !conn.in_world || !conn.is_dev {
+                return Outcome::Continue;
+            }
+            // Exact per-tier credit, no reduction — a raw-copper grant must
+            // stay raw copper (that's what makes it useful for encumbrance
+            // testing). Negative grants allowed (dev drain), floored at 0.
+            conn.coins.platinum = conn.coins.platinum.saturating_add(platinum).max(0);
+            conn.coins.gold = conn.coins.gold.saturating_add(gold).max(0);
+            conn.coins.silver = conn.coins.silver.saturating_add(silver).max(0);
+            conn.coins.copper = conn.coins.copper.saturating_add(copper).max(0);
+            conn.coins_dirty = true;
+            send_coins_update(server, client_id, conn.coins);
+            tracing::info!(
+                char_id = conn.char_id,
+                platinum, gold, silver, copper,
+                total_copper = conn.coins.total_copper(),
+                "dev coin grant"
+            );
+            Outcome::Continue
+        }
+
         ClientWorldMsg::Respawn => {
             if !conn.ready {
                 return Outcome::Continue;

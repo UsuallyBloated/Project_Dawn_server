@@ -553,6 +553,18 @@ pub enum ClientWorldMsg {
     HealSelf {
         amount: i32,
     },
+
+    /// Dev intent — credit exact per-tier coin stacks (no reduction; a
+    /// 1,000-copper grant arrives as 1,000 raw copper, which is the point
+    /// for encumbrance testing). Backs the Test Panel money buttons; gated
+    /// on `is_dev` like HealSelf / DamageSelf. Server replies with the
+    /// authoritative CoinsUpdate.
+    GiveCoins {
+        platinum: i64,
+        gold: i64,
+        silver: i64,
+        copper: i64,
+    },
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────

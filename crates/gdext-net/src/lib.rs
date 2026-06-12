@@ -599,6 +599,15 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// Dev intent — credit exact per-tier coin stacks (Test Panel money
+    /// buttons). Server-gated on PD_DEV_CMDS like heal_self / damage_self;
+    /// the authoritative wallet comes back via `coins_update`.
+    #[func]
+    fn send_give_coins(&mut self, platinum: i64, gold: i64, silver: i64, copper: i64) -> bool {
+        let msg = ClientWorldMsg::GiveCoins { platinum, gold, silver, copper };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
     /// Track 4 sub-task 2 — owning client tells the server it started
     /// casting a spell. Server relays as ServerWorldMsg::CastStart to
     /// in_world peers so they can render a cast bar.

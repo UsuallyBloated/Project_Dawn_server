@@ -149,7 +149,7 @@ pub struct PerConnection {
     pub max_stamina: f32,
     pub xp: i32,
     pub xp_to_next: i32,
-    pub coins: i64,
+    pub coins: protocol::world::Coins,
 
     /// Track 6: authoritative base stats. The damage formula port (sub-task
     /// 2) reads these; for now sub-task 1 just loads them so the values are

@@ -260,10 +260,11 @@ impl NetClient {
 
     /// Track 14 follow-up — server-authoritative coins. Fired after
     /// vendor BuyItem / SellItem applies (and any future coin-mutating
-    /// flow lands). GDScript subscribers (PlayerStats) overwrite the
-    /// local coin count and emit `coins_changed`.
+    /// flow lands). Carries the full four-tier wallet; GDScript
+    /// subscribers (PlayerStats) overwrite the local stacks and emit
+    /// `coins_changed`.
     #[signal]
-    fn coins_update(coins: i64);
+    fn coins_update(platinum: i64, gold: i64, silver: i64, copper: i64);
 
     /// Track 6 sub-task 5 — server forwarded a group invite. Client
     /// shows an accept/reject UI; on accept the GDScript handler
@@ -1138,7 +1139,10 @@ enum Incoming {
         to_next: i32,
     },
     CoinsUpdate {
-        coins: i64,
+        platinum: i64,
+        gold: i64,
+        silver: i64,
+        copper: i64,
     },
     GroupInvited {
         from_id: i64,
@@ -1585,9 +1589,16 @@ impl NetClient {
                         ],
                     );
                 }
-                Incoming::CoinsUpdate { coins } => {
-                    self.base_mut()
-                        .emit_signal("coins_update", &[coins.to_variant()]);
+                Incoming::CoinsUpdate { platinum, gold, silver, copper } => {
+                    self.base_mut().emit_signal(
+                        "coins_update",
+                        &[
+                            platinum.to_variant(),
+                            gold.to_variant(),
+                            silver.to_variant(),
+                            copper.to_variant(),
+                        ],
+                    );
                 }
                 Incoming::GroupInvited { from_id, from_name } => {
                     self.base_mut().emit_signal(
@@ -1894,7 +1905,12 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             current,
             to_next,
         },
-        ServerWorldMsg::CoinsUpdate { coins } => Incoming::CoinsUpdate { coins },
+        ServerWorldMsg::CoinsUpdate { coins } => Incoming::CoinsUpdate {
+            platinum: coins.platinum,
+            gold: coins.gold,
+            silver: coins.silver,
+            copper: coins.copper,
+        },
         ServerWorldMsg::GroupInvited { from_id, from_name } => Incoming::GroupInvited {
             from_id: from_id as i64,
             from_name,

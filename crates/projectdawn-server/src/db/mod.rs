@@ -10,6 +10,7 @@ use argon2::{
 };
 use chrono::{DateTime, Duration, Utc};
 use protocol::auth::CharacterSummary;
+use protocol::world::Coins;
 use rand::RngCore;
 use sqlx::{sqlite::SqlitePoolOptions, FromRow, Row, SqlitePool};
 
@@ -394,7 +395,7 @@ pub struct CharacterSpawn {
     pub hp: f32,
     pub mp: f32,
     pub stamina: f32,
-    pub coins: i64,
+    pub coins: Coins,
     pub zone: Option<String>,
     pub pos: (f32, f32, f32),
     pub yaw: f32,
@@ -423,7 +424,10 @@ struct SpawnRow {
     hp: f32,
     mp: f32,
     stamina: f32,
-    coins: i64,
+    platinum: i64,
+    gold: i64,
+    silver: i64,
+    copper: i64,
     zone: Option<String>,
     pos_x: Option<f32>,
     pos_y: Option<f32>,
@@ -441,7 +445,7 @@ pub async fn load_character(
                 base_intelligence, base_wisdom, base_charisma,
                 base_constitution,
                 base_max_hp, base_max_mp, base_max_stamina,
-                hp, mp, stamina, coins,
+                hp, mp, stamina, platinum, gold, silver, copper,
                 zone, pos_x, pos_y, pos_z, yaw
          FROM characters
          WHERE id = ?1 AND deleted_at IS NULL",
@@ -487,7 +491,12 @@ pub async fn load_character(
         hp: row.hp.min(computed.max_hp),
         mp: row.mp.min(computed.max_mp),
         stamina: row.stamina.min(computed.max_stamina),
-        coins: row.coins,
+        coins: Coins {
+            platinum: row.platinum,
+            gold: row.gold,
+            silver: row.silver,
+            copper: row.copper,
+        },
         zone: row.zone,
         pos: (
             row.pos_x.unwrap_or(0.0),

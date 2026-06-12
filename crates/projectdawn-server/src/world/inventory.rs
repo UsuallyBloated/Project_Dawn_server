@@ -1421,7 +1421,7 @@ mod tests {
             wisdom: 10, charisma: 10, constitution: 10,
             max_hp: 100.0, max_mp: 100.0, max_stamina: 100.0,
             hp: 100.0, mp: 100.0, stamina: 100.0,
-            coins: 0, zone: None,
+            coins: protocol::world::Coins::ZERO, zone: None,
             pos: (0.0, 0.0, 0.0), yaw: 0.0,
         };
         crate::world::connection::PerConnection::from_spawn(spawn, Instant::now())

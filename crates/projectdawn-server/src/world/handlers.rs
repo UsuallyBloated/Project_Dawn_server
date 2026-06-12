@@ -9,7 +9,7 @@ use super::{
     CHANNEL_POSITION, CHANNEL_SYSTEM,
 };
 use bincode::config::standard as bincode_cfg;
-use protocol::world::{ClientWorldMsg, KickCode, ServerWorldMsg, Vec3};
+use protocol::world::{ClientWorldMsg, Coins, KickCode, ServerWorldMsg, Vec3};
 use renet::{ClientId, RenetServer};
 use std::time::Instant;
 
@@ -1550,10 +1550,9 @@ pub fn fan_out_buff_snapshot(
 
 /// Track 14 follow-up — fan a `CoinsUpdate` privately to one
 /// client. Vendor BuyItem / SellItem use this after mutating
-/// `conn.coins`. Wire encoding is the existing scaffolded
-/// `ServerWorldMsg::CoinsUpdate { coins }` variant; gdext-net
-/// will decode it once the next DLL rebuild lands.
-pub fn send_coins_update(server: &mut RenetServer, client_id: ClientId, coins: i64) {
+/// `conn.coins`. Carries the full four-tier `Coins` wallet
+/// (`ServerWorldMsg::CoinsUpdate`); gdext-net re-emits it as four ints.
+pub fn send_coins_update(server: &mut RenetServer, client_id: ClientId, coins: Coins) {
     let msg = ServerWorldMsg::CoinsUpdate { coins };
     if let Some(bytes) = encode(&msg) {
         server.send_message(client_id, CHANNEL_SYSTEM, bytes);

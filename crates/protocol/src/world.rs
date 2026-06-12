@@ -18,9 +18,122 @@ use serde::{Deserialize, Serialize};
 /// `StaminaUpdate`); `ClientWorldMsg::ResourceUpdate` is removed because the
 /// authority flips and the client no longer broadcasts resources. One bump
 /// per track; individual sub-task commits append new variants under this id.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3132; // "PD_W0012"
+///
+/// PD_W0013: four-tier currency. `CoinsUpdate` now carries a `Coins`
+/// (platinum/gold/silver/copper) instead of a single `i64`, a wire break.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3133; // "PD_W0013"
 
 pub type EntityId = u64;
+
+/// A player wallet: four independent coin stacks at 100:1 ratios
+/// (100 copper = 1 silver, 100 silver = 1 gold, 100 gold = 1 platinum).
+///
+/// The stacks are independent on purpose. A player may choose to hold raw
+/// copper rather than its reduced form, and that choice carries a real weight
+/// cost (encumbrance). Nothing here silently consolidates held coin: `spend`
+/// breaks a higher coin into change only when the lower stacks can't cover the
+/// cost, and `add_payout` deposits a vendor payout already reduced on *top* of
+/// existing stacks. Wholesale re-minting is an explicit moneychanger action,
+/// never a side effect of buying or selling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Coins {
+    pub platinum: i64,
+    pub gold: i64,
+    pub silver: i64,
+    pub copper: i64,
+}
+
+impl Coins {
+    /// Copper-equivalent value of one coin of each tier, indexed copper→platinum.
+    const TIER_VALUE: [i64; 4] = [1, 100, 10_000, 1_000_000];
+
+    pub const ZERO: Coins = Coins { platinum: 0, gold: 0, silver: 0, copper: 0 };
+
+    /// Total wallet value expressed in copper.
+    pub fn total_copper(self) -> i64 {
+        self.copper
+            .saturating_add(self.silver.saturating_mul(Self::TIER_VALUE[1]))
+            .saturating_add(self.gold.saturating_mul(Self::TIER_VALUE[2]))
+            .saturating_add(self.platinum.saturating_mul(Self::TIER_VALUE[3]))
+    }
+
+    /// The fully-reduced (minimal-coin) representation of a copper amount.
+    /// Used for fresh payouts and as a correctness fallback — never to
+    /// silently rewrite a player's existing holdings.
+    pub fn from_copper(mut amount: i64) -> Coins {
+        if amount < 0 {
+            amount = 0;
+        }
+        let platinum = amount / Self::TIER_VALUE[3];
+        amount %= Self::TIER_VALUE[3];
+        let gold = amount / Self::TIER_VALUE[2];
+        amount %= Self::TIER_VALUE[2];
+        let silver = amount / Self::TIER_VALUE[1];
+        amount %= Self::TIER_VALUE[1];
+        Coins { platinum, gold, silver, copper: amount }
+    }
+
+    pub fn can_afford(self, cost_copper: i64) -> bool {
+        cost_copper <= self.total_copper()
+    }
+
+    /// Spend `cost` copper-equivalents, disturbing the wallet as little as
+    /// possible: spend low coins first (shedding heavy copper), breaking a
+    /// single higher coin into change only when the lower stacks fall short.
+    /// A deliberate copper hoard is therefore left intact by unrelated
+    /// purchases. Returns false and leaves the wallet untouched if the player
+    /// can't afford it.
+    pub fn spend(&mut self, cost: i64) -> bool {
+        let total = self.total_copper();
+        if cost < 0 || total < cost {
+            return false;
+        }
+        // Mutable working copy indexed copper→platinum; commit only on success.
+        let mut counts = [self.copper, self.silver, self.gold, self.platinum];
+        let mut remaining = cost;
+        for i in 0..4 {
+            if remaining == 0 {
+                break;
+            }
+            let val = Self::TIER_VALUE[i];
+            let whole = (remaining / val).min(counts[i]);
+            counts[i] -= whole;
+            remaining -= whole * val;
+            // Sub-`val` remainder: break one coin of this tier and scatter the
+            // change back down into the lower tiers.
+            if remaining > 0 && remaining < val && counts[i] > 0 {
+                counts[i] -= 1;
+                let mut change = val - remaining;
+                remaining = 0;
+                for j in (0..i).rev() {
+                    counts[j] += change / Self::TIER_VALUE[j];
+                    change %= Self::TIER_VALUE[j];
+                }
+            }
+        }
+        if remaining > 0 {
+            // Greedy couldn't settle (shouldn't happen once affordable);
+            // guarantee correctness by reducing the remainder.
+            *self = Coins::from_copper(total - cost);
+            return true;
+        }
+        self.copper = counts[0];
+        self.silver = counts[1];
+        self.gold = counts[2];
+        self.platinum = counts[3];
+        true
+    }
+
+    /// Deposit a vendor/quest payout — reduced to minimal coins — on top of the
+    /// existing stacks. Existing stacks are not re-reduced.
+    pub fn add_payout(&mut self, amount_copper: i64) {
+        let p = Coins::from_copper(amount_copper.max(0));
+        self.platinum = self.platinum.saturating_add(p.platinum);
+        self.gold = self.gold.saturating_add(p.gold);
+        self.silver = self.silver.saturating_add(p.silver);
+        self.copper = self.copper.saturating_add(p.copper);
+    }
+}
 pub type Sequence = u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -524,7 +637,7 @@ pub enum ServerWorldMsg {
         max: f32,
     },
     CoinsUpdate {
-        coins: i64,
+        coins: Coins,
     },
     XpGained {
         amount: i32,
@@ -813,4 +926,58 @@ pub mod pet_command {
     pub const ATTACK: u8 = 2;
     pub const BACK: u8 = 3;
     pub const SIT: u8 = 4;
+}
+
+#[cfg(test)]
+mod coins_tests {
+    use super::Coins;
+
+    #[test]
+    fn total_and_from_copper_roundtrip() {
+        let c = Coins::from_copper(1_234_567);
+        assert_eq!(c, Coins { platinum: 1, gold: 23, silver: 45, copper: 67 });
+        assert_eq!(c.total_copper(), 1_234_567);
+        assert_eq!(Coins::from_copper(-5), Coins::ZERO);
+    }
+
+    #[test]
+    fn spend_exact_from_copper() {
+        let mut c = Coins { copper: 100, ..Coins::ZERO };
+        assert!(c.spend(36));
+        assert_eq!(c, Coins { copper: 64, ..Coins::ZERO });
+    }
+
+    #[test]
+    fn spend_leaves_a_copper_hoard_intact() {
+        // The whole point of independent stacks: buying a 1c candle out of a
+        // 5000-copper hoard must NOT silently consolidate it into silver.
+        let mut c = Coins { copper: 5000, ..Coins::ZERO };
+        assert!(c.spend(1));
+        assert_eq!(c, Coins { copper: 4999, ..Coins::ZERO });
+    }
+
+    #[test]
+    fn spend_breaks_a_higher_coin_into_change() {
+        // Pay 1 copper out of a lone platinum → 0p 99g 99s 99c (= 999_999c).
+        let mut c = Coins { platinum: 1, ..Coins::ZERO };
+        assert!(c.spend(1));
+        assert_eq!(c, Coins { platinum: 0, gold: 99, silver: 99, copper: 99 });
+        assert_eq!(c.total_copper(), 999_999);
+    }
+
+    #[test]
+    fn spend_rejects_when_unaffordable_and_leaves_wallet_untouched() {
+        let mut c = Coins { silver: 1, ..Coins::ZERO };
+        assert!(!c.spend(150));
+        assert_eq!(c, Coins { silver: 1, ..Coins::ZERO });
+    }
+
+    #[test]
+    fn add_payout_reduces_payout_but_not_existing_stacks() {
+        // Existing 99 raw copper stays raw; the 5000c payout arrives as 50s.
+        let mut c = Coins { copper: 99, ..Coins::ZERO };
+        c.add_payout(5000);
+        assert_eq!(c, Coins { platinum: 0, gold: 0, silver: 50, copper: 99 });
+        assert_eq!(c.total_copper(), 5099);
+    }
 }

@@ -2032,7 +2032,7 @@ async fn buy_item_charges_coins_and_grants_stack() {
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "buy1", "Buyer", "Human", "Warrior").await;
     let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
-    sqlx::query("UPDATE characters SET coins = 100 WHERE id = ?1")
+    sqlx::query("UPDATE characters SET copper = 100 WHERE id = ?1")
         .bind(a_char_id)
         .execute(&pool)
         .await
@@ -2071,7 +2071,7 @@ async fn buy_item_charges_coins_and_grants_stack() {
     // Coins update: 100 - (12 * 3) = 64.
     let coins = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::CoinsUpdate { coins } if *coins == 64)
+            matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.total_copper() == 64)
         })
         .await
         .expect("CoinsUpdate at 64");
@@ -2148,7 +2148,7 @@ async fn sell_item_credits_coins_and_removes_stack() {
     )
     .await
     .expect("seed inventory");
-    sqlx::query("UPDATE characters SET coins = 0 WHERE id = ?1")
+    sqlx::query("UPDATE characters SET copper = 0 WHERE id = ?1")
         .bind(a_char_id)
         .execute(&pool)
         .await
@@ -2183,7 +2183,7 @@ async fn sell_item_credits_coins_and_removes_stack() {
 
     let coins = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::CoinsUpdate { coins } if *coins == 24)
+            matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.total_copper() == 24)
         })
         .await
         .expect("CoinsUpdate at 24");

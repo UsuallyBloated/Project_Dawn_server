@@ -163,3 +163,29 @@ async fn cascade_delete_on_character_removes_inventory() {
     let loaded = db::load_inventory(&pool, char_id).await.unwrap();
     assert!(loaded.is_empty(), "inventory rows must cascade with the character");
 }
+
+/// Coins persist across "restart": save_coins → load_character returns the
+/// same four stacks. Guards the playtest bug where the in-session wallet
+/// (vendor buys, dev grants) silently reset to the stale DB row on next
+/// login because nothing ever wrote coins back.
+#[tokio::test]
+async fn coins_save_and_load_roundtrip() {
+    let (pool, _tmp) = fresh_pool().await;
+    let account_id = db::create_account(&pool, "coiner", "hunter2!", None)
+        .await
+        .expect("create account");
+    let char_id = db::create_character(&pool, account_id, "Moneybags", "Human", "Warrior")
+        .await
+        .expect("create character");
+
+    let wallet = protocol::world::Coins {
+        platinum: 1,
+        gold: 5,
+        silver: 5,
+        copper: 4000,
+    };
+    db::save_coins(&pool, char_id, wallet).await.expect("save coins");
+
+    let spawn = db::load_character(&pool, char_id).await.expect("load character");
+    assert_eq!(spawn.coins, wallet, "wallet must round-trip exactly, per-tier");
+}

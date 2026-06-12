@@ -74,6 +74,18 @@ pub async fn checkpoint_dirty(pool: &SqlitePool, conns: &mut [&mut PerConnection
                 }
             }
         }
+        if conn.coins_dirty {
+            match db::save_coins(pool, conn.char_id, conn.coins).await {
+                Ok(()) => conn.coins_dirty = false,
+                Err(e) => {
+                    tracing::warn!(
+                        char_id = conn.char_id,
+                        error = %e,
+                        "coin checkpoint failed; will retry next interval"
+                    );
+                }
+            }
+        }
         // Track 18.1 — passive skill scores. Rewrite the full set
         // when any advance landed since last persist; one delete +
         // ≤ 21 inserts per character is well within the SQLite WAL

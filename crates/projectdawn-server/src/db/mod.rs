@@ -654,6 +654,25 @@ pub async fn save_inventory(
     Ok(())
 }
 
+/// Persist the four-tier wallet. Called from the checkpoint sweep +
+/// disconnect flush whenever `coins_dirty` is set — without this the
+/// in-session wallet (vendor buys/sells, dev grants) silently resets
+/// to the stale DB row on next login.
+pub async fn save_coins(pool: &SqlitePool, char_id: i64, coins: Coins) -> AuthResult<()> {
+    sqlx::query(
+        "UPDATE characters SET platinum = ?1, gold = ?2, silver = ?3, copper = ?4
+         WHERE id = ?5",
+    )
+    .bind(coins.platinum)
+    .bind(coins.gold)
+    .bind(coins.silver)
+    .bind(coins.copper)
+    .bind(char_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Track 18.1 — one row of `character_skills`. `kind` is one of
 /// `'weapon'`, `'armor'`, `'casting'`; `key` is the GDScript skill key
 /// (e.g. `'1h_slashing'`, `'cloth'`, `'evocation'`).

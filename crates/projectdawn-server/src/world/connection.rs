@@ -280,6 +280,11 @@ pub struct PerConnection {
     pub inventory: super::inventory::PlayerInventory,
     pub inventory_dirty: bool,
 
+    /// Flips when anything mutates `coins` (vendor buy/sell, dev grants);
+    /// the persistence sweep + disconnect flush clear it. Without this the
+    /// wallet silently resets to the DB row on next login.
+    pub coins_dirty: bool,
+
     /// Track 18.1 — server-side passive skill scores. Three parallel
     /// maps mirror WeaponSkills / ArmorSkills / CastingSkills on the
     /// client. Seeded from `character_skills` at load (`seed_starting_scores`
@@ -370,6 +375,7 @@ impl PerConnection {
             warder_respawn_at: None,
             inventory: super::inventory::PlayerInventory::new(),
             inventory_dirty: false,
+            coins_dirty: false,
             equip_stat_bonuses: super::inventory::EquipStatBonuses::default(),
             weapon_skills: HashMap::new(),
             armor_skills: HashMap::new(),

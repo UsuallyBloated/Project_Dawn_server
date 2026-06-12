@@ -965,6 +965,22 @@ pub async fn run(
                                 conn.mark_persisted();
                             }
                         }
+                        // Coins flush on the way out too — a logout right
+                        // after a vendor run shouldn't roll the wallet back
+                        // to the last 60 s checkpoint.
+                        if conn.coins_dirty {
+                            if let Err(e) =
+                                db::save_coins(&pool, conn.char_id, conn.coins).await
+                            {
+                                tracing::warn!(
+                                    char_id = conn.char_id,
+                                    error = %e,
+                                    "final coin save on disconnect failed"
+                                );
+                            } else {
+                                conn.coins_dirty = false;
+                            }
+                        }
                     }
                 }
             }
@@ -5070,6 +5086,7 @@ pub async fn run(
                 // spend always succeeds; make-change handles tier breaking.
                 let actual_cost = unit_price.saturating_mul(placed as i64);
                 conn.coins.spend(actual_cost);
+                conn.coins_dirty = true;
                 conn.inventory_dirty = true;
                 let coins_after = conn.coins;
                 let deltas: Vec<(u32, String, u32)> = touched
@@ -5236,6 +5253,7 @@ pub async fn run(
                     protocol::world::SlotRef::EquipSlot(_) => unreachable!(),
                 };
                 conn.coins.add_payout(total_credit);
+                conn.coins_dirty = true;
                 conn.inventory_dirty = true;
                 let coins_after = conn.coins;
                 let delta_item: Option<String> = if new_count > 0 {

@@ -21,7 +21,14 @@ use serde::{Deserialize, Serialize};
 ///
 /// PD_W0013: four-tier currency. `CoinsUpdate` now carries a `Coins`
 /// (platinum/gold/silver/copper) instead of a single `i64`, a wire break.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3133; // "PD_W0013"
+///
+/// PD_W0014: group loot rights + coin drops (client
+/// docs/design/group_loot_and_coin.md). Adds the per-player `SetAutosplit`
+/// intent; the rest of the track's wire bits (loot-mode / coin display /
+/// roster mode / reject feedback) append variants under this same id as
+/// they land. One bump for the whole track — client + server must rebuild
+/// together.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3134; // "PD_W0014"
 
 pub type EntityId = u64;
 
@@ -564,6 +571,14 @@ pub enum ClientWorldMsg {
         gold: i64,
         silver: i64,
         copper: i64,
+    },
+
+    /// PD_W0014 — per-player `/autosplit` toggle. Sets the sender's
+    /// `autosplit` flag: on (default) splits coin they loot among the
+    /// nearby group in Round Robin; off keeps it all for the looter.
+    /// See client docs/design/group_loot_and_coin.md.
+    SetAutosplit {
+        on: bool,
     },
 }
 

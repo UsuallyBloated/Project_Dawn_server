@@ -580,6 +580,15 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// PD_W0014 — per-player /autosplit toggle. See the `Net` autoload's
+    /// `broadcast_autosplit`. Coin the player loots splits to the nearby
+    /// group (on) or stays with them (off).
+    #[func]
+    fn send_autosplit(&mut self, on: bool) -> bool {
+        let msg = ClientWorldMsg::SetAutosplit { on };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
     /// Track 6 sub-task 3 dev intent — server-side self damage.
     /// Verifies server-driven HP fan-out without waiting on the
     /// CastSpell port. Mirror of send_heal_self.

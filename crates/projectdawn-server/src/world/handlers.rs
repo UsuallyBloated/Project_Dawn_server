@@ -522,6 +522,15 @@ pub fn handle_message(
             Outcome::Continue
         }
 
+        ClientWorldMsg::SetAutosplit { on } => {
+            if !conn.ready {
+                return Outcome::Continue;
+            }
+            conn.autosplit = on;
+            tracing::info!(char_id = conn.char_id, on, "autosplit toggled");
+            Outcome::Continue
+        }
+
         ClientWorldMsg::DamageSelf { amount } => {
             if !conn.in_world || conn.hp <= 0.0 || !conn.is_dev {
                 return Outcome::Continue;

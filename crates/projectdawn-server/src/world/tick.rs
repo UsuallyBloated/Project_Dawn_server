@@ -929,6 +929,7 @@ pub async fn run(
                                     gid,
                                     *m,
                                     Vec::new(),
+                                    0,
                                 );
                             }
                         } else {
@@ -945,6 +946,7 @@ pub async fn run(
                                     gid,
                                     g.leader,
                                     members_with_names,
+                                    g.loot_mode.to_u8(),
                                 );
                             }
                         }
@@ -1038,10 +1040,12 @@ pub async fn run(
         struct GroupAcceptI { invitee: u64, from: u64 }
         struct GroupLeaveI { member: u64 }
         struct GroupKickI { leader: u64, target_name: String }
+        struct GroupLootModeI { leader: u64, mode: u8 }
         let mut group_invite_intents: Vec<GroupInviteI> = Vec::new();
         let mut group_accept_intents: Vec<GroupAcceptI> = Vec::new();
         let mut group_leave_intents: Vec<GroupLeaveI> = Vec::new();
         let mut group_kick_intents: Vec<GroupKickI> = Vec::new();
+        let mut group_loot_mode_intents: Vec<GroupLootModeI> = Vec::new();
         // Track 5 sub-task 4 — player → server loot pickup intents.
         // Verbatim queue; sub-task 4 is FFA loot so order matters for
         // contested bags (first arrival wins the slot).
@@ -1382,6 +1386,9 @@ pub async fn run(
                         }
                         Outcome::GroupKickIntent { leader, target_name } => {
                             group_kick_intents.push(GroupKickI { leader, target_name });
+                        }
+                        Outcome::SetGroupLootModeIntent { leader, mode } => {
+                            group_loot_mode_intents.push(GroupLootModeI { leader, mode });
                         }
                         Outcome::LootItemIntent {
                             looter,
@@ -3881,6 +3888,7 @@ pub async fn run(
                         gid,
                         g.leader,
                         members_with_names,
+                        g.loot_mode.to_u8(),
                     );
                 } else if let Some(last) = also_notify_dissolved {
                     // Group dissolved — send an empty roster to the
@@ -3891,6 +3899,7 @@ pub async fn run(
                         gid,
                         last,
                         Vec::new(),
+                        0,
                     );
                 }
             };
@@ -3967,6 +3976,7 @@ pub async fn run(
                     gid,
                     cid,
                     Vec::new(),
+                    0,
                 );
                 if dissolved {
                     // Survivors (0 or 1) also need a dissolution notice
@@ -3978,6 +3988,7 @@ pub async fn run(
                             gid,
                             *m,
                             Vec::new(),
+                            0,
                         );
                     }
                 } else {
@@ -4024,6 +4035,7 @@ pub async fn run(
                     gid,
                     target_cid,
                     Vec::new(),
+                    0,
                 );
                 if dissolved {
                     // Survivors (0 or 1) also need a dissolution notice.
@@ -4034,12 +4046,34 @@ pub async fn run(
                             gid,
                             *m,
                             Vec::new(),
+                            0,
                         );
                     }
                 } else {
                     fan_roster(&mut server, &connections, &group_manager, gid, None);
                 }
             }
+        }
+
+        // 4hbb. PD_W0014 — leader sets the group's loot distribution
+        //       mode. Validate the sender is the leader, set the mode,
+        //       and re-fan the roster so every member sees it.
+        for intent in group_loot_mode_intents.drain(..) {
+            let leader_cid = intent.leader as ClientId;
+            let gid = match group_manager.group_of(leader_cid) {
+                Some(g) if g.leader == leader_cid => g.id,
+                _ => continue, // not grouped, or not the leader
+            };
+            if let Some(g) = group_manager.groups.get_mut(&gid) {
+                g.loot_mode = groups::LootMode::from_u8(intent.mode);
+            }
+            tracing::info!(
+                leader = intent.leader,
+                gid,
+                mode = intent.mode,
+                "group loot mode set"
+            );
+            fan_roster(&mut server, &connections, &group_manager, gid, None);
         }
 
         // 4hc. Track 12 Piece A — apply pet commands. Locate each

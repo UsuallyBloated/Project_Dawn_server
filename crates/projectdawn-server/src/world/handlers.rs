@@ -126,6 +126,12 @@ pub enum Outcome {
         leader: u64,
         target_name: String,
     },
+    /// PD_W0014 — leader sets the group's loot mode. Resolved in the
+    /// tick loop (validate leader, set mode, re-fan roster).
+    SetGroupLootModeIntent {
+        leader: u64,
+        mode: u8,
+    },
     /// Track 12 Piece A — player → server pet command. Tick loop
     /// resolves the owner's pet, validates the target if `command ==
     /// ATTACK`, then sets `pet.target` + `pet.command_at` (sticky
@@ -716,6 +722,16 @@ pub fn handle_message(
             }
         }
 
+        ClientWorldMsg::SetGroupLootMode { mode } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::SetGroupLootModeIntent {
+                leader: conn.char_id as u64,
+                mode,
+            }
+        }
+
         ClientWorldMsg::CastSpell { spell_name, target_id } => {
             if !conn.in_world {
                 return Outcome::Continue;
@@ -1113,6 +1129,7 @@ pub fn fan_group_roster(
     group_id: u64,
     leader_id: u64,
     members: Vec<(u64, String)>,
+    loot_mode: u8,
 ) {
     if recipients.is_empty() {
         return;
@@ -1121,6 +1138,7 @@ pub fn fan_group_roster(
         group_id,
         leader_id,
         members,
+        loot_mode,
     };
     let Some(bytes) = encode(&msg) else { return };
     for &recipient in recipients {

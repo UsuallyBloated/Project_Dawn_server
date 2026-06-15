@@ -580,6 +580,14 @@ pub enum ClientWorldMsg {
     SetAutosplit {
         on: bool,
     },
+
+    /// PD_W0014 — leader sets the group's loot distribution mode
+    /// (`groups::LootMode`: 0 = Round Robin, 1 = Free-for-all). Ignored
+    /// from non-leaders. The server re-fans `GroupRoster` with the new
+    /// mode on success.
+    SetGroupLootMode {
+        mode: u8,
+    },
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────
@@ -852,6 +860,10 @@ pub enum ServerWorldMsg {
         group_id: u64,
         leader_id: EntityId,
         members: Vec<(EntityId, String)>,
+        /// PD_W0014 — the group's loot distribution mode
+        /// (`groups::LootMode` as u8: 0 = Round Robin, 1 = Free-for-all).
+        /// Carried on every roster so members always see the current mode.
+        loot_mode: u8,
     },
     /// Track 6 — damage-shield reflect notification. Fanned when a
     /// player's DamageShield buff (Thorns / Spellshield) reflects

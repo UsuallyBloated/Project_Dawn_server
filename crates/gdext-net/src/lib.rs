@@ -282,6 +282,7 @@ impl NetClient {
         leader_id: i64,
         member_ids: PackedInt64Array,
         member_names: PackedStringArray,
+        loot_mode: i64,
     );
 
     /// Track 6 — damage-shield reflect. Fanned to all peers when a
@@ -586,6 +587,15 @@ impl NetClient {
     #[func]
     fn send_autosplit(&mut self, on: bool) -> bool {
         let msg = ClientWorldMsg::SetAutosplit { on };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// PD_W0014 — leader sets the group's loot mode (0 = Round Robin,
+    /// 1 = Free-for-all). Server validates leadership and re-fans the
+    /// roster. See the `Net` autoload's `broadcast_set_group_loot_mode`.
+    #[func]
+    fn send_set_group_loot_mode(&mut self, mode: i64) -> bool {
+        let msg = ClientWorldMsg::SetGroupLootMode { mode: mode as u8 };
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
@@ -1171,6 +1181,7 @@ enum Incoming {
         leader_id: i64,
         member_ids: Vec<i64>,
         member_names: Vec<String>,
+        loot_mode: u8,
     },
     DamageShieldTrigger {
         defender: i64,
@@ -1632,6 +1643,7 @@ impl NetClient {
                     leader_id,
                     member_ids,
                     member_names,
+                    loot_mode,
                 } => {
                     let mut ids_arr = PackedInt64Array::new();
                     ids_arr.resize(member_ids.len());
@@ -1650,6 +1662,7 @@ impl NetClient {
                             leader_id.to_variant(),
                             ids_arr.to_variant(),
                             names_arr.to_variant(),
+                            (loot_mode as i64).to_variant(),
                         ],
                     );
                 }
@@ -1933,7 +1946,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             from_id: from_id as i64,
             from_name,
         },
-        ServerWorldMsg::GroupRoster { group_id, leader_id, members } => {
+        ServerWorldMsg::GroupRoster { group_id, leader_id, members, loot_mode } => {
             let mut member_ids = Vec::with_capacity(members.len());
             let mut member_names = Vec::with_capacity(members.len());
             for (id, name) in members {
@@ -1945,6 +1958,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
                 leader_id: leader_id as i64,
                 member_ids,
                 member_names,
+                loot_mode,
             }
         }
         ServerWorldMsg::DamageShieldTrigger { defender, attacker, amount, shield_name } => {

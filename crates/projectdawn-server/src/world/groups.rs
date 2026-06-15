@@ -182,4 +182,89 @@ impl GroupManager {
             _ => false,
         }
     }
+
+    /// Pick the next Round-Robin loot recipient for a corpse owned by
+    /// `killer`'s group, advancing the turn pointer past them. `eligible`
+    /// filters candidates (the caller checks online + in range). Returns
+    /// `None` when there is no item-turn restriction — the killer is solo
+    /// / ungrouped, the group is Free-for-all, or nobody is eligible — and
+    /// the caller then lets anyone with loot rights take items.
+    pub fn next_loot_turn(
+        &mut self,
+        killer: ClientId,
+        eligible: impl Fn(ClientId) -> bool,
+    ) -> Option<ClientId> {
+        let gid = *self.member_to_group.get(&killer)?;
+        let group = self.groups.get_mut(&gid)?;
+        if group.loot_mode != LootMode::RoundRobin {
+            return None;
+        }
+        let n = group.members.len();
+        if n == 0 {
+            return None;
+        }
+        // Scan rotation order from the current pointer for the first
+        // eligible member; advance the pointer just past them so the next
+        // claimed corpse goes to someone else.
+        for offset in 0..n {
+            let idx = (group.loot_turn + offset) % n;
+            let cand = group.members[idx];
+            if eligible(cand) {
+                group.loot_turn = (idx + 1) % n;
+                return Some(cand);
+            }
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build group {leader, members...} with the leader as member 0.
+    fn grouped(gm: &mut GroupManager, leader: ClientId, members: &[ClientId]) {
+        for &m in members {
+            gm.record_invite(leader, m);
+            let _ = gm.accept(m, leader);
+        }
+    }
+
+    #[test]
+    fn round_robin_rotates_through_members() {
+        let mut gm = GroupManager::new();
+        grouped(&mut gm, 1, &[2, 3]); // {1,2,3}, RR by default
+        let seq = [
+            gm.next_loot_turn(1, |_| true),
+            gm.next_loot_turn(1, |_| true),
+            gm.next_loot_turn(1, |_| true),
+            gm.next_loot_turn(1, |_| true),
+        ];
+        assert_eq!(seq, [Some(1), Some(2), Some(3), Some(1)]);
+    }
+
+    #[test]
+    fn ffa_group_has_no_turn() {
+        let mut gm = GroupManager::new();
+        grouped(&mut gm, 1, &[2]);
+        let gid = *gm.member_to_group.get(&1).unwrap();
+        gm.groups.get_mut(&gid).unwrap().loot_mode = LootMode::FreeForAll;
+        assert_eq!(gm.next_loot_turn(1, |_| true), None);
+    }
+
+    #[test]
+    fn solo_killer_has_no_turn() {
+        let mut gm = GroupManager::new();
+        assert_eq!(gm.next_loot_turn(42, |_| true), None);
+    }
+
+    #[test]
+    fn skips_ineligible_members() {
+        let mut gm = GroupManager::new();
+        grouped(&mut gm, 1, &[2, 3]); // {1,2,3}
+        // Only 3 is eligible (e.g. the only one in range); the turn lands
+        // on 3 and the pointer advances past it.
+        assert_eq!(gm.next_loot_turn(1, |c| c == 3), Some(3));
+        assert_eq!(gm.next_loot_turn(1, |_| true), Some(1));
+    }
 }

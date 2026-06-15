@@ -60,6 +60,11 @@ pub struct LootBag {
     /// loot time — their current group. `None` marks a public bag (e.g.
     /// a player-dropped item) that anyone in range may take.
     pub owner_killer: Option<ClientId>,
+    /// Round-robin claim. In a Round Robin group the first loot attempt
+    /// assigns this corpse to the next eligible member (advancing the
+    /// group's turn); only they may take its items. `None` = unclaimed,
+    /// or no turn restriction (FFA / solo / public). Coin ignores this.
+    pub assigned_looter: Option<ClientId>,
     pub spawned_at: Instant,
 }
 
@@ -77,6 +82,7 @@ impl LootBag {
             items,
             coins,
             owner_killer,
+            assigned_looter: None,
             spawned_at: now,
         }
     }

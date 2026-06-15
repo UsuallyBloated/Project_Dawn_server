@@ -6119,6 +6119,36 @@ pub async fn run(
                     );
                     continue;
                 }
+                // Round Robin: the first loot attempt claims this corpse
+                // for the next eligible group member (online + within the
+                // coin-share range), advancing the group's turn; only they
+                // may take its items. FFA / solo / public bags are
+                // unrestricted (next_loot_turn returns None). The coin
+                // block below ignores the turn, but a rejected click
+                // `continue`s before it — so coin is only ever paid out to
+                // the rightful looter, not whoever clicks first.
+                if let Some(owner_cid) = bag.owner_killer {
+                    if bag.assigned_looter.is_none() {
+                        let bag_pos = bag.pos;
+                        bag.assigned_looter = group_manager.next_loot_turn(owner_cid, |cand| {
+                            connections
+                                .get(&cand)
+                                .map(|c| c.pos.distance_to(bag_pos) <= GROUP_COIN_SHARE_RANGE)
+                                .unwrap_or(false)
+                        });
+                    }
+                    if let Some(turn) = bag.assigned_looter {
+                        if (intent.looter as ClientId) != turn {
+                            tracing::info!(
+                                looter = intent.looter,
+                                bag_id = intent.bag_id,
+                                assigned = turn,
+                                "loot rejected: not your turn (round robin)"
+                            );
+                            continue;
+                        }
+                    }
+                }
                 // Coin: credited on the first loot action against the bag,
                 // then zeroed. Unified rule (group_loot_and_coin.md): the
                 // looter alone gets it if the group is Free-for-all or the

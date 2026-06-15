@@ -241,6 +241,10 @@ impl NetClient {
         pos: Vector3,
         item_paths: PackedStringArray,
         item_counts: PackedInt32Array,
+        coin_platinum: i64,
+        coin_gold: i64,
+        coin_silver: i64,
+        coin_copper: i64,
     );
 
     /// Track 5 sub-task 4 — private confirmation that the local
@@ -250,6 +254,12 @@ impl NetClient {
     /// Inventory.add_item.
     #[signal]
     fn loot_granted(item_path: GString, count: i64);
+
+    /// PD_W0014 — a loot attempt was refused (not the owning group, or
+    /// not this player's Round Robin turn). The GDScript handler logs
+    /// `reason` to the combat log.
+    #[signal]
+    fn loot_rejected(reason: GString);
 
     /// Track 5 sub-task 5 — private kill-credit XP grant. `current`
     /// and `to_next` are placeholders from the server (Track 5 keeps
@@ -1156,10 +1166,17 @@ enum Incoming {
         bag_id: i64,
         pos: WireVec3,
         items: Vec<(String, u32)>,
+        coin_platinum: i64,
+        coin_gold: i64,
+        coin_silver: i64,
+        coin_copper: i64,
     },
     LootGranted {
         item_path: String,
         count: u32,
+    },
+    LootRejected {
+        reason: String,
     },
     XpGained {
         amount: i32,
@@ -1582,7 +1599,15 @@ impl NetClient {
                         &[id.to_variant(), target_id.to_variant()],
                     );
                 }
-                Incoming::LootBagSpawn { bag_id, pos, items } => {
+                Incoming::LootBagSpawn {
+                    bag_id,
+                    pos,
+                    items,
+                    coin_platinum,
+                    coin_gold,
+                    coin_silver,
+                    coin_copper,
+                } => {
                     let mut paths = PackedStringArray::new();
                     let mut counts = PackedInt32Array::new();
                     for (path, count) in &items {
@@ -1596,6 +1621,10 @@ impl NetClient {
                             Vector3::new(pos.x, pos.y, pos.z).to_variant(),
                             paths.to_variant(),
                             counts.to_variant(),
+                            coin_platinum.to_variant(),
+                            coin_gold.to_variant(),
+                            coin_silver.to_variant(),
+                            coin_copper.to_variant(),
                         ],
                     );
                 }
@@ -1606,6 +1635,12 @@ impl NetClient {
                             GString::from(item_path.as_str()).to_variant(),
                             (count as i64).to_variant(),
                         ],
+                    );
+                }
+                Incoming::LootRejected { reason } => {
+                    self.base_mut().emit_signal(
+                        "loot_rejected",
+                        &[GString::from(reason.as_str()).to_variant()],
                     );
                 }
                 Incoming::XpGained { amount, current, to_next } => {
@@ -1922,15 +1957,20 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             item_path,
             count,
         },
-        ServerWorldMsg::LootBagSpawn { bag_id, pos, items } => Incoming::LootBagSpawn {
+        ServerWorldMsg::LootBagSpawn { bag_id, pos, items, coins } => Incoming::LootBagSpawn {
             bag_id: bag_id as i64,
             pos,
             items,
+            coin_platinum: coins.platinum,
+            coin_gold: coins.gold,
+            coin_silver: coins.silver,
+            coin_copper: coins.copper,
         },
         ServerWorldMsg::LootGranted { item_path, count } => Incoming::LootGranted {
             item_path,
             count,
         },
+        ServerWorldMsg::LootRejected { reason } => Incoming::LootRejected { reason },
         ServerWorldMsg::XpGained { amount, current, to_next } => Incoming::XpGained {
             amount,
             current,

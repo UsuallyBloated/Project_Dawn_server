@@ -1105,6 +1105,16 @@ pub fn send_loot_granted(
     }
 }
 
+/// PD_W0014 — private notice that a loot attempt was refused (wrong
+/// group, or not this player's Round Robin turn). The client logs
+/// `reason`.
+pub fn send_loot_rejected(server: &mut RenetServer, recipient_id: ClientId, reason: String) {
+    let msg = ServerWorldMsg::LootRejected { reason };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
 /// Track 6 sub-task 5 — forward a pending group invite to the
 /// invitee. Sent on the reliable system channel; client shows an
 /// accept/reject UI.
@@ -1178,6 +1188,7 @@ pub fn fan_out_loot_bag_spawn(
         bag_id: bag.id,
         pos: Vec3 { x: bag.pos.x, y: bag.pos.y, z: bag.pos.z },
         items: bag.snapshot(),
+        coins: bag.coins,
     };
     let Some(bytes) = encode(&msg) else {
         return;

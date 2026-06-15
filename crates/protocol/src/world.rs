@@ -832,6 +832,10 @@ pub enum ServerWorldMsg {
         bag_id: EntityId,
         pos: Vec3,
         items: Vec<(String, u32)>,
+        /// PD_W0014 — coin sitting on the corpse, shown in the loot
+        /// window. Credited (split or whole) to the looter on the first
+        /// loot action and then zeroed; a re-snapshot carries the update.
+        coins: Coins,
     },
     /// Private message — sent only to the client whose `LootItem` /
     /// `LootAll` intent landed. Carries one stack the looter just claimed
@@ -841,6 +845,12 @@ pub enum ServerWorldMsg {
     LootGranted {
         item_path: String,
         count: u32,
+    },
+    /// PD_W0014 — private notice that a loot attempt was refused: the
+    /// looter isn't in the owning group, or it isn't their turn in Round
+    /// Robin. The client shows `reason` in the combat log.
+    LootRejected {
+        reason: String,
     },
 
     /// Track 6 sub-task 5 — server forwards a pending group invite

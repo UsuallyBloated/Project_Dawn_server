@@ -6151,6 +6151,11 @@ pub async fn run(
                         bag_id = intent.bag_id,
                         "loot rejected: not the owner or owner's group"
                     );
+                    handlers::send_loot_rejected(
+                        &mut server,
+                        intent.looter as ClientId,
+                        "That isn't your loot.".to_string(),
+                    );
                     continue;
                 }
                 // Round Robin: the first loot attempt claims this corpse
@@ -6178,6 +6183,11 @@ pub async fn run(
                                 bag_id = intent.bag_id,
                                 assigned = turn,
                                 "loot rejected: not your turn (round robin)"
+                            );
+                            handlers::send_loot_rejected(
+                                &mut server,
+                                intent.looter as ClientId,
+                                "Not your turn to loot.".to_string(),
                             );
                             continue;
                         }

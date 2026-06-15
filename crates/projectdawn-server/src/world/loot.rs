@@ -13,8 +13,10 @@
 //! Skeleton" picks up the "Skeleton" table). Unknown mob names roll
 //! the generic fallback table.
 
+use super::groups::GroupManager;
 use protocol::world::{EntityId, LOOT_BAG_ID_BASE};
 use rand::Rng;
+use renet::ClientId;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -49,16 +51,39 @@ pub struct LootBag {
     pub id: EntityId,
     pub pos: super::connection::Vec3f,
     pub items: Vec<LootItemStack>,
+    /// The player credited with the kill that dropped this bag (top
+    /// damager). Loot rights extend to this player and — resolved at
+    /// loot time — their current group. `None` marks a public bag (e.g.
+    /// a player-dropped item) that anyone in range may take.
+    pub owner_killer: Option<ClientId>,
     pub spawned_at: Instant,
 }
 
 impl LootBag {
-    pub fn new(pos: super::connection::Vec3f, items: Vec<LootItemStack>, now: Instant) -> Self {
+    pub fn new(
+        pos: super::connection::Vec3f,
+        items: Vec<LootItemStack>,
+        owner_killer: Option<ClientId>,
+        now: Instant,
+    ) -> Self {
         Self {
             id: mint_bag_id(),
             pos,
             items,
+            owner_killer,
             spawned_at: now,
+        }
+    }
+
+    /// Whether `looter` is allowed to take from this bag. Public bags
+    /// (no owner) are open to anyone in range; owned bags are restricted
+    /// to the kill-creditor and their current group-mates. Group rights
+    /// are resolved live so they follow the group's present membership,
+    /// not whoever happened to land the killing blow.
+    pub fn can_loot(&self, looter: ClientId, groups: &GroupManager) -> bool {
+        match self.owner_killer {
+            None => true,
+            Some(owner) => looter == owner || groups.same_group(looter, owner),
         }
     }
 
@@ -288,5 +313,38 @@ mod tests {
         let b = mint_bag_id();
         assert!(a >= LOOT_BAG_ID_BASE);
         assert!(b > a);
+    }
+
+    fn empty_bag(owner: Option<ClientId>) -> LootBag {
+        LootBag::new(super::super::connection::Vec3f::ZERO, vec![], owner, Instant::now())
+    }
+
+    #[test]
+    fn public_bag_loots_for_anyone() {
+        let gm = GroupManager::new();
+        let bag = empty_bag(None);
+        assert!(bag.can_loot(1, &gm));
+        assert!(bag.can_loot(99, &gm));
+    }
+
+    #[test]
+    fn owned_bag_loots_only_for_owner_when_solo() {
+        let gm = GroupManager::new();
+        let bag = empty_bag(Some(7));
+        assert!(bag.can_loot(7, &gm));
+        assert!(!bag.can_loot(8, &gm), "a stranger must not loot a solo kill");
+    }
+
+    #[test]
+    fn owned_bag_loots_for_group_mates() {
+        // 7 invites 8; both end up in one group. A kill by 7 is lootable
+        // by 8, but not by an ungrouped stranger (9).
+        let mut gm = GroupManager::new();
+        gm.record_invite(7, 8);
+        assert!(gm.accept(8, 7).is_some());
+        let bag = empty_bag(Some(7));
+        assert!(bag.can_loot(7, &gm));
+        assert!(bag.can_loot(8, &gm), "a group-mate must be able to loot");
+        assert!(!bag.can_loot(9, &gm), "a non-member must not loot");
     }
 }

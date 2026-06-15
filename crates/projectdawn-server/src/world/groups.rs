@@ -30,11 +30,46 @@ pub const GROUP_XP_BONUS: f32 = 0.20;
 
 pub type GroupId = u64;
 
+/// How a group distributes loot from kills its members are credited
+/// with. Round Robin (default) rotates item-loot turns per corpse and
+/// auto-splits coin among nearby members; Free-for-all lets any member
+/// take any item (master-looter style) and gives all coin to the looter.
+/// See `docs/design/group_loot_and_coin.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LootMode {
+    #[default]
+    RoundRobin,
+    FreeForAll,
+}
+
+impl LootMode {
+    /// Wire encoding for the group roster. 0 = Round Robin, 1 = FFA.
+    pub fn to_u8(self) -> u8 {
+        match self {
+            LootMode::RoundRobin => 0,
+            LootMode::FreeForAll => 1,
+        }
+    }
+
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => LootMode::FreeForAll,
+            _ => LootMode::RoundRobin,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Group {
     pub id: GroupId,
     pub leader: ClientId,
     pub members: Vec<ClientId>,
+    /// Loot distribution rule for this group. Leader-set; defaults to
+    /// Round Robin.
+    pub loot_mode: LootMode,
+    /// Round-robin pointer: index into `members` for the next corpse
+    /// assignment. Advanced as corpses are assigned (Layer 3).
+    pub loot_turn: usize,
 }
 
 #[derive(Debug, Default)]
@@ -68,6 +103,8 @@ impl GroupManager {
             id: gid,
             leader: inviter,
             members: vec![inviter],
+            loot_mode: LootMode::default(),
+            loot_turn: 0,
         });
         self.member_to_group.insert(inviter, gid);
         gid

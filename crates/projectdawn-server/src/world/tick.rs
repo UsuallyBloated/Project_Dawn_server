@@ -555,7 +555,12 @@ fn apply_spell_damage_to_enemy(
             }
         }
         if let Some(items) = loot::roll_for_mob(&mob_name) {
-            let bag = LootBag::new(death_pos, items, now);
+            // Loot ownership: the spell kill-creditor owns the corpse;
+            // their group shares rights, resolved at loot time.
+            let owner_cid_opt = credit_id_opt
+                .filter(|&id| id < protocol::world::ENEMY_ID_BASE)
+                .map(|id| id as ClientId);
+            let bag = LootBag::new(death_pos, items, owner_cid_opt, now);
             let bag_id = bag.id;
             let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
             aoi.insert(bag_id, bag_cell);
@@ -2602,9 +2607,24 @@ pub async fn run(
                     // (matches the GDScript behaviour where the local
                     // Loot autoload simply returns without instantiating
                     // a node).
+                    // Loot ownership: the top damager (kill-creditor) owns
+                    // the corpse; their group shares rights, resolved at
+                    // loot time (see loot::LootBag::can_loot). Filter to the
+                    // player id range — if a pet/enemy was the top damager
+                    // the bag falls back to public rather than locking out.
+                    let owner_cid_opt: Option<ClientId> = entity
+                        .aggro
+                        .iter()
+                        .max_by(|a, b| {
+                            a.1.partial_cmp(b.1)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|(&id, _)| id)
+                        .filter(|&id| id < protocol::world::ENEMY_ID_BASE)
+                        .map(|id| id as ClientId);
                     if let Some(items) = loot::roll_for_mob(&entity.mob.name) {
                         let stacks_for_log = items.len();
-                        let bag = LootBag::new(entity.pos, items, now);
+                        let bag = LootBag::new(entity.pos, items, owner_cid_opt, now);
                         let bag_id = bag.id;
                         // Track 7: add bag to AOI; fan LootBagSpawn only
                         // to players who can see the bag's cell.
@@ -4435,9 +4455,12 @@ pub async fn run(
                 );
                 // Spawn a single-stack LootBag at the player's feet
                 // and fan via the existing AOI-filtered loot pipeline.
+                // Dropped items are public (no kill-owner) — anyone in
+                // range may pick them up, as before.
                 let bag = loot::LootBag::new(
                     drop_pos,
                     vec![loot::LootItemStack { item_path: item_path.clone(), count }],
+                    None,
                     now,
                 );
                 let bag_id = bag.id;
@@ -5738,7 +5761,12 @@ pub async fn run(
                             }
                             if let Some(mob_name) = mob_name_dead.as_ref() {
                                 if let Some(items) = loot::roll_for_mob(mob_name) {
-                                    let bag = LootBag::new(death_pos, items, now);
+                                    // Pet kills credit the pet's player owner;
+                                    // that player (and group) owns the corpse.
+                                    let owner_cid_opt = credit_id_opt
+                                        .filter(|&id| id < protocol::world::ENEMY_ID_BASE)
+                                        .map(|id| id as ClientId);
+                                    let bag = LootBag::new(death_pos, items, owner_cid_opt, now);
                                     let bag_id = bag.id;
                                     let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
                                     aoi.insert(bag_id, bag_cell);
@@ -6054,6 +6082,19 @@ pub async fn run(
                     continue;
                 };
                 if bag.pos.distance_to(looter_pos) > LOOT_PICKUP_RANGE {
+                    continue;
+                }
+                // Loot rights: only the kill-creditor and their group may
+                // take an owned corpse. Public bags (dropped items) are
+                // open to anyone in range. Strangers are rejected; a
+                // user-facing "that isn't your loot" message rides in with
+                // the wire changes (Layer 4).
+                if !bag.can_loot(intent.looter as ClientId, &group_manager) {
+                    tracing::info!(
+                        looter = intent.looter,
+                        bag_id = intent.bag_id,
+                        "loot rejected: not the owner or owner's group"
+                    );
                     continue;
                 }
                 let mut granted: Vec<(String, u32)> = Vec::new();

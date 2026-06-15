@@ -103,6 +103,11 @@ pub const LOOT_BAG_LINGER_SECS: f32 = 120.0;
 /// can't trip this check by accident.
 pub const LOOT_PICKUP_RANGE: f32 = 6.0;
 
+/// How close (metres from the corpse) a group member must be to share in
+/// an auto-split coin drop. Members further out (e.g. back in town) are
+/// excluded. See docs/design/group_loot_and_coin.md.
+pub const GROUP_COIN_SHARE_RANGE: f32 = 30.0;
+
 /// Channel ids — kept in lockstep with `protocol/src/world.rs`. Slice 1
 /// uses just two; the other two from `server_design.md` §3 (combat events,
 /// system shutdown) get added when their handlers land.

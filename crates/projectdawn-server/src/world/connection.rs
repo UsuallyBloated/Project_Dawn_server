@@ -285,6 +285,12 @@ pub struct PerConnection {
     /// wallet silently resets to the DB row on next login.
     pub coins_dirty: bool,
 
+    /// Per-player `/autosplit` toggle (default on). Governs only this
+    /// player's *own* loots: on + Round Robin → coin they loot splits
+    /// among the nearby group; off → they keep it all. Session-scoped for
+    /// now (not persisted). See docs/design/group_loot_and_coin.md.
+    pub autosplit: bool,
+
     /// Track 18.1 — server-side passive skill scores. Three parallel
     /// maps mirror WeaponSkills / ArmorSkills / CastingSkills on the
     /// client. Seeded from `character_skills` at load (`seed_starting_scores`
@@ -376,6 +382,7 @@ impl PerConnection {
             inventory: super::inventory::PlayerInventory::new(),
             inventory_dirty: false,
             coins_dirty: false,
+            autosplit: true,
             equip_stat_bonuses: super::inventory::EquipStatBonuses::default(),
             weapon_skills: HashMap::new(),
             armor_skills: HashMap::new(),

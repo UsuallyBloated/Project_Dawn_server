@@ -14,7 +14,7 @@
 //! the generic fallback table.
 
 use super::groups::GroupManager;
-use protocol::world::{EntityId, LOOT_BAG_ID_BASE};
+use protocol::world::{Coins, EntityId, LOOT_BAG_ID_BASE};
 use rand::Rng;
 use renet::ClientId;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -51,6 +51,10 @@ pub struct LootBag {
     pub id: EntityId,
     pub pos: super::connection::Vec3f,
     pub items: Vec<LootItemStack>,
+    /// Coin sitting on the corpse, rolled by mob tier at death. Credited
+    /// to the looter (or split among the nearby group) on the first loot
+    /// action, then zeroed. See `roll_coin_for_mob`.
+    pub coins: Coins,
     /// The player credited with the kill that dropped this bag (top
     /// damager). Loot rights extend to this player and — resolved at
     /// loot time — their current group. `None` marks a public bag (e.g.
@@ -63,6 +67,7 @@ impl LootBag {
     pub fn new(
         pos: super::connection::Vec3f,
         items: Vec<LootItemStack>,
+        coins: Coins,
         owner_killer: Option<ClientId>,
         now: Instant,
     ) -> Self {
@@ -70,9 +75,16 @@ impl LootBag {
             id: mint_bag_id(),
             pos,
             items,
+            coins,
             owner_killer,
             spawned_at: now,
         }
+    }
+
+    /// A bag is empty (and should despawn) only once both its items and
+    /// its coin are gone.
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty() && self.coins == Coins::ZERO
     }
 
     /// Whether `looter` is allowed to take from this bag. Public bags
@@ -158,6 +170,65 @@ fn find_table(mob_name: &str) -> Option<&'static MobLootTable> {
         }
     }
     None
+}
+
+// ── Coin drops (see docs/design/group_loot_and_coin.md) ───────────────
+//
+// Coin is rolled by mob tier on death and stored on the bag, separate
+// from the item table. Wildlife/beasts drop none; humanoid + undead
+// tiers scale by mob level per docs/concepts/world/currency.md. Amounts
+// roll in copper and reduce to minimal coins via Coins::from_copper, so
+// a named mob shows "~15 silver", not 1500 raw copper.
+
+/// Case-insensitive substring markers for non-coin-dropping wildlife.
+/// Everything else is treated as a humanoid/undead coin-dropper scaled
+/// by level. Tunable; undead (skeleton/zombie) deliberately DO drop
+/// coin. Uses the same loose substring match as the loot-table lookup,
+/// so an off name ("Bearer") can misfire — keep the list specific.
+const BEAST_NAMES: &[&str] = &[
+    "wolf", "rat", "boar", "snake", "bear", "spider", "bat",
+    "crawler", "wasp", "beetle", "lion", "tiger", "scorpion", "drake",
+];
+
+pub fn is_beast(mob_name: &str) -> bool {
+    let lower = mob_name.to_lowercase();
+    BEAST_NAMES.iter().any(|b| lower.contains(b))
+}
+
+/// Roll coin for a slain mob by tier. Returns `Coins::ZERO` for beasts.
+/// Bands mirror currency.md's Loot Drops table; named/boss are
+/// level-approximated until named mobs are flagged server-side.
+pub fn roll_coin_for_mob(mob_name: &str, level: u32) -> Coins {
+    if is_beast(mob_name) {
+        return Coins::ZERO;
+    }
+    let mut rng = rand::thread_rng();
+    let copper: i64 = if level <= 9 {
+        // Low humanoid: 5–50c.
+        rng.gen_range(5..=50)
+    } else if level <= 19 {
+        // Mid humanoid: 50–300c, ~20% chance of a little silver.
+        let mut c: i64 = rng.gen_range(50..=300);
+        if rng.gen_bool(0.20) {
+            c += rng.gen_range(1..=3) * 100;
+        }
+        c
+    } else if level <= 29 {
+        // Named: 1–20s, ~15% chance of 1–2g.
+        let mut c: i64 = rng.gen_range(1..=20) * 100;
+        if rng.gen_bool(0.15) {
+            c += rng.gen_range(1..=2) * 10_000;
+        }
+        c
+    } else {
+        // Boss: 1–10g, ~5% chance of 1p.
+        let mut c: i64 = rng.gen_range(1..=10) * 10_000;
+        if rng.gen_bool(0.05) {
+            c += 1_000_000;
+        }
+        c
+    };
+    Coins::from_copper(copper)
 }
 
 // ── Authored tables (mirror of MobLootTables.TABLES) ──────────────────
@@ -316,7 +387,49 @@ mod tests {
     }
 
     fn empty_bag(owner: Option<ClientId>) -> LootBag {
-        LootBag::new(super::super::connection::Vec3f::ZERO, vec![], owner, Instant::now())
+        LootBag::new(
+            super::super::connection::Vec3f::ZERO,
+            vec![],
+            Coins::ZERO,
+            owner,
+            Instant::now(),
+        )
+    }
+
+    #[test]
+    fn beasts_drop_no_coin() {
+        assert_eq!(roll_coin_for_mob("Dire Wolf", 5), Coins::ZERO);
+        assert_eq!(roll_coin_for_mob("Cave Bat", 18), Coins::ZERO);
+        assert!(is_beast("Giant Rat"));
+        assert!(!is_beast("Gnoll Raider"));
+        assert!(!is_beast("Decrepit Skeleton"), "undead drop coin");
+    }
+
+    #[test]
+    fn low_humanoid_coin_in_band() {
+        for _ in 0..100 {
+            let c = roll_coin_for_mob("Bandit Scout", 5).total_copper();
+            assert!((5..=50).contains(&c), "low-humanoid copper {c} out of band");
+        }
+    }
+
+    #[test]
+    fn mid_humanoid_coin_in_band() {
+        for _ in 0..100 {
+            let c = roll_coin_for_mob("Gnoll Raider", 15).total_copper();
+            // 50–300c base, plus an optional 100–300c silver bonus.
+            assert!((50..=600).contains(&c), "mid-humanoid copper {c} out of band");
+        }
+    }
+
+    #[test]
+    fn boss_coin_is_gold_scale() {
+        for _ in 0..100 {
+            let c = roll_coin_for_mob("Ancient Warlord", 35).total_copper();
+            // 1–10g, plus a rare +1p.
+            assert!(c >= 10_000, "boss copper {c} below floor");
+            assert!(c <= 100_000 + 1_000_000, "boss copper {c} above ceiling");
+        }
     }
 
     #[test]

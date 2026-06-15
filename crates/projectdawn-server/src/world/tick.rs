@@ -20,7 +20,8 @@ use super::{
     spawn_points::Spawner,
     spells,
     ATTACK_RANGE_TOLERANCE, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL,
-    CORPSE_LINGER_SECS, LOOT_BAG_LINGER_SECS, LOOT_PICKUP_RANGE, MAX_MOVE_SPEED,
+    CORPSE_LINGER_SECS, GROUP_COIN_SHARE_RANGE, LOOT_BAG_LINGER_SECS, LOOT_PICKUP_RANGE,
+    MAX_MOVE_SPEED,
     RANGED_ATTACK_RANGE, STALE_MOVE_THRESHOLD, TICK_DT,
 };
 use crate::{db, Config};
@@ -423,7 +424,7 @@ fn apply_spell_damage_to_enemy(
     dmg_type: DamageType,
     now: Instant,
 ) -> bool {
-    let (died, credit_id_opt, mob_xp, death_pos, mob_name, damage_done, warder_owner_opt) = {
+    let (died, credit_id_opt, mob_xp, mob_level, death_pos, mob_name, damage_done, warder_owner_opt) = {
         let Some(entity) = enemies.get_mut(&target_id) else {
             return false;
         };
@@ -472,6 +473,7 @@ fn apply_spell_damage_to_enemy(
                 })
                 .map(|(&id, _)| id);
             let mob_xp = entity.mob.xp;
+            let mob_level = entity.mob.level;
             let death_pos = entity.pos;
             let mob_name = entity.mob.name.clone();
             let warder_owner_opt: Option<EntityId> =
@@ -480,7 +482,7 @@ fn apply_spell_damage_to_enemy(
                 } else {
                     None
                 };
-            (true, credit_id_opt, mob_xp, death_pos, mob_name, damage_done, warder_owner_opt)
+            (true, credit_id_opt, mob_xp, mob_level, death_pos, mob_name, damage_done, warder_owner_opt)
         } else {
             if dmg > 0 {
                 entity.clear_mez();
@@ -500,7 +502,7 @@ fn apply_spell_damage_to_enemy(
                     spell.attack_slow_duration,
                 ));
             }
-            (false, None, 0, entity.pos, String::new(), damage_done, None)
+            (false, None, 0, 0, entity.pos, String::new(), damage_done, None)
         }
     };
 
@@ -554,13 +556,15 @@ fn apply_spell_damage_to_enemy(
                 }
             }
         }
-        if let Some(items) = loot::roll_for_mob(&mob_name) {
+        let loot_items = loot::roll_for_mob(&mob_name).unwrap_or_default();
+        let loot_coins = loot::roll_coin_for_mob(&mob_name, mob_level);
+        if !loot_items.is_empty() || loot_coins != protocol::world::Coins::ZERO {
             // Loot ownership: the spell kill-creditor owns the corpse;
             // their group shares rights, resolved at loot time.
             let owner_cid_opt = credit_id_opt
                 .filter(|&id| id < protocol::world::ENEMY_ID_BASE)
                 .map(|id| id as ClientId);
-            let bag = LootBag::new(death_pos, items, owner_cid_opt, now);
+            let bag = LootBag::new(death_pos, loot_items, loot_coins, owner_cid_opt, now);
             let bag_id = bag.id;
             let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
             aoi.insert(bag_id, bag_cell);
@@ -2622,9 +2626,13 @@ pub async fn run(
                         .map(|(&id, _)| id)
                         .filter(|&id| id < protocol::world::ENEMY_ID_BASE)
                         .map(|id| id as ClientId);
-                    if let Some(items) = loot::roll_for_mob(&entity.mob.name) {
-                        let stacks_for_log = items.len();
-                        let bag = LootBag::new(entity.pos, items, owner_cid_opt, now);
+                    let loot_items = loot::roll_for_mob(&entity.mob.name).unwrap_or_default();
+                    let loot_coins =
+                        loot::roll_coin_for_mob(&entity.mob.name, entity.mob.level);
+                    if !loot_items.is_empty() || loot_coins != protocol::world::Coins::ZERO {
+                        let stacks_for_log = loot_items.len();
+                        let bag =
+                            LootBag::new(entity.pos, loot_items, loot_coins, owner_cid_opt, now);
                         let bag_id = bag.id;
                         // Track 7: add bag to AOI; fan LootBagSpawn only
                         // to players who can see the bag's cell.
@@ -4460,6 +4468,7 @@ pub async fn run(
                 let bag = loot::LootBag::new(
                     drop_pos,
                     vec![loot::LootItemStack { item_path: item_path.clone(), count }],
+                    protocol::world::Coins::ZERO,
                     None,
                     now,
                 );
@@ -5669,6 +5678,7 @@ pub async fn run(
                         let max_hp = target_entity.max_hp;
                         let died = new_hp <= 0.0;
                         let mob_xp = target_entity.mob.xp;
+                        let mob_level = target_entity.mob.level;
                         let mob_name_dead = if died {
                             target_entity.transition(EnemyState::Dead, now);
                             Some(target_entity.mob.name.clone())
@@ -5760,13 +5770,25 @@ pub async fn run(
                                 }
                             }
                             if let Some(mob_name) = mob_name_dead.as_ref() {
-                                if let Some(items) = loot::roll_for_mob(mob_name) {
+                                let loot_items =
+                                    loot::roll_for_mob(mob_name).unwrap_or_default();
+                                let loot_coins =
+                                    loot::roll_coin_for_mob(mob_name, mob_level);
+                                if !loot_items.is_empty()
+                                    || loot_coins != protocol::world::Coins::ZERO
+                                {
                                     // Pet kills credit the pet's player owner;
                                     // that player (and group) owns the corpse.
                                     let owner_cid_opt = credit_id_opt
                                         .filter(|&id| id < protocol::world::ENEMY_ID_BASE)
                                         .map(|id| id as ClientId);
-                                    let bag = LootBag::new(death_pos, items, owner_cid_opt, now);
+                                    let bag = LootBag::new(
+                                        death_pos,
+                                        loot_items,
+                                        loot_coins,
+                                        owner_cid_opt,
+                                        now,
+                                    );
                                     let bag_id = bag.id;
                                     let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
                                     aoi.insert(bag_id, bag_cell);
@@ -6097,6 +6119,71 @@ pub async fn run(
                     );
                     continue;
                 }
+                // Coin: credited on the first loot action against the bag,
+                // then zeroed. Unified rule (group_loot_and_coin.md): the
+                // looter alone gets it if the group is Free-for-all or the
+                // looter has /autosplit off; otherwise it splits evenly
+                // among online group members within GROUP_COIN_SHARE_RANGE
+                // of the corpse, remainder copper to the looter.
+                if bag.coins != protocol::world::Coins::ZERO {
+                    let pot = bag.coins.total_copper();
+                    bag.coins = protocol::world::Coins::ZERO;
+                    let bag_pos = bag.pos;
+                    let looter_cid = intent.looter as ClientId;
+                    let looter_autosplit = connections
+                        .get(&looter_cid)
+                        .map(|c| c.autosplit)
+                        .unwrap_or(false);
+                    let group = group_manager.group_of(looter_cid);
+                    let mode = group
+                        .map(|g| g.loot_mode)
+                        .unwrap_or(groups::LootMode::FreeForAll);
+                    let do_split =
+                        matches!(mode, groups::LootMode::RoundRobin) && looter_autosplit;
+                    let mut recipients: Vec<ClientId> = Vec::new();
+                    if do_split {
+                        if let Some(g) = group {
+                            for &m in &g.members {
+                                if let Some(c) = connections.get(&m) {
+                                    if c.pos.distance_to(bag_pos) <= GROUP_COIN_SHARE_RANGE {
+                                        recipients.push(m);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // FFA, autosplit off, or nobody eligible nearby → the
+                    // looter takes it all (coin is never destroyed).
+                    if recipients.is_empty() {
+                        recipients.push(looter_cid);
+                    }
+                    let n = recipients.len() as i64;
+                    let base_share = pot / n;
+                    let remainder = pot - base_share * n;
+                    for &r in &recipients {
+                        let mut amount = base_share;
+                        if r == looter_cid {
+                            amount += remainder;
+                        }
+                        if amount <= 0 {
+                            continue;
+                        }
+                        if let Some(c) = connections.get_mut(&r) {
+                            c.coins.add_payout(amount);
+                            c.coins_dirty = true;
+                            let coins_after = c.coins;
+                            handlers::send_coins_update(&mut server, r, coins_after);
+                        }
+                    }
+                    tracing::info!(
+                        looter = intent.looter,
+                        bag_id = intent.bag_id,
+                        pot,
+                        recipients = recipients.len(),
+                        do_split,
+                        "coin looted"
+                    );
+                }
                 let mut granted: Vec<(String, u32)> = Vec::new();
                 match intent.slot {
                     Some(idx) => {
@@ -6197,7 +6284,7 @@ pub async fn run(
                 let bag_pos = bag.pos;
                 let bag_cell = aoi::cell_for(bag_pos.x, bag_pos.z);
                 let bag_visible = aoi.entities_visible_from(bag_cell);
-                if bag.items.is_empty() {
+                if bag.is_empty() {
                     loot_bags.remove(&bag_id);
                     aoi.remove(bag_id, bag_cell);
                     for &recipient in &in_world_recipients_now {

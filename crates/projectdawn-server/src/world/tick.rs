@@ -1041,11 +1041,13 @@ pub async fn run(
         struct GroupLeaveI { member: u64 }
         struct GroupKickI { leader: u64, target_name: String }
         struct GroupLootModeI { leader: u64, mode: u8 }
+        struct GroupPassLeadershipI { leader: u64, new_leader: u64 }
         let mut group_invite_intents: Vec<GroupInviteI> = Vec::new();
         let mut group_accept_intents: Vec<GroupAcceptI> = Vec::new();
         let mut group_leave_intents: Vec<GroupLeaveI> = Vec::new();
         let mut group_kick_intents: Vec<GroupKickI> = Vec::new();
         let mut group_loot_mode_intents: Vec<GroupLootModeI> = Vec::new();
+        let mut group_pass_leadership_intents: Vec<GroupPassLeadershipI> = Vec::new();
         // Track 5 sub-task 4 — player → server loot pickup intents.
         // Verbatim queue; sub-task 4 is FFA loot so order matters for
         // contested bags (first arrival wins the slot).
@@ -1389,6 +1391,10 @@ pub async fn run(
                         }
                         Outcome::SetGroupLootModeIntent { leader, mode } => {
                             group_loot_mode_intents.push(GroupLootModeI { leader, mode });
+                        }
+                        Outcome::PassLeadershipIntent { leader, new_leader } => {
+                            group_pass_leadership_intents
+                                .push(GroupPassLeadershipI { leader, new_leader });
                         }
                         Outcome::LootItemIntent {
                             looter,
@@ -4074,6 +4080,24 @@ pub async fn run(
                 "group loot mode set"
             );
             fan_roster(&mut server, &connections, &group_manager, gid, None);
+        }
+
+        // 4hbc. PD_W0014 — leader hands leadership to a member. Validate
+        //       (current leader → existing member) and re-fan the roster
+        //       so both old and new leader see the change. Fixes the
+        //       launcher-mode gap where pass-leadership was local-only.
+        for intent in group_pass_leadership_intents.drain(..) {
+            if let Some(gid) = group_manager
+                .pass_leadership(intent.leader as ClientId, intent.new_leader as ClientId)
+            {
+                tracing::info!(
+                    from = intent.leader,
+                    to = intent.new_leader,
+                    gid,
+                    "group leadership passed"
+                );
+                fan_roster(&mut server, &connections, &group_manager, gid, None);
+            }
         }
 
         // 4hc. Track 12 Piece A — apply pet commands. Locate each

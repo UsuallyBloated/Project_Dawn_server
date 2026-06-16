@@ -588,6 +588,14 @@ pub enum ClientWorldMsg {
     SetGroupLootMode {
         mode: u8,
     },
+
+    /// PD_W0014 — current leader hands leadership to `new_leader` (a
+    /// member char_id). Ignored from non-leaders or for a non-member
+    /// target; the server re-fans `GroupRoster` on success. (Fixes the
+    /// pre-existing launcher-mode gap where leadership pass was local-only.)
+    PassLeadership {
+        new_leader: u64,
+    },
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────

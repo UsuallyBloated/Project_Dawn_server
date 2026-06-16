@@ -132,6 +132,12 @@ pub enum Outcome {
         leader: u64,
         mode: u8,
     },
+    /// PD_W0014 — leader hands leadership to another member. Resolved in
+    /// the tick loop (validate, set leader, re-fan roster).
+    PassLeadershipIntent {
+        leader: u64,
+        new_leader: u64,
+    },
     /// Track 12 Piece A — player → server pet command. Tick loop
     /// resolves the owner's pet, validates the target if `command ==
     /// ATTACK`, then sets `pet.target` + `pet.command_at` (sticky
@@ -729,6 +735,16 @@ pub fn handle_message(
             Outcome::SetGroupLootModeIntent {
                 leader: conn.char_id as u64,
                 mode,
+            }
+        }
+
+        ClientWorldMsg::PassLeadership { new_leader } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::PassLeadershipIntent {
+                leader: conn.char_id as u64,
+                new_leader,
             }
         }
 

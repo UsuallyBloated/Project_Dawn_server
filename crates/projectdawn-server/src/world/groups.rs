@@ -216,6 +216,20 @@ impl GroupManager {
         }
         None
     }
+
+    /// Transfer leadership to `new_leader` iff `current` is the present
+    /// leader and `new_leader` is a member of the same group. Returns the
+    /// group id on success (the caller re-fans the roster), `None`
+    /// otherwise (not the leader / target not a member / ungrouped).
+    pub fn pass_leadership(&mut self, current: ClientId, new_leader: ClientId) -> Option<GroupId> {
+        let gid = *self.member_to_group.get(&current)?;
+        let group = self.groups.get_mut(&gid)?;
+        if group.leader != current || !group.members.contains(&new_leader) {
+            return None;
+        }
+        group.leader = new_leader;
+        Some(gid)
+    }
 }
 
 #[cfg(test)]
@@ -266,5 +280,20 @@ mod tests {
         // on 3 and the pointer advances past it.
         assert_eq!(gm.next_loot_turn(1, |c| c == 3), Some(3));
         assert_eq!(gm.next_loot_turn(1, |_| true), Some(1));
+    }
+
+    #[test]
+    fn pass_leadership_only_from_leader_to_member() {
+        let mut gm = GroupManager::new();
+        grouped(&mut gm, 1, &[2, 3]); // leader 1, members {1,2,3}
+        // Non-leader can't pass.
+        assert_eq!(gm.pass_leadership(2, 3), None);
+        // Leader can't pass to a non-member.
+        assert_eq!(gm.pass_leadership(1, 99), None);
+        // Leader → member works and actually moves leadership.
+        assert!(gm.pass_leadership(1, 2).is_some());
+        assert_eq!(gm.group_of(1).unwrap().leader, 2);
+        // The old leader can no longer pass.
+        assert_eq!(gm.pass_leadership(1, 3), None);
     }
 }

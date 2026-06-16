@@ -609,6 +609,15 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// PD_W0014 — current leader hands leadership to `new_leader` (a
+    /// member char_id). Server validates and re-fans the roster. See the
+    /// `Net` autoload's `broadcast_pass_leadership`.
+    #[func]
+    fn send_pass_leadership(&mut self, new_leader: i64) -> bool {
+        let msg = ClientWorldMsg::PassLeadership { new_leader: new_leader as u64 };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
     /// Track 6 sub-task 3 dev intent — server-side self damage.
     /// Verifies server-driven HP fan-out without waiting on the
     /// CastSpell port. Mirror of send_heal_self.

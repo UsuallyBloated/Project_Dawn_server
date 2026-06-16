@@ -6209,11 +6209,12 @@ pub async fn run(
                         .map(|c| c.autosplit)
                         .unwrap_or(false);
                     let group = group_manager.group_of(looter_cid);
-                    let mode = group
-                        .map(|g| g.loot_mode)
-                        .unwrap_or(groups::LootMode::FreeForAll);
-                    let do_split =
-                        matches!(mode, groups::LootMode::RoundRobin) && looter_autosplit;
+                    // Coin distribution follows the looter's /autosplit
+                    // flag regardless of loot mode (RR vs FFA only governs
+                    // item turns): autosplit on → split among the nearby
+                    // group; off → the looter keeps it (master-looter case
+                    // is FFA + autosplit off). Solo/ungrouped never splits.
+                    let do_split = looter_autosplit;
                     let mut recipients: Vec<ClientId> = Vec::new();
                     if do_split {
                         if let Some(g) = group {

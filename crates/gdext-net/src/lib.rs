@@ -261,6 +261,11 @@ impl NetClient {
     #[signal]
     fn loot_rejected(reason: GString);
 
+    /// PD_W0014 — private one-line group notice (e.g. a group-mate toggled
+    /// `/autosplit`). The GDScript handler logs `text` to the combat log.
+    #[signal]
+    fn group_notice(text: GString);
+
     /// Track 5 sub-task 5 — private kill-credit XP grant. `current`
     /// and `to_next` are placeholders from the server (Track 5 keeps
     /// player XP state client-authoritative); the GDScript handler
@@ -1187,6 +1192,9 @@ enum Incoming {
     LootRejected {
         reason: String,
     },
+    GroupNotice {
+        text: String,
+    },
     XpGained {
         amount: i32,
         current: i32,
@@ -1652,6 +1660,12 @@ impl NetClient {
                         &[GString::from(reason.as_str()).to_variant()],
                     );
                 }
+                Incoming::GroupNotice { text } => {
+                    self.base_mut().emit_signal(
+                        "group_notice",
+                        &[GString::from(text.as_str()).to_variant()],
+                    );
+                }
                 Incoming::XpGained { amount, current, to_next } => {
                     self.base_mut().emit_signal(
                         "xp_gained",
@@ -1980,6 +1994,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             count,
         },
         ServerWorldMsg::LootRejected { reason } => Incoming::LootRejected { reason },
+        ServerWorldMsg::GroupNotice { text } => Incoming::GroupNotice { text },
         ServerWorldMsg::XpGained { amount, current, to_next } => Incoming::XpGained {
             amount,
             current,

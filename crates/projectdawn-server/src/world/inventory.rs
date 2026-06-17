@@ -567,36 +567,6 @@ impl PlayerInventory {
         Ok(vec![("base", dst as u32), ("equip", equip_slot as u32)])
     }
 
-    /// Track 13.2.b / 14.3 — remove `count` of the entry at
-    /// `(base, slot)`. `count == 0` drops the whole stack. Returns
-    /// the item_path and actual quantity removed (capped by the
-    /// stack), plus whether the slot is now empty. `None` if the
-    /// slot was already empty or if the slot holds a non-empty
-    /// bag (drop would orphan the contents).
-    pub fn drop_base(&mut self, slot: usize, count: u32) -> Option<(String, u32)> {
-        if slot >= BASE_SLOT_COUNT {
-            return None;
-        }
-        // Track 14.3 — refuse to drop a bag that still has items
-        // inside. The client UI should empty it first.
-        if self.bag_at_base_is_nonempty(slot) {
-            return None;
-        }
-        let entry = self.base.get_mut(slot)?.as_mut()?;
-        let path = entry.item_path.clone();
-        let to_remove = if count == 0 || count >= entry.count {
-            entry.count
-        } else {
-            count
-        };
-        entry.count -= to_remove;
-        if entry.count == 0 {
-            self.base[slot] = None;
-        }
-        self.ensure_bag_init(slot);
-        Some((path, to_remove))
-    }
-
     /// Track 15.1 — equip from any inventory location (base or bag
     /// inner). Generalisation of `equip_from_base`: the wire's
     /// `(src_location, src_slot)` can now address bag inner slots so
@@ -665,10 +635,11 @@ impl PlayerInventory {
 
     /// Track 15.1 — destroy `count` of the entry at `(location, slot)`
     /// outright (no loot bag, no recovery). `count == 0` removes the
-    /// whole stack. Rejects bag-typed slots that still hold items
-    /// (mirrors `drop_base`'s safety). Returns the destroyed
-    /// `(item_path, count)` so the caller can log + fan a single
-    /// `InventoryDelta` for the touched slot.
+    /// whole stack. Rejects bag-typed slots that still hold items (a
+    /// bag must be emptied first). Returns the removed `(item_path,
+    /// count)` so the caller can log + fan a single `InventoryDelta`
+    /// for the touched slot. Shared by the DestroyItem and DropItem
+    /// apply paths (DropItem additionally spawns a loot bag).
     pub fn destroy_at(
         &mut self,
         loc: &str,
@@ -1224,38 +1195,41 @@ mod tests {
         assert_eq!(inv.base[7].as_ref().unwrap().count, 5);
     }
 
+    // `destroy_at` is the shared base/bag removal primitive behind both
+    // the DestroyItem and DropItem apply paths; these cover its base-slot
+    // arithmetic (the bag path is covered by destroy_at_rejects_non_empty_bag).
     #[test]
-    fn drop_base_partial_keeps_residual() {
+    fn destroy_at_base_partial_keeps_residual() {
         let mut inv = PlayerInventory::new();
         inv.add_item("res://items/cloth.tres", 10).unwrap();
-        let (path, removed) = inv.drop_base(0, 3).expect("drop");
+        let (path, removed) = inv.destroy_at("base", 0, 3).expect("remove");
         assert_eq!(path, "res://items/cloth.tres");
         assert_eq!(removed, 3);
         assert_eq!(inv.base[0].as_ref().unwrap().count, 7);
     }
 
     #[test]
-    fn drop_base_zero_count_drops_whole_stack() {
+    fn destroy_at_base_zero_count_removes_whole_stack() {
         let mut inv = PlayerInventory::new();
         inv.add_item("res://items/cloth.tres", 10).unwrap();
-        let (_, removed) = inv.drop_base(0, 0).expect("drop whole");
+        let (_, removed) = inv.destroy_at("base", 0, 0).expect("remove whole");
         assert_eq!(removed, 10);
         assert!(inv.base[0].is_none());
     }
 
     #[test]
-    fn drop_base_count_exceeds_stack_drops_all() {
+    fn destroy_at_base_count_exceeds_stack_removes_all() {
         let mut inv = PlayerInventory::new();
         inv.add_item("res://items/cloth.tres", 5).unwrap();
-        let (_, removed) = inv.drop_base(0, 99).expect("drop over-cap");
-        assert_eq!(removed, 5, "drop caps at the stack size");
+        let (_, removed) = inv.destroy_at("base", 0, 99).expect("remove over-cap");
+        assert_eq!(removed, 5, "removal caps at the stack size");
         assert!(inv.base[0].is_none());
     }
 
     #[test]
-    fn drop_base_empty_slot_returns_none() {
+    fn destroy_at_base_empty_slot_errors() {
         let mut inv = PlayerInventory::new();
-        assert!(inv.drop_base(0, 1).is_none());
+        assert!(inv.destroy_at("base", 0, 1).is_err());
     }
 
     #[test]
@@ -1821,7 +1795,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_base_rejects_non_empty_bag() {
+    fn destroy_at_rejects_non_empty_bag() {
         let mut inv = PlayerInventory::new();
         inv.add_item_locating(POUCH, 1).unwrap();
         inv.bags.get_mut(&0u8).unwrap()[0] = Some(InventoryEntry {
@@ -1829,10 +1803,10 @@ mod tests {
             count: 1,
         });
         assert!(
-            inv.drop_base(0, 0).is_none(),
-            "dropping a non-empty bag returns None"
+            inv.destroy_at("base", 0, 0).is_err(),
+            "removing a non-empty bag is rejected"
         );
-        assert!(inv.base[0].is_some(), "bag still in base after rejected drop");
+        assert!(inv.base[0].is_some(), "bag still in base after rejected removal");
     }
 
     #[test]

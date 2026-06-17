@@ -138,6 +138,13 @@ pub enum Outcome {
         leader: u64,
         new_leader: u64,
     },
+    /// PD_W0014 — a player toggled `/autosplit` to a new value. Resolved
+    /// in the tick loop (look up the toggler's group + name, fan a
+    /// `GroupNotice` to their group-mates). `char_id` is the toggler.
+    AutosplitNoticeIntent {
+        char_id: u64,
+        on: bool,
+    },
     /// Track 12 Piece A — player → server pet command. Tick loop
     /// resolves the owner's pet, validates the target if `command ==
     /// ATTACK`, then sets `pet.target` + `pet.command_at` (sticky
@@ -538,9 +545,18 @@ pub fn handle_message(
             if !conn.ready {
                 return Outcome::Continue;
             }
+            // No-op when the flag is unchanged — the toggler still gets
+            // their local echo (hud.gd), but we don't spam the group with
+            // a notice for a setting that didn't actually move.
+            if conn.autosplit == on {
+                return Outcome::Continue;
+            }
             conn.autosplit = on;
             tracing::info!(char_id = conn.char_id, on, "autosplit toggled");
-            Outcome::Continue
+            Outcome::AutosplitNoticeIntent {
+                char_id: conn.char_id as u64,
+                on,
+            }
         }
 
         ClientWorldMsg::DamageSelf { amount } => {
@@ -1126,6 +1142,16 @@ pub fn send_loot_granted(
 /// `reason`.
 pub fn send_loot_rejected(server: &mut RenetServer, recipient_id: ClientId, reason: String) {
     let msg = ServerWorldMsg::LootRejected { reason };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// PD_W0014 — private one-line group notice (combat-log text) to a single
+/// recipient. Used by the `/autosplit` toggle fan-out; mirrors
+/// `send_loot_rejected`'s single-recipient shape.
+pub fn send_group_notice(server: &mut RenetServer, recipient_id: ClientId, text: String) {
+    let msg = ServerWorldMsg::GroupNotice { text };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
     }

@@ -1042,12 +1042,14 @@ pub async fn run(
         struct GroupKickI { leader: u64, target_name: String }
         struct GroupLootModeI { leader: u64, mode: u8 }
         struct GroupPassLeadershipI { leader: u64, new_leader: u64 }
+        struct AutosplitNoticeI { char_id: u64, on: bool }
         let mut group_invite_intents: Vec<GroupInviteI> = Vec::new();
         let mut group_accept_intents: Vec<GroupAcceptI> = Vec::new();
         let mut group_leave_intents: Vec<GroupLeaveI> = Vec::new();
         let mut group_kick_intents: Vec<GroupKickI> = Vec::new();
         let mut group_loot_mode_intents: Vec<GroupLootModeI> = Vec::new();
         let mut group_pass_leadership_intents: Vec<GroupPassLeadershipI> = Vec::new();
+        let mut autosplit_notice_intents: Vec<AutosplitNoticeI> = Vec::new();
         // Track 5 sub-task 4 — player → server loot pickup intents.
         // Verbatim queue; sub-task 4 is FFA loot so order matters for
         // contested bags (first arrival wins the slot).
@@ -1395,6 +1397,10 @@ pub async fn run(
                         Outcome::PassLeadershipIntent { leader, new_leader } => {
                             group_pass_leadership_intents
                                 .push(GroupPassLeadershipI { leader, new_leader });
+                        }
+                        Outcome::AutosplitNoticeIntent { char_id, on } => {
+                            autosplit_notice_intents
+                                .push(AutosplitNoticeI { char_id, on });
                         }
                         Outcome::LootItemIntent {
                             looter,
@@ -4082,6 +4088,40 @@ pub async fn run(
             fan_roster(&mut server, &connections, &group_manager, gid, None);
         }
 
+        // 4hbb-bis. PD_W0014 — a player toggled /autosplit. Fan a one-line
+        //       notice to their group-mates (transparency: it changes
+        //       whether the group shares coin from that member's loots).
+        //       The toggler already echoes locally (hud.gd), so they're
+        //       excluded here; solo players get no notice at all.
+        for intent in autosplit_notice_intents.drain(..) {
+            let toggler_cid = intent.char_id as ClientId;
+            let gid = match group_manager.group_of(toggler_cid) {
+                Some(g) => g.id,
+                None => continue, // solo → nobody to notify
+            };
+            let toggler_name = connections
+                .get(&toggler_cid)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| "Someone".to_string());
+            let text = format!(
+                "{} set auto-split {}.",
+                toggler_name,
+                if intent.on { "on" } else { "off" }
+            );
+            let members: Vec<ClientId> = match group_manager.groups.get(&gid) {
+                Some(g) => g.members.clone(),
+                None => continue,
+            };
+            for member_cid in members {
+                if member_cid == toggler_cid {
+                    continue; // toggler echoed locally already
+                }
+                if connections.get(&member_cid).map_or(false, |c| c.in_world) {
+                    handlers::send_group_notice(&mut server, member_cid, text.clone());
+                }
+            }
+        }
+
         // 4hbc. PD_W0014 — leader hands leadership to a member. Validate
         //       (current leader → existing member) and re-fan the roster
         //       so both old and new leader see the change. Fixes the
@@ -4468,45 +4508,66 @@ pub async fn run(
         //      behaviour of "drop on ground".
         if !drop_item_intents.is_empty() {
             for intent in drop_item_intents.drain(..) {
-                if intent.location != "base" {
-                    tracing::debug!(
-                        owner = intent.owner,
-                        loc = %intent.location,
-                        "DropItem rejected — non-base locations not yet supported"
-                    );
-                    continue;
-                }
                 let owner_cid = intent.owner as ClientId;
                 let drop_pos: Vec3f;
                 let dropped: Option<(String, u32)>;
                 if let Some(conn) = connections.get_mut(&owner_cid) {
                     drop_pos = conn.pos;
-                    dropped = conn.inventory.drop_base(intent.slot as usize, intent.count);
-                    if dropped.is_some() {
-                        conn.inventory_dirty = true;
-                    }
+                    // Bag-aware removal (base or bag_<i>); mirrors the
+                    // DestroyItem apply path. Rejects a non-empty
+                    // bag-typed slot (the bag must be emptied first).
+                    dropped = match conn
+                        .inventory
+                        .destroy_at(&intent.location, intent.slot, intent.count)
+                    {
+                        Ok(d) => {
+                            conn.inventory_dirty = true;
+                            Some(d)
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                owner = intent.owner,
+                                loc = %intent.location,
+                                slot = intent.slot,
+                                error = %e,
+                                "DropItem rejected"
+                            );
+                            None
+                        }
+                    };
                 } else {
                     continue;
                 }
                 let Some((item_path, count)) = dropped else {
-                    tracing::debug!(
-                        owner = intent.owner,
-                        slot = intent.slot,
-                        "DropItem rejected — empty slot"
-                    );
                     continue;
                 };
-                // Inventory Delta for the source slot — reflect the
-                // new state (residual count or empty).
-                let post = connections
-                    .get(&owner_cid)
-                    .and_then(|c| {
+                // InventoryDelta for the source slot — reflect the new
+                // state (residual count or empty). Reads base or bag_<i>
+                // exactly like the DestroyItem apply path.
+                let post = if intent.location == "base" {
+                    connections.get(&owner_cid).and_then(|c| {
                         c.inventory
                             .base
                             .get(intent.slot as usize)
                             .and_then(|s| s.as_ref())
                             .map(|e| (e.item_path.clone(), e.count))
-                    });
+                    })
+                } else if let Some(base_idx) = intent
+                    .location
+                    .strip_prefix("bag_")
+                    .and_then(|s| s.parse::<u8>().ok())
+                {
+                    connections.get(&owner_cid).and_then(|c| {
+                        c.inventory
+                            .bags
+                            .get(&base_idx)
+                            .and_then(|arr| arr.get(intent.slot as usize))
+                            .and_then(|s| s.as_ref())
+                            .map(|e| (e.item_path.clone(), e.count))
+                    })
+                } else {
+                    None
+                };
                 let (delta_path, delta_count) = match post {
                     Some((p, c)) => (Some(p), c),
                     None => (None, 0),
@@ -4514,7 +4575,7 @@ pub async fn run(
                 handlers::send_inventory_delta(
                     &mut server,
                     owner_cid,
-                    "base".to_string(),
+                    intent.location.clone(),
                     intent.slot,
                     delta_path,
                     delta_count,
@@ -5223,8 +5284,8 @@ pub async fn run(
         // 4hj. Track 14 follow-up — apply vendor SellItem intents.
         //      Server: looks up the slot, validates item count, computes
         //      sell price (vendor_price / 2 per unit, mirroring the
-        //      GDScript), credits coins, removes via drop_base /
-        //      bag-inner mutation, fans CoinsUpdate + InventoryDelta.
+        //      GDScript), credits coins, removes the sold stack (base
+        //      or bag-inner slot), fans CoinsUpdate + InventoryDelta.
         //      Equip-slot sells reject (player should unequip first).
         if !sell_item_intents.is_empty() {
             for intent in sell_item_intents.drain(..) {

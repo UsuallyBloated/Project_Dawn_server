@@ -955,6 +955,20 @@ pub enum ServerWorldMsg {
         armor: Vec<(String, u32)>,
         casting: Vec<(String, u32)>,
     },
+
+    /// PD_W0014 — private one-line group notice shown in the recipient's
+    /// combat log. Currently fanned when a group member toggles
+    /// `/autosplit` (transparency: it affects whether the group shares
+    /// coin from that member's loots). Fanned to the toggler's group-mates
+    /// only; the toggler gets their own echo locally.
+    ///
+    /// Appended at the end of the enum: bincode encodes the variant by
+    /// positional index, so new server→client variants go last to keep
+    /// every existing variant's discriminant stable (same rule the
+    /// PD_W0011 `Shout` / `ChatChannel` additions followed).
+    GroupNotice {
+        text: String,
+    },
 }
 
 /// First entity id reserved for server-spawned enemies. Player char_ids are

@@ -150,6 +150,10 @@ pub struct PerConnection {
     pub xp: i32,
     pub xp_to_next: i32,
     pub coins: protocol::world::Coins,
+    /// Per-character bank wallet (Banker NPC, slice 1) — zero-weight coin
+    /// storage. Mutated by deposit / withdraw / exchange intents and
+    /// persisted via `bank_dirty`; seeded from the DB at load.
+    pub bank_coins: protocol::world::Coins,
 
     /// Track 6: authoritative base stats. The damage formula port (sub-task
     /// 2) reads these; for now sub-task 1 just loads them so the values are
@@ -285,6 +289,11 @@ pub struct PerConnection {
     /// wallet silently resets to the DB row on next login.
     pub coins_dirty: bool,
 
+    /// Dirty flag for `bank_coins`; set on any deposit / withdraw / exchange,
+    /// cleared by the checkpoint sweep + disconnect flush (mirrors
+    /// `coins_dirty`).
+    pub bank_dirty: bool,
+
     /// Per-player `/autosplit` toggle (default on). Governs only this
     /// player's *own* loots: on + Round Robin → coin they loot splits
     /// among the nearby group; off → they keep it all. Session-scoped for
@@ -348,6 +357,7 @@ impl PerConnection {
             xp: spawn.xp,
             xp_to_next: spawn.xp_to_next,
             coins: spawn.coins,
+            bank_coins: spawn.bank_coins,
             strength: spawn.strength,
             dexterity: spawn.dexterity,
             agility: spawn.agility,
@@ -382,6 +392,7 @@ impl PerConnection {
             inventory: super::inventory::PlayerInventory::new(),
             inventory_dirty: false,
             coins_dirty: false,
+            bank_dirty: false,
             autosplit: true,
             equip_stat_bonuses: super::inventory::EquipStatBonuses::default(),
             weapon_skills: HashMap::new(),

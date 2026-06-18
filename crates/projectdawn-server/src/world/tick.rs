@@ -992,6 +992,21 @@ pub async fn run(
                                 conn.coins_dirty = false;
                             }
                         }
+                        // Bank flush on the way out too (mirror coins) — a
+                        // deposit right before logout shouldn't roll back.
+                        if conn.bank_dirty {
+                            if let Err(e) =
+                                db::save_bank(&pool, conn.char_id, conn.bank_coins).await
+                            {
+                                tracing::warn!(
+                                    char_id = conn.char_id,
+                                    error = %e,
+                                    "final bank save on disconnect failed"
+                                );
+                            } else {
+                                conn.bank_dirty = false;
+                            }
+                        }
                     }
                 }
             }
@@ -1139,6 +1154,13 @@ pub async fn run(
             qty: u32,
         }
         let mut sell_item_intents: Vec<SellItemI> = Vec::new();
+        // PD_W0015 — Banker, slice 1 (coins): deposit / withdraw / exchange.
+        struct BankDepositI { owner: u64, coins: protocol::world::Coins }
+        let mut bank_deposit_intents: Vec<BankDepositI> = Vec::new();
+        struct BankWithdrawI { owner: u64, coins: protocol::world::Coins }
+        let mut bank_withdraw_intents: Vec<BankWithdrawI> = Vec::new();
+        struct BankExchangeI { owner: u64, from_tier: u8, to_tier: u8, qty: u32 }
+        let mut bank_exchange_intents: Vec<BankExchangeI> = Vec::new();
         for client_id in client_ids {
             // Skip clients whose Connected event is in the queue but whose
             // PerConnection row hasn't been built yet (load_character failed
@@ -1379,6 +1401,17 @@ pub async fn run(
                         Outcome::SellItemIntent { owner, slot, qty } => {
                             sell_item_intents.push(SellItemI { owner, slot, qty });
                         }
+                        Outcome::BankDepositIntent { owner, coins } => {
+                            bank_deposit_intents.push(BankDepositI { owner, coins });
+                        }
+                        Outcome::BankWithdrawIntent { owner, coins } => {
+                            bank_withdraw_intents.push(BankWithdrawI { owner, coins });
+                        }
+                        Outcome::BankExchangeIntent { owner, from_tier, to_tier, qty } => {
+                            bank_exchange_intents.push(BankExchangeI {
+                                owner, from_tier, to_tier, qty,
+                            });
+                        }
                         Outcome::GroupInviteIntent { inviter, target_name } => {
                             group_invite_intents.push(GroupInviteI { inviter, target_name });
                         }
@@ -1605,6 +1638,12 @@ pub async fn run(
             // in sync after this seed.
             if let Some(new_conn) = connections.get(new_id) {
                 handlers::send_coins_update(&mut server, *new_id, new_conn.coins);
+            }
+            // PD_W0015 — seed the new joiner with their bank balance so the
+            // BankWindow shows the right total the moment they open it (the
+            // client caches it; deposit/withdraw keep it in sync after).
+            if let Some(new_conn) = connections.get(new_id) {
+                handlers::send_bank_snapshot(&mut server, *new_id, new_conn.bank_coins);
             }
             // Track 18.1 — seed the new joiner with their three
             // passive skill score maps (weapon / armor / casting).
@@ -5429,6 +5468,88 @@ pub async fn run(
                     coins_after = coins_after.total_copper(),
                     "SellItem applied"
                 );
+            }
+        }
+
+        // 4i-bank. PD_W0015 — Banker, slice 1 (coins). Deposit / withdraw move
+        //          per-tier amounts between the carried wallet and the
+        //          zero-weight bank balance; exchange converts tiers on the
+        //          wallet. All validated against minting (non-negative,
+        //          affordable), then fan CoinsUpdate (wallet) + BankSnapshot
+        //          (bank) to the actor; failures fan a private BankRejected.
+        for intent in bank_deposit_intents.drain(..) {
+            let cid = intent.owner as ClientId;
+            let Some(conn) = connections.get_mut(&cid) else { continue };
+            if intent.coins.has_negative() || intent.coins == protocol::world::Coins::ZERO {
+                handlers::send_bank_rejected(&mut server, cid, "Nothing to deposit.".to_string());
+                continue;
+            }
+            if !conn.coins.has_at_least(intent.coins) {
+                handlers::send_bank_rejected(
+                    &mut server, cid, "You don't have that coin to deposit.".to_string(),
+                );
+                continue;
+            }
+            conn.coins = conn.coins.sub_each(intent.coins);
+            conn.bank_coins = conn.bank_coins.add_each(intent.coins);
+            conn.coins_dirty = true;
+            conn.bank_dirty = true;
+            let (wallet, bank) = (conn.coins, conn.bank_coins);
+            handlers::send_coins_update(&mut server, cid, wallet);
+            handlers::send_bank_snapshot(&mut server, cid, bank);
+            tracing::info!(
+                owner = intent.owner,
+                deposited = intent.coins.total_copper(),
+                bank = bank.total_copper(),
+                "bank deposit"
+            );
+        }
+        for intent in bank_withdraw_intents.drain(..) {
+            let cid = intent.owner as ClientId;
+            let Some(conn) = connections.get_mut(&cid) else { continue };
+            if intent.coins.has_negative() || intent.coins == protocol::world::Coins::ZERO {
+                handlers::send_bank_rejected(&mut server, cid, "Nothing to withdraw.".to_string());
+                continue;
+            }
+            if !conn.bank_coins.has_at_least(intent.coins) {
+                handlers::send_bank_rejected(
+                    &mut server, cid, "Your bank doesn't hold that coin.".to_string(),
+                );
+                continue;
+            }
+            conn.bank_coins = conn.bank_coins.sub_each(intent.coins);
+            conn.coins = conn.coins.add_each(intent.coins);
+            conn.coins_dirty = true;
+            conn.bank_dirty = true;
+            let (wallet, bank) = (conn.coins, conn.bank_coins);
+            handlers::send_coins_update(&mut server, cid, wallet);
+            handlers::send_bank_snapshot(&mut server, cid, bank);
+            tracing::info!(
+                owner = intent.owner,
+                withdrew = intent.coins.total_copper(),
+                bank = bank.total_copper(),
+                "bank withdraw"
+            );
+        }
+        for intent in bank_exchange_intents.drain(..) {
+            let cid = intent.owner as ClientId;
+            let Some(conn) = connections.get_mut(&cid) else { continue };
+            match conn.coins.exchange(intent.from_tier, intent.to_tier, intent.qty) {
+                Ok(()) => {
+                    conn.coins_dirty = true;
+                    let wallet = conn.coins;
+                    handlers::send_coins_update(&mut server, cid, wallet);
+                    tracing::info!(
+                        owner = intent.owner,
+                        from = intent.from_tier,
+                        to = intent.to_tier,
+                        qty = intent.qty,
+                        "bank exchange"
+                    );
+                }
+                Err(reason) => {
+                    handlers::send_bank_rejected(&mut server, cid, reason.to_string());
+                }
             }
         }
 

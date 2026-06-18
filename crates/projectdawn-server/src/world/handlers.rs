@@ -266,6 +266,26 @@ pub enum Outcome {
         qty: u32,
     },
 
+    /// PD_W0015 — Banker, slice 1. Move `coins` from the player's carried
+    /// wallet into their bank (validated + applied in the tick loop).
+    BankDepositIntent {
+        owner: u64,
+        coins: Coins,
+    },
+    /// PD_W0015 — Banker, slice 1. Move `coins` from the bank to the wallet.
+    BankWithdrawIntent {
+        owner: u64,
+        coins: Coins,
+    },
+    /// PD_W0015 — Banker, slice 1. Convert `qty` coins of `from_tier` into
+    /// `to_tier` on the carried wallet (tiers 0 = copper … 3 = platinum).
+    BankExchangeIntent {
+        owner: u64,
+        from_tier: u8,
+        to_tier: u8,
+        qty: u32,
+    },
+
     /// Track 5 sub-task 4 — player → server pickup intent for one slot
     /// of a loot bag. The tick loop validates bag existence + slot
     /// index + pickup range, removes the stack, sends `LootGranted`
@@ -988,6 +1008,32 @@ pub fn handle_message(
             }
         }
 
+        ClientWorldMsg::BankDepositCoins { coins } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::BankDepositIntent { owner: conn.char_id as u64, coins }
+        }
+
+        ClientWorldMsg::BankWithdrawCoins { coins } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::BankWithdrawIntent { owner: conn.char_id as u64, coins }
+        }
+
+        ClientWorldMsg::BankExchange { from_tier, to_tier, qty } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::BankExchangeIntent {
+                owner: conn.char_id as u64,
+                from_tier,
+                to_tier,
+                qty,
+            }
+        }
+
         ClientWorldMsg::GmCommand { line } => {
             if !conn.in_world {
                 return Outcome::Continue;
@@ -1656,6 +1702,25 @@ pub fn fan_out_buff_snapshot(
 /// (`ServerWorldMsg::CoinsUpdate`); gdext-net re-emits it as four ints.
 pub fn send_coins_update(server: &mut RenetServer, client_id: ClientId, coins: Coins) {
     let msg = ServerWorldMsg::CoinsUpdate { coins };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(client_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// PD_W0015 — fan a `BankSnapshot` (the player's bank balance) privately to
+/// one client, after deposit/withdraw and on bank-open. Mirrors
+/// `send_coins_update`; gdext-net re-emits it as four ints.
+pub fn send_bank_snapshot(server: &mut RenetServer, client_id: ClientId, bank: Coins) {
+    let msg = ServerWorldMsg::BankSnapshot { coins: bank };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(client_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// PD_W0015 — privately tell one client a bank action was refused; the
+/// client logs `reason`. Mirrors `send_loot_rejected`.
+pub fn send_bank_rejected(server: &mut RenetServer, client_id: ClientId, reason: String) {
+    let msg = ServerWorldMsg::BankRejected { reason };
     if let Some(bytes) = encode(&msg) {
         server.send_message(client_id, CHANNEL_SYSTEM, bytes);
     }

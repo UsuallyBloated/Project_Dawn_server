@@ -26,7 +26,7 @@
 use bincode::config::standard as bincode_cfg;
 use godot::classes::{INode, Node};
 use godot::prelude::*;
-use protocol::world::{ClientWorldMsg, ServerWorldMsg, Vec3 as WireVec3};
+use protocol::world::{ClientWorldMsg, Coins, ServerWorldMsg, Vec3 as WireVec3};
 use renet::{ChannelConfig, ConnectionConfig, RenetClient, SendType};
 use renet_netcode::{ClientAuthentication, ConnectToken, NetcodeClientTransport};
 use std::io::Cursor;
@@ -280,6 +280,15 @@ impl NetClient {
     /// `coins_changed`.
     #[signal]
     fn coins_update(platinum: i64, gold: i64, silver: i64, copper: i64);
+
+    /// PD_W0015 — Banker, slice 1. The player's current bank balance (four
+    /// tiers). The GDScript handler updates the BankWindow.
+    #[signal]
+    fn bank_snapshot(platinum: i64, gold: i64, silver: i64, copper: i64);
+
+    /// PD_W0015 — Banker, slice 1. A bank action was refused; GDScript logs it.
+    #[signal]
+    fn bank_rejected(reason: GString);
 
     /// Track 6 sub-task 5 — server forwarded a group invite. Client
     /// shows an accept/reject UI; on accept the GDScript handler
@@ -648,6 +657,39 @@ impl NetClient {
     #[func]
     fn send_give_coins(&mut self, platinum: i64, gold: i64, silver: i64, copper: i64) -> bool {
         let msg = ClientWorldMsg::GiveCoins { platinum, gold, silver, copper };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// PD_W0015 — Banker, slice 1. Deposit per-tier coin amounts from the
+    /// carried wallet into the bank. Server fans `coins_update` (wallet) +
+    /// `bank_snapshot` (bank), or `bank_rejected` on failure.
+    #[func]
+    fn send_bank_deposit(&mut self, platinum: i64, gold: i64, silver: i64, copper: i64) -> bool {
+        let msg = ClientWorldMsg::BankDepositCoins {
+            coins: Coins { platinum, gold, silver, copper },
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// PD_W0015 — Banker, slice 1. Withdraw per-tier coin amounts from the
+    /// bank back to the carried wallet.
+    #[func]
+    fn send_bank_withdraw(&mut self, platinum: i64, gold: i64, silver: i64, copper: i64) -> bool {
+        let msg = ClientWorldMsg::BankWithdrawCoins {
+            coins: Coins { platinum, gold, silver, copper },
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// PD_W0015 — Banker, slice 1. Convert `qty` coins of `from_tier` into
+    /// `to_tier` on the carried wallet (tiers 0 = copper … 3 = platinum).
+    #[func]
+    fn send_bank_exchange(&mut self, from_tier: i64, to_tier: i64, qty: i64) -> bool {
+        let msg = ClientWorldMsg::BankExchange {
+            from_tier: from_tier.clamp(0, 3) as u8,
+            to_tier: to_tier.clamp(0, 3) as u8,
+            qty: qty.max(0) as u32,
+        };
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
@@ -1206,6 +1248,15 @@ enum Incoming {
         silver: i64,
         copper: i64,
     },
+    BankSnapshot {
+        platinum: i64,
+        gold: i64,
+        silver: i64,
+        copper: i64,
+    },
+    BankRejected {
+        reason: String,
+    },
     GroupInvited {
         from_id: i64,
         from_name: String,
@@ -1687,6 +1738,23 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::BankSnapshot { platinum, gold, silver, copper } => {
+                    self.base_mut().emit_signal(
+                        "bank_snapshot",
+                        &[
+                            platinum.to_variant(),
+                            gold.to_variant(),
+                            silver.to_variant(),
+                            copper.to_variant(),
+                        ],
+                    );
+                }
+                Incoming::BankRejected { reason } => {
+                    self.base_mut().emit_signal(
+                        "bank_rejected",
+                        &[GString::from(reason.as_str()).to_variant()],
+                    );
+                }
                 Incoming::GroupInvited { from_id, from_name } => {
                     self.base_mut().emit_signal(
                         "group_invited",
@@ -2006,6 +2074,13 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             silver: coins.silver,
             copper: coins.copper,
         },
+        ServerWorldMsg::BankSnapshot { coins } => Incoming::BankSnapshot {
+            platinum: coins.platinum,
+            gold: coins.gold,
+            silver: coins.silver,
+            copper: coins.copper,
+        },
+        ServerWorldMsg::BankRejected { reason } => Incoming::BankRejected { reason },
         ServerWorldMsg::GroupInvited { from_id, from_name } => Incoming::GroupInvited {
             from_id: from_id as i64,
             from_name,

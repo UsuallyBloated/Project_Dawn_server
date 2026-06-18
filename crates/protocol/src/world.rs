@@ -28,7 +28,13 @@ use serde::{Deserialize, Serialize};
 /// roster mode / reject feedback) append variants under this same id as
 /// they land. One bump for the whole track — client + server must rebuild
 /// together.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3134; // "PD_W0014"
+///
+/// PD_W0015: Banker NPC, slice 1 (coins). Adds the per-character bank wallet
+/// over the wire — `BankDepositCoins` / `BankWithdrawCoins` / `BankExchange`
+/// client intents and `BankSnapshot` / `BankRejected` server→client messages.
+/// New variants append at the END of each enum (bincode encodes by positional
+/// discriminant, so appending keeps every existing variant stable).
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3135; // "PD_W0015"
 
 pub type EntityId = u64;
 
@@ -82,6 +88,110 @@ impl Coins {
 
     pub fn can_afford(self, cost_copper: i64) -> bool {
         cost_copper <= self.total_copper()
+    }
+
+    /// Copper value of one coin of `tier` (0 = copper … 3 = platinum).
+    pub const fn tier_value(tier: u8) -> i64 {
+        Self::TIER_VALUE[tier as usize]
+    }
+
+    /// Count held in `tier` (0 = copper … 3 = platinum).
+    pub fn tier_count(self, tier: u8) -> i64 {
+        match tier {
+            0 => self.copper,
+            1 => self.silver,
+            2 => self.gold,
+            _ => self.platinum,
+        }
+    }
+
+    /// True if any tier is negative. Used to reject malformed client amounts
+    /// (a deposit/withdraw of a negative stack would otherwise mint coin).
+    pub fn has_negative(self) -> bool {
+        self.platinum < 0 || self.gold < 0 || self.silver < 0 || self.copper < 0
+    }
+
+    /// Per-tier "holds at least `other` in every tier" — the affordability
+    /// check before a deposit/withdraw of specific tier amounts.
+    pub fn has_at_least(self, other: Coins) -> bool {
+        self.platinum >= other.platinum
+            && self.gold >= other.gold
+            && self.silver >= other.silver
+            && self.copper >= other.copper
+    }
+
+    /// Per-tier sum — credit specific tier amounts on top of existing stacks
+    /// without re-reducing (unlike `add_payout`). For bank deposit/withdraw.
+    /// Saturating to match the overflow-safe discipline of `total_copper` /
+    /// `add_payout` (a tier never wraps to a negative balance).
+    pub fn add_each(self, other: Coins) -> Coins {
+        Coins {
+            platinum: self.platinum.saturating_add(other.platinum),
+            gold: self.gold.saturating_add(other.gold),
+            silver: self.silver.saturating_add(other.silver),
+            copper: self.copper.saturating_add(other.copper),
+        }
+    }
+
+    /// Per-tier difference; caller must ensure `has_at_least(other)` first.
+    /// Saturating for the same overflow-safety reason as `add_each`.
+    pub fn sub_each(self, other: Coins) -> Coins {
+        Coins {
+            platinum: self.platinum.saturating_sub(other.platinum),
+            gold: self.gold.saturating_sub(other.gold),
+            silver: self.silver.saturating_sub(other.silver),
+            copper: self.copper.saturating_sub(other.copper),
+        }
+    }
+
+    /// Banker tier exchange (slice 1): convert up to `qty` coins of `from_tier`
+    /// into `to_tier` in place, value-preserving (0% fee for MVP). Up-conversions
+    /// convert the whole-multiple part and leave any remainder in `from_tier`
+    /// (150 copper → 1 silver + 50 copper); down-conversions always divide
+    /// evenly. Touches only the two tiers involved — no silent consolidation of
+    /// the rest of the wallet. Returns Err (wallet untouched) on same/invalid
+    /// tier, zero qty, insufficient `from_tier`, or too little to make even one
+    /// target coin.
+    pub fn exchange(&mut self, from_tier: u8, to_tier: u8, qty: u32) -> Result<(), &'static str> {
+        if from_tier == to_tier {
+            return Err("pick two different coin tiers");
+        }
+        if from_tier > 3 || to_tier > 3 {
+            return Err("invalid coin tier");
+        }
+        if qty == 0 {
+            return Err("nothing to convert");
+        }
+        let qty = qty as i64;
+        if self.tier_count(from_tier) < qty {
+            return Err("not enough of that coin to convert");
+        }
+        let from_v = Self::TIER_VALUE[from_tier as usize];
+        let to_v = Self::TIER_VALUE[to_tier as usize];
+        let value = qty.saturating_mul(from_v);
+        let to_count = value / to_v;
+        if to_count == 0 {
+            // Less than one target coin's worth (e.g. 50 copper → silver).
+            return Err("not enough of that coin to make even one of the target");
+        }
+        // Convert the whole-multiple part; the remainder (always a whole number
+        // of `from_tier` coins) stays put. Value is preserved exactly (0% fee
+        // for MVP — a future fee would deduct from `to_count` here per
+        // currency.md's bands).
+        let remainder_in_from = (value % to_v) / from_v;
+        let consumed = qty - remainder_in_from;
+        self.adjust_tier(from_tier, -consumed);
+        self.adjust_tier(to_tier, to_count);
+        Ok(())
+    }
+
+    fn adjust_tier(&mut self, tier: u8, delta: i64) {
+        match tier {
+            0 => self.copper = self.copper.saturating_add(delta),
+            1 => self.silver = self.silver.saturating_add(delta),
+            2 => self.gold = self.gold.saturating_add(delta),
+            _ => self.platinum = self.platinum.saturating_add(delta),
+        }
     }
 
     /// Spend `cost` copper-equivalents, disturbing the wallet as little as
@@ -596,6 +706,26 @@ pub enum ClientWorldMsg {
     PassLeadership {
         new_leader: u64,
     },
+
+    /// PD_W0015 — Banker, slice 1. Move `coins` (per-tier amounts) from the
+    /// sender's carried wallet into their bank. Server validates non-negative
+    /// + affordable, then fans `CoinsUpdate` (wallet) + `BankSnapshot` (bank).
+    BankDepositCoins {
+        coins: Coins,
+    },
+    /// PD_W0015 — Banker, slice 1. Move `coins` from the bank back to the
+    /// carried wallet. Server validates the bank holds them.
+    BankWithdrawCoins {
+        coins: Coins,
+    },
+    /// PD_W0015 — Banker, slice 1. Convert `qty` coins of `from_tier` into
+    /// `to_tier` on the carried wallet (tiers 0 = copper … 3 = platinum).
+    /// Up-conversion must be a whole multiple of the target tier; 0% fee MVP.
+    BankExchange {
+        from_tier: u8,
+        to_tier: u8,
+        qty: u32,
+    },
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────
@@ -969,6 +1099,18 @@ pub enum ServerWorldMsg {
     GroupNotice {
         text: String,
     },
+
+    /// PD_W0015 — Banker, slice 1. The recipient's current bank balance
+    /// (four-tier wallet). Fanned privately when the player opens the bank and
+    /// after each deposit/withdraw. The carried wallet uses `CoinsUpdate`.
+    BankSnapshot {
+        coins: Coins,
+    },
+    /// PD_W0015 — Banker, slice 1. A bank action was refused (e.g. you don't
+    /// hold that coin, or a non-whole conversion). The client logs `reason`.
+    BankRejected {
+        reason: String,
+    },
 }
 
 /// First entity id reserved for server-spawned enemies. Player char_ids are
@@ -1050,5 +1192,67 @@ mod coins_tests {
         c.add_payout(5000);
         assert_eq!(c, Coins { platinum: 0, gold: 0, silver: 50, copper: 99 });
         assert_eq!(c.total_copper(), 5099);
+    }
+
+    // ── Banker slice 1: tier exchange + deposit/withdraw math ──
+
+    #[test]
+    fn exchange_up_converts_whole_multiples_and_preserves_value() {
+        // 200 copper → 2 silver; the rest of the wallet is untouched.
+        let mut c = Coins { copper: 250, gold: 1, ..Coins::ZERO };
+        let before = c.total_copper();
+        assert!(c.exchange(0, 1, 200).is_ok());
+        assert_eq!(c, Coins { copper: 50, silver: 2, gold: 1, ..Coins::ZERO });
+        assert_eq!(c.total_copper(), before, "0% fee preserves value");
+    }
+
+    #[test]
+    fn exchange_up_partial_converts_and_keeps_remainder() {
+        // 150 copper -> 1 silver, with the unconvertible 50 copper left in place.
+        let mut c = Coins { copper: 150, ..Coins::ZERO };
+        let before = c.total_copper();
+        assert!(c.exchange(0, 1, 150).is_ok());
+        assert_eq!(c, Coins { copper: 50, silver: 1, ..Coins::ZERO });
+        assert_eq!(c.total_copper(), before, "0% fee preserves value");
+    }
+
+    #[test]
+    fn exchange_up_rejects_below_one_target_coin() {
+        // 50 copper can't make even one silver — nothing converts.
+        let mut c = Coins { copper: 50, ..Coins::ZERO };
+        assert!(c.exchange(0, 1, 50).is_err());
+        assert_eq!(c, Coins { copper: 50, ..Coins::ZERO });
+    }
+
+    #[test]
+    fn exchange_down_always_divides_evenly() {
+        let mut c = Coins { silver: 1, ..Coins::ZERO };
+        assert!(c.exchange(1, 0, 1).is_ok());
+        assert_eq!(c, Coins { copper: 100, ..Coins::ZERO });
+    }
+
+    #[test]
+    fn exchange_rejects_insufficient_same_tier_and_zero() {
+        let mut c = Coins { copper: 100, ..Coins::ZERO };
+        assert!(c.exchange(0, 1, 200).is_err(), "not enough copper");
+        assert!(c.exchange(1, 1, 1).is_err(), "same tier");
+        assert!(c.exchange(0, 1, 0).is_err(), "zero qty");
+        assert_eq!(c, Coins { copper: 100, ..Coins::ZERO }, "no partial mutation");
+    }
+
+    #[test]
+    fn deposit_helpers_are_per_tier() {
+        let wallet = Coins { silver: 5, copper: 30, ..Coins::ZERO };
+        let amt = Coins { silver: 2, copper: 30, ..Coins::ZERO };
+        assert!(wallet.has_at_least(amt));
+        assert!(!wallet.has_at_least(Coins { silver: 6, ..Coins::ZERO }));
+        assert_eq!(wallet.sub_each(amt), Coins { silver: 3, ..Coins::ZERO });
+        assert_eq!(Coins::ZERO.add_each(amt), amt);
+    }
+
+    #[test]
+    fn has_negative_flags_malformed_amounts() {
+        assert!(Coins { copper: -1, ..Coins::ZERO }.has_negative());
+        assert!(!Coins { copper: 1, ..Coins::ZERO }.has_negative());
     }
 }

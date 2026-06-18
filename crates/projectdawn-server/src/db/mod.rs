@@ -396,6 +396,9 @@ pub struct CharacterSpawn {
     pub mp: f32,
     pub stamina: f32,
     pub coins: Coins,
+    /// Per-character bank wallet (Banker NPC, slice 1) — zero-weight coin
+    /// storage at the Banker. Seeded from the `bank_*` columns.
+    pub bank_coins: Coins,
     pub zone: Option<String>,
     pub pos: (f32, f32, f32),
     pub yaw: f32,
@@ -428,6 +431,10 @@ struct SpawnRow {
     gold: i64,
     silver: i64,
     copper: i64,
+    bank_platinum: i64,
+    bank_gold: i64,
+    bank_silver: i64,
+    bank_copper: i64,
     zone: Option<String>,
     pos_x: Option<f32>,
     pos_y: Option<f32>,
@@ -446,6 +453,7 @@ pub async fn load_character(
                 base_constitution,
                 base_max_hp, base_max_mp, base_max_stamina,
                 hp, mp, stamina, platinum, gold, silver, copper,
+                bank_platinum, bank_gold, bank_silver, bank_copper,
                 zone, pos_x, pos_y, pos_z, yaw
          FROM characters
          WHERE id = ?1 AND deleted_at IS NULL",
@@ -496,6 +504,12 @@ pub async fn load_character(
             gold: row.gold,
             silver: row.silver,
             copper: row.copper,
+        },
+        bank_coins: Coins {
+            platinum: row.bank_platinum,
+            gold: row.bank_gold,
+            silver: row.bank_silver,
+            copper: row.bank_copper,
         },
         zone: row.zone,
         pos: (
@@ -667,6 +681,25 @@ pub async fn save_coins(pool: &SqlitePool, char_id: i64, coins: Coins) -> AuthRe
     .bind(coins.gold)
     .bind(coins.silver)
     .bind(coins.copper)
+    .bind(char_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Persist the per-character bank wallet (Banker NPC, slice 1). Mirror of
+/// `save_coins`; gated on `bank_dirty` in the checkpoint sweep + disconnect
+/// flush so deposits / withdrawals / exchanges survive logout.
+pub async fn save_bank(pool: &SqlitePool, char_id: i64, bank: Coins) -> AuthResult<()> {
+    sqlx::query(
+        "UPDATE characters SET bank_platinum = ?1, bank_gold = ?2,
+                bank_silver = ?3, bank_copper = ?4
+         WHERE id = ?5",
+    )
+    .bind(bank.platinum)
+    .bind(bank.gold)
+    .bind(bank.silver)
+    .bind(bank.copper)
     .bind(char_id)
     .execute(pool)
     .await?;

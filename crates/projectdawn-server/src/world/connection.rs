@@ -123,6 +123,17 @@ pub struct PerConnection {
     /// EntitySpawn fan-out so peers don't see ghost bodies for clients
     /// still on the Enter World screen.
     pub in_world: bool,
+
+    /// Camp + linkdead: set on a CLEAN disconnect (a `Disconnect` intent from
+    /// Quit Game, or a completed `/camp`). The tick loop reads it when the
+    /// transport drops to decide whether to reap the body immediately (clean)
+    /// or let it linger as linkdead (unclean). See docs/design/camp_and_linkdead.md.
+    pub clean_disconnect: bool,
+    /// Camp + linkdead: when `Some`, this connection's transport has dropped
+    /// uncleanly and the body is lingering in-world (still targetable, frozen
+    /// in place). The reaper sweep removes it once `now - linkdead_since`
+    /// passes [`super::LINKDEAD_SECS`]. `None` for a live connection.
+    pub linkdead_since: Option<Instant>,
     /// Highest move sequence we've accepted from this client. Out-of-order
     /// packets get dropped (unreliable channel, so reorder is expected).
     pub last_move_seq: u32,
@@ -357,6 +368,8 @@ impl PerConnection {
             last_persisted_level: spawn.level,
             ready: false,
             in_world: false,
+            clean_disconnect: false,
+            linkdead_since: None,
             last_move_seq: 0,
             latest_direction: Vec3f::ZERO,
             last_move_received: None,
@@ -461,5 +474,76 @@ impl PerConnection {
         self.last_persisted_stamina = self.stamina;
         self.last_persisted_xp = self.xp;
         self.last_persisted_level = self.level;
+    }
+
+    /// Camp + linkdead: true once a body that dropped uncleanly has lingered at
+    /// least `window`, i.e. the reaper should remove it now. A live connection
+    /// (`linkdead_since == None`) is never expired. The tick loop's reaper
+    /// sweep uses this with [`super::LINKDEAD_SECS`].
+    pub fn linkdead_expired(&self, now: Instant, window: std::time::Duration) -> bool {
+        self.linkdead_since
+            .is_some_and(|t| now.duration_since(t) >= window)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Minimal spawn for connection-state tests. Field values are arbitrary;
+    /// only the lifecycle flags under test matter.
+    fn test_spawn() -> crate::db::CharacterSpawn {
+        crate::db::CharacterSpawn {
+            char_id: 1,
+            account_id: 1,
+            name: "Tester".into(),
+            race: "Human".into(),
+            class: "Warrior".into(),
+            level: 1,
+            xp: 0,
+            xp_to_next: 100,
+            strength: 10,
+            dexterity: 10,
+            agility: 10,
+            intelligence: 10,
+            wisdom: 10,
+            charisma: 10,
+            constitution: 10,
+            max_hp: 100.0,
+            max_mp: 100.0,
+            max_stamina: 100.0,
+            hp: 100.0,
+            mp: 100.0,
+            stamina: 100.0,
+            coins: Default::default(),
+            bank_coins: Default::default(),
+            zone: None,
+            pos: (0.0, 0.0, 0.0),
+            yaw: 0.0,
+        }
+    }
+
+    #[test]
+    fn linkdead_expired_false_when_not_linkdead() {
+        let now = Instant::now();
+        let conn = PerConnection::from_spawn(test_spawn(), now);
+        // A live connection (linkdead_since == None) is never reaped, no matter
+        // how much later we sweep.
+        assert!(!conn.linkdead_expired(now, Duration::from_secs(30)));
+        assert!(!conn.linkdead_expired(now + Duration::from_secs(120), Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn linkdead_expired_respects_window() {
+        let base = Instant::now();
+        let mut conn = PerConnection::from_spawn(test_spawn(), base);
+        conn.linkdead_since = Some(base);
+        let window = Duration::from_secs(30);
+        // Still inside the window: not yet reapable.
+        assert!(!conn.linkdead_expired(base + Duration::from_secs(29), window));
+        // At and past the window: reapable.
+        assert!(conn.linkdead_expired(base + window, window));
+        assert!(conn.linkdead_expired(base + Duration::from_secs(31), window));
     }
 }

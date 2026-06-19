@@ -20,8 +20,8 @@ use super::{
     spawn_points::Spawner,
     spells,
     ATTACK_RANGE_TOLERANCE, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL,
-    CORPSE_LINGER_SECS, GROUP_COIN_SHARE_RANGE, LOOT_BAG_LINGER_SECS, LOOT_PICKUP_RANGE,
-    MAX_MOVE_SPEED,
+    CORPSE_LINGER_SECS, GROUP_COIN_SHARE_RANGE, LINKDEAD_SECS, LOOT_BAG_LINGER_SECS,
+    LOOT_PICKUP_RANGE, MAX_MOVE_SPEED,
     RANGED_ATTACK_RANGE, STALE_MOVE_THRESHOLD, TICK_DT,
 };
 use crate::{db, Config};
@@ -666,6 +666,201 @@ enum CombatEvent {
     },
 }
 
+/// Despawn the pet(s) owned by `owner_entity`: fan EntityDespawn to the AOI
+/// peers who could see each pet, then drop it from the grid and the enemies
+/// map. Idempotent — a second call after the pets are already gone is a no-op.
+/// Called both when a player goes linkdead (the body lingers but the pet
+/// can't be commanded) and from the final reap.
+fn despawn_owned_pets(
+    server: &mut RenetServer,
+    connections: &HashMap<ClientId, PerConnection>,
+    aoi: &mut AoiGrid,
+    enemies: &mut HashMap<EntityId, Entity>,
+    owner_entity: EntityId,
+    owner_client_id: ClientId,
+) {
+    // Track 11 — owner's pet dies with them. Future work: hand off pets on
+    // zone change rather than instant despawn.
+    let owned_pets: Vec<(EntityId, Vec3f)> = enemies
+        .iter()
+        .filter(|(_, e)| e.owner == Some(owner_entity))
+        .map(|(id, e)| (*id, e.pos))
+        .collect();
+    for (pet_id, pet_pos) in owned_pets {
+        let pet_cell = aoi::cell_for(pet_pos.x, pet_pos.z);
+        aoi.remove(pet_id, pet_cell);
+        let pet_visible = aoi.entities_visible_from(pet_cell);
+        let pet_recipients: Vec<ClientId> = connections
+            .iter()
+            .filter(|(id, c)| {
+                **id != owner_client_id && c.in_world && pet_visible.contains(*id)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for peer_id in pet_recipients {
+            handlers::send_entity_despawn(server, peer_id, pet_id);
+        }
+        enemies.remove(&pet_id);
+        tracing::info!(owner = owner_entity, pet_id, "pet despawned on owner disconnect");
+    }
+}
+
+/// Full disconnect cleanup, shared by the immediate clean-disconnect path and
+/// the linkdead reaper sweep: despawn the player body (and any surviving pet)
+/// for AOI peers, drop the player from the grid, remove them from their group,
+/// then remove the connection and flush its dirty state to the DB.
+///
+/// Safe to call for a `client_id` that isn't in `connections` (a refused
+/// duplicate login never inserted): every step degrades to a no-op. Does NOT
+/// call `server.disconnect` — the transport is already torn down by the time
+/// we get here on either path.
+async fn reap_connection(
+    server: &mut RenetServer,
+    connections: &mut HashMap<ClientId, PerConnection>,
+    aoi: &mut AoiGrid,
+    enemies: &mut HashMap<EntityId, Entity>,
+    group_manager: &mut GroupManager,
+    pool: &SqlitePool,
+    client_id: ClientId,
+) {
+    // Track 7: remove the leaver from the AOI grid BEFORE computing recipients
+    // so entities_visible_from gives the correct set of peers who could see
+    // this player. Send EntityDespawn only to that AOI-visible set.
+    let despawn_info = connections
+        .get(&client_id)
+        .filter(|c| c.in_world)
+        .map(|c| (c.char_id as u64, c.aoi_cell));
+    if let Some((entity_id, leaver_cell)) = despawn_info {
+        aoi.remove(entity_id, leaver_cell);
+        let visible_peers = aoi.entities_visible_from(leaver_cell);
+        let peer_ids: Vec<ClientId> = connections
+            .iter()
+            .filter(|(id, c)| **id != client_id && c.in_world && visible_peers.contains(*id))
+            .map(|(id, _)| *id)
+            .collect();
+        for peer_id in peer_ids {
+            handlers::send_entity_despawn(server, peer_id, entity_id);
+        }
+        // Despawn any pet still alive (no-op if linkdead already dropped it).
+        despawn_owned_pets(server, connections, aoi, enemies, entity_id, client_id);
+    }
+
+    // Track 6 sub-task 5 — remove the leaver from their group. If the group
+    // dissolves (one member left), notify them too. The rest of the roster
+    // gets a fresh GroupRoster.
+    if let Some((gid, remaining, dissolved)) = group_manager.leave(client_id) {
+        if dissolved {
+            // Group dissolved. Survivors (0 or 1) get an empty roster so their
+            // HUD clears. The leaver's transport is already torn down.
+            for m in &remaining {
+                handlers::fan_group_roster(
+                    server,
+                    std::slice::from_ref(m),
+                    gid,
+                    *m,
+                    Vec::new(),
+                    0,
+                );
+            }
+        } else if let Some(g) = group_manager.groups.get(&gid) {
+            // Re-fetch the group with name lookups for the survivor fan-out.
+            let members_with_names: Vec<(u64, String)> = g
+                .members
+                .iter()
+                .filter_map(|m| connections.get(m).map(|c| (*m, c.name.clone())))
+                .collect();
+            let recipients: Vec<ClientId> = g.members.clone();
+            handlers::fan_group_roster(
+                server,
+                &recipients,
+                gid,
+                g.leader,
+                members_with_names,
+                g.loot_mode.to_u8(),
+            );
+        }
+    }
+
+    if let Some(mut conn) = connections.remove(&client_id) {
+        // One last save for the road. Failure is non-fatal — worst case the
+        // player rolls back to the last 60 s checkpoint.
+        if conn.is_dirty_for_persist() {
+            let zone = conn.zone.clone();
+            if let Err(e) = db::checkpoint_position(
+                pool,
+                conn.char_id,
+                zone.as_deref(),
+                conn.pos.into_tuple(),
+                conn.yaw,
+            )
+            .await
+            {
+                tracing::warn!(
+                    char_id = conn.char_id,
+                    error = %e,
+                    "final checkpoint on disconnect failed"
+                );
+            } else {
+                conn.mark_persisted();
+            }
+        }
+        // Coins flush on the way out too — a logout right after a vendor run
+        // shouldn't roll the wallet back to the last 60 s checkpoint.
+        if conn.coins_dirty {
+            if let Err(e) = db::save_coins(pool, conn.char_id, conn.coins).await {
+                tracing::warn!(
+                    char_id = conn.char_id,
+                    error = %e,
+                    "final coin save on disconnect failed"
+                );
+            } else {
+                conn.coins_dirty = false;
+            }
+        }
+        // Bank flush on the way out too (mirror coins) — a deposit right before
+        // logout shouldn't roll back.
+        if conn.bank_dirty {
+            if let Err(e) = db::save_bank(pool, conn.char_id, conn.bank_coins).await {
+                tracing::warn!(
+                    char_id = conn.char_id,
+                    error = %e,
+                    "final bank save on disconnect failed"
+                );
+            } else {
+                conn.bank_dirty = false;
+            }
+        }
+        // Banker slice 2 — flush both item vaults on the way out (personal
+        // char-keyed, shared account-keyed).
+        if conn.bank_items_dirty {
+            let rows = conn.bank_items.to_rows();
+            if let Err(e) = db::save_bank_items(pool, conn.char_id, &rows).await {
+                tracing::warn!(
+                    char_id = conn.char_id,
+                    error = %e,
+                    "final bank-items save on disconnect failed"
+                );
+            } else {
+                conn.bank_items_dirty = false;
+            }
+        }
+        if conn.account_bank_items_dirty {
+            let rows = conn.account_bank_items.to_rows();
+            if let Err(e) =
+                db::save_account_bank_items(pool, conn.account_id, &rows).await
+            {
+                tracing::warn!(
+                    account_id = conn.account_id,
+                    error = %e,
+                    "final account-bank-items save on disconnect failed"
+                );
+            } else {
+                conn.account_bank_items_dirty = false;
+            }
+        }
+    }
+}
+
 pub async fn run(
     cfg: Arc<Config>,
     pool: SqlitePool,
@@ -753,9 +948,21 @@ pub async fn run(
                             // single-owner. Tradeoff: after an UNCLEAN disconnect the
                             // player waits for the stale session to time out before
                             // reconnecting; a clean logout frees the account at once.
-                            if connections.values().any(|c| c.account_id == account_id) {
+                            if let Some(existing) =
+                                connections.values().find(|c| c.account_id == account_id)
+                            {
+                                // If the existing session is lingering linkdead, the
+                                // soonest a fresh relogin can succeed is when its window
+                                // elapses; hand the client that countdown. A LIVE session
+                                // (not linkdead) has no countdown — the player must log
+                                // that one out first.
+                                let reconnect_after_secs = existing.linkdead_since.map(|t| {
+                                    LINKDEAD_SECS
+                                        .saturating_sub(now.duration_since(t))
+                                        .as_secs() as u32
+                                });
                                 tracing::info!(
-                                    account_id, char_id,
+                                    account_id, char_id, ?reconnect_after_secs,
                                     "duplicate login refused — account already in-world"
                                 );
                                 // Send the reason and let the CLIENT tear down its own
@@ -767,11 +974,12 @@ pub async fn run(
                                 // refused connection was never inserted into `connections`, so
                                 // it holds no world state and its messages are ignored; if the
                                 // client ignores the kick, the netcode timeout reaps it.
-                                handlers::send_kick(
+                                handlers::send_kick_with_reconnect(
                                     &mut server,
                                     client_id,
                                     KickCode::DuplicateLogin,
                                     "You already have a character in this world.",
+                                    reconnect_after_secs,
                                 );
                                 continue;
                             }
@@ -882,6 +1090,26 @@ pub async fn run(
                 ServerEvent::ClientDisconnected { client_id, reason } => {
                     tracing::info!(%client_id, ?reason, "client disconnected (transport)");
 
+                    // Camp + linkdead: if a body is ALREADY lingering linkdead
+                    // under this client_id, this event is a stray echo, not the
+                    // body dropping again. Because client_id == char_id, a refused
+                    // same-character relogin collides with the lingering body's key
+                    // and emits its own ClientDisconnected when it tears down after
+                    // the deny-login kick. Draining its messages or re-marking would
+                    // reset the reap timer and let the body linger forever, so a
+                    // player could dodge the reap by spamming relogin. Ignore it; the
+                    // reaper still removes the body when its window elapses.
+                    if connections
+                        .get(&client_id)
+                        .is_some_and(|c| c.linkdead_since.is_some())
+                    {
+                        tracing::debug!(
+                            %client_id,
+                            "ignoring disconnect for already-linkdead body (refused-relogin echo)"
+                        );
+                        continue;
+                    }
+
                     // Drain any pending app-layer messages before removing the
                     // connection. Without this, if the client sent
                     // ClientWorldMsg::Disconnect and then tore down the
@@ -904,197 +1132,62 @@ pub async fn run(
                         }
                     }
 
-                    // Track 7: remove leaver from the AOI grid BEFORE
-                    // computing recipients so entities_visible_from gives
-                    // the correct set of peers who could see this player.
-                    // Send EntityDespawn only to that AOI-visible set.
-                    let despawn_info = connections
+                    // Camp + linkdead: a CLEAN leave (Quit Game, or a completed
+                    // /camp — both set `clean_disconnect`) reaps the body at once.
+                    // An UNCLEAN drop (crash, killed client, network loss) instead
+                    // marks the connection linkdead: the body stays in `connections`
+                    // with `in_world = true`, so it remains in the targeting
+                    // snapshots (vulnerable) and the AOI grid (peers keep seeing it).
+                    // The reaper sweep removes it once LINKDEAD_SECS elapse. A
+                    // connection not in `connections` (e.g. a refused duplicate login
+                    // that never spawned) counts as clean — the reap is then a no-op.
+                    let clean = connections
                         .get(&client_id)
-                        .filter(|c| c.in_world)
-                        .map(|c| (c.char_id as u64, c.aoi_cell));
-                    if let Some((entity_id, leaver_cell)) = despawn_info {
-                        aoi.remove(entity_id, leaver_cell);
-                        let visible_peers = aoi.entities_visible_from(leaver_cell);
-                        let peer_ids: Vec<ClientId> = connections
-                            .iter()
-                            .filter(|(id, c)| {
-                                **id != client_id
-                                    && c.in_world
-                                    && visible_peers.contains(*id)
-                            })
-                            .map(|(id, _)| *id)
-                            .collect();
-                        for peer_id in peer_ids {
-                            handlers::send_entity_despawn(
+                        .map(|c| c.clean_disconnect)
+                        .unwrap_or(true);
+                    if clean {
+                        reap_connection(
+                            &mut server,
+                            &mut connections,
+                            &mut aoi,
+                            &mut enemies,
+                            &mut group_manager,
+                            &pool,
+                            client_id,
+                        )
+                        .await;
+                    } else {
+                        // Despawn the pet now — a linkdead player can't command it,
+                        // and an orphaned warder still chasing mobs is worse than a
+                        // brief gap. Group membership is KEPT for the window so a
+                        // short drop doesn't double-vanish the player from the roster
+                        // (the reaper removes them from the group at the end).
+                        let owner_entity = connections
+                            .get(&client_id)
+                            .filter(|c| c.in_world)
+                            .map(|c| c.char_id as u64);
+                        if let Some(owner_entity) = owner_entity {
+                            despawn_owned_pets(
                                 &mut server,
-                                peer_id,
-                                entity_id,
+                                &connections,
+                                &mut aoi,
+                                &mut enemies,
+                                owner_entity,
+                                client_id,
                             );
                         }
-
-                        // Track 11 — leaver's pet (if any) dies with
-                        // them. Drop from AOI + enemies map, fan
-                        // EntityDespawn to peers who could see the
-                        // pet's cell. Future work: hand off pets on
-                        // zone change rather than instant despawn.
-                        let owned_pets: Vec<(EntityId, Vec3f)> = enemies
-                            .iter()
-                            .filter(|(_, e)| e.owner == Some(entity_id))
-                            .map(|(id, e)| (*id, e.pos))
-                            .collect();
-                        for (pet_id, pet_pos) in owned_pets {
-                            let pet_cell = aoi::cell_for(pet_pos.x, pet_pos.z);
-                            aoi.remove(pet_id, pet_cell);
-                            let pet_visible = aoi.entities_visible_from(pet_cell);
-                            let pet_recipients: Vec<ClientId> = connections
-                                .iter()
-                                .filter(|(id, c)| {
-                                    **id != client_id
-                                        && c.in_world
-                                        && pet_visible.contains(*id)
-                                })
-                                .map(|(id, _)| *id)
-                                .collect();
-                            for peer_id in pet_recipients {
-                                handlers::send_entity_despawn(
-                                    &mut server,
-                                    peer_id,
-                                    pet_id,
-                                );
-                            }
-                            enemies.remove(&pet_id);
+                        if let Some(conn) = connections.get_mut(&client_id) {
+                            conn.linkdead_since = Some(now);
+                            // Freeze the body so it doesn't keep drifting on its
+                            // last movement intent (the movement-integration step
+                            // also skips linkdead connections; this is belt-and-
+                            // suspenders).
+                            conn.latest_direction = Vec3f::ZERO;
                             tracing::info!(
-                                owner = entity_id,
-                                pet_id,
-                                "pet despawned on owner disconnect"
+                                char_id = conn.char_id,
+                                linger_secs = LINKDEAD_SECS.as_secs(),
+                                "client linkdead — body lingers (vulnerable) before reap"
                             );
-                        }
-                    }
-
-                    // Track 6 sub-task 5 — remove the leaver from
-                    // their group. If the group dissolves (one
-                    // member left), notify them too. The rest of the
-                    // roster gets a fresh GroupRoster.
-                    if let Some((gid, remaining, dissolved)) = group_manager.leave(client_id) {
-                        if dissolved {
-                            // Group dissolved. Survivors (0 or 1) get
-                            // an empty roster so their HUD clears.
-                            // The leaver is the disconnecting client;
-                            // their transport is already torn down.
-                            for m in &remaining {
-                                handlers::fan_group_roster(
-                                    &mut server,
-                                    std::slice::from_ref(m),
-                                    gid,
-                                    *m,
-                                    Vec::new(),
-                                    0,
-                                );
-                            }
-                        } else {
-                            // Re-fetch the group with name lookups
-                            // for the survivor fan-out.
-                            if let Some(g) = group_manager.groups.get(&gid) {
-                                let members_with_names: Vec<(u64, String)> = g.members.iter()
-                                    .filter_map(|m| connections.get(m).map(|c| (*m, c.name.clone())))
-                                    .collect();
-                                let recipients: Vec<ClientId> = g.members.clone();
-                                handlers::fan_group_roster(
-                                    &mut server,
-                                    &recipients,
-                                    gid,
-                                    g.leader,
-                                    members_with_names,
-                                    g.loot_mode.to_u8(),
-                                );
-                            }
-                        }
-                    }
-
-                    if let Some(mut conn) = connections.remove(&client_id) {
-                        // One last save for the road. Failure is non-fatal —
-                        // worst case the player rolls back to the last 60 s
-                        // checkpoint.
-                        if conn.is_dirty_for_persist() {
-                            let zone = conn.zone.clone();
-                            if let Err(e) = db::checkpoint_position(
-                                &pool,
-                                conn.char_id,
-                                zone.as_deref(),
-                                conn.pos.into_tuple(),
-                                conn.yaw,
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    char_id = conn.char_id,
-                                    error = %e,
-                                    "final checkpoint on disconnect failed"
-                                );
-                            } else {
-                                conn.mark_persisted();
-                            }
-                        }
-                        // Coins flush on the way out too — a logout right
-                        // after a vendor run shouldn't roll the wallet back
-                        // to the last 60 s checkpoint.
-                        if conn.coins_dirty {
-                            if let Err(e) =
-                                db::save_coins(&pool, conn.char_id, conn.coins).await
-                            {
-                                tracing::warn!(
-                                    char_id = conn.char_id,
-                                    error = %e,
-                                    "final coin save on disconnect failed"
-                                );
-                            } else {
-                                conn.coins_dirty = false;
-                            }
-                        }
-                        // Bank flush on the way out too (mirror coins) — a
-                        // deposit right before logout shouldn't roll back.
-                        if conn.bank_dirty {
-                            if let Err(e) =
-                                db::save_bank(&pool, conn.char_id, conn.bank_coins).await
-                            {
-                                tracing::warn!(
-                                    char_id = conn.char_id,
-                                    error = %e,
-                                    "final bank save on disconnect failed"
-                                );
-                            } else {
-                                conn.bank_dirty = false;
-                            }
-                        }
-                        // Banker slice 2 — flush both item vaults on the way
-                        // out (personal char-keyed, shared account-keyed).
-                        if conn.bank_items_dirty {
-                            let rows = conn.bank_items.to_rows();
-                            if let Err(e) =
-                                db::save_bank_items(&pool, conn.char_id, &rows).await
-                            {
-                                tracing::warn!(
-                                    char_id = conn.char_id,
-                                    error = %e,
-                                    "final bank-items save on disconnect failed"
-                                );
-                            } else {
-                                conn.bank_items_dirty = false;
-                            }
-                        }
-                        if conn.account_bank_items_dirty {
-                            let rows = conn.account_bank_items.to_rows();
-                            if let Err(e) =
-                                db::save_account_bank_items(&pool, conn.account_id, &rows).await
-                            {
-                                tracing::warn!(
-                                    account_id = conn.account_id,
-                                    error = %e,
-                                    "final account-bank-items save on disconnect failed"
-                                );
-                            } else {
-                                conn.account_bank_items_dirty = false;
-                            }
                         }
                     }
                 }
@@ -1564,9 +1657,12 @@ pub async fn run(
         }
 
         // 4. App-layer heartbeat timeout — catches frozen game windows that
-        //    transport-level keepalive doesn't notice.
+        //    transport-level keepalive doesn't notice. Skip connections that
+        //    are already lingering linkdead: their transport is gone, so
+        //    re-flagging them would just spam disconnect every tick while the
+        //    reaper below counts down their window.
         for (client_id, conn) in connections.iter() {
-            if conn.is_app_idle(now) {
+            if conn.linkdead_since.is_none() && conn.is_app_idle(now) {
                 tracing::info!(
                     char_id = conn.char_id,
                     "app-layer heartbeat timeout — disconnecting"
@@ -1577,6 +1673,30 @@ pub async fn run(
 
         for client_id in &to_disconnect {
             server.disconnect(*client_id);
+        }
+
+        // 4-bis. Linkdead reaper. A connection marked linkdead on an unclean
+        //        disconnect lingers (vulnerable) for LINKDEAD_SECS, then we run
+        //        the full disconnect cleanup. renet already dropped its
+        //        transport, so reap_connection does NOT call server.disconnect
+        //        again — it just despawns, flushes, and removes.
+        let to_reap: Vec<ClientId> = connections
+            .iter()
+            .filter(|(_, c)| c.linkdead_expired(now, LINKDEAD_SECS))
+            .map(|(id, _)| *id)
+            .collect();
+        for client_id in to_reap {
+            tracing::info!(%client_id, "linkdead window elapsed — reaping");
+            reap_connection(
+                &mut server,
+                &mut connections,
+                &mut aoi,
+                &mut enemies,
+                &mut group_manager,
+                &pool,
+                client_id,
+            )
+            .await;
         }
 
         // 4a. EntitySpawn fan-out for clients that just sent `EnterWorld`.
@@ -6882,7 +7002,13 @@ pub async fn run(
         // a mutable borrow on `connections` while also needing it for
         // the fan-out reads.
         let mut cell_changes: Vec<(ClientId, (i32, i32), (i32, i32))> = Vec::new();
-        for (client_id, conn) in connections.iter_mut().filter(|(_, c)| c.ready) {
+        // Linkdead bodies are frozen: they stay in `connections` (vulnerable)
+        // but must not integrate movement, or a body that dropped mid-run would
+        // keep drifting through the world for the whole linger window.
+        for (client_id, conn) in connections
+            .iter_mut()
+            .filter(|(_, c)| c.ready && c.linkdead_since.is_none())
+        {
             let dir = match conn.last_move_received {
                 Some(t) if now.duration_since(t) < STALE_MOVE_THRESHOLD => {
                     conn.latest_direction

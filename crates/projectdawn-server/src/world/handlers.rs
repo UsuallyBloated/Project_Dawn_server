@@ -405,6 +405,10 @@ pub fn handle_message(
 
         ClientWorldMsg::Disconnect => {
             tracing::info!(char_id = conn.char_id, "client requested disconnect");
+            // Mark this leave as CLEAN so the tick loop reaps the body at once
+            // instead of letting it linger as linkdead. Quit Game and a
+            // completed `/camp` both route through here.
+            conn.clean_disconnect = true;
             Outcome::Disconnect
         }
 
@@ -1875,10 +1879,24 @@ fn send_connect_ok(server: &mut RenetServer, client_id: ClientId, conn: &PerConn
 }
 
 pub fn send_kick(server: &mut RenetServer, client_id: ClientId, code: KickCode, reason: &str) {
+    send_kick_with_reconnect(server, client_id, code, reason, None);
+}
+
+/// Same as [`send_kick`] but populates `reconnect_after_secs` so the client
+/// can show a "retry in N seconds" countdown. Used by the deny-login path
+/// when the refused account is lingering linkdead: the remaining linkdead
+/// seconds are the soonest a fresh relogin can succeed.
+pub fn send_kick_with_reconnect(
+    server: &mut RenetServer,
+    client_id: ClientId,
+    code: KickCode,
+    reason: &str,
+    reconnect_after_secs: Option<u32>,
+) {
     let msg = ServerWorldMsg::Kick {
         reason: reason.to_string(),
         code,
-        reconnect_after_secs: None,
+        reconnect_after_secs,
     };
     if let Some(bytes) = encode(&msg) {
         server.send_message(client_id, CHANNEL_SYSTEM, bytes);

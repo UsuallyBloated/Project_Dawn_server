@@ -606,17 +606,45 @@ Disk writes happen on:
 
 ### Disconnect
 
-- **Clean disconnect**: client sends `Disconnect` (e.g. ESC → Quit Game). Server saves, despawns, broadcasts `EntityDespawn`.
-- **Timeout**: no client packets for 10 seconds → server treats as disconnected. Same save+despawn flow.
-- **Crash**: server detects renet disconnect event. Same save+despawn flow. Last save was at most 5 minutes ago (periodic checkpoint).
+A character must remain in the world ~30 s before it actually leaves. Whether
+that wait is paid up-front or after the fact depends on how the connection ends:
+
+- **Clean disconnect** (`clean_disconnect` flag set): client sends `Disconnect`
+  (ESC → Quit Game, or a completed `/camp`). Server reaps immediately — saves,
+  despawns, broadcasts `EntityDespawn`, frees the account. (`/camp` is the
+  voluntary case: the ~30 s wait already happened as the camp countdown.)
+- **Unclean disconnect** (timeout or crash): the body goes **linkdead**. It stays
+  in the world for `LINKDEAD_SECS` (~30 s), still targetable and **killable** by
+  mobs and PvP, frozen in place (movement integration skips it). A same-account
+  relogin is refused during the window (see below). When the window elapses, the
+  reaper runs the same save + despawn + account-free path. Triggers: no app-layer
+  packets for `HEARTBEAT_TIMEOUT` (10 s), or a renet transport drop (netcode
+  timeout 15 s). Detection cost adds to the linger, so a hard crash takes up to
+  ~45 s before the account frees. Last save was at most `CHECKPOINT_INTERVAL`
+  (60 s) ago (periodic checkpoint).
+
+The pet despawns immediately on linkdead (a linkdead player can't command it);
+group membership is kept for the window so a brief drop doesn't double-vanish the
+player from the roster. See `docs/design/camp_and_linkdead.md` for the full model
+and the locked decisions.
 
 ---
 
 ## Reconnect handling
 
-**Within 60 seconds of disconnect**: server keeps the entity in the world (frozen, AI inactive, untargetable). Reconnecting client sends `Connect` with the same session token; server resumes seamlessly. No load screen.
+v1 is **wait-then-fresh-login**: there is no seamless reconnect-resume. A relogin
+attempted while the previous session is still in the world (live, or lingering
+linkdead) is **refused** by the one-character-per-account deny-login with
+"You already have a character in this world." If the refused session is linkdead,
+the `Kick.reconnect_after_secs` field carries the remaining linkdead seconds so
+the client can show a retry countdown. Once the linkdead window elapses and the
+body reaps, a fresh `Connect` succeeds and the client gets a `ConnectOk` with a
+fresh snapshot (a full load, possibly in a different zone if the server moved them,
+e.g. died and respawned at bind point).
 
-**After 60 seconds**: entity despawned and saved. Reconnect is a fresh `Connect` — client gets a `ConnectOk` with a fresh snapshot, possibly in a different zone if the server moved them (e.g. died and respawned at bind point).
+Seamless resume on a brief network blip (the old 60 s frozen-and-untargetable
+model) is a deferred enhancement, not built; it would need session resurrection,
+AOI re-attach, and connect-token juggling.
 
 **Session token expired**: server replies `Error { code: "session_expired" }`. Client must re-authenticate via the launcher.
 

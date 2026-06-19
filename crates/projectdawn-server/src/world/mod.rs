@@ -52,6 +52,13 @@ pub const MAX_CLIENTS: usize = 64;
 /// own keepalive; this catches clients that stop sending app messages
 /// (frozen game window) without the transport noticing.
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long an UNCLEAN disconnect (crash, killed client, network drop)
+/// leaves the character lingering in the world before it reaps. The body
+/// stays targetable and killable for this window (the EverQuest "linkdead"
+/// model) and a same-account relogin is refused until it elapses. A clean
+/// Quit or a completed `/camp` reaps immediately instead. Tunable; see
+/// docs/design/camp_and_linkdead.md.
+pub const LINKDEAD_SECS: Duration = Duration::from_secs(30);
 /// Periodic position checkpoint cadence. Inventory/quest mutations write
 /// per-mutation; this is just for "where was I when the power went out".
 pub const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);

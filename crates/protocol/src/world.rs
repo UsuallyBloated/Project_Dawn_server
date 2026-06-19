@@ -34,7 +34,12 @@ use serde::{Deserialize, Serialize};
 /// client intents and `BankSnapshot` / `BankRejected` server→client messages.
 /// New variants append at the END of each enum (bincode encodes by positional
 /// discriminant, so appending keeps every existing variant stable).
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3135; // "PD_W0015"
+///
+/// PD_W0016: Banker NPC, slice 2 (item storage). Adds the per-character item
+/// vault (10 slots) and the account-shared vault (2 slots). New client intents
+/// `BankStoreItem` / `BankWithdrawItem` and the server message `BankItemSnapshot`,
+/// all appended at the END of their enums.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3136; // "PD_W0016"
 
 pub type EntityId = u64;
 
@@ -726,6 +731,25 @@ pub enum ClientWorldMsg {
         to_tier: u8,
         qty: u32,
     },
+
+    /// PD_W0016 — Banker, slice 2. Quick-transfer (deposit) the WHOLE stack at
+    /// `(src_location, src_slot)` in the player's inventory into a bank item
+    /// vault: `shared = false` is the 10-slot per-character vault, `true` is the
+    /// 2-slot account-shared vault. The server merges into same-item stacks then
+    /// claims free vault slots; any remainder stays in inventory.
+    BankStoreItem {
+        src_location: String,
+        src_slot: u32,
+        shared: bool,
+    },
+    /// PD_W0016 — Banker, slice 2. Quick-transfer (withdraw) the whole stack at
+    /// `vault_slot` back into the player's inventory (`shared` selects which
+    /// vault). The server merges into inventory; a remainder with no room stays
+    /// in the vault.
+    BankWithdrawItem {
+        shared: bool,
+        vault_slot: u32,
+    },
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────
@@ -1110,6 +1134,16 @@ pub enum ServerWorldMsg {
     /// hold that coin, or a non-whole conversion). The client logs `reason`.
     BankRejected {
         reason: String,
+    },
+
+    /// PD_W0016 — Banker, slice 2. Full contents of one item vault (`shared`
+    /// selects per-character vs account-shared). `entries` is `(slot, item_path,
+    /// count)` for filled slots only. The vaults are tiny (10 / 2 slots), so a
+    /// full snapshot is re-fanned after each store/withdraw (and on enter-world)
+    /// rather than per-slot deltas — same approach as the coin `BankSnapshot`.
+    BankItemSnapshot {
+        shared: bool,
+        entries: Vec<(u32, String, u32)>,
     },
 }
 

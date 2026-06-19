@@ -743,6 +743,38 @@ pub async fn run(
                                 server.disconnect(client_id);
                                 continue;
                             }
+                            // Banker slice 2 — one character per account in-world.
+                            // If the account is already connected, REFUSE this new
+                            // login and leave the existing session untouched. We
+                            // never force-disconnect the session already playing:
+                            // "log in again to boot your other session" is a known
+                            // grief / force-off vector (Lineage II). Denying the new
+                            // login also keeps the account-shared vault trivially
+                            // single-owner. Tradeoff: after an UNCLEAN disconnect the
+                            // player waits for the stale session to time out before
+                            // reconnecting; a clean logout frees the account at once.
+                            if connections.values().any(|c| c.account_id == account_id) {
+                                tracing::info!(
+                                    account_id, char_id,
+                                    "duplicate login refused — account already in-world"
+                                );
+                                // Send the reason and let the CLIENT tear down its own
+                                // transport (its kick handler calls disconnect_now). Calling
+                                // server.disconnect() here would evict this connection's
+                                // channel buffers before the reliable Kick flushes, so the
+                                // client would only ever see a generic transport drop — the
+                                // same race leave_session() avoids on the client side. The
+                                // refused connection was never inserted into `connections`, so
+                                // it holds no world state and its messages are ignored; if the
+                                // client ignores the kick, the netcode timeout reaps it.
+                                handlers::send_kick(
+                                    &mut server,
+                                    client_id,
+                                    KickCode::DuplicateLogin,
+                                    "You already have a character in this world.",
+                                );
+                                continue;
+                            }
                             // Track 13.1 — load any persisted inventory
                             // rows. Failure here is non-fatal (logged
                             // and the character keeps an empty
@@ -773,6 +805,25 @@ pub async fn run(
                                     Vec::new()
                                 }
                             };
+                            // Banker slice 2 — load the two item vaults:
+                            // personal (char-keyed) + account-shared (keyed on
+                            // account_id, freshly flushed above if a sibling
+                            // session was just kicked).
+                            let bank_item_rows = match db::load_bank_items(&pool, char_id).await {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    tracing::warn!(char_id, error = %e, "load_bank_items failed; empty");
+                                    Vec::new()
+                                }
+                            };
+                            let account_bank_item_rows =
+                                match db::load_account_bank_items(&pool, account_id).await {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        tracing::warn!(account_id, error = %e, "load_account_bank_items failed; empty");
+                                        Vec::new()
+                                    }
+                                };
                             connections.insert(
                                 client_id,
                                 PerConnection::from_spawn(spawn, now),
@@ -786,6 +837,14 @@ pub async fn run(
                             if let Some(conn) = connections.get_mut(&client_id) {
                                 conn.aoi_cell = aoi::cell_for(conn.pos.x, conn.pos.z);
                                 conn.inventory = inventory::PlayerInventory::from_rows(&inv_rows);
+                                conn.bank_items = inventory::ItemVault::from_rows(
+                                    inventory::BANK_VAULT_SLOTS,
+                                    &bank_item_rows,
+                                );
+                                conn.account_bank_items = inventory::ItemVault::from_rows(
+                                    inventory::ACCOUNT_VAULT_SLOTS,
+                                    &account_bank_item_rows,
+                                );
                                 let _ = inventory::recompute_equipped_stats(conn);
                                 // Track 18.1 — seed all three skill maps
                                 // with starting values (untrained classes
@@ -1007,6 +1066,36 @@ pub async fn run(
                                 conn.bank_dirty = false;
                             }
                         }
+                        // Banker slice 2 — flush both item vaults on the way
+                        // out (personal char-keyed, shared account-keyed).
+                        if conn.bank_items_dirty {
+                            let rows = conn.bank_items.to_rows();
+                            if let Err(e) =
+                                db::save_bank_items(&pool, conn.char_id, &rows).await
+                            {
+                                tracing::warn!(
+                                    char_id = conn.char_id,
+                                    error = %e,
+                                    "final bank-items save on disconnect failed"
+                                );
+                            } else {
+                                conn.bank_items_dirty = false;
+                            }
+                        }
+                        if conn.account_bank_items_dirty {
+                            let rows = conn.account_bank_items.to_rows();
+                            if let Err(e) =
+                                db::save_account_bank_items(&pool, conn.account_id, &rows).await
+                            {
+                                tracing::warn!(
+                                    account_id = conn.account_id,
+                                    error = %e,
+                                    "final account-bank-items save on disconnect failed"
+                                );
+                            } else {
+                                conn.account_bank_items_dirty = false;
+                            }
+                        }
                     }
                 }
             }
@@ -1161,6 +1250,11 @@ pub async fn run(
         let mut bank_withdraw_intents: Vec<BankWithdrawI> = Vec::new();
         struct BankExchangeI { owner: u64, from_tier: u8, to_tier: u8, qty: u32 }
         let mut bank_exchange_intents: Vec<BankExchangeI> = Vec::new();
+        // PD_W0016 — Banker, slice 2 (item vaults): store / withdraw whole stacks.
+        struct BankStoreItemI { owner: u64, src_location: String, src_slot: u32, shared: bool }
+        let mut bank_store_item_intents: Vec<BankStoreItemI> = Vec::new();
+        struct BankWithdrawItemI { owner: u64, shared: bool, vault_slot: u32 }
+        let mut bank_withdraw_item_intents: Vec<BankWithdrawItemI> = Vec::new();
         for client_id in client_ids {
             // Skip clients whose Connected event is in the queue but whose
             // PerConnection row hasn't been built yet (load_character failed
@@ -1412,6 +1506,16 @@ pub async fn run(
                                 owner, from_tier, to_tier, qty,
                             });
                         }
+                        Outcome::BankStoreItemIntent { owner, src_location, src_slot, shared } => {
+                            bank_store_item_intents.push(BankStoreItemI {
+                                owner, src_location, src_slot, shared,
+                            });
+                        }
+                        Outcome::BankWithdrawItemIntent { owner, shared, vault_slot } => {
+                            bank_withdraw_item_intents.push(BankWithdrawItemI {
+                                owner, shared, vault_slot,
+                            });
+                        }
                         Outcome::GroupInviteIntent { inviter, target_name } => {
                             group_invite_intents.push(GroupInviteI { inviter, target_name });
                         }
@@ -1644,6 +1748,14 @@ pub async fn run(
             // client caches it; deposit/withdraw keep it in sync after).
             if let Some(new_conn) = connections.get(new_id) {
                 handlers::send_bank_snapshot(&mut server, *new_id, new_conn.bank_coins);
+            }
+            // PD_W0016 — seed both item vaults (personal + account-shared) so
+            // the BankWindow's Items tab renders correctly on first open.
+            if let Some(new_conn) = connections.get(new_id) {
+                let personal = new_conn.bank_items.to_snapshot_entries();
+                let shared = new_conn.account_bank_items.to_snapshot_entries();
+                handlers::send_bank_item_snapshot(&mut server, *new_id, false, personal);
+                handlers::send_bank_item_snapshot(&mut server, *new_id, true, shared);
             }
             // Track 18.1 — seed the new joiner with their three
             // passive skill score maps (weapon / armor / casting).
@@ -5551,6 +5663,146 @@ pub async fn run(
                     handlers::send_bank_rejected(&mut server, cid, reason.to_string());
                 }
             }
+        }
+
+        // 4i-bank2. PD_W0016 — Banker, slice 2 (item vaults). Quick-transfer
+        //           whole stacks between inventory and a vault. Store sizes the
+        //           deposit against the vault's room first (capacity_for) so the
+        //           inventory side moves exactly what fits and the source never
+        //           relocates; bag-typed items are rejected (MVP). Withdraw
+        //           takes the stack then refunds any inventory overflow back to
+        //           the vault. Each op fans an InventoryDelta (inventory side) +
+        //           a full BankItemSnapshot (the tiny vault).
+        for intent in bank_store_item_intents.drain(..) {
+            let cid = intent.owner as ClientId;
+            let Some(conn) = connections.get_mut(&cid) else { continue };
+            let Some((path, avail)) =
+                conn.inventory.peek_at(&intent.src_location, intent.src_slot)
+            else {
+                handlers::send_bank_rejected(&mut server, cid, "Nothing to deposit there.".to_string());
+                continue;
+            };
+            if items::bag_num_slots(&path).is_some() {
+                handlers::send_bank_rejected(&mut server, cid, "Bags can't go in the bank vault.".to_string());
+                continue;
+            }
+            let room = if intent.shared {
+                conn.account_bank_items.capacity_for(&path)
+            } else {
+                conn.bank_items.capacity_for(&path)
+            };
+            let take = avail.min(room);
+            if take == 0 {
+                handlers::send_bank_rejected(&mut server, cid, "Your bank vault is full.".to_string());
+                continue;
+            }
+            // Remove from inventory FIRST and let the actual removed count drive
+            // the deposit, so the inventory side is the single source of truth
+            // for how much moved (the vault is never credited without debiting
+            // inventory). destroy_at can't fail here today — peek_at vetted the
+            // slot and bags are rejected above — but bailing on Err keeps a
+            // future change from turning this into a dup.
+            let removed = match conn.inventory.destroy_at(&intent.src_location, intent.src_slot, take) {
+                Ok((_, removed)) => removed,
+                Err(_) => {
+                    handlers::send_bank_rejected(&mut server, cid, "Couldn't move that item.".to_string());
+                    continue;
+                }
+            };
+            if removed == 0 {
+                continue;
+            }
+            conn.inventory_dirty = true;
+            if intent.shared {
+                conn.account_bank_items.deposit(&path, removed);
+                conn.account_bank_items_dirty = true;
+            } else {
+                conn.bank_items.deposit(&path, removed);
+                conn.bank_items_dirty = true;
+            }
+            let post = conn.inventory.peek_at(&intent.src_location, intent.src_slot);
+            let (dpath, dcount) = match post {
+                Some((p, c)) => (Some(p), c),
+                None => (None, 0),
+            };
+            handlers::send_inventory_delta(
+                &mut server, cid, intent.src_location.clone(), intent.src_slot, dpath, dcount,
+            );
+            let entries = if intent.shared {
+                conn.account_bank_items.to_snapshot_entries()
+            } else {
+                conn.bank_items.to_snapshot_entries()
+            };
+            handlers::send_bank_item_snapshot(&mut server, cid, intent.shared, entries);
+            tracing::info!(owner = intent.owner, %path, deposited = take, shared = intent.shared, "bank store item");
+        }
+        for intent in bank_withdraw_item_intents.drain(..) {
+            let cid = intent.owner as ClientId;
+            let Some(conn) = connections.get_mut(&cid) else { continue };
+            let slot = intent.vault_slot as usize;
+            let present = if intent.shared {
+                conn.account_bank_items.peek(slot).cloned()
+            } else {
+                conn.bank_items.peek(slot).cloned()
+            };
+            let Some(entry) = present else {
+                handlers::send_bank_rejected(&mut server, cid, "Nothing to withdraw there.".to_string());
+                continue;
+            };
+            let path = entry.item_path;
+            let count = entry.count;
+            if intent.shared {
+                conn.account_bank_items.take_all(slot);
+                conn.account_bank_items_dirty = true;
+            } else {
+                conn.bank_items.take_all(slot);
+                conn.bank_items_dirty = true;
+            }
+            let (touched, leftover) = conn
+                .inventory
+                .add_item_locating(&path, count)
+                .unwrap_or((Vec::new(), count));
+            if leftover > 0 {
+                // Inventory had no room for all of it. Put the overflow straight
+                // back into the slot it came from (take_all just emptied it),
+                // not via deposit() — restore() guarantees it lands in the same
+                // slot and never trips the max_stack cap, so nothing is lost even
+                // for an oddly-sized stored stack.
+                if intent.shared {
+                    conn.account_bank_items.restore(slot, &path, leftover);
+                } else {
+                    conn.bank_items.restore(slot, &path, leftover);
+                }
+                let reason = if leftover == count {
+                    "No room in your inventory."
+                } else {
+                    "Only part of that fit in your inventory."
+                };
+                handlers::send_bank_rejected(&mut server, cid, reason.to_string());
+            }
+            if !touched.is_empty() {
+                conn.inventory_dirty = true;
+            }
+            for s in &touched {
+                let post = conn
+                    .inventory
+                    .base
+                    .get(*s)
+                    .and_then(|x| x.as_ref())
+                    .map(|e| (e.item_path.clone(), e.count));
+                let (dp, dc) = match post {
+                    Some((p, c)) => (Some(p), c),
+                    None => (None, 0),
+                };
+                handlers::send_inventory_delta(&mut server, cid, "base".to_string(), *s as u32, dp, dc);
+            }
+            let entries = if intent.shared {
+                conn.account_bank_items.to_snapshot_entries()
+            } else {
+                conn.bank_items.to_snapshot_entries()
+            };
+            handlers::send_bank_item_snapshot(&mut server, cid, intent.shared, entries);
+            tracing::info!(owner = intent.owner, %path, withdrew = count - leftover, shared = intent.shared, "bank withdraw item");
         }
 
         // 4i. Enemy AI tick. Each alive enemy evaluates its state machine

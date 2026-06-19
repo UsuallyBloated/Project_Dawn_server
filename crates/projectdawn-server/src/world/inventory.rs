@@ -10,7 +10,7 @@
 //! wire snapshot the client renders from. 13.2 takes that step;
 //! this module is the shape it converges to.
 
-use crate::db::InventoryRow;
+use crate::db::{BankItemRow, InventoryRow};
 use crate::world::items;
 use std::collections::HashMap;
 
@@ -175,10 +175,164 @@ pub const BASE_SLOT_COUNT: usize = 8;
 /// `protocol::world::EquipSlot` enum order.
 pub const EQUIP_SLOT_COUNT: u8 = 9;
 
+/// Banker slice 2 — fixed item-vault sizes. The per-character bank holds 10
+/// slots; the 2-slot vault is shared across all of an account's characters
+/// (EQ shared bank).
+pub const BANK_VAULT_SLOTS: usize = 10;
+pub const ACCOUNT_VAULT_SLOTS: usize = 2;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct InventoryEntry {
     pub item_path: String,
     pub count: u32,
+}
+
+/// Banker slice 2 — a flat, fixed-size item store with no bags/equip. Used
+/// for both the 10-slot per-character bank and the 2-slot account-shared
+/// bank (they differ only in size and persistence key). Reuses
+/// `InventoryEntry` and mirrors `PlayerInventory`'s row/snapshot helpers.
+#[derive(Debug, Clone)]
+pub struct ItemVault {
+    pub slots: Vec<Option<InventoryEntry>>,
+}
+
+impl ItemVault {
+    pub fn new(n: usize) -> Self {
+        Self { slots: vec![None; n] }
+    }
+
+    /// Hydrate from DB rows; out-of-range / empty rows are dropped (same
+    /// tolerance as `PlayerInventory::from_rows`).
+    pub fn from_rows(n: usize, rows: &[BankItemRow]) -> Self {
+        let mut v = Self::new(n);
+        for row in rows {
+            if row.count <= 0 || row.item_path.is_empty() {
+                continue;
+            }
+            let s = row.slot as usize;
+            if s < n {
+                v.slots[s] = Some(InventoryEntry {
+                    item_path: row.item_path.clone(),
+                    count: row.count as u32,
+                });
+            }
+        }
+        v
+    }
+
+    /// Project filled slots to DB rows.
+    pub fn to_rows(&self) -> Vec<BankItemRow> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| {
+                slot.as_ref().map(|e| BankItemRow {
+                    slot: i as i32,
+                    item_path: e.item_path.clone(),
+                    count: e.count as i32,
+                })
+            })
+            .collect()
+    }
+
+    /// Wire snapshot entries `(slot, item_path, count)` for filled slots.
+    pub fn to_snapshot_entries(&self) -> Vec<(u32, String, u32)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| {
+                slot.as_ref().map(|e| (i as u32, e.item_path.clone(), e.count))
+            })
+            .collect()
+    }
+
+    /// Deposit `count` of `item_path`: top up same-item stacks (capped at
+    /// `items::max_stack`), then claim empty slots. Returns `(touched slots,
+    /// leftover)` like `add_item_locating` — leftover lets the caller refund
+    /// the remainder rather than vanishing it.
+    pub fn deposit(&mut self, item_path: &str, count: u32) -> (Vec<usize>, u32) {
+        let n = self.slots.len();
+        let cap = items::max_stack(item_path);
+        let mut remaining = count;
+        let mut touched: Vec<usize> = Vec::new();
+        // Pass 1 — top up existing same-item stacks.
+        for i in 0..n {
+            if remaining == 0 {
+                break;
+            }
+            if let Some(e) = self.slots[i].as_mut() {
+                if e.item_path == item_path && e.count < cap {
+                    let space = cap - e.count;
+                    let put = remaining.min(space);
+                    e.count = e.count.saturating_add(put);
+                    remaining -= put;
+                    touched.push(i);
+                }
+            }
+        }
+        // Pass 2 — claim empty slots, each capped at max_stack.
+        for i in 0..n {
+            if remaining == 0 {
+                break;
+            }
+            if self.slots[i].is_none() {
+                let put = remaining.min(cap);
+                self.slots[i] = Some(InventoryEntry {
+                    item_path: item_path.to_string(),
+                    count: put,
+                });
+                remaining -= put;
+                touched.push(i);
+            }
+        }
+        (touched, remaining)
+    }
+
+    /// Remove the whole stack at `slot`, returning `(item_path, count)`.
+    /// `None` if the slot is empty or out of range.
+    pub fn take_all(&mut self, slot: usize) -> Option<(String, u32)> {
+        if slot >= self.slots.len() {
+            return None;
+        }
+        self.slots[slot].take().map(|e| (e.item_path, e.count))
+    }
+
+    /// Peek the entry at `slot` without removing it.
+    pub fn peek(&self, slot: usize) -> Option<&InventoryEntry> {
+        self.slots.get(slot).and_then(|s| s.as_ref())
+    }
+
+    /// Put `count` of `item_path` directly into `slot`, overwriting it. Used to
+    /// refund a withdraw overflow back into the slot it came from: `take_all`
+    /// just emptied that slot and it held at least this much, so this always
+    /// fits and bypasses the per-slot `max_stack` cap (no item loss even for an
+    /// oddly-sized stored stack). No-op for an out-of-range slot or zero count.
+    pub fn restore(&mut self, slot: usize, item_path: &str, count: u32) {
+        if slot < self.slots.len() && count > 0 {
+            self.slots[slot] = Some(InventoryEntry {
+                item_path: item_path.to_string(),
+                count,
+            });
+        }
+    }
+
+    /// Total room for `item_path`: free space in same-item stacks (up to
+    /// `items::max_stack`) plus empty slots. Lets a deposit be sized without
+    /// mutating, so the caller removes exactly what fits from the source.
+    pub fn capacity_for(&self, item_path: &str) -> u32 {
+        let cap = items::max_stack(item_path);
+        let mut total: u32 = 0;
+        for slot in &self.slots {
+            match slot {
+                Some(e) if e.item_path == item_path => {
+                    total = total.saturating_add(cap.saturating_sub(e.count));
+                }
+                None => total = total.saturating_add(cap),
+                _ => {}
+            }
+        }
+        total
+    }
 }
 
 #[derive(Debug)]
@@ -461,6 +615,25 @@ impl PlayerInventory {
             }
         }
         Ok((touched, remaining))
+    }
+
+    /// Banker slice 2 — read `(item_path, count)` at `(loc, slot)` without
+    /// removing it. Supports `base` and `bag_<i>` (equip is not a banking
+    /// source). `None` if the location is unsupported or the slot is empty.
+    pub fn peek_at(&self, loc: &str, slot: u32) -> Option<(String, u32)> {
+        match parse_slot_ref(loc, slot).ok()? {
+            SlotRefInt::Base(s) => self
+                .base
+                .get(s)
+                .and_then(|x| x.as_ref())
+                .map(|e| (e.item_path.clone(), e.count)),
+            SlotRefInt::Bag(b, s) => self
+                .bags
+                .get(&b)
+                .and_then(|arr| arr.get(s))
+                .and_then(|x| x.as_ref())
+                .map(|e| (e.item_path.clone(), e.count)),
+        }
     }
 
     /// Track 13.2.b — split `count` items off src into dst. Dst must
@@ -1089,6 +1262,59 @@ impl PlayerInventory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Banker slice 2: ItemVault ──
+    const VAULT_ITEM: &str = "res://data/loot/items/minor_healing_potion.tres"; // stack_size 10
+
+    #[test]
+    fn item_vault_rows_roundtrip_and_take_all() {
+        let mut v = ItemVault::new(BANK_VAULT_SLOTS);
+        v.slots[0] = Some(InventoryEntry { item_path: "a".into(), count: 3 });
+        v.slots[2] = Some(InventoryEntry { item_path: "b".into(), count: 1 });
+        let v2 = ItemVault::from_rows(BANK_VAULT_SLOTS, &v.to_rows());
+        assert_eq!(v2.peek(0).map(|e| (e.item_path.as_str(), e.count)), Some(("a", 3)));
+        assert_eq!(v2.peek(2).map(|e| (e.item_path.as_str(), e.count)), Some(("b", 1)));
+        assert!(v2.peek(1).is_none());
+        let mut v3 = v2.clone();
+        assert_eq!(v3.take_all(0), Some(("a".to_string(), 3)));
+        assert!(v3.peek(0).is_none());
+        assert_eq!(v3.take_all(0), None, "second take on an empty slot is None");
+    }
+
+    #[test]
+    fn item_vault_from_rows_drops_out_of_range_and_empty() {
+        let rows = vec![
+            BankItemRow { slot: 0, item_path: "a".into(), count: 2 },
+            BankItemRow { slot: 99, item_path: "b".into(), count: 1 }, // out of range
+            BankItemRow { slot: 1, item_path: "c".into(), count: 0 },  // empty
+        ];
+        let v = ItemVault::from_rows(ACCOUNT_VAULT_SLOTS, &rows);
+        assert_eq!(v.slots.len(), ACCOUNT_VAULT_SLOTS);
+        assert_eq!(v.peek(0).map(|e| e.count), Some(2));
+        assert!(v.peek(1).is_none());
+    }
+
+    #[test]
+    fn item_vault_deposit_stacks_then_claims_slots() {
+        // stack_size 10: 25 = one full stack of 10, another 10, then 5.
+        let mut v = ItemVault::new(BANK_VAULT_SLOTS);
+        let (touched, leftover) = v.deposit(VAULT_ITEM, 25);
+        assert_eq!(leftover, 0);
+        assert_eq!(touched.len(), 3);
+        assert_eq!(v.peek(0).map(|e| e.count), Some(10));
+        assert_eq!(v.peek(1).map(|e| e.count), Some(10));
+        assert_eq!(v.peek(2).map(|e| e.count), Some(5));
+    }
+
+    #[test]
+    fn item_vault_capacity_caps_deposit_and_reports_leftover() {
+        // A 2-slot vault holds at most 20 of a stack-10 item.
+        let mut v = ItemVault::new(ACCOUNT_VAULT_SLOTS);
+        assert_eq!(v.capacity_for(VAULT_ITEM), 20);
+        let (_t, leftover) = v.deposit(VAULT_ITEM, 25);
+        assert_eq!(leftover, 5, "only 20 fit; 5 left over");
+        assert_eq!(v.capacity_for(VAULT_ITEM), 0, "full now");
+    }
 
     #[test]
     fn default_has_eight_empty_slots() {

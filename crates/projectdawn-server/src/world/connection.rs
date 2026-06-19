@@ -294,6 +294,18 @@ pub struct PerConnection {
     /// `coins_dirty`).
     pub bank_dirty: bool,
 
+    /// Banker slice 2 — per-character item vault (10 slots, char-keyed).
+    /// Loaded at connect, persisted char-keyed via `bank_items_dirty`.
+    pub bank_items: super::inventory::ItemVault,
+    pub bank_items_dirty: bool,
+
+    /// Banker slice 2 — the account-shared item vault (2 slots, EQ shared
+    /// bank). The authoritative copy is per-connection only because login is
+    /// single-session-per-account (enforced at connect); persisted by
+    /// `account_id` via `account_bank_items_dirty`, never by char_id.
+    pub account_bank_items: super::inventory::ItemVault,
+    pub account_bank_items_dirty: bool,
+
     /// Per-player `/autosplit` toggle (default on). Governs only this
     /// player's *own* loots: on + Round Robin → coin they loot splits
     /// among the nearby group; off → they keep it all. Session-scoped for
@@ -393,6 +405,10 @@ impl PerConnection {
             inventory_dirty: false,
             coins_dirty: false,
             bank_dirty: false,
+            bank_items: super::inventory::ItemVault::new(super::inventory::BANK_VAULT_SLOTS),
+            bank_items_dirty: false,
+            account_bank_items: super::inventory::ItemVault::new(super::inventory::ACCOUNT_VAULT_SLOTS),
+            account_bank_items_dirty: false,
             autosplit: true,
             equip_stat_bonuses: super::inventory::EquipStatBonuses::default(),
             weapon_skills: HashMap::new(),

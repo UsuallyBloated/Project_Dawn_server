@@ -286,6 +286,23 @@ pub enum Outcome {
         qty: u32,
     },
 
+    /// PD_W0016 — Banker, slice 2. Quick-transfer the whole stack at
+    /// `(src_location, src_slot)` into a bank item vault (`shared` selects
+    /// per-character vs account-shared).
+    BankStoreItemIntent {
+        owner: u64,
+        src_location: String,
+        src_slot: u32,
+        shared: bool,
+    },
+    /// PD_W0016 — Banker, slice 2. Quick-transfer the whole stack at
+    /// `vault_slot` back into inventory (`shared` selects the vault).
+    BankWithdrawItemIntent {
+        owner: u64,
+        shared: bool,
+        vault_slot: u32,
+    },
+
     /// Track 5 sub-task 4 — player → server pickup intent for one slot
     /// of a loot bag. The tick loop validates bag existence + slot
     /// index + pickup range, removes the stack, sends `LootGranted`
@@ -1034,6 +1051,29 @@ pub fn handle_message(
             }
         }
 
+        ClientWorldMsg::BankStoreItem { src_location, src_slot, shared } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::BankStoreItemIntent {
+                owner: conn.char_id as u64,
+                src_location,
+                src_slot,
+                shared,
+            }
+        }
+
+        ClientWorldMsg::BankWithdrawItem { shared, vault_slot } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::BankWithdrawItemIntent {
+                owner: conn.char_id as u64,
+                shared,
+                vault_slot,
+            }
+        }
+
         ClientWorldMsg::GmCommand { line } => {
             if !conn.in_world {
                 return Outcome::Continue;
@@ -1712,6 +1752,20 @@ pub fn send_coins_update(server: &mut RenetServer, client_id: ClientId, coins: C
 /// `send_coins_update`; gdext-net re-emits it as four ints.
 pub fn send_bank_snapshot(server: &mut RenetServer, client_id: ClientId, bank: Coins) {
     let msg = ServerWorldMsg::BankSnapshot { coins: bank };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(client_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// PD_W0016 — fan one item vault's full contents privately to one client,
+/// after each store/withdraw and on enter-world. `shared` picks which vault.
+pub fn send_bank_item_snapshot(
+    server: &mut RenetServer,
+    client_id: ClientId,
+    shared: bool,
+    entries: Vec<(u32, String, u32)>,
+) {
+    let msg = ServerWorldMsg::BankItemSnapshot { shared, entries };
     if let Some(bytes) = encode(&msg) {
         server.send_message(client_id, CHANNEL_SYSTEM, bytes);
     }

@@ -290,6 +290,17 @@ impl NetClient {
     #[signal]
     fn bank_rejected(reason: GString);
 
+    /// PD_W0016 — Banker, slice 2. Full contents of one item vault (`shared`
+    /// picks personal vs account-shared). Parallel arrays of (slot, item_path,
+    /// count) for filled slots. The GDScript handler repaints the vault grid.
+    #[signal]
+    fn bank_item_snapshot(
+        shared: bool,
+        slots: PackedInt32Array,
+        item_paths: PackedStringArray,
+        counts: PackedInt32Array,
+    );
+
     /// Track 6 sub-task 5 — server forwarded a group invite. Client
     /// shows an accept/reject UI; on accept the GDScript handler
     /// fires `send_group_accept_invite(from_id)`.
@@ -689,6 +700,30 @@ impl NetClient {
             from_tier: from_tier.clamp(0, 3) as u8,
             to_tier: to_tier.clamp(0, 3) as u8,
             qty: qty.max(0) as u32,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// PD_W0016 — Banker, slice 2. Quick-transfer (deposit) the whole stack at
+    /// (src_location, src_slot) into the personal (shared=false) or shared
+    /// (shared=true) item vault.
+    #[func]
+    fn send_bank_store_item(&mut self, src_location: GString, src_slot: i64, shared: bool) -> bool {
+        let msg = ClientWorldMsg::BankStoreItem {
+            src_location: src_location.to_string(),
+            src_slot: src_slot.max(0) as u32,
+            shared,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// PD_W0016 — Banker, slice 2. Quick-transfer (withdraw) the whole stack at
+    /// `vault_slot` back into inventory (`shared` selects which vault).
+    #[func]
+    fn send_bank_withdraw_item(&mut self, shared: bool, vault_slot: i64) -> bool {
+        let msg = ClientWorldMsg::BankWithdrawItem {
+            shared,
+            vault_slot: vault_slot.max(0) as u32,
         };
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
@@ -1257,6 +1292,10 @@ enum Incoming {
     BankRejected {
         reason: String,
     },
+    BankItemSnapshot {
+        shared: bool,
+        entries: Vec<(u32, String, u32)>,
+    },
     GroupInvited {
         from_id: i64,
         from_name: String,
@@ -1755,6 +1794,25 @@ impl NetClient {
                         &[GString::from(reason.as_str()).to_variant()],
                     );
                 }
+                Incoming::BankItemSnapshot { shared, entries } => {
+                    let mut slots = PackedInt32Array::new();
+                    let mut item_paths = PackedStringArray::new();
+                    let mut counts = PackedInt32Array::new();
+                    for (slot, path, count) in entries {
+                        slots.push(slot as i32);
+                        item_paths.push(&GString::from(path.as_str()));
+                        counts.push(count as i32);
+                    }
+                    self.base_mut().emit_signal(
+                        "bank_item_snapshot",
+                        &[
+                            shared.to_variant(),
+                            slots.to_variant(),
+                            item_paths.to_variant(),
+                            counts.to_variant(),
+                        ],
+                    );
+                }
                 Incoming::GroupInvited { from_id, from_name } => {
                     self.base_mut().emit_signal(
                         "group_invited",
@@ -2081,6 +2139,9 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             copper: coins.copper,
         },
         ServerWorldMsg::BankRejected { reason } => Incoming::BankRejected { reason },
+        ServerWorldMsg::BankItemSnapshot { shared, entries } => {
+            Incoming::BankItemSnapshot { shared, entries }
+        }
         ServerWorldMsg::GroupInvited { from_id, from_name } => Incoming::GroupInvited {
             from_id: from_id as i64,
             from_name,

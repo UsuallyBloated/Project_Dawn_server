@@ -668,6 +668,98 @@ pub async fn save_inventory(
     Ok(())
 }
 
+/// Banker slice 2 — one stack in an item vault. No `location` column: the
+/// table it came from (bank_items vs account_bank_items) is the store, and
+/// the slot is a flat index into that store.
+#[derive(Debug, Clone, FromRow)]
+pub struct BankItemRow {
+    pub slot: i32,
+    pub item_path: String,
+    pub count: i32,
+}
+
+/// Load the per-character bank vault rows (char-keyed). Empty for a
+/// character that has never banked an item.
+pub async fn load_bank_items(pool: &SqlitePool, char_id: i64) -> AuthResult<Vec<BankItemRow>> {
+    let rows: Vec<BankItemRow> = sqlx::query_as(
+        "SELECT slot, item_path, count FROM bank_items WHERE char_id = ?1 ORDER BY slot",
+    )
+    .bind(char_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Persist the per-character bank vault (atomic DELETE + INSERT, like
+/// `save_inventory`). Gated on `bank_items_dirty`.
+pub async fn save_bank_items(
+    pool: &SqlitePool,
+    char_id: i64,
+    rows: &[BankItemRow],
+) -> AuthResult<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM bank_items WHERE char_id = ?1")
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await?;
+    for row in rows {
+        sqlx::query(
+            "INSERT INTO bank_items (char_id, slot, item_path, count) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(char_id)
+        .bind(row.slot)
+        .bind(&row.item_path)
+        .bind(row.count)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Load the account-shared bank vault rows (ACCOUNT-keyed — shared across
+/// all of the account's characters).
+pub async fn load_account_bank_items(
+    pool: &SqlitePool,
+    account_id: i64,
+) -> AuthResult<Vec<BankItemRow>> {
+    let rows: Vec<BankItemRow> = sqlx::query_as(
+        "SELECT slot, item_path, count FROM account_bank_items WHERE account_id = ?1 ORDER BY slot",
+    )
+    .bind(account_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Persist the account-shared bank vault (atomic DELETE + INSERT, keyed on
+/// account_id — never char_id).
+pub async fn save_account_bank_items(
+    pool: &SqlitePool,
+    account_id: i64,
+    rows: &[BankItemRow],
+) -> AuthResult<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM account_bank_items WHERE account_id = ?1")
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await?;
+    for row in rows {
+        sqlx::query(
+            "INSERT INTO account_bank_items (account_id, slot, item_path, count)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(account_id)
+        .bind(row.slot)
+        .bind(&row.item_path)
+        .bind(row.count)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Persist the four-tier wallet. Called from the checkpoint sweep +
 /// disconnect flush whenever `coins_dirty` is set — without this the
 /// in-session wallet (vendor buys/sells, dev grants) silently resets

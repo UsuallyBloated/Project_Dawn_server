@@ -98,6 +98,34 @@ pub async fn checkpoint_dirty(pool: &SqlitePool, conns: &mut [&mut PerConnection
                 }
             }
         }
+        // Banker slice 2 — the two item vaults. Personal is char-keyed;
+        // the account-shared vault is keyed on account_id.
+        if conn.bank_items_dirty {
+            let rows = conn.bank_items.to_rows();
+            match db::save_bank_items(pool, conn.char_id, &rows).await {
+                Ok(()) => conn.bank_items_dirty = false,
+                Err(e) => {
+                    tracing::warn!(
+                        char_id = conn.char_id,
+                        error = %e,
+                        "bank-items checkpoint failed; will retry next interval"
+                    );
+                }
+            }
+        }
+        if conn.account_bank_items_dirty {
+            let rows = conn.account_bank_items.to_rows();
+            match db::save_account_bank_items(pool, conn.account_id, &rows).await {
+                Ok(()) => conn.account_bank_items_dirty = false,
+                Err(e) => {
+                    tracing::warn!(
+                        account_id = conn.account_id,
+                        error = %e,
+                        "account-bank-items checkpoint failed; will retry next interval"
+                    );
+                }
+            }
+        }
         // Track 18.1 — passive skill scores. Rewrite the full set
         // when any advance landed since last persist; one delete +
         // ≤ 21 inserts per character is well within the SQLite WAL

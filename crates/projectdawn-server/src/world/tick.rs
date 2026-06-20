@@ -19,7 +19,7 @@ use super::{
     skills,
     spawn_points::Spawner,
     spells,
-    ATTACK_RANGE_TOLERANCE, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL,
+    ATTACK_RANGE_TOLERANCE, CAMP_SECS, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL,
     CORPSE_LINGER_SECS, GROUP_COIN_SHARE_RANGE, LINKDEAD_SECS, LOOT_BAG_LINGER_SECS,
     LOOT_PICKUP_RANGE, MAX_MOVE_SPEED,
     RANGED_ATTACK_RANGE, STALE_MOVE_THRESHOLD, TICK_DT,
@@ -965,6 +965,20 @@ pub async fn run(
                                     account_id, char_id, ?reconnect_after_secs,
                                     "duplicate login refused — account already in-world"
                                 );
+                                // The EQ phrasing, plus a "try again in ~Ns"
+                                // estimate when the existing session is lingering
+                                // linkdead (computed once at kick time; a live
+                                // session has no countdown — the player must log it
+                                // out first). The structured `reconnect_after_secs`
+                                // is also sent for a future live-ticking client UI.
+                                let reason = match reconnect_after_secs {
+                                    Some(secs) => format!(
+                                        "You already have a character in this world. You can try again in about {secs}s."
+                                    ),
+                                    None => {
+                                        "You already have a character in this world.".to_string()
+                                    }
+                                };
                                 // Send the reason and let the CLIENT tear down its own
                                 // transport (its kick handler calls disconnect_now). Calling
                                 // server.disconnect() here would evict this connection's
@@ -978,7 +992,7 @@ pub async fn run(
                                     &mut server,
                                     client_id,
                                     KickCode::DuplicateLogin,
-                                    "You already have a character in this world.",
+                                    &reason,
                                     reconnect_after_secs,
                                 );
                                 continue;
@@ -1178,6 +1192,10 @@ pub async fn run(
                         }
                         if let Some(conn) = connections.get_mut(&client_id) {
                             conn.linkdead_since = Some(now);
+                            // Linkdead governs from here: drop any in-progress
+                            // /camp so the camp sweep doesn't also try to complete
+                            // it and race the linkdead reaper.
+                            conn.camp_since = None;
                             // Freeze the body so it doesn't keep drifting on its
                             // last movement intent (the movement-integration step
                             // also skips linkdead connections; this is belt-and-
@@ -2480,6 +2498,7 @@ pub async fn run(
                         shield_name_pvp = buffs::first_damage_shield_name(&target_conn.active_buffs).map(|s| s.to_string());
                         target_conn.hp = (target_conn.hp - amount as f32).max(0.0);
                         regen::mark_dirty(target_conn);
+                        target_conn.note_damage_taken(now); // camp breaks on damage
                         (target_conn.hp, target_conn.max_hp, amount, target_conn.equipped_armor)
                     };
                     // Strip exhausted absorb buff + fan snapshot.
@@ -2507,6 +2526,7 @@ pub async fn run(
                                 let reflect_dmg = dmg as i32;
                                 att.hp = (att.hp - dmg).max(0.0);
                                 regen::mark_dirty(att);
+                                att.note_damage_taken(now); // camp breaks on damage
                                 let new_att_hp = att.hp;
                                 let att_max = att.max_hp;
                                 handlers::fan_out_health_update(
@@ -3579,6 +3599,7 @@ pub async fn run(
                                 shield_back_name = buffs::first_damage_shield_name(&tc.active_buffs).map(|s| s.to_string());
                                 tc.hp = (tc.hp - dmg as f32).max(0.0);
                                 regen::mark_dirty(tc);
+                                tc.note_damage_taken(now); // camp breaks on damage
                                 (tc.hp, tc.max_hp, dmg)
                             };
                             if let Some(idx) = absorb_strip_idx {
@@ -3659,6 +3680,7 @@ pub async fn run(
                                         let reflect_dmg = shield_back as i32;
                                         att.hp = (att.hp - shield_back).max(0.0);
                                         regen::mark_dirty(att);
+                                        att.note_damage_taken(now); // camp breaks on damage
                                         let new_att_hp = att.hp;
                                         let att_max = att.max_hp;
                                         handlers::fan_out_health_update(
@@ -6472,6 +6494,7 @@ pub async fn run(
                             shield_name_pve = buffs::first_damage_shield_name(&target_conn.active_buffs).map(|s| s.to_string());
                             target_conn.hp = (target_conn.hp - reduced as f32).max(0.0);
                             regen::mark_dirty(target_conn);
+                            target_conn.note_damage_taken(now); // camp breaks on damage
                             // Track 15.2 follow-up — feed the pet
                             // inheritance pre-pass so a FOLLOW-stance
                             // pet auto-engages whatever's hitting its
@@ -7306,6 +7329,41 @@ pub async fn run(
                         fan_out_pet_buff_snapshot(&mut server, &recipients, pet);
                     }
                 }
+            }
+        }
+
+        // 5c. Camp sweep (slice B). Advance each in-progress /camp. Runs after
+        //     movement integration (which clears is_sitting on a move) and after
+        //     all damage application this tick, so both cancel conditions are
+        //     current. A camp cancels if the player is no longer seated (covers
+        //     an explicit stand AND movement) or has taken damage since it began;
+        //     on cancel we fan a CampUpdate so the client hides its countdown.
+        //
+        //     Completion is CLIENT-DRIVEN: at CAMP_SECS the client runs the same
+        //     clean logout as Quit Game (a clean Disconnect), which reaps the body
+        //     and frees the account. The server does NOT force the disconnect here
+        //     because a mid-world server kick has no client-side return-to-lobby
+        //     path yet (it would strand the player in a frozen world). The server's
+        //     job is the vulnerability window + the cancel-on-damage/move rule (the
+        //     security-relevant parts); once the window elapses it just stops
+        //     tracking. The client backstops itself, and if it never disconnects it
+        //     simply stays in-world (it gained nothing — it sat vulnerable the whole
+        //     time). The `>= start` compare catches damage applied on the very tick
+        //     the camp began (same `now`); prior-tick damage has a strictly smaller
+        //     Instant, so this never spuriously cancels a fresh camp.
+        for (camp_cid, conn) in connections.iter_mut() {
+            let Some(start) = conn.camp_since else {
+                continue;
+            };
+            let cancelled =
+                !conn.is_sitting || conn.last_damaged_at.is_some_and(|t| t >= start);
+            if cancelled {
+                conn.camp_since = None;
+                handlers::send_camp_update(&mut server, *camp_cid, 0, false);
+            } else if now.duration_since(start) >= CAMP_SECS {
+                // Window elapsed; stop tracking. The client logs itself out.
+                conn.camp_since = None;
+                tracing::info!(char_id = conn.char_id, "camp window elapsed — client logs out");
             }
         }
 

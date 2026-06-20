@@ -134,6 +134,19 @@ pub struct PerConnection {
     /// in place). The reaper sweep removes it once `now - linkdead_since`
     /// passes [`super::LINKDEAD_SECS`]. `None` for a live connection.
     pub linkdead_since: Option<Instant>,
+
+    /// Camp slice B: when `Some`, a voluntary `/camp` countdown is in progress
+    /// (set when `Camp` is accepted). The per-tick camp sweep cancels it if the
+    /// player stands/moves (`!is_sitting`) or has taken damage since it began,
+    /// and completes it (clean logout) once `now - camp_since` passes
+    /// [`super::CAMP_SECS`]. `None` when not camping.
+    pub camp_since: Option<Instant>,
+    /// Camp slice B: wall-clock of the most recent incoming damage applied to
+    /// this player. The camp sweep compares it against `camp_since` to cancel a
+    /// camp on "took damage since it started". Set at the (few) player-damage
+    /// application sites in the tick loop; never cleared (it's a monotonic
+    /// last-hit marker, only meaningful relative to `camp_since`).
+    pub last_damaged_at: Option<Instant>,
     /// Highest move sequence we've accepted from this client. Out-of-order
     /// packets get dropped (unreliable channel, so reorder is expected).
     pub last_move_seq: u32,
@@ -370,6 +383,8 @@ impl PerConnection {
             in_world: false,
             clean_disconnect: false,
             linkdead_since: None,
+            camp_since: None,
+            last_damaged_at: None,
             last_move_seq: 0,
             latest_direction: Vec3f::ZERO,
             last_move_received: None,
@@ -483,6 +498,13 @@ impl PerConnection {
     pub fn linkdead_expired(&self, now: Instant, window: std::time::Duration) -> bool {
         self.linkdead_since
             .is_some_and(|t| now.duration_since(t) >= window)
+    }
+
+    /// Camp slice B: record that incoming damage just landed on this player, so
+    /// the per-tick camp sweep can cancel an in-progress `/camp` ("cancelled by
+    /// damage"). Called at each player-damage application site in the tick loop.
+    pub fn note_damage_taken(&mut self, now: Instant) {
+        self.last_damaged_at = Some(now);
     }
 }
 

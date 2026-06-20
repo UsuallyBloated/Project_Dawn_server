@@ -39,7 +39,12 @@ use serde::{Deserialize, Serialize};
 /// vault (10 slots) and the account-shared vault (2 slots). New client intents
 /// `BankStoreItem` / `BankWithdrawItem` and the server message `BankItemSnapshot`,
 /// all appended at the END of their enums.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3136; // "PD_W0016"
+///
+/// PD_W0017: Camp + linkdead, slice B (`/camp`). Adds the voluntary sit-gated
+/// logout: client intents `Camp` / `CancelCamp` and the server confirm
+/// `CampUpdate { remaining_secs, active }`, all appended at the END of their
+/// enums.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3137; // "PD_W0017"
 
 pub type EntityId = u64;
 
@@ -750,6 +755,15 @@ pub enum ClientWorldMsg {
         shared: bool,
         vault_slot: u32,
     },
+
+    /// PD_W0017 — Camp, slice B. Begin a voluntary `/camp` logout. The server
+    /// gates it on the player being seated (`is_sitting`) and runs a ~30 s
+    /// countdown (`CAMP_SECS`), cancelled if the player stands/moves or takes
+    /// damage; on completion the server logs the player out cleanly. No payload.
+    Camp,
+    /// PD_W0017 — Camp, slice B. Abort an in-progress `/camp` countdown. No-op
+    /// if the player is not currently camping. No payload.
+    CancelCamp,
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────
@@ -1144,6 +1158,17 @@ pub enum ServerWorldMsg {
     BankItemSnapshot {
         shared: bool,
         entries: Vec<(u32, String, u32)>,
+    },
+
+    /// PD_W0017 — Camp, slice B. Server confirm for the `/camp` countdown so the
+    /// client display stays authoritative. Sent when a camp starts
+    /// (`active = true`, `remaining_secs = CAMP_SECS`) and when it ends
+    /// (`active = false`, on cancel by stand/move/damage). On *completion* the
+    /// server logs the player out (a clean disconnect), so the client never sees
+    /// an `active = false` for the success case — the disconnect is the signal.
+    CampUpdate {
+        remaining_secs: u32,
+        active: bool,
     },
 }
 

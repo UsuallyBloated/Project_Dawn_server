@@ -290,6 +290,13 @@ impl NetClient {
     #[signal]
     fn bank_rejected(reason: GString);
 
+    /// PD_W0017 — Camp, slice B. The server's `/camp` countdown state: `active`
+    /// true with `remaining_secs` when a camp starts, false (remaining 0) when it
+    /// is cancelled. Completion is signalled by the clean disconnect, not here.
+    /// GDScript drives the HUD countdown label from this.
+    #[signal]
+    fn camp_update(remaining_secs: i64, active: bool);
+
     /// PD_W0016 — Banker, slice 2. Full contents of one item vault (`shared`
     /// picks personal vs account-shared). Parallel arrays of (slot, item_path,
     /// count) for filled slots. The GDScript handler repaints the vault grid.
@@ -588,6 +595,20 @@ impl NetClient {
     #[func]
     fn send_stand(&mut self) -> bool {
         self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::Stand)
+    }
+
+    /// Camp slice B — begin a voluntary `/camp` logout. Server gates on the
+    /// player being seated and runs the countdown; the client mirrors it via the
+    /// `camp_update` signal.
+    #[func]
+    fn send_camp(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::Camp)
+    }
+
+    /// Camp slice B — abort an in-progress `/camp` countdown. Pair to `send_camp`.
+    #[func]
+    fn send_cancel_camp(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::CancelCamp)
     }
 
     /// Track 6 — owning client respawned (local death-timer elapsed).
@@ -1334,6 +1355,10 @@ enum Incoming {
         target_name: String,
         slots: Vec<(u8, String)>,
     },
+    CampUpdate {
+        remaining_secs: i64,
+        active: bool,
+    },
     Raw {
         channel: u8,
         bytes: Vec<u8>,
@@ -1928,6 +1953,12 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::CampUpdate { remaining_secs, active } => {
+                    self.base_mut().emit_signal(
+                        "camp_update",
+                        &[remaining_secs.to_variant(), active.to_variant()],
+                    );
+                }
                 Incoming::Raw { channel, bytes } => {
                     let pba = packed_byte_array_from(&bytes);
                     self.base_mut().emit_signal(
@@ -2190,6 +2221,10 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
         ServerWorldMsg::InspectResult { target_char_id, target_name, slots } => {
             Incoming::InspectResult { target_char_id, target_name, slots }
         }
+        ServerWorldMsg::CampUpdate { remaining_secs, active } => Incoming::CampUpdate {
+            remaining_secs: remaining_secs as i64,
+            active,
+        },
         // Other variants get bubbled up raw. As their handlers land, add
         // typed `match` arms here.
         _ => Incoming::Raw {

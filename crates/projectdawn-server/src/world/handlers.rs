@@ -546,6 +546,12 @@ pub fn handle_message(
             // without clearing here too the next BuffSnapshot fan-out
             // restores them on the corpse.
             conn.active_buffs.clear();
+            // Death aborts an in-progress /camp (a corpse can't make camp). The
+            // camp sweep already cancels on damage, but this covers any death
+            // path that doesn't run through `note_damage_taken` (self-damage,
+            // future environmental). No CampUpdate is fanned: the client's own
+            // PlayerDeath flow drops it out of the seated/camping state.
+            conn.camp_since = None;
             super::regen::mark_dirty(conn);
             Outcome::DeathFanOut
         }
@@ -720,6 +726,32 @@ pub fn handle_message(
                 return Outcome::Continue;
             }
             conn.is_sitting = false;
+            Outcome::Continue
+        }
+
+        ClientWorldMsg::Camp => {
+            // Camp slice B — begin a voluntary sit-gated logout. Server is
+            // authoritative on the gate; the client also pre-checks its sit
+            // state for a fast rejection line, so a standing player normally
+            // never reaches here. Reject silently if not seated, not ready, or
+            // already camping. On accept, start the countdown and confirm to the
+            // client so its display matches our clock; the per-tick camp sweep
+            // (tick.rs) drives cancel-on-stand/move/damage + completion.
+            if !conn.ready || !conn.is_sitting || conn.camp_since.is_some() {
+                return Outcome::Continue;
+            }
+            conn.camp_since = Some(now);
+            send_camp_update(server, client_id, super::CAMP_SECS.as_secs() as u32, true);
+            Outcome::Continue
+        }
+
+        ClientWorldMsg::CancelCamp => {
+            // Camp slice B — abort an in-progress countdown (e.g. the player
+            // re-typed /camp or hit a cancel key). No-op if not camping; confirm
+            // the clear so the client hides its countdown.
+            if conn.camp_since.take().is_some() {
+                send_camp_update(server, client_id, 0, false);
+            }
             Outcome::Continue
         }
 
@@ -1880,6 +1912,23 @@ fn send_connect_ok(server: &mut RenetServer, client_id: ClientId, conn: &PerConn
 
 pub fn send_kick(server: &mut RenetServer, client_id: ClientId, code: KickCode, reason: &str) {
     send_kick_with_reconnect(server, client_id, code, reason, None);
+}
+
+/// Camp slice B — confirm a `/camp` countdown state to one client. `active =
+/// true` with `remaining_secs = CAMP_SECS` starts the client display; `active =
+/// false` (remaining 0) tells it to hide the countdown on a cancel. Completion
+/// is NOT signalled this way — the server logs the player out, so the disconnect
+/// is the success signal.
+pub fn send_camp_update(
+    server: &mut RenetServer,
+    client_id: ClientId,
+    remaining_secs: u32,
+    active: bool,
+) {
+    let msg = ServerWorldMsg::CampUpdate { remaining_secs, active };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(client_id, CHANNEL_SYSTEM, bytes);
+    }
 }
 
 /// Same as [`send_kick`] but populates `reconnect_after_secs` so the client

@@ -59,6 +59,11 @@ pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Quit or a completed `/camp` reaps immediately instead. Tunable; see
 /// docs/design/camp_and_linkdead.md.
 pub const LINKDEAD_SECS: Duration = Duration::from_secs(30);
+/// How long a voluntary `/camp` countdown runs before the player is logged
+/// out cleanly. The player must be seated to start and the camp is cancelled
+/// if they stand/move or take damage. Tunable; the voluntary mirror of
+/// `LINKDEAD_SECS`. See docs/design/camp_and_linkdead.md.
+pub const CAMP_SECS: Duration = Duration::from_secs(30);
 /// Periodic position checkpoint cadence. Inventory/quest mutations write
 /// per-mutation; this is just for "where was I when the power went out".
 pub const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);

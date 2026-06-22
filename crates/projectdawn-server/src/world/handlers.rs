@@ -527,33 +527,32 @@ pub fn handle_message(
             if !conn.ready {
                 return Outcome::Continue;
             }
-            // Cast cache cleared on death — a corpse isn't mid-cast.
-            // Track 6 also zeroes conn.hp + flags the broadcast baseline
-            // dirty so the next regen tick fans HealthUpdate(0). Peer
-            // RemotePlayer.apply_health_update needs that drop-to-zero
-            // before the matching Respawn HealthUpdate(>0) flips
-            // _apply_respawn(). Sub-task 3 will lift death detection
-            // fully server-side; for now the dying client is still the
-            // source of truth for "I died."
-            conn.cast_spell_name.clear();
-            conn.cast_total_duration = 0.0;
-            conn.cast_set_at = None;
-            conn.hp = 0.0;
-            // Round-7 playtest fix — food / drink and other timed buffs
-            // shouldn't survive a death. The client's BuffManager
-            // already calls clear_all on PlayerDeath.player_died, but
-            // those buffs are server-authoritative in launcher mode —
-            // without clearing here too the next BuffSnapshot fan-out
-            // restores them on the corpse.
-            conn.active_buffs.clear();
-            // Death aborts an in-progress /camp (a corpse can't make camp). The
-            // camp sweep already cancels on damage, but this covers any death
-            // path that doesn't run through `note_damage_taken` (self-damage,
-            // future environmental). No CampUpdate is fanned: the client's own
-            // PlayerDeath flow drops it out of the seated/camping state.
-            conn.camp_since = None;
-            super::regen::mark_dirty(conn);
+            // Server-authoritative death (Slice 0): the per-tick death sweep
+            // already kills players whose hp hit zero in server-simulated
+            // combat. This handler now covers death causes the server doesn't
+            // simulate (e.g. client-side fall damage): if this death hasn't been
+            // processed yet, run the same authoritative kill path (xp penalty +
+            // de-level, on-death resets). The `death_processed` guard keeps the
+            // penalty + EntityDied to exactly once whether the sweep or this
+            // handler reaches it first.
+            if conn.death_processed {
+                return Outcome::Continue;
+            }
+            super::progression::kill_player(server, conn);
+            conn.death_processed = true;
             Outcome::DeathFanOut
+        }
+
+        ClientWorldMsg::GrantQuestXp { amount } => {
+            if !conn.ready || amount <= 0 {
+                return Outcome::Continue;
+            }
+            // PD_W0018 — quests are still tracked client-side; the client reports
+            // a completed quest's xp reward and the server applies it through the
+            // authoritative leveling path, so a turn-in can level you like a kill.
+            tracing::info!(char_id = conn.char_id, amount, "quest xp grant");
+            super::progression::award_xp(server, conn, amount);
+            Outcome::Continue
         }
 
         ClientWorldMsg::EquipUpdate { armor } => {
@@ -685,6 +684,9 @@ pub fn handle_message(
             conn.regen_hp_acc = 0.0;
             conn.regen_mp_acc = 0.0;
             conn.regen_stamina_acc = 0.0;
+            // Slice 0: the player is alive again, so the death sweep should
+            // process the next death afresh.
+            conn.death_processed = false;
             super::regen::mark_dirty(conn);
             Outcome::Continue
         }
@@ -1322,15 +1324,35 @@ pub fn fan_group_roster(
 
 /// Private XP grant to the kill-credit recipient. Mirrors
 /// `send_loot_granted`'s single-recipient shape on the reliable system
-/// channel. `current` / `to_next` are placeholders — the server doesn't
-/// track player XP state in Track 5 (still client-authoritative); Track 6
-/// will populate them.
-pub fn send_xp_gained(server: &mut RenetServer, recipient_id: ClientId, amount: i32) {
-    let msg = ServerWorldMsg::XpGained {
-        amount,
-        current: 0,
-        to_next: 0,
-    };
+/// channel. `current` / `to_next` carry the player's authoritative xp into the
+/// current level + that level's band, populated by `world::progression` now
+/// that the server owns xp/leveling. The client mirrors them onto its bar.
+pub fn send_xp_gained(
+    server: &mut RenetServer,
+    recipient_id: ClientId,
+    amount: i32,
+    current: i32,
+    to_next: i32,
+) {
+    let msg = ServerWorldMsg::XpGained { amount, current, to_next };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// Private `LevelUp` to one player: the authoritative new level + xp totals.
+/// The client mirrors the level number and applies the matching intrinsic
+/// stat deltas locally (the two level tables are kept in lockstep); the new
+/// max pools arrive alongside via the resource fan. Used for both level-ups
+/// and de-levels (a death penalty can lower `new_level`).
+pub fn send_level_up(
+    server: &mut RenetServer,
+    recipient_id: ClientId,
+    new_level: u32,
+    xp: i32,
+    xp_to_next: i32,
+) {
+    let msg = ServerWorldMsg::LevelUp { new_level, xp, xp_to_next };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
     }

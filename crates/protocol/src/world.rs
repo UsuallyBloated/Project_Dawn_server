@@ -44,7 +44,14 @@ use serde::{Deserialize, Serialize};
 /// logout: client intents `Camp` / `CancelCamp` and the server confirm
 /// `CampUpdate { remaining_secs, active }`, all appended at the END of their
 /// enums.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3137; // "PD_W0017"
+///
+/// PD_W0018: server-authoritative XP + leveling (corpse / resurrection epic,
+/// Slice 0). The inert `LevelUp` is reshaped to carry `xp` / `xp_to_next`
+/// alongside `new_level` (it had no encoder, so reshaping in place is safe),
+/// `XpGained` now carries real `current` / `to_next`, and the client intent
+/// `GrantQuestXp { amount }` (appended at the END of `ClientWorldMsg`) lets
+/// client-tracked quests award xp through the server's authoritative path.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3138; // "PD_W0018"
 
 pub type EntityId = u64;
 
@@ -764,6 +771,16 @@ pub enum ClientWorldMsg {
     /// PD_W0017 — Camp, slice B. Abort an in-progress `/camp` countdown. No-op
     /// if the player is not currently camping. No payload.
     CancelCamp,
+
+    /// PD_W0018 — server-authoritative XP, Slice 0. Quests are still tracked
+    /// client-side, so the client reports a completed quest's xp reward here
+    /// and the server applies it through its authoritative leveling path
+    /// (`world::progression::award_xp`). Kept to a primitive so the GDScript
+    /// client can encode it. As trusted as today's client-only quest xp; quest
+    /// turn-ins move server-side in a later track.
+    GrantQuestXp {
+        amount: i32,
+    },
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────
@@ -855,8 +872,15 @@ pub enum ServerWorldMsg {
         current: i32,
         to_next: i32,
     },
+    /// PD_W0018 — server-authoritative leveling. Sent privately to a player
+    /// whose level changed (up on xp gain, or DOWN on a death penalty). Carries
+    /// the authoritative new level plus xp into it + that level's band; the
+    /// client sets the level, mirrors the bar, and applies the matching
+    /// intrinsic stat deltas locally. New max pools arrive via the resource fan.
     LevelUp {
         new_level: u32,
+        xp: i32,
+        xp_to_next: i32,
     },
     AlignmentChanged {
         score: i32,

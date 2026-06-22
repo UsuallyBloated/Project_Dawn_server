@@ -266,12 +266,19 @@ impl NetClient {
     #[signal]
     fn group_notice(text: GString);
 
-    /// Track 5 sub-task 5 — private kill-credit XP grant. `current`
-    /// and `to_next` are placeholders from the server (Track 5 keeps
-    /// player XP state client-authoritative); the GDScript handler
-    /// calls PlayerStats.gain_xp(amount) and ignores them.
+    /// PD_W0018 — private kill / quest xp update. The server owns xp + leveling
+    /// now, so `current` / `to_next` are the authoritative xp into the current
+    /// level + that level's band. The GDScript handler mirrors them onto the bar
+    /// and does NOT level up locally (that arrives via `level_up`).
     #[signal]
     fn xp_gained(amount: i64, current: i64, to_next: i64);
+
+    /// PD_W0018 — server-authoritative level change (up on xp gain, DOWN on a
+    /// death penalty). The GDScript handler sets the level, mirrors the bar, and
+    /// applies the matching intrinsic stat deltas; new max pools arrive via the
+    /// resource updates.
+    #[signal]
+    fn level_up(new_level: i64, xp: i64, xp_to_next: i64);
 
     /// Track 14 follow-up — server-authoritative coins. Fired after
     /// vendor BuyItem / SellItem applies (and any future coin-mutating
@@ -609,6 +616,15 @@ impl NetClient {
     #[func]
     fn send_cancel_camp(&mut self) -> bool {
         self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::CancelCamp)
+    }
+
+    /// PD_W0018 — report a completed quest's xp reward. Quests are tracked
+    /// client-side; the server applies the xp through its authoritative leveling
+    /// path and replies with `XpGained` / `LevelUp`. Primitive payload so the
+    /// GDScript client can encode it.
+    #[func]
+    fn send_grant_quest_xp(&mut self, amount: i32) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::GrantQuestXp { amount })
     }
 
     /// Track 6 — owning client respawned (local death-timer elapsed).
@@ -1298,6 +1314,11 @@ enum Incoming {
         current: i32,
         to_next: i32,
     },
+    LevelUp {
+        new_level: u32,
+        xp: i32,
+        xp_to_next: i32,
+    },
     CoinsUpdate {
         platinum: i64,
         gold: i64,
@@ -1791,6 +1812,16 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::LevelUp { new_level, xp, xp_to_next } => {
+                    self.base_mut().emit_signal(
+                        "level_up",
+                        &[
+                            (new_level as i64).to_variant(),
+                            (xp as i64).to_variant(),
+                            (xp_to_next as i64).to_variant(),
+                        ],
+                    );
+                }
                 Incoming::CoinsUpdate { platinum, gold, silver, copper } => {
                     self.base_mut().emit_signal(
                         "coins_update",
@@ -2156,6 +2187,11 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             amount,
             current,
             to_next,
+        },
+        ServerWorldMsg::LevelUp { new_level, xp, xp_to_next } => Incoming::LevelUp {
+            new_level,
+            xp,
+            xp_to_next,
         },
         ServerWorldMsg::CoinsUpdate { coins } => Incoming::CoinsUpdate {
             platinum: coins.platinum,

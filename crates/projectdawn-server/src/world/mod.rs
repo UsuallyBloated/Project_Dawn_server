@@ -25,6 +25,7 @@ mod items;
 mod loot;
 mod persistence;
 mod pet_templates;
+mod progression;
 mod regen;
 mod skills;
 mod spawn_points;

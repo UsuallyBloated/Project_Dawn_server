@@ -306,8 +306,8 @@ enum ServerMsg {
     StaminaUpdate { id: EntityId, stamina: f32, max: f32 },     // owner only
     StatsUpdate { full_stats_dict },                            // owner only
     CoinsUpdate { coins: i64 },                                 // owner only
-    XpGained { amount: i32, current: i32, to_next: i32 },
-    LevelUp { new_level: u32 },
+    XpGained { amount: i32, current: i32, to_next: i32 },      // owner only; current/to_next now real (PD_W0018)
+    LevelUp { new_level: u32, xp: i32, xp_to_next: i32 },       // owner only; up on xp, DOWN on death penalty (PD_W0018)
     AlignmentChanged { score: i32, tier: String },
 
     // Combat events

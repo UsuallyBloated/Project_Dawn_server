@@ -356,6 +356,20 @@ pub fn compute(race: &str, class: &str, level: i32) -> ComputedCharacter {
     ComputedCharacter { stats, max_hp, max_mp, max_stamina, xp_to_next }
 }
 
+/// The XP needed to clear `level` (the size of that level's band). Depends
+/// only on the level, not race/class. Mirrors the geometric 1.5x growth in
+/// `compute` and the GDScript `apply_character` loop. Used by the leveling
+/// path (`world::progression`) to resize the band on a level up/down without
+/// recomputing the whole character.
+pub fn xp_to_next_for(level: i32) -> i32 {
+    let lvl = level.clamp(1, 99);
+    let mut xp_to_next: i32 = 100;
+    for _ in 1..lvl {
+        xp_to_next = ((xp_to_next as f32) * 1.5) as i32;
+    }
+    xp_to_next
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

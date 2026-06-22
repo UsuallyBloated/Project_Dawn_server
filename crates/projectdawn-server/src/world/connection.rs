@@ -147,6 +147,12 @@ pub struct PerConnection {
     /// application sites in the tick loop; never cleared (it's a monotonic
     /// last-hit marker, only meaningful relative to `camp_since`).
     pub last_damaged_at: Option<Instant>,
+
+    /// Corpse/resurrection Slice 0: set true when the server-side death sweep
+    /// has already processed this player's death (applied the xp penalty, fanned
+    /// EntityDied). Guards the sweep from re-running every tick while hp stays 0,
+    /// and is cleared on `Respawn` so the next death is processed afresh.
+    pub death_processed: bool,
     /// Highest move sequence we've accepted from this client. Out-of-order
     /// packets get dropped (unreliable channel, so reorder is expected).
     pub last_move_seq: u32,
@@ -385,6 +391,7 @@ impl PerConnection {
             linkdead_since: None,
             camp_since: None,
             last_damaged_at: None,
+            death_processed: false,
             last_move_seq: 0,
             latest_direction: Vec3f::ZERO,
             last_move_received: None,

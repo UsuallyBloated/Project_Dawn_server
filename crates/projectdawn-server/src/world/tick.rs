@@ -551,8 +551,11 @@ fn apply_spell_damage_to_enemy(
         if let Some(credit_id) = credit_id_opt {
             if mob_xp > 0 {
                 let cid = credit_id as ClientId;
-                if connections.contains_key(&cid) {
-                    handlers::send_xp_gained(server, cid, mob_xp);
+                if let Some(conn) = connections.get_mut(&cid) {
+                    // Server-authoritative xp/leveling (Slice 0): solo spell
+                    // kill credit. award_xp adds the xp, resolves any level-up,
+                    // and tells the client.
+                    super::progression::award_xp(server, conn, mob_xp);
                 }
             }
         }
@@ -2900,8 +2903,11 @@ pub async fn run(
                             let per_member = pool / online_members.len() as i32;
                             let per_member = per_member.max(1);
                             for m in &online_members {
-                                if connections.contains_key(m) {
-                                    handlers::send_xp_gained(&mut server, *m, per_member);
+                                if let Some(conn) = connections.get_mut(m) {
+                                    // Server-authoritative xp/leveling (Slice 0):
+                                    // each group member's share runs through
+                                    // award_xp so leveling is authoritative.
+                                    super::progression::award_xp(&mut server, conn, per_member);
                                 }
                             }
                             tracing::info!(
@@ -6394,12 +6400,10 @@ pub async fn run(
                             if let Some(credit_id) = credit_id_opt {
                                 if mob_xp > 0 && credit_id < protocol::world::ENEMY_ID_BASE {
                                     let cid = credit_id as ClientId;
-                                    if connections.contains_key(&cid) {
-                                        handlers::send_xp_gained(
-                                            &mut server,
-                                            cid,
-                                            mob_xp,
-                                        );
+                                    if let Some(conn) = connections.get_mut(&cid) {
+                                        // Server-authoritative xp/leveling
+                                        // (Slice 0): solo pet kill credit.
+                                        super::progression::award_xp(&mut server, conn, mob_xp);
                                     }
                                 }
                             }
@@ -7364,6 +7368,32 @@ pub async fn run(
                 // Window elapsed; stop tracking. The client logs itself out.
                 conn.camp_since = None;
                 tracing::info!(char_id = conn.char_id, "camp window elapsed — client logs out");
+            }
+        }
+
+        // 5a-bis. Corpse / resurrection Slice 0 — server-authoritative death
+        //     detection. After all combat damage this tick, any in-world player
+        //     whose hp reached zero (and hasn't already been processed) dies
+        //     here: the xp penalty + de-level apply, the on-death resets run,
+        //     and EntityDied fans to peers. `death_processed` keeps this from
+        //     re-firing every tick while hp stays 0; the Respawn handler clears
+        //     it. The client's DeathBroadcast still covers death causes the
+        //     server doesn't simulate (e.g. client-side fall damage).
+        let death_recipients: Vec<ClientId> = connections
+            .iter()
+            .filter(|(_, c)| c.in_world)
+            .map(|(id, _)| *id)
+            .collect();
+        for conn in connections.values_mut() {
+            if conn.in_world && conn.hp <= 0.0 && !conn.death_processed {
+                super::progression::kill_player(&mut server, conn);
+                conn.death_processed = true;
+                handlers::fan_out_entity_died(&mut server, &death_recipients, conn.char_id as u64);
+                tracing::info!(
+                    char_id = conn.char_id,
+                    level = conn.level,
+                    "server-detected player death",
+                );
             }
         }
 

@@ -153,6 +153,12 @@ pub struct PerConnection {
     /// EntityDied). Guards the sweep from re-running every tick while hp stays 0,
     /// and is cleared on `Respawn` so the next death is processed afresh.
     pub death_processed: bool,
+    /// Corpse/resurrection Slice 1: set true by `kill_player`, so EVERY death
+    /// path flags a corpse (the server-detected death sweep AND a client-first
+    /// `DeathBroadcast` — Trigger Death, fall damage, a linkdead body that dies).
+    /// The corpse-creation pass consumes it (makes the corpse, then clears it).
+    /// Distinct from `death_processed` so a client-first death still leaves one.
+    pub corpse_pending: bool,
     /// Highest move sequence we've accepted from this client. Out-of-order
     /// packets get dropped (unreliable channel, so reorder is expected).
     pub last_move_seq: u32,
@@ -392,6 +398,7 @@ impl PerConnection {
             camp_since: None,
             last_damaged_at: None,
             death_processed: false,
+            corpse_pending: false,
             last_move_seq: 0,
             latest_direction: Vec3f::ZERO,
             last_move_received: None,

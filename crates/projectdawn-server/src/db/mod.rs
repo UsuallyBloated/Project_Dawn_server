@@ -668,6 +668,145 @@ pub async fn save_inventory(
     Ok(())
 }
 
+// ── Corpses (corpse / resurrection epic, Slice 1) ─────────────────────────────
+
+/// A corpse loaded from the DB at boot. Plain data; `world::tick` maps it into
+/// the in-memory `world::corpses::Corpse`.
+#[derive(Debug, Clone)]
+pub struct CorpseRow {
+    pub corpse_id: i64,
+    pub char_id: i64,
+    pub owner_name: String,
+    pub zone: String,
+    pub pos: (f32, f32, f32),
+    pub coins: protocol::world::Coins,
+    pub items: Vec<(String, u32)>,
+}
+
+#[derive(FromRow)]
+struct CorpseHeaderRow {
+    corpse_id: i64,
+    char_id: i64,
+    owner_name: String,
+    zone: String,
+    pos_x: f64,
+    pos_y: f64,
+    pos_z: f64,
+    platinum: i64,
+    gold: i64,
+    silver: i64,
+    copper: i64,
+}
+
+/// Persist a corpse + its item stacks atomically. Called BEFORE the player's
+/// live inventory is cleared, so a crash between this commit and the clear
+/// leaves the gear on the corpse (recoverable) rather than vaporizing it.
+/// `corpse_id` is the minted EntityId (loot-bag id partition); `items` are
+/// flat (item_path, count) stacks.
+pub async fn save_corpse(
+    pool: &SqlitePool,
+    corpse_id: i64,
+    char_id: i64,
+    owner_name: &str,
+    zone: &str,
+    pos: (f32, f32, f32),
+    coins: protocol::world::Coins,
+    items: &[(String, u32)],
+) -> AuthResult<()> {
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO corpses
+           (corpse_id, char_id, owner_name, zone, pos_x, pos_y, pos_z,
+            platinum, gold, silver, copper, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+    )
+    .bind(corpse_id)
+    .bind(char_id)
+    .bind(owner_name)
+    .bind(zone)
+    .bind(pos.0 as f64)
+    .bind(pos.1 as f64)
+    .bind(pos.2 as f64)
+    .bind(coins.platinum)
+    .bind(coins.gold)
+    .bind(coins.silver)
+    .bind(coins.copper)
+    .bind(created_at)
+    .execute(&mut *tx)
+    .await?;
+    for (slot, (item_path, count)) in items.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO corpse_items (corpse_id, slot, item_path, count)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(corpse_id)
+        .bind(slot as i64)
+        .bind(item_path)
+        .bind(*count as i64)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Load every corpse (+ its items) from the DB. Called ONCE at server boot,
+/// before any login is accepted, so a corpse is always in memory before its
+/// owner could log in and loot it.
+pub async fn load_corpses(pool: &SqlitePool) -> AuthResult<Vec<CorpseRow>> {
+    let headers: Vec<CorpseHeaderRow> = sqlx::query_as(
+        "SELECT corpse_id, char_id, owner_name, zone, pos_x, pos_y, pos_z,
+                platinum, gold, silver, copper
+         FROM corpses",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::with_capacity(headers.len());
+    for h in headers {
+        let items: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT item_path, count FROM corpse_items WHERE corpse_id = ?1 ORDER BY slot",
+        )
+        .bind(h.corpse_id)
+        .fetch_all(pool)
+        .await?;
+        out.push(CorpseRow {
+            corpse_id: h.corpse_id,
+            char_id: h.char_id,
+            owner_name: h.owner_name,
+            zone: h.zone,
+            pos: (h.pos_x as f32, h.pos_y as f32, h.pos_z as f32),
+            coins: protocol::world::Coins {
+                platinum: h.platinum,
+                gold: h.gold,
+                silver: h.silver,
+                copper: h.copper,
+            },
+            items: items.into_iter().map(|(p, n)| (p, n as u32)).collect(),
+        });
+    }
+    Ok(out)
+}
+
+/// Delete a corpse + its items (decay, or fully-looted in Slice 2). Explicit
+/// two-table delete so it works regardless of the FK-cascade pragma.
+pub async fn delete_corpse(pool: &SqlitePool, corpse_id: i64) -> AuthResult<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM corpse_items WHERE corpse_id = ?1")
+        .bind(corpse_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM corpses WHERE corpse_id = ?1")
+        .bind(corpse_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Banker slice 2 — one stack in an item vault. No `location` column: the
 /// table it came from (bank_items vs account_bank_items) is the store, and
 /// the slot is a flat index into that store.

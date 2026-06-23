@@ -513,6 +513,38 @@ impl PlayerInventory {
         out
     }
 
+    /// Corpse / resurrection Slice 1 — every item stack the player carries
+    /// (equipped + base + inside bags), flattened to (item_path, count) pairs to
+    /// move onto a corpse on death. Slot identity isn't preserved: looted corpse
+    /// gear goes into bags in EQ, not back to its original slot.
+    pub fn all_stacks(&self) -> Vec<(String, u32)> {
+        let mut out = Vec::new();
+        for entry in self.base.iter().flatten() {
+            out.push((entry.item_path.clone(), entry.count));
+        }
+        for entry in self.equipment.values() {
+            out.push((entry.item_path.clone(), entry.count));
+        }
+        for arr in self.bags.values() {
+            for entry in arr.iter().flatten() {
+                out.push((entry.item_path.clone(), entry.count));
+            }
+        }
+        out
+    }
+
+    /// Corpse / resurrection Slice 1 — empty the entire inventory (equipped,
+    /// base, bags), leaving the player naked. The caller re-runs
+    /// `recompute_equipped_stats` to drop the gear bonuses and persists the now
+    /// empty `character_items`.
+    pub fn clear_all(&mut self) {
+        for slot in self.base.iter_mut() {
+            *slot = None;
+        }
+        self.equipment.clear();
+        self.bags.clear();
+    }
+
     /// Track 14.3 — sync `bags[base_idx]` against whatever sits in
     /// `base[base_idx]`. Called after every mutation that could
     /// change a base entry. If the base slot now holds a bag-typed

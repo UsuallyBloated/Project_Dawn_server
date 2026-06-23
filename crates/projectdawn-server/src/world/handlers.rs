@@ -1384,6 +1384,32 @@ pub fn fan_out_loot_bag_spawn(
     }
 }
 
+/// Fan out a `CorpseSpawn` for `corpse` to `recipients` (corpse / resurrection
+/// Slice 1). Encoded once, cloned per recipient — mirrors
+/// `fan_out_loot_bag_spawn`. Used on death and when a corpse first becomes
+/// visible to a player (AOI entry / boot-loaded).
+pub fn fan_out_corpse_spawn(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    corpse: &super::corpses::Corpse,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::CorpseSpawn {
+        corpse_id: corpse.id,
+        owner_id: corpse.owner_char as u64,
+        owner_name: corpse.owner_name.clone(),
+        pos: Vec3 { x: corpse.pos.x, y: corpse.pos.y, z: corpse.pos.z },
+    };
+    let Some(bytes) = encode(&msg) else {
+        return;
+    };
+    for &recipient_id in recipients {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
 /// Fan out a HealthUpdate for any entity id (player char_id or enemy
 /// id). Encoded once and cloned per recipient.
 pub fn fan_out_health_update(

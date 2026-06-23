@@ -903,6 +903,41 @@ pub async fn run(
     // removes the member; one-member-left groups dissolve.
     let mut group_manager = GroupManager::new();
 
+    // Corpse / resurrection Slice 1 — server-owned player corpses (persisted
+    // LootBags). Load every persisted corpse BEFORE the loop (so before any login
+    // is accepted, no first-player race), seed the AOI, and advance the bag-id
+    // minter past the highest loaded id so a fresh bag/corpse can't reuse a
+    // loaded corpse's id after this restart.
+    let mut corpses: HashMap<EntityId, super::corpses::Corpse> = HashMap::new();
+    match db::load_corpses(&pool).await {
+        Ok(rows) => {
+            let boot = Instant::now();
+            let mut max_id: EntityId = 0;
+            for r in rows {
+                let id = r.corpse_id as EntityId;
+                let pos = super::connection::Vec3f::from_tuple(r.pos);
+                let items: Vec<super::loot::LootItemStack> = r
+                    .items
+                    .into_iter()
+                    .map(|(item_path, count)| super::loot::LootItemStack { item_path, count })
+                    .collect();
+                aoi.insert(id, aoi::cell_for(pos.x, pos.z));
+                max_id = max_id.max(id);
+                corpses.insert(
+                    id,
+                    super::corpses::Corpse::new(
+                        id, r.char_id, r.owner_name, r.zone, pos, items, r.coins, boot,
+                    ),
+                );
+            }
+            if max_id >= protocol::world::LOOT_BAG_ID_BASE {
+                super::loot::reserve_bag_ids_through(max_id);
+            }
+            tracing::info!(count = corpses.len(), "loaded persisted corpses");
+        }
+        Err(e) => tracing::error!(error = %e, "load_corpses failed; starting with no corpses"),
+    }
+
     loop {
         interval.tick().await;
         let now = Instant::now();
@@ -1932,6 +1967,18 @@ pub async fn run(
                         &mut server,
                         std::slice::from_ref(new_id),
                         bag,
+                    );
+                }
+            }
+            // Corpse / resurrection Slice 1 — seed the joiner with nearby
+            // corpses too (so a relog near your body, or a walk-back, shows it).
+            for corpse in corpses.values() {
+                let corpse_cell = aoi::cell_for(corpse.pos.x, corpse.pos.z);
+                if aoi.can_see(joiner_cell, corpse_cell) {
+                    handlers::fan_out_corpse_spawn(
+                        &mut server,
+                        std::slice::from_ref(new_id),
+                        corpse,
                     );
                 }
             }
@@ -7014,6 +7061,35 @@ pub async fn run(
             }
         }
 
+        // 4k-bis. Corpse / resurrection Slice 1 — corpse decay. Corpses linger
+        //     much longer than loot bags (CORPSE_LINGER_SECS); on expiry the
+        //     corpse + its gear are gone for good: despawn to visible peers,
+        //     remove from AOI + map, AND delete the DB rows so a restart can't
+        //     bring it back.
+        let corpse_linger = Duration::from_secs_f32(super::corpses::CORPSE_LINGER_SECS);
+        let mut expired_corpses: Vec<EntityId> = Vec::new();
+        for corpse in corpses.values() {
+            if now.duration_since(corpse.spawned_at) >= corpse_linger {
+                expired_corpses.push(corpse.id);
+            }
+        }
+        for id in expired_corpses {
+            if let Some(corpse) = corpses.remove(&id) {
+                let cell = aoi::cell_for(corpse.pos.x, corpse.pos.z);
+                aoi.remove(id, cell);
+                let visible = aoi.entities_visible_from(cell);
+                for &recipient in &in_world_recipients_now {
+                    if visible.contains(&recipient) {
+                        handlers::send_entity_despawn(&mut server, recipient, id);
+                    }
+                }
+                if let Err(e) = db::delete_corpse(&pool, id as i64).await {
+                    tracing::error!(corpse_id = id, error = %e, "delete_corpse on decay failed");
+                }
+                tracing::info!(corpse_id = id, char_id = corpse.owner_char, "corpse decayed — gear lost");
+            }
+        }
+
         // 5. Integrate movement intent exactly once per tick. The Move
         //    handler stores the latest direction on the connection; we
         //    advance position here so the rate is bound to wall-clock
@@ -7092,12 +7168,19 @@ pub async fn run(
                     continue;
                 }
                 if peer_entity >= protocol::world::LOOT_BAG_ID_BASE {
-                    // Loot bag — seed the mover with LootBagSpawn.
+                    // Loot bag OR corpse — they share the id partition (corpses
+                    // mint from mint_bag_id). Seed the mover with whichever it is.
                     if let Some(bag) = loot_bags.get(&peer_entity) {
                         handlers::fan_out_loot_bag_spawn(
                             &mut server,
                             std::slice::from_ref(mover_id),
                             bag,
+                        );
+                    } else if let Some(corpse) = corpses.get(&peer_entity) {
+                        handlers::fan_out_corpse_spawn(
+                            &mut server,
+                            std::slice::from_ref(mover_id),
+                            corpse,
                         );
                     }
                 } else if peer_entity >= protocol::world::ENEMY_ID_BASE {
@@ -7395,6 +7478,94 @@ pub async fn run(
                     "server-detected player death",
                 );
             }
+        }
+
+        // Corpse / resurrection Slice 1 — move each freshly-dead player's gear +
+        // coin onto a persisted corpse, then strip them naked. Keyed off the
+        // `corpse_pending` flag `kill_player` sets, so EVERY death path leaves a
+        // corpse: the server-detected sweep above AND a client-first
+        // DeathBroadcast (Test Panel Trigger Death, fall damage, a linkdead body
+        // that dies) handled earlier this tick. ORDER MATTERS: persist the corpse
+        // FIRST so a crash before the inventory clear leaves the gear recoverable
+        // on the corpse (never duped-then-lost). If save_corpse fails we skip the
+        // strip entirely (player keeps their gear, no corpse). Outside the
+        // values_mut loop so we can await the DB.
+        let corpse_pending: Vec<i64> = connections
+            .values()
+            .filter(|c| c.corpse_pending)
+            .map(|c| c.char_id)
+            .collect();
+        for cid in corpse_pending {
+            let client_id = cid as ClientId;
+            if let Some(c) = connections.get_mut(&client_id) {
+                c.corpse_pending = false;
+            }
+            let (owner_name, zone, pos, items, coins) = match connections.get(&client_id) {
+                Some(c) => (
+                    c.name.clone(),
+                    c.zone.clone().unwrap_or_default(),
+                    c.pos,
+                    c.inventory.all_stacks(),
+                    c.coins,
+                ),
+                None => continue,
+            };
+            // Always leave a corpse, even an empty one (player died naked +
+            // broke). A corpse is the Cleric's resurrection anchor (Slice 3), so
+            // someone who dies mid-corpse-run with nothing on them STILL needs a
+            // body to be rezzed back to. An empty corpse is just a corpses row
+            // with no items; it renders and decays like any other.
+            let corpse_id = super::loot::mint_bag_id();
+            // 1. Persist the corpse first (durable before we touch the player).
+            if let Err(e) = db::save_corpse(
+                &pool,
+                corpse_id as i64,
+                cid,
+                &owner_name,
+                &zone,
+                (pos.x, pos.y, pos.z),
+                coins,
+                &items,
+            )
+            .await
+            {
+                tracing::error!(char_id = cid, error = %e, "save_corpse failed; leaving inventory intact (no strip)");
+                continue;
+            }
+            // 2. Strip the live player + persist the now-empty inventory / coins,
+            //    and fan the emptied snapshot (drives the naked respawn), the new
+            //    gear-free max stats, and the zeroed wallet to the owner.
+            if let Some(conn) = connections.get_mut(&client_id) {
+                conn.inventory.clear_all();
+                inventory::recompute_equipped_stats(conn);
+                conn.coins = protocol::world::Coins::ZERO;
+                conn.coins_dirty = true;
+                let _ = db::save_inventory(&pool, cid, &[]).await;
+                let _ = db::save_coins(&pool, cid, protocol::world::Coins::ZERO).await;
+                let entries = conn.inventory.to_snapshot_entries();
+                handlers::send_inventory_snapshot(&mut server, client_id, entries);
+                handlers::fan_out_resources(&mut server, std::slice::from_ref(&client_id), conn);
+                handlers::send_coins_update(&mut server, client_id, protocol::world::Coins::ZERO);
+            }
+            // 3. Spawn the corpse: AOI + map, fan CorpseSpawn to nearby peers.
+            let cell = aoi::cell_for(pos.x, pos.z);
+            aoi.insert(corpse_id, cell);
+            let visible = aoi.entities_visible_from(cell);
+            let recipients: Vec<ClientId> = in_world_recipients_now
+                .iter()
+                .copied()
+                .filter(|id| visible.contains(id))
+                .collect();
+            let stacks: Vec<super::loot::LootItemStack> = items
+                .iter()
+                .map(|(p, n)| super::loot::LootItemStack { item_path: p.clone(), count: *n })
+                .collect();
+            let corpse = super::corpses::Corpse::new(
+                corpse_id, cid, owner_name, zone, pos, stacks, coins, now,
+            );
+            handlers::fan_out_corpse_spawn(&mut server, &recipients, &corpse);
+            corpses.insert(corpse_id, corpse);
+            tracing::info!(char_id = cid, corpse_id, item_stacks = items.len(), "corpse created");
         }
 
         // 5b. Track 6 regen tick — HP/MP/Stamina recovery, then fan

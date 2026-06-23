@@ -51,7 +51,13 @@ use serde::{Deserialize, Serialize};
 /// `XpGained` now carries real `current` / `to_next`, and the client intent
 /// `GrantQuestXp { amount }` (appended at the END of `ClientWorldMsg`) lets
 /// client-tracked quests award xp through the server's authoritative path.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3138; // "PD_W0018"
+///
+/// PD_W0019: corpse / resurrection Slice 1. Appends `ServerWorldMsg::CorpseSpawn
+/// { corpse_id, owner_id, owner_name, pos }` so the client renders a player
+/// corpse (body + "<name>'s corpse" nameplate) on death or when one loads into
+/// AOI at boot. Despawn rides the existing `EntityDespawn`; corpse looting is
+/// Slice 2.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3139; // "PD_W0019"
 
 pub type EntityId = u64;
 
@@ -1193,6 +1199,19 @@ pub enum ServerWorldMsg {
     CampUpdate {
         remaining_secs: u32,
         active: bool,
+    },
+
+    /// PD_W0019 — corpse / resurrection Slice 1. A player corpse spawned in AOI
+    /// (on death or boot-loaded). `owner_id` is the dead player's char_id (so the
+    /// client can tell if it's its own corpse); `owner_name` labels the
+    /// "<name>'s corpse" nameplate. `corpse_id` is minted from the loot-bag id
+    /// partition; despawn rides the shared `EntityDespawn`. No items on the wire
+    /// yet (render-only) — Slice 2 adds looting.
+    CorpseSpawn {
+        corpse_id: EntityId,
+        owner_id: EntityId,
+        owner_name: String,
+        pos: Vec3,
     },
 }
 

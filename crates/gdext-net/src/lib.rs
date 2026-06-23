@@ -247,6 +247,12 @@ impl NetClient {
         coin_copper: i64,
     );
 
+    /// PD_W0019 — corpse / resurrection Slice 1. A player corpse spawned in AOI;
+    /// the client renders a body + "<owner_name>'s corpse" nameplate. `owner_id`
+    /// is the dead player's char_id (so the owner can tell it's theirs).
+    #[signal]
+    fn corpse_spawn(corpse_id: i64, owner_id: i64, owner_name: GString, pos: Vector3);
+
     /// Track 5 sub-task 4 — private confirmation that the local
     /// player's LootItem / LootAll intent landed and the server has
     /// transferred `count` of `item_path` into our inventory. The
@@ -1299,6 +1305,12 @@ enum Incoming {
         coin_silver: i64,
         coin_copper: i64,
     },
+    CorpseSpawn {
+        corpse_id: i64,
+        owner_id: i64,
+        owner_name: String,
+        pos: WireVec3,
+    },
     LootGranted {
         item_path: String,
         count: u32,
@@ -1781,6 +1793,17 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::CorpseSpawn { corpse_id, owner_id, owner_name, pos } => {
+                    self.base_mut().emit_signal(
+                        "corpse_spawn",
+                        &[
+                            corpse_id.to_variant(),
+                            owner_id.to_variant(),
+                            GString::from(owner_name.as_str()).to_variant(),
+                            Vector3::new(pos.x, pos.y, pos.z).to_variant(),
+                        ],
+                    );
+                }
                 Incoming::LootGranted { item_path, count } => {
                     self.base_mut().emit_signal(
                         "loot_granted",
@@ -2177,6 +2200,14 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             coin_silver: coins.silver,
             coin_copper: coins.copper,
         },
+        ServerWorldMsg::CorpseSpawn { corpse_id, owner_id, owner_name, pos } => {
+            Incoming::CorpseSpawn {
+                corpse_id: corpse_id as i64,
+                owner_id: owner_id as i64,
+                owner_name,
+                pos,
+            }
+        }
         ServerWorldMsg::LootGranted { item_path, count } => Incoming::LootGranted {
             item_path,
             count,

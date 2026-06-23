@@ -95,6 +95,11 @@ pub fn kill_player(server: &mut RenetServer, conn: &mut PerConnection) {
     conn.cast_set_at = None;
     conn.active_buffs.clear();
     conn.camp_since = None; // a corpse can't make camp
+    // Flag a corpse for the tick's corpse-creation pass. Set on EVERY death path
+    // (this is called from the server-detected death sweep AND the client-first
+    // DeathBroadcast handler), so fall damage / Trigger Death / a dying linkdead
+    // body all leave a corpse, not just server-simulated combat kills.
+    conn.corpse_pending = true;
     super::regen::mark_dirty(conn);
 }
 

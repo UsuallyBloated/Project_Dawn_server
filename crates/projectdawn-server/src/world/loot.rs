@@ -121,6 +121,15 @@ pub fn mint_bag_id() -> EntityId {
     NEXT_BAG_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Corpse / resurrection Slice 1 — corpses are persisted but mint their ids from
+/// this same loot-bag partition, and the atomic resets to `LOOT_BAG_ID_BASE` on
+/// restart. After boot-loading corpses, advance the minter past the highest
+/// loaded id so a freshly-minted bag/corpse can never reuse a loaded corpse's id.
+/// No-op when `max_id + 1` is below the current next.
+pub fn reserve_bag_ids_through(max_id: EntityId) {
+    NEXT_BAG_ID.fetch_max(max_id + 1, Ordering::Relaxed);
+}
+
 /// Roll a fresh bag's contents for `mob_name`. Returns `None` if the
 /// roll produced zero stacks (the empty bucket won for every roll), so
 /// the caller can skip the spawn entirely.

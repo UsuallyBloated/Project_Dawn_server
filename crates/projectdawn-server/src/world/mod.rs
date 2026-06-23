@@ -17,6 +17,7 @@ mod aoi;
 mod buffs;
 mod combat;
 mod connection;
+mod corpses;
 mod entity;
 mod groups;
 mod handlers;

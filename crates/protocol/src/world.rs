@@ -57,7 +57,13 @@ use serde::{Deserialize, Serialize};
 /// corpse (body + "<name>'s corpse" nameplate) on death or when one loads into
 /// AOI at boot. Despawn rides the existing `EntityDespawn`; corpse looting is
 /// Slice 2.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3139; // "PD_W0019"
+///
+/// PD_W0020: corpse / resurrection Slice 2 (loot your own corpse). Appends
+/// `ServerWorldMsg::CorpseContents { corpse_id, items, coins }`, sent privately to
+/// the owner only so the client can drive a loot window; taking reuses the
+/// existing `LootItem` / `LootAll` intents keyed by corpse_id (no new client
+/// intent). No wire change to those intents.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3230; // "PD_W0020"
 
 pub type EntityId = u64;
 
@@ -1212,6 +1218,18 @@ pub enum ServerWorldMsg {
         owner_id: EntityId,
         owner_name: String,
         pos: Vec3,
+    },
+
+    /// PD_W0020 — corpse / resurrection Slice 2. A corpse's contents, sent
+    /// PRIVATELY to the OWNER only (peers see the body via `CorpseSpawn` but never
+    /// the gear list). Snapshot-style: re-sent in full after each partial loot so
+    /// the owner's open loot window refreshes. The client drives a loot window off
+    /// this; taking items reuses the existing `LootItem` / `LootAll` intents keyed
+    /// by `corpse_id` (same id partition as loot bags).
+    CorpseContents {
+        corpse_id: EntityId,
+        items: Vec<(String, u32)>,
+        coins: Coins,
     },
 }
 

@@ -1410,6 +1410,30 @@ pub fn fan_out_corpse_spawn(
     }
 }
 
+/// Send a corpse's contents PRIVATELY to one recipient (the owner) — corpse /
+/// resurrection Slice 2. Drives the owner's loot window; snapshot-style, re-sent
+/// in full after each partial loot. Peers never get this (the gear list is
+/// owner-only), so it is a single-recipient send, NOT a fan.
+pub fn send_corpse_contents(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    corpse: &super::corpses::Corpse,
+) {
+    let items: Vec<(String, u32)> = corpse
+        .items
+        .iter()
+        .map(|s| (s.item_path.clone(), s.count))
+        .collect();
+    let msg = ServerWorldMsg::CorpseContents {
+        corpse_id: corpse.id,
+        items,
+        coins: corpse.coins,
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
 /// Fan out a HealthUpdate for any entity id (player char_id or enemy
 /// id). Encoded once and cloned per recipient.
 pub fn fan_out_health_update(

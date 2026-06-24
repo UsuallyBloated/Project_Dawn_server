@@ -807,6 +807,92 @@ pub async fn delete_corpse(pool: &SqlitePool, corpse_id: i64) -> AuthResult<()> 
     Ok(())
 }
 
+/// Corpse / resurrection Slice 2 — persist ONE corpse-loot action ATOMICALLY:
+/// the looter's full inventory + wallet AND the corpse itself, all in a single
+/// transaction. Corpses are DB-backed (unlike transient loot bags), so without
+/// this a crash between an inventory save and a corpse change could dupe the item
+/// (in both) or lose it. When `delete_corpse` is true (the corpse was looted
+/// fully empty) the body is DELETED inside this same tx — folding the delete in
+/// (rather than a separate `delete_corpse` call) is what makes it crash-safe: the
+/// body can never be removed while the matching inventory write is rolled back.
+/// Otherwise the corpse's shrunk items + coins are rewritten and the row stays.
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_corpse_loot(
+    pool: &SqlitePool,
+    char_id: i64,
+    inv_rows: &[InventoryRow],
+    looter_coins: protocol::world::Coins,
+    corpse_id: i64,
+    corpse_items: &[(String, u32)],
+    corpse_coins: protocol::world::Coins,
+    delete_corpse: bool,
+) -> AuthResult<()> {
+    let mut tx = pool.begin().await?;
+    // Looter inventory — full DELETE + reINSERT (same shape as save_inventory).
+    sqlx::query("DELETE FROM character_items WHERE char_id = ?1")
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await?;
+    for row in inv_rows {
+        sqlx::query(
+            "INSERT INTO character_items (char_id, location, slot, item_path, count)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(char_id)
+        .bind(&row.location)
+        .bind(row.slot)
+        .bind(&row.item_path)
+        .bind(row.count)
+        .execute(&mut *tx)
+        .await?;
+    }
+    // Looter wallet (corpse coins credited back to the owner).
+    sqlx::query("UPDATE characters SET platinum = ?1, gold = ?2, silver = ?3, copper = ?4 WHERE id = ?5")
+        .bind(looter_coins.platinum)
+        .bind(looter_coins.gold)
+        .bind(looter_coins.silver)
+        .bind(looter_coins.copper)
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await?;
+    // Corpse — clear its items, then either DELETE the body (looted fully empty)
+    // or rewrite its shrunk items + coins. Both happen in THIS tx so the corpse
+    // change commits together with the inventory write, never half-applied.
+    sqlx::query("DELETE FROM corpse_items WHERE corpse_id = ?1")
+        .bind(corpse_id)
+        .execute(&mut *tx)
+        .await?;
+    if delete_corpse {
+        sqlx::query("DELETE FROM corpses WHERE corpse_id = ?1")
+            .bind(corpse_id)
+            .execute(&mut *tx)
+            .await?;
+    } else {
+        for (slot, (item_path, count)) in corpse_items.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO corpse_items (corpse_id, slot, item_path, count)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )
+            .bind(corpse_id)
+            .bind(slot as i64)
+            .bind(item_path)
+            .bind(*count as i64)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query("UPDATE corpses SET platinum = ?1, gold = ?2, silver = ?3, copper = ?4 WHERE corpse_id = ?5")
+            .bind(corpse_coins.platinum)
+            .bind(corpse_coins.gold)
+            .bind(corpse_coins.silver)
+            .bind(corpse_coins.copper)
+            .bind(corpse_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Banker slice 2 — one stack in an item vault. No `location` column: the
 /// table it came from (bank_items vs account_bank_items) is the store, and
 /// the slot is a flat index into that store.
@@ -991,4 +1077,147 @@ pub async fn save_skills(
     }
     tx.commit().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod corpse_loot_tests {
+    //! Corpse / resurrection Slice 2 — the atomic corpse-loot persist. Locks the
+    //! two outcomes of `apply_corpse_loot`: a PARTIAL loot rewrites the corpse row
+    //! (it stays) while updating the looter, and a FULL loot DELETES the corpse in
+    //! the SAME tx as the inventory write — so a crash can never drop the body
+    //! while losing the gear. Each asserts the looter side AND the corpse side.
+    use super::*;
+    use tempfile::TempDir;
+
+    async fn fresh_pool() -> (sqlx::SqlitePool, TempDir) {
+        let tmp = TempDir::new().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("corpse_test.db").display());
+        let pool = open(&url).await.expect("open");
+        migrate(&pool).await.expect("migrate");
+        (pool, tmp)
+    }
+
+    async fn wallet_cols(pool: &sqlx::SqlitePool, char_id: i64) -> (i64, i64, i64, i64) {
+        sqlx::query_as("SELECT platinum, gold, silver, copper FROM characters WHERE id = ?1")
+            .bind(char_id)
+            .fetch_one(pool)
+            .await
+            .expect("wallet row")
+    }
+
+    /// Account + character + a corpse owned by them holding a sword, a shield, and
+    /// 50 copper. Returns (char_id, corpse_id).
+    async fn setup(pool: &sqlx::SqlitePool) -> (i64, i64) {
+        let account = create_account(pool, "looter", "hunter2!", None)
+            .await
+            .expect("account");
+        let char_id = create_character(pool, account, "Looter", "Human", "Warrior")
+            .await
+            .expect("char");
+        let corpse_id = 2_000_000_000_i64;
+        save_corpse(
+            pool,
+            corpse_id,
+            char_id,
+            "Looter",
+            "test_zone",
+            (1.0, 0.0, 2.0),
+            protocol::world::Coins::from_copper(50),
+            &[
+                ("res://items/sword.tres".to_string(), 1),
+                ("res://items/shield.tres".to_string(), 1),
+            ],
+        )
+        .await
+        .expect("save corpse");
+        (char_id, corpse_id)
+    }
+
+    #[tokio::test]
+    async fn partial_loot_rewrites_corpse_and_updates_looter() {
+        let (pool, _tmp) = fresh_pool().await;
+        let (char_id, corpse_id) = setup(&pool).await;
+
+        // Owner took the sword + the coins; the shield stays on the corpse.
+        let inv_rows = vec![InventoryRow {
+            location: "base".into(),
+            slot: 0,
+            item_path: "res://items/sword.tres".into(),
+            count: 1,
+        }];
+        apply_corpse_loot(
+            &pool,
+            char_id,
+            &inv_rows,
+            protocol::world::Coins::from_copper(50),
+            corpse_id,
+            &[("res://items/shield.tres".to_string(), 1)],
+            protocol::world::Coins::ZERO,
+            false, // partial -> keep the corpse
+        )
+        .await
+        .expect("apply");
+
+        // Looter got the sword + the coins.
+        let inv = load_inventory(&pool, char_id).await.expect("inv");
+        assert_eq!(inv.len(), 1);
+        assert_eq!(inv[0].item_path, "res://items/sword.tres");
+        assert_eq!(wallet_cols(&pool, char_id).await, (0, 0, 0, 50));
+
+        // Corpse still exists, holding only the shield, its coins zeroed.
+        let corpses = load_corpses(&pool).await.expect("corpses");
+        assert_eq!(corpses.len(), 1);
+        assert_eq!(corpses[0].items, vec![("res://items/shield.tres".to_string(), 1)]);
+        assert_eq!(corpses[0].coins, protocol::world::Coins::ZERO);
+    }
+
+    #[tokio::test]
+    async fn full_loot_deletes_corpse_atomically() {
+        let (pool, _tmp) = fresh_pool().await;
+        let (char_id, corpse_id) = setup(&pool).await;
+
+        // Owner took everything; the corpse is emptied -> delete it in this tx.
+        let inv_rows = vec![
+            InventoryRow {
+                location: "base".into(),
+                slot: 0,
+                item_path: "res://items/sword.tres".into(),
+                count: 1,
+            },
+            InventoryRow {
+                location: "base".into(),
+                slot: 1,
+                item_path: "res://items/shield.tres".into(),
+                count: 1,
+            },
+        ];
+        apply_corpse_loot(
+            &pool,
+            char_id,
+            &inv_rows,
+            protocol::world::Coins::from_copper(50),
+            corpse_id,
+            &[],
+            protocol::world::Coins::ZERO,
+            true, // looted clean -> delete the corpse
+        )
+        .await
+        .expect("apply");
+
+        // Corpse + its items are gone.
+        let corpses = load_corpses(&pool).await.expect("corpses");
+        assert!(corpses.is_empty(), "corpse should be deleted after a full loot");
+        let leftover: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM corpse_items WHERE corpse_id = ?1")
+                .bind(corpse_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(leftover, 0, "corpse_items rows should be gone too");
+
+        // Looter kept both items + the coins.
+        let inv = load_inventory(&pool, char_id).await.expect("inv");
+        assert_eq!(inv.len(), 2);
+        assert_eq!(wallet_cols(&pool, char_id).await, (0, 0, 0, 50));
+    }
 }

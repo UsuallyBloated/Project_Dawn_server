@@ -1980,6 +1980,11 @@ pub async fn run(
                         std::slice::from_ref(new_id),
                         corpse,
                     );
+                    // Slice 2 — seed the owner with the contents on relog /
+                    // enter-world so they can loot a corpse they spawn next to.
+                    if corpse.owner_char == *new_id as i64 {
+                        handlers::send_corpse_contents(&mut server, *new_id, corpse);
+                    }
                 }
             }
         }
@@ -6786,6 +6791,243 @@ pub async fn run(
                     continue;
                 };
                 let looter_pos = looter_conn.pos;
+
+                // Corpse / resurrection Slice 2 — corpse loot. Corpses share the
+                // loot-bag id partition, so a LootItem/LootAll keyed by a
+                // corpse_id lands here; resolve corpses FIRST, then fall through
+                // to loot bags. Owner-only, no group/round-robin/coin-split (you
+                // take your own gear back to your own bags), and unlike a
+                // transient bag the corpse is DB-backed so the take is persisted
+                // atomically (db::apply_corpse_loot). A corpse LOOTED empty
+                // despawns; a corpse that was BORN empty (naked death) lingers as
+                // a res anchor — the despawn here only fires from a loot action.
+                if corpses.contains_key(&intent.bag_id) {
+                    let corpse_id = intent.bag_id;
+                    let looter_cid = intent.looter as ClientId;
+                    // Range + owner gate (read-only).
+                    {
+                        let corpse = corpses.get(&corpse_id).unwrap();
+                        if corpse.pos.distance_to(looter_pos) > LOOT_PICKUP_RANGE {
+                            continue;
+                        }
+                        if corpse.owner_char != intent.looter as i64 {
+                            handlers::send_loot_rejected(
+                                &mut server,
+                                looter_cid,
+                                "That is not your corpse.".to_string(),
+                            );
+                            continue;
+                        }
+                    }
+                    // Pre-loot snapshot. The take mutates in-memory BEFORE it is
+                    // persisted; if the atomic persist fails we roll the in-memory
+                    // side back to exactly this so it matches the rolled-back DB
+                    // (no dupe, no loss). Every client message is also DEFERRED
+                    // until the persist commits, so a rollback has nothing to
+                    // un-send. `had_content` decides linger-vs-despawn: only a
+                    // corpse that HELD something and is now empty is "looted clean";
+                    // a born-empty corpse (naked-death res anchor) lingers.
+                    let corpse_items_before: Vec<(String, u32)> = {
+                        let corpse = corpses.get(&corpse_id).unwrap();
+                        corpse.items.iter().map(|s| (s.item_path.clone(), s.count)).collect()
+                    };
+                    let corpse_coins_before = corpses.get(&corpse_id).unwrap().coins;
+                    let had_content = !corpse_items_before.is_empty()
+                        || corpse_coins_before != protocol::world::Coins::ZERO;
+                    let (inv_before, coins_before) = match connections.get(&looter_cid) {
+                        Some(c) => (c.inventory.clone(), c.coins),
+                        None => continue,
+                    };
+
+                    // Coins: credited WHOLE to the owner (their own carried wallet
+                    // returning — no group split), then the corpse's coin is zeroed.
+                    let mut coin_update: Option<protocol::world::Coins> = None;
+                    let coin_pot = {
+                        let corpse = corpses.get_mut(&corpse_id).unwrap();
+                        if corpse.coins != protocol::world::Coins::ZERO {
+                            let pot = corpse.coins.total_copper();
+                            corpse.coins = protocol::world::Coins::ZERO;
+                            pot
+                        } else {
+                            0
+                        }
+                    };
+                    if coin_pot > 0 {
+                        if let Some(c) = connections.get_mut(&looter_cid) {
+                            c.coins.add_payout(coin_pot);
+                            c.coins_dirty = true;
+                            coin_update = Some(c.coins);
+                        }
+                    }
+                    // Items: take one (slot) or all (None) off the corpse.
+                    let mut granted: Vec<(String, u32)> = Vec::new();
+                    {
+                        let corpse = corpses.get_mut(&corpse_id).unwrap();
+                        match intent.slot {
+                            Some(idx) => {
+                                let i = idx as usize;
+                                if i < corpse.items.len() {
+                                    let stack = corpse.items.remove(i);
+                                    granted.push((stack.item_path, stack.count));
+                                }
+                            }
+                            None => {
+                                for stack in corpse.items.drain(..) {
+                                    granted.push((stack.item_path, stack.count));
+                                }
+                            }
+                        }
+                    }
+                    // Move each stack into the looter's bags (same add_item_locating
+                    // path the bag loot uses); a full inventory refunds the unplaced
+                    // portion to the corpse. Collect the client deltas — don't send.
+                    let mut inv_deltas: Vec<(u32, String, u32)> = Vec::new();
+                    let mut granted_lines: Vec<(String, u32)> = Vec::new();
+                    for (path, count) in granted {
+                        let mut placed_count: u32 = 0;
+                        let mut leftover_count: u32 = count;
+                        if let Some(conn) = connections.get_mut(&looter_cid) {
+                            if let Ok((touched, leftover)) =
+                                conn.inventory.add_item_locating(&path, count)
+                            {
+                                for slot_idx in &touched {
+                                    let entry = conn.inventory.base[*slot_idx]
+                                        .as_ref()
+                                        .expect("just inserted");
+                                    inv_deltas.push((
+                                        *slot_idx as u32,
+                                        entry.item_path.clone(),
+                                        entry.count,
+                                    ));
+                                }
+                                placed_count = count - leftover;
+                                leftover_count = leftover;
+                                conn.inventory_dirty = true;
+                            }
+                        }
+                        if placed_count > 0 {
+                            granted_lines.push((path.clone(), placed_count));
+                        }
+                        if leftover_count > 0 {
+                            corpses.get_mut(&corpse_id).unwrap().items.push(
+                                loot::LootItemStack { item_path: path, count: leftover_count },
+                            );
+                        }
+                    }
+                    // Post-drain corpse state for the atomic persist + the despawn
+                    // decision (corpse borrow dropped before the await below).
+                    let (corpse_items_now, corpse_coins_now, corpse_pos, corpse_empty) = {
+                        let corpse = corpses.get(&corpse_id).unwrap();
+                        (
+                            corpse
+                                .items
+                                .iter()
+                                .map(|s| (s.item_path.clone(), s.count))
+                                .collect::<Vec<(String, u32)>>(),
+                            corpse.coins,
+                            corpse.pos,
+                            corpse.items.is_empty() && corpse.coins == protocol::world::Coins::ZERO,
+                        )
+                    };
+                    let delete_now = corpse_emptied_by_loot(had_content, corpse_empty);
+                    // Persist ATOMICALLY: looter inventory + wallet AND the corpse
+                    // (rewritten, or DELETED when looted empty) in ONE tx, so a
+                    // crash can't dupe/lose. Extract the owned rows + wallet FIRST
+                    // so no `connections` borrow is held across the await.
+                    let persist_data = connections
+                        .get(&looter_cid)
+                        .map(|c| (c.inventory.to_rows(), c.coins));
+                    let persist_ok = if let Some((inv_rows, looter_coins)) = persist_data {
+                        match db::apply_corpse_loot(
+                            &pool,
+                            intent.looter as i64,
+                            &inv_rows,
+                            looter_coins,
+                            corpse_id as i64,
+                            &corpse_items_now,
+                            corpse_coins_now,
+                            delete_now,
+                        )
+                        .await
+                        {
+                            Ok(()) => true,
+                            Err(e) => {
+                                tracing::error!(corpse_id, error = %e, "apply_corpse_loot persist failed");
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    };
+
+                    if persist_ok {
+                        // Durable — clear the dirty flags and NOW push the deferred
+                        // client updates, then despawn / refresh the window.
+                        if let Some(c) = connections.get_mut(&looter_cid) {
+                            c.inventory_dirty = false;
+                            c.coins_dirty = false;
+                        }
+                        if let Some(coins) = coin_update {
+                            handlers::send_coins_update(&mut server, looter_cid, coins);
+                        }
+                        for (slot_idx, item_path, total_count) in inv_deltas {
+                            handlers::send_inventory_delta(
+                                &mut server,
+                                looter_cid,
+                                "base".to_string(),
+                                slot_idx,
+                                Some(item_path),
+                                total_count,
+                            );
+                        }
+                        for (path, n) in granted_lines {
+                            handlers::send_loot_granted(&mut server, looter_cid, path, n);
+                        }
+                        if delete_now {
+                            // Looted clean -> the body vanishes (the DB rows were
+                            // already deleted inside apply_corpse_loot's tx).
+                            corpses.remove(&corpse_id);
+                            let cell = aoi::cell_for(corpse_pos.x, corpse_pos.z);
+                            aoi.remove(corpse_id, cell);
+                            let visible = aoi.entities_visible_from(cell);
+                            for &recipient in &in_world_recipients_now {
+                                if visible.contains(&recipient) {
+                                    handlers::send_entity_despawn(&mut server, recipient, corpse_id);
+                                }
+                            }
+                            tracing::info!(corpse_id, char_id = intent.looter, "corpse looted empty — despawned");
+                        } else if let Some(corpse) = corpses.get(&corpse_id) {
+                            handlers::send_corpse_contents(&mut server, looter_cid, corpse);
+                        }
+                    } else {
+                        // Persist failed — roll the in-memory side back to the
+                        // pre-loot snapshot so it matches the rolled-back DB (no
+                        // dupe, no loss), and tell the owner the loot didn't take.
+                        // No optimistic messages were sent, so there's nothing to
+                        // correct on the client beyond the refreshed window.
+                        if let Some(corpse) = corpses.get_mut(&corpse_id) {
+                            corpse.items = corpse_items_before
+                                .into_iter()
+                                .map(|(item_path, count)| loot::LootItemStack { item_path, count })
+                                .collect();
+                            corpse.coins = corpse_coins_before;
+                        }
+                        if let Some(conn) = connections.get_mut(&looter_cid) {
+                            conn.inventory = inv_before;
+                            conn.coins = coins_before;
+                        }
+                        handlers::send_loot_rejected(
+                            &mut server,
+                            looter_cid,
+                            "Couldn't loot the corpse — try again.".to_string(),
+                        );
+                        if let Some(corpse) = corpses.get(&corpse_id) {
+                            handlers::send_corpse_contents(&mut server, looter_cid, corpse);
+                        }
+                    }
+                    continue;
+                }
+
                 let Some(bag) = loot_bags.get_mut(&intent.bag_id) else {
                     continue;
                 };
@@ -7182,6 +7424,11 @@ pub async fn run(
                             std::slice::from_ref(mover_id),
                             corpse,
                         );
+                        // Slice 2 — if the approaching player owns this corpse,
+                        // privately seed its contents so they can loot it.
+                        if corpse.owner_char == *mover_id as i64 {
+                            handlers::send_corpse_contents(&mut server, *mover_id, corpse);
+                        }
                     }
                 } else if peer_entity >= protocol::world::ENEMY_ID_BASE {
                     // Enemy — seed the mover with EnemySpawn.
@@ -7564,6 +7811,9 @@ pub async fn run(
                 corpse_id, cid, owner_name, zone, pos, stacks, coins, now,
             );
             handlers::fan_out_corpse_spawn(&mut server, &recipients, &corpse);
+            // Slice 2 — privately seed the owner with the corpse contents so they
+            // can loot it (peers got only the render-only CorpseSpawn above).
+            handlers::send_corpse_contents(&mut server, client_id, &corpse);
             corpses.insert(corpse_id, corpse);
             tracing::info!(char_id = cid, corpse_id, item_stacks = items.len(), "corpse created");
         }
@@ -7671,4 +7921,31 @@ fn parse_account_id_from_user_data(user_data: Option<[u8; 256]>) -> i64 {
     let mut buf = [0u8; 8];
     buf.copy_from_slice(&data[..8]);
     i64::from_le_bytes(buf)
+}
+
+/// Corpse / resurrection — a corpse despawns ONLY when a loot action emptied it:
+/// it held something before and is empty now. A corpse that was ALREADY empty (a
+/// naked-death res anchor) is NOT removed by a Take-All — it lingers for a Cleric
+/// resurrection. A named predicate so this linger rule is testable and hard to
+/// flip by accident (see the corpse-loot branch above).
+fn corpse_emptied_by_loot(had_content: bool, empty_now: bool) -> bool {
+    had_content && empty_now
+}
+
+#[cfg(test)]
+mod tests {
+    use super::corpse_emptied_by_loot;
+
+    #[test]
+    fn corpse_lingers_unless_a_loot_emptied_it() {
+        // Held gear, now empty -> looted clean -> the body despawns.
+        assert!(corpse_emptied_by_loot(true, true));
+        // Born empty (naked death), Take-All'd -> nothing was taken -> it LINGERS
+        // as a res anchor. This is the edge the 2026-06-23 playtest didn't cover.
+        assert!(!corpse_emptied_by_loot(false, true));
+        // Partial loot -> still has items -> stays.
+        assert!(!corpse_emptied_by_loot(true, false));
+        // Empty and nothing taken -> lingers.
+        assert!(!corpse_emptied_by_loot(false, false));
+    }
 }

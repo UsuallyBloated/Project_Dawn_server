@@ -253,6 +253,20 @@ impl NetClient {
     #[signal]
     fn corpse_spawn(corpse_id: i64, owner_id: i64, owner_name: GString, pos: Vector3);
 
+    /// PD_W0020 — corpse / resurrection Slice 2. A corpse's contents (owner-only).
+    /// Items flattened to parallel path/count arrays + four coin ints, like
+    /// `loot_bag_spawn`. The client populates the corpse's loot window from this.
+    #[signal]
+    fn corpse_contents(
+        corpse_id: i64,
+        item_paths: PackedStringArray,
+        item_counts: PackedInt32Array,
+        coin_platinum: i64,
+        coin_gold: i64,
+        coin_silver: i64,
+        coin_copper: i64,
+    );
+
     /// Track 5 sub-task 4 — private confirmation that the local
     /// player's LootItem / LootAll intent landed and the server has
     /// transferred `count` of `item_path` into our inventory. The
@@ -1311,6 +1325,14 @@ enum Incoming {
         owner_name: String,
         pos: WireVec3,
     },
+    CorpseContents {
+        corpse_id: i64,
+        items: Vec<(String, u32)>,
+        coin_platinum: i64,
+        coin_gold: i64,
+        coin_silver: i64,
+        coin_copper: i64,
+    },
     LootGranted {
         item_path: String,
         count: u32,
@@ -1804,6 +1826,33 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::CorpseContents {
+                    corpse_id,
+                    items,
+                    coin_platinum,
+                    coin_gold,
+                    coin_silver,
+                    coin_copper,
+                } => {
+                    let mut paths = PackedStringArray::new();
+                    let mut counts = PackedInt32Array::new();
+                    for (path, count) in &items {
+                        paths.push(&GString::from(path.as_str()));
+                        counts.push(*count as i32);
+                    }
+                    self.base_mut().emit_signal(
+                        "corpse_contents",
+                        &[
+                            corpse_id.to_variant(),
+                            paths.to_variant(),
+                            counts.to_variant(),
+                            coin_platinum.to_variant(),
+                            coin_gold.to_variant(),
+                            coin_silver.to_variant(),
+                            coin_copper.to_variant(),
+                        ],
+                    );
+                }
                 Incoming::LootGranted { item_path, count } => {
                     self.base_mut().emit_signal(
                         "loot_granted",
@@ -2208,6 +2257,14 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
                 pos,
             }
         }
+        ServerWorldMsg::CorpseContents { corpse_id, items, coins } => Incoming::CorpseContents {
+            corpse_id: corpse_id as i64,
+            items,
+            coin_platinum: coins.platinum,
+            coin_gold: coins.gold,
+            coin_silver: coins.silver,
+            coin_copper: coins.copper,
+        },
         ServerWorldMsg::LootGranted { item_path, count } => Incoming::LootGranted {
             item_path,
             count,

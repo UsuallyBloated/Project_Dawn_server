@@ -335,7 +335,7 @@ impl ItemVault {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PlayerInventory {
     /// 8 base slots, parallel to the client's `Inventory.base_slots`.
     /// `None` is an empty slot.

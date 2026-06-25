@@ -245,6 +245,7 @@ impl NetClient {
         coin_gold: i64,
         coin_silver: i64,
         coin_copper: i64,
+        creature_name: GString,
     );
 
     /// PD_W0019 — corpse / resurrection Slice 1. A player corpse spawned in AOI;
@@ -1318,6 +1319,7 @@ enum Incoming {
         coin_gold: i64,
         coin_silver: i64,
         coin_copper: i64,
+        creature_name: String,
     },
     CorpseSpawn {
         corpse_id: i64,
@@ -1794,6 +1796,7 @@ impl NetClient {
                     coin_gold,
                     coin_silver,
                     coin_copper,
+                    creature_name,
                 } => {
                     let mut paths = PackedStringArray::new();
                     let mut counts = PackedInt32Array::new();
@@ -1812,6 +1815,7 @@ impl NetClient {
                             coin_gold.to_variant(),
                             coin_silver.to_variant(),
                             coin_copper.to_variant(),
+                            GString::from(creature_name.as_str()).to_variant(),
                         ],
                     );
                 }
@@ -2240,7 +2244,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             item_path,
             count,
         },
-        ServerWorldMsg::LootBagSpawn { bag_id, pos, items, coins } => Incoming::LootBagSpawn {
+        ServerWorldMsg::LootBagSpawn { bag_id, pos, items, coins, creature_name } => Incoming::LootBagSpawn {
             bag_id: bag_id as i64,
             pos,
             items,
@@ -2248,6 +2252,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             coin_gold: coins.gold,
             coin_silver: coins.silver,
             coin_copper: coins.copper,
+            creature_name,
         },
         ServerWorldMsg::CorpseSpawn { corpse_id, owner_id, owner_name, pos } => {
             Incoming::CorpseSpawn {

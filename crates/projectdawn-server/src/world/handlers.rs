@@ -1375,6 +1375,7 @@ pub fn fan_out_loot_bag_spawn(
         pos: Vec3 { x: bag.pos.x, y: bag.pos.y, z: bag.pos.z },
         items: bag.snapshot(),
         coins: bag.coins,
+        creature_name: bag.creature_name.clone(),
     };
     let Some(bytes) = encode(&msg) else {
         return;

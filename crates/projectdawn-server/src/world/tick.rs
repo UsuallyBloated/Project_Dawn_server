@@ -567,7 +567,7 @@ fn apply_spell_damage_to_enemy(
             let owner_cid_opt = credit_id_opt
                 .filter(|&id| id < protocol::world::ENEMY_ID_BASE)
                 .map(|id| id as ClientId);
-            let bag = LootBag::new(death_pos, loot_items, loot_coins, owner_cid_opt, now);
+            let bag = LootBag::new(death_pos, loot_items, loot_coins, mob_name.clone(), owner_cid_opt, now);
             let bag_id = bag.id;
             let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
             aoi.insert(bag_id, bag_cell);
@@ -2999,8 +2999,14 @@ pub async fn run(
                         loot::roll_coin_for_mob(&entity.mob.name, entity.mob.level);
                     if !loot_items.is_empty() || loot_coins != protocol::world::Coins::ZERO {
                         let stacks_for_log = loot_items.len();
-                        let bag =
-                            LootBag::new(entity.pos, loot_items, loot_coins, owner_cid_opt, now);
+                        let bag = LootBag::new(
+                            entity.pos,
+                            loot_items,
+                            loot_coins,
+                            entity.mob.name.clone(),
+                            owner_cid_opt,
+                            now,
+                        );
                         let bag_id = bag.id;
                         // Track 7: add bag to AOI; fan LootBagSpawn only
                         // to players who can see the bag's cell.
@@ -4939,6 +4945,7 @@ pub async fn run(
                     drop_pos,
                     vec![loot::LootItemStack { item_path: item_path.clone(), count }],
                     protocol::world::Coins::ZERO,
+                    String::new(), // player-dropped public bag — no creature, keep the sack visual
                     None,
                     now,
                 );
@@ -6476,6 +6483,7 @@ pub async fn run(
                                         death_pos,
                                         loot_items,
                                         loot_coins,
+                                        mob_name.clone(),
                                         owner_cid_opt,
                                         now,
                                     );

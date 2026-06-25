@@ -55,6 +55,11 @@ pub struct LootBag {
     /// to the looter (or split among the nearby group) on the first loot
     /// action, then zeroed. See `roll_coin_for_mob`.
     pub coins: Coins,
+    /// PD_W0021 — the dead creature's display name, carried so every
+    /// re-snapshot (AOI entry, item removed) can re-send it. The client
+    /// renders a "<name>'s corpse" body from it instead of a golden orb.
+    /// EMPTY for a player-dropped public bag (keeps the old sack visual).
+    pub creature_name: String,
     /// The player credited with the kill that dropped this bag (top
     /// damager). Loot rights extend to this player and — resolved at
     /// loot time — their current group. `None` marks a public bag (e.g.
@@ -73,6 +78,7 @@ impl LootBag {
         pos: super::connection::Vec3f,
         items: Vec<LootItemStack>,
         coins: Coins,
+        creature_name: String,
         owner_killer: Option<ClientId>,
         now: Instant,
     ) -> Self {
@@ -81,6 +87,7 @@ impl LootBag {
             pos,
             items,
             coins,
+            creature_name,
             owner_killer,
             assigned_looter: None,
             spawned_at: now,
@@ -406,6 +413,7 @@ mod tests {
             super::super::connection::Vec3f::ZERO,
             vec![],
             Coins::ZERO,
+            String::new(),
             owner,
             Instant::now(),
         )

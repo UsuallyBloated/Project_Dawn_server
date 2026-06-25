@@ -63,7 +63,13 @@ use serde::{Deserialize, Serialize};
 /// the owner only so the client can drive a loot window; taking reuses the
 /// existing `LootItem` / `LootAll` intents keyed by corpse_id (no new client
 /// intent). No wire change to those intents.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3230; // "PD_W0020"
+///
+/// PD_W0021: monster orb -> corpse. Appends `creature_name: String` to the END of
+/// the existing `LootBagSpawn` variant (append-only-safe — bincode encodes a
+/// struct variant's fields positionally), so the client renders a dead-body
+/// visual with a "<creature>'s corpse" nameplate instead of a golden orb. Empty
+/// for a player-dropped public bag (no creature died -> keep the sack look).
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3231; // "PD_W0021"
 
 pub type EntityId = u64;
 
@@ -1048,6 +1054,11 @@ pub enum ServerWorldMsg {
         /// window. Credited (split or whole) to the looter on the first
         /// loot action and then zeroed; a re-snapshot carries the update.
         coins: Coins,
+        /// PD_W0021 — the dead creature's display name. The client renders a
+        /// body with a "<name>'s corpse" nameplate instead of a golden orb.
+        /// EMPTY for a player-dropped public bag (no creature died), which
+        /// keeps the old sack visual. Appended last to stay wire-compatible.
+        creature_name: String,
     },
     /// Private message — sent only to the client whose `LootItem` /
     /// `LootAll` intent landed. Carries one stack the looter just claimed

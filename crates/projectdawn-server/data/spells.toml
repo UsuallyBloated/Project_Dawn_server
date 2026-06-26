@@ -1588,3 +1588,59 @@ cooldown = 45.0
 duration = 30.0
 min_level = 14
 classes = ["Bard"]
+
+# Corpse / resurrection Slice 3 — Cleric + Paladin resurrection. target_type
+# "CORPSE": summon the fallen ally to their corpse and refund res_xp_percent of
+# that death's lost xp (server-authoritative; no damage/heal component). Hand-
+# authored alongside the client data/spell_definitions.gd entries.
+[[spell]]
+name = "Resurrection (Minor)"
+target_type = "CORPSE"
+damage_type = "HOLY"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 100.0
+cast_time = 6.0
+cooldown = 60.0
+min_level = 20
+res_xp_percent = 25.0
+classes = ["Cleric"]
+
+[[spell]]
+name = "Resurrection"
+target_type = "CORPSE"
+damage_type = "HOLY"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 200.0
+cast_time = 10.0
+cooldown = 120.0
+min_level = 30
+res_xp_percent = 50.0
+classes = ["Cleric"]
+
+[[spell]]
+name = "Resurrection II"
+target_type = "CORPSE"
+damage_type = "HOLY"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 300.0
+cast_time = 0.0
+cooldown = 300.0
+min_level = 45
+res_xp_percent = 75.0
+classes = ["Cleric"]
+
+[[spell]]
+name = "Reclaim Soul"
+target_type = "CORPSE"
+damage_type = "HOLY"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 150.0
+cast_time = 12.0
+cooldown = 180.0
+min_level = 35
+res_xp_percent = 20.0
+classes = ["Paladin"]

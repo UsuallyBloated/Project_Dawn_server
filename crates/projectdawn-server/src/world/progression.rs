@@ -69,6 +69,9 @@ pub fn award_xp(server: &mut RenetServer, conn: &mut PerConnection, amount: i32)
 /// with no per-death cap, but exempt below level 5 and floored at level 5.
 /// Routes through [`award_xp`] so the de-level fans the same messages.
 pub fn apply_death_penalty(server: &mut RenetServer, conn: &mut PerConnection) {
+    // Reset first so a grace / zero-loss death stamps 0 on the corpse (the
+    // corpse-creation pass reads this for the Slice 3 res refund).
+    conn.death_lost_xp = 0;
     if conn.level < DEATH_PENALTY_FLOOR_LEVEL {
         return; // grace: levels 1 to 4 lose no xp on death
     }
@@ -76,7 +79,19 @@ pub fn apply_death_penalty(server: &mut RenetServer, conn: &mut PerConnection) {
     if loss <= 0 {
         return;
     }
+    let pre_level = conn.level;
+    let pre_xp = conn.xp;
     award_xp(server, conn, -loss);
+    // Store the ACTUAL xp removed (for the Slice 3 res refund), not the nominal
+    // `loss`: at the level-5 floor a death is clamped (you can't de-level below 5),
+    // so less than `loss` is really taken. Refunding a % of the nominal there would
+    // hand back MORE than the death cost — net-positive xp from dying. When the
+    // floor clamped us (same level, xp now 0) only the remaining progress was lost.
+    conn.death_lost_xp = if conn.level == pre_level && conn.xp == 0 {
+        pre_xp
+    } else {
+        loss
+    };
 }
 
 /// Run the server-authoritative death of a player: apply the xp penalty (which

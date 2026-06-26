@@ -42,6 +42,12 @@ pub struct Spell {
     #[serde(default)]
     pub classes: Vec<String>,
 
+    // Corpse / resurrection Slice 3 — for a `target_type == "CORPSE"` res spell,
+    // the percentage of THAT death's lost xp refunded on accept (25/50/75 for the
+    // Cleric tiers, 20 for the Paladin "Reclaim Soul"). 0 for every non-res spell.
+    #[serde(default)]
+    pub res_xp_percent: f32,
+
     // Track 6 sub-task 4a — buff fields applied to the target (or
     // caster for SELF spells) after the immediate damage/heal lands.
     /// Heal-over-time. `hot_hps` HP/sec for `hot_duration` seconds.
@@ -220,5 +226,22 @@ mod tests {
         assert!(matches!(parse_damage_type("FIRE"), DamageType::Fire));
         assert!(matches!(parse_damage_type("HOLY"), DamageType::Holy));
         assert!(matches!(parse_damage_type("UNKNOWN"), DamageType::Physical));
+    }
+
+    #[test]
+    fn resurrection_tiers_are_corpse_targeted_with_refund_percents() {
+        // Slice 3 — the three Cleric tiers + the Paladin tier, each targeting a
+        // CORPSE and carrying its server-authoritative XP-refund percentage.
+        for (name, pct, class) in [
+            ("Resurrection (Minor)", 25.0_f32, "Cleric"),
+            ("Resurrection", 50.0, "Cleric"),
+            ("Resurrection II", 75.0, "Cleric"),
+            ("Reclaim Soul", 20.0, "Paladin"),
+        ] {
+            let s = lookup(name).unwrap_or_else(|| panic!("{name} missing from spells.toml"));
+            assert_eq!(s.target_type, "CORPSE", "{name} must target a corpse");
+            assert!((s.res_xp_percent - pct).abs() < 0.01, "{name} refund percent");
+            assert!(s.classes.iter().any(|c| c == class), "{name} castable by {class}");
+        }
     }
 }

@@ -268,6 +268,17 @@ impl NetClient {
         coin_copper: i64,
     );
 
+    /// PD_W0022 — corpse / resurrection Slice 3. A Cleric/Paladin offered to
+    /// resurrect the local player's corpse; the client shows an accept/decline
+    /// prompt. `xp_percent` is for the prompt text only.
+    #[signal]
+    fn resurrect_offer(corpse_id: i64, caster_name: GString, xp_percent: i64);
+
+    /// PD_W0022 — server-forced reposition (a resurrection summon). The client
+    /// snaps its local player to `pos`.
+    #[signal]
+    fn teleport(pos: Vector3);
+
     /// Track 5 sub-task 4 — private confirmation that the local
     /// player's LootItem / LootAll intent landed and the server has
     /// transferred `count` of `item_path` into our inventory. The
@@ -966,6 +977,17 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// PD_W0022 — the dead player's response to a resurrection offer on their
+    /// corpse. `accept = false` declines.
+    #[func]
+    fn send_resurrect_accept(&mut self, corpse_id: i64, accept: bool) -> bool {
+        let msg = ClientWorldMsg::ResurrectAccept {
+            corpse_id: corpse_id as u64,
+            accept,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
     /// Track 13.2 — player requests a slot-to-slot inventory move.
     /// `src_location` / `dst_location` are `"base"` for 13.2;
     /// `"bag_<i>"` and `"equip"` are reserved for 13.2.b / 13.3.
@@ -1334,6 +1356,14 @@ enum Incoming {
         coin_gold: i64,
         coin_silver: i64,
         coin_copper: i64,
+    },
+    ResurrectOffer {
+        corpse_id: i64,
+        caster_name: String,
+        xp_percent: i64,
+    },
+    Teleport {
+        pos: WireVec3,
     },
     LootGranted {
         item_path: String,
@@ -1857,6 +1887,22 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::ResurrectOffer { corpse_id, caster_name, xp_percent } => {
+                    self.base_mut().emit_signal(
+                        "resurrect_offer",
+                        &[
+                            corpse_id.to_variant(),
+                            GString::from(caster_name.as_str()).to_variant(),
+                            xp_percent.to_variant(),
+                        ],
+                    );
+                }
+                Incoming::Teleport { pos } => {
+                    self.base_mut().emit_signal(
+                        "teleport",
+                        &[Vector3::new(pos.x, pos.y, pos.z).to_variant()],
+                    );
+                }
                 Incoming::LootGranted { item_path, count } => {
                     self.base_mut().emit_signal(
                         "loot_granted",
@@ -2270,6 +2316,12 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             coin_silver: coins.silver,
             coin_copper: coins.copper,
         },
+        ServerWorldMsg::ResurrectOffer { corpse_id, caster_name, xp_percent } => Incoming::ResurrectOffer {
+            corpse_id: corpse_id as i64,
+            caster_name,
+            xp_percent: xp_percent as i64,
+        },
+        ServerWorldMsg::Teleport { pos } => Incoming::Teleport { pos },
         ServerWorldMsg::LootGranted { item_path, count } => Incoming::LootGranted {
             item_path,
             count,

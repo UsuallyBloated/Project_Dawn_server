@@ -681,6 +681,8 @@ pub struct CorpseRow {
     pub pos: (f32, f32, f32),
     pub coins: protocol::world::Coins,
     pub items: Vec<(String, u32)>,
+    pub lost_xp: i32,
+    pub resurrected: bool,
 }
 
 #[derive(FromRow)]
@@ -696,6 +698,8 @@ struct CorpseHeaderRow {
     gold: i64,
     silver: i64,
     copper: i64,
+    lost_xp: i64,
+    resurrected: i64,
 }
 
 /// Persist a corpse + its item stacks atomically. Called BEFORE the player's
@@ -712,17 +716,19 @@ pub async fn save_corpse(
     pos: (f32, f32, f32),
     coins: protocol::world::Coins,
     items: &[(String, u32)],
+    lost_xp: i32,
 ) -> AuthResult<()> {
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let mut tx = pool.begin().await?;
+    // `resurrected` defaults to 0 in the schema — a fresh corpse is never rezzed.
     sqlx::query(
         "INSERT INTO corpses
            (corpse_id, char_id, owner_name, zone, pos_x, pos_y, pos_z,
-            platinum, gold, silver, copper, created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            platinum, gold, silver, copper, created_at, lost_xp)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
     )
     .bind(corpse_id)
     .bind(char_id)
@@ -736,6 +742,7 @@ pub async fn save_corpse(
     .bind(coins.silver)
     .bind(coins.copper)
     .bind(created_at)
+    .bind(lost_xp as i64)
     .execute(&mut *tx)
     .await?;
     for (slot, (item_path, count)) in items.iter().enumerate() {
@@ -760,7 +767,7 @@ pub async fn save_corpse(
 pub async fn load_corpses(pool: &SqlitePool) -> AuthResult<Vec<CorpseRow>> {
     let headers: Vec<CorpseHeaderRow> = sqlx::query_as(
         "SELECT corpse_id, char_id, owner_name, zone, pos_x, pos_y, pos_z,
-                platinum, gold, silver, copper
+                platinum, gold, silver, copper, lost_xp, resurrected
          FROM corpses",
     )
     .fetch_all(pool)
@@ -786,6 +793,8 @@ pub async fn load_corpses(pool: &SqlitePool) -> AuthResult<Vec<CorpseRow>> {
                 copper: h.copper,
             },
             items: items.into_iter().map(|(p, n)| (p, n as u32)).collect(),
+            lost_xp: h.lost_xp as i32,
+            resurrected: h.resurrected != 0,
         });
     }
     Ok(out)
@@ -804,6 +813,16 @@ pub async fn delete_corpse(pool: &SqlitePool, corpse_id: i64) -> AuthResult<()> 
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    Ok(())
+}
+
+/// Mark a corpse resurrected (corpse / resurrection Slice 3) so it can't be
+/// rezzed twice for free XP. Persisted so a restart can't reset the flag.
+pub async fn set_corpse_resurrected(pool: &SqlitePool, corpse_id: i64) -> AuthResult<()> {
+    sqlx::query("UPDATE corpses SET resurrected = 1 WHERE corpse_id = ?1")
+        .bind(corpse_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1127,6 +1146,7 @@ mod corpse_loot_tests {
                 ("res://items/sword.tres".to_string(), 1),
                 ("res://items/shield.tres".to_string(), 1),
             ],
+            0, // lost_xp
         )
         .await
         .expect("save corpse");
@@ -1219,5 +1239,37 @@ mod corpse_loot_tests {
         let inv = load_inventory(&pool, char_id).await.expect("inv");
         assert_eq!(inv.len(), 2);
         assert_eq!(wallet_cols(&pool, char_id).await, (0, 0, 0, 50));
+    }
+
+    // Slice 3 — the corpse remembers the death's lost XP (for the res refund) and
+    // its un-resurrected state across a save/load (a server restart).
+    #[tokio::test]
+    async fn corpse_lost_xp_round_trips() {
+        let (pool, _tmp) = fresh_pool().await;
+        let account = create_account(&pool, "rez", "hunter2!", None)
+            .await
+            .expect("account");
+        let char_id = create_character(&pool, account, "Rez", "Human", "Cleric")
+            .await
+            .expect("char");
+        let corpse_id = 2_000_000_077_i64;
+        save_corpse(
+            &pool,
+            corpse_id,
+            char_id,
+            "Rez",
+            "test_zone",
+            (3.0, 0.0, 4.0),
+            protocol::world::Coins::ZERO,
+            &[("res://items/staff.tres".to_string(), 1)],
+            500, // lost_xp
+        )
+        .await
+        .expect("save");
+
+        let loaded = load_corpses(&pool).await.expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].lost_xp, 500, "lost_xp must survive a save/load round-trip");
+        assert!(!loaded[0].resurrected, "a fresh corpse is not resurrected");
     }
 }

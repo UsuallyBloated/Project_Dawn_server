@@ -926,7 +926,8 @@ pub async fn run(
                 corpses.insert(
                     id,
                     super::corpses::Corpse::new(
-                        id, r.char_id, r.owner_name, r.zone, pos, items, r.coins, boot,
+                        id, r.char_id, r.owner_name, r.zone, pos, items, r.coins,
+                        r.lost_xp, r.resurrected, boot,
                     ),
                 );
             }
@@ -1307,6 +1308,9 @@ pub async fn run(
         // Verbatim queue; sub-task 4 is FFA loot so order matters for
         // contested bags (first arrival wins the slot).
         let mut loot_intents: Vec<LootIntent> = Vec::new();
+        // Corpse / resurrection Slice 3 — (responder, corpse_id, accept) responses
+        // to a res offer, applied after dispatch where the corpses map is in scope.
+        let mut resurrect_accept_intents: Vec<(u64, protocol::world::EntityId, bool)> = Vec::new();
         // Track 12 Piece A — pet commands. Buffered to apply after
         // message dispatch so we can mutate `enemies` (where pets
         // live) without overlapping the handler's mutable
@@ -1705,6 +1709,9 @@ pub async fn run(
                                 bag_id,
                                 slot: None,
                             });
+                        }
+                        Outcome::ResurrectAcceptIntent { responder, corpse_id, accept } => {
+                            resurrect_accept_intents.push((responder, corpse_id, accept));
                         }
                         Outcome::Continue => {}
                     }
@@ -3251,6 +3258,63 @@ pub async fn run(
                 }
 
                 match spell.target_type.as_str() {
+                    "CORPSE" => {
+                        // Corpse / resurrection Slice 3 — a res spell targets a
+                        // corpse; offer the res to its owner, who summons + gets an
+                        // xp refund on accept. Mana was already deducted above
+                        // (consistent with the rest of the cast pipeline).
+                        const RES_CAST_RANGE: f32 = 30.0;
+                        let Some(corpse_id) = intent.target_id else {
+                            tracing::info!(caster = intent.caster, spell = %spell.name, "resurrection rejected — no corpse targeted (target_id 0)");
+                            handlers::fan_out_cast_fail(&mut server, &in_world_recipients_now, intent.caster, "No corpse targeted.".to_string());
+                            continue;
+                        };
+                        tracing::info!(caster = intent.caster, spell = %spell.name, corpse_id, "resurrection cast received");
+                        // Defense-in-depth: only the spell's own classes (Cleric /
+                        // Paladin) at the required level may cast it. The client
+                        // gates this, but don't trust a forged client with a free
+                        // xp grant.
+                        let caster_class_level = connections.get(&caster_cid).map(|c| (c.class.clone(), c.level));
+                        let caster_ok = caster_class_level.as_ref().map(|(class, level)| {
+                            spell.classes.iter().any(|cl| cl == class) && *level >= spell.min_level
+                        }).unwrap_or(false);
+                        if !caster_ok {
+                            if let Some((class, level)) = &caster_class_level {
+                                tracing::info!(caster = intent.caster, spell = %spell.name, class = %class, level, required = spell.min_level, "resurrection rejected — caster class/level");
+                            }
+                            handlers::fan_out_cast_fail(&mut server, &in_world_recipients_now, intent.caster, "You cannot cast that.".to_string());
+                            continue;
+                        }
+                        // Validate the corpse: exists, in range, not already rezzed.
+                        let mut reason: Option<&str> = None;
+                        let corpse_owner = match corpses.get(&corpse_id) {
+                            None => { reason = Some("That is not a corpse."); 0 }
+                            Some(c) if c.pos.distance_to(caster_pos) > RES_CAST_RANGE => { reason = Some("You are too far from the corpse."); 0 }
+                            Some(c) if c.resurrected => { reason = Some("That corpse has already been resurrected."); 0 }
+                            Some(c) => c.owner_char,
+                        };
+                        if let Some(r) = reason {
+                            tracing::info!(caster = intent.caster, corpse_id, reason = r, "resurrection rejected — corpse");
+                            handlers::fan_out_cast_fail(&mut server, &in_world_recipients_now, intent.caster, r.to_string());
+                            continue;
+                        }
+                        // The owner must be in-world to receive + accept the offer.
+                        let owner_cid = corpse_owner as ClientId;
+                        if !connections.get(&owner_cid).map(|c| c.in_world).unwrap_or(false) {
+                            tracing::info!(caster = intent.caster, corpse_id, owner = corpse_owner, "resurrection rejected — owner not in world");
+                            handlers::fan_out_cast_fail(&mut server, &in_world_recipients_now, intent.caster, "Their spirit is not present.".to_string());
+                            continue;
+                        }
+                        let xp_percent = spell.res_xp_percent.round() as u32;
+                        let caster_name = connections.get(&caster_cid).map(|c| c.name.clone()).unwrap_or_default();
+                        // Record the pending offer on the owner so the accept can't
+                        // forge the refund %, then send the offer privately.
+                        if let Some(owner_conn) = connections.get_mut(&owner_cid) {
+                            owner_conn.pending_res_offer = Some((corpse_id, xp_percent));
+                        }
+                        handlers::send_resurrect_offer(&mut server, owner_cid, corpse_id, caster_name, xp_percent);
+                        tracing::info!(caster = intent.caster, corpse_id, xp_percent, "resurrection offered");
+                    }
                     "SELF" => {
                         tracing::info!(
                             caster = intent.caster,
@@ -6785,6 +6849,53 @@ pub async fn run(
             spawner.on_enemy_died(entity.spawn_point_idx, now);
         }
 
+        // 4k-res. Corpse / resurrection Slice 3 — apply accepted res offers.
+        //      Re-validate against the owner's recorded pending offer (so the
+        //      refund % can't be forged), summon the living player to their corpse,
+        //      refund a % of that death's lost xp, and mark the corpse resurrected
+        //      (persisted) so it can't be re-rezzed for free xp.
+        for (responder, corpse_id, accept) in resurrect_accept_intents.drain(..) {
+            let responder_cid = responder as ClientId;
+            // Read + consume the pending offer recorded at cast time.
+            let offer = connections.get(&responder_cid).and_then(|c| c.pending_res_offer);
+            if let Some(c) = connections.get_mut(&responder_cid) {
+                c.pending_res_offer = None;
+            }
+            let Some((offered_corpse, xp_percent)) = offer else {
+                continue;
+            };
+            if !accept || offered_corpse != corpse_id {
+                continue; // declined, or doesn't match the recorded offer
+            }
+            // Re-validate the corpse: still exists, owned by the responder, unrezzed.
+            let (corpse_pos, lost_xp) = match corpses.get(&corpse_id) {
+                Some(c) if c.owner_char == responder as i64 && !c.resurrected => (c.pos, c.lost_xp),
+                _ => continue,
+            };
+            // Persist the rezzed flag FIRST — only grant the res once it's durable,
+            // so a write failure can't hand out a refund that a restart would let
+            // the player claim a second time. On failure, skip the grant (a fresh
+            // cast can retry); the offer was already consumed above.
+            if let Err(e) = db::set_corpse_resurrected(&pool, corpse_id as i64).await {
+                tracing::error!(corpse_id, error = %e, "set_corpse_resurrected failed — res not granted");
+                continue;
+            }
+            if let Some(c) = corpses.get_mut(&corpse_id) {
+                c.resurrected = true;
+            }
+            // Summon the living player to their corpse + refund the xp (award_xp
+            // re-levels + fans XpGained/LevelUp).
+            let refund = ((lost_xp as f32) * (xp_percent as f32 / 100.0)).round() as i32;
+            if let Some(conn) = connections.get_mut(&responder_cid) {
+                conn.pos = corpse_pos;
+                handlers::send_teleport(&mut server, responder_cid, corpse_pos);
+                if refund > 0 {
+                    super::progression::award_xp(&mut server, conn, refund);
+                }
+            }
+            tracing::info!(char_id = responder, corpse_id, xp_percent, refund, "resurrection accepted");
+        }
+
         // 4ka. Apply loot pickup intents. For each: validate bag, slot
         //      bounds, and looter range. On success drain the relevant
         //      stack(s), send LootGranted privately to the looter, and
@@ -7755,13 +7866,14 @@ pub async fn run(
             if let Some(c) = connections.get_mut(&client_id) {
                 c.corpse_pending = false;
             }
-            let (owner_name, zone, pos, items, coins) = match connections.get(&client_id) {
+            let (owner_name, zone, pos, items, coins, lost_xp) = match connections.get(&client_id) {
                 Some(c) => (
                     c.name.clone(),
                     c.zone.clone().unwrap_or_default(),
                     c.pos,
                     c.inventory.all_stacks(),
                     c.coins,
+                    c.death_lost_xp,
                 ),
                 None => continue,
             };
@@ -7781,6 +7893,7 @@ pub async fn run(
                 (pos.x, pos.y, pos.z),
                 coins,
                 &items,
+                lost_xp,
             )
             .await
             {
@@ -7816,7 +7929,7 @@ pub async fn run(
                 .map(|(p, n)| super::loot::LootItemStack { item_path: p.clone(), count: *n })
                 .collect();
             let corpse = super::corpses::Corpse::new(
-                corpse_id, cid, owner_name, zone, pos, stacks, coins, now,
+                corpse_id, cid, owner_name, zone, pos, stacks, coins, lost_xp, false, now,
             );
             handlers::fan_out_corpse_spawn(&mut server, &recipients, &corpse);
             // Slice 2 — privately seed the owner with the corpse contents so they

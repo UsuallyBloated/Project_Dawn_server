@@ -320,6 +320,15 @@ pub enum Outcome {
         looter: u64,
         bag_id: protocol::world::EntityId,
     },
+    /// PD_W0022 — corpse / resurrection Slice 3. The dead player accepted (or
+    /// declined) a resurrection offer on their corpse. The tick loop reads the
+    /// owner's recorded pending offer, and on accept summons the player to the
+    /// corpse + refunds a % of that death's lost xp + marks the corpse rezzed.
+    ResurrectAcceptIntent {
+        responder: u64,
+        corpse_id: protocol::world::EntityId,
+        accept: bool,
+    },
     /// Player → server chat. Handler returns this; the tick loop fans
     /// `ChatMessage` to recipients based on `channel`:
     /// - Say  → in-AOI peers (3×3 cell neighbourhood, sender excluded)
@@ -900,6 +909,17 @@ pub fn handle_message(
             }
         }
 
+        ClientWorldMsg::ResurrectAccept { corpse_id, accept } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::ResurrectAcceptIntent {
+                responder: conn.char_id as u64,
+                corpse_id,
+                accept,
+            }
+        }
+
         ClientWorldMsg::PetCommand { command, target_id } => {
             if !conn.in_world {
                 return Outcome::Continue;
@@ -1430,6 +1450,31 @@ pub fn send_corpse_contents(
         items,
         coins: corpse.coins,
     };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// Offer a resurrection to a corpse's owner PRIVATELY — corpse / resurrection
+/// Slice 3. The owner's client shows an accept/decline prompt; `xp_percent` is for
+/// the prompt text only (the server computes the real refund on accept).
+pub fn send_resurrect_offer(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    corpse_id: protocol::world::EntityId,
+    caster_name: String,
+    xp_percent: u32,
+) {
+    let msg = ServerWorldMsg::ResurrectOffer { corpse_id, caster_name, xp_percent };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// Snap one client's local player to `pos` — corpse / resurrection Slice 3 summons
+/// the living player to their corpse on accept. Server-authoritative reposition.
+pub fn send_teleport(server: &mut RenetServer, recipient: ClientId, pos: super::connection::Vec3f) {
+    let msg = ServerWorldMsg::Teleport { pos: Vec3 { x: pos.x, y: pos.y, z: pos.z } };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient, CHANNEL_SYSTEM, bytes);
     }

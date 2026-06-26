@@ -159,6 +159,17 @@ pub struct PerConnection {
     /// The corpse-creation pass consumes it (makes the corpse, then clears it).
     /// Distinct from `death_processed` so a client-first death still leaves one.
     pub corpse_pending: bool,
+    /// Corpse/resurrection Slice 3: the XP this death cost (nominal
+    /// `floor(xp_to_next * 0.05)`, or 0 for a grace / sub-level-5 death).
+    /// Captured in `apply_death_penalty` and read by the corpse-creation pass
+    /// onto the corpse, so a Cleric/Paladin res can refund a % of it.
+    pub death_lost_xp: i32,
+    /// Corpse/resurrection Slice 3: a pending resurrection offer on this player's
+    /// corpse — `(corpse_id, xp_percent)` recorded when a Cleric/Paladin casts a
+    /// res on it, read when the player accepts (so the refund % can't be forged by
+    /// the client) and cleared on accept/decline. In-memory only — a server
+    /// restart simply drops an un-answered offer.
+    pub pending_res_offer: Option<(protocol::world::EntityId, u32)>,
     /// Highest move sequence we've accepted from this client. Out-of-order
     /// packets get dropped (unreliable channel, so reorder is expected).
     pub last_move_seq: u32,
@@ -399,6 +410,8 @@ impl PerConnection {
             last_damaged_at: None,
             death_processed: false,
             corpse_pending: false,
+            death_lost_xp: 0,
+            pending_res_offer: None,
             last_move_seq: 0,
             latest_direction: Vec3f::ZERO,
             last_move_received: None,

@@ -40,6 +40,12 @@ pub struct Corpse {
     pub pos: Vec3f,
     pub items: Vec<LootItemStack>,
     pub coins: Coins,
+    /// Slice 3 — the XP this death cost (nominal); a Cleric/Paladin res refunds a
+    /// percentage of it. 0 for a grace / sub-level-5 death.
+    pub lost_xp: i32,
+    /// Slice 3 — set once a res has been accepted on this corpse, so it can't be
+    /// resurrected twice (re-refunding XP). Persisted so a restart can't reset it.
+    pub resurrected: bool,
     /// Decay clock. Set to creation time; on a boot-loaded corpse it is reset to
     /// boot time, so a restart restarts the linger rather than losing the corpse.
     pub spawned_at: Instant,
@@ -55,8 +61,10 @@ impl Corpse {
         pos: Vec3f,
         items: Vec<LootItemStack>,
         coins: Coins,
+        lost_xp: i32,
+        resurrected: bool,
         now: Instant,
     ) -> Self {
-        Self { id, owner_char, owner_name, zone, pos, items, coins, spawned_at: now }
+        Self { id, owner_char, owner_name, zone, pos, items, coins, lost_xp, resurrected, spawned_at: now }
     }
 }

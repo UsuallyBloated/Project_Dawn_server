@@ -69,7 +69,13 @@ use serde::{Deserialize, Serialize};
 /// struct variant's fields positionally), so the client renders a dead-body
 /// visual with a "<creature>'s corpse" nameplate instead of a golden orb. Empty
 /// for a player-dropped public bag (no creature died -> keep the sack look).
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3231; // "PD_W0021"
+///
+/// PD_W0022: corpse / resurrection Slice 3 (Cleric + Paladin resurrection).
+/// Appends `ClientWorldMsg::ResurrectAccept { corpse_id, accept }`, and
+/// `ServerWorldMsg::ResurrectOffer { corpse_id, caster_name, xp_percent }` (sent
+/// privately to the corpse owner) + a generic `ServerWorldMsg::Teleport { pos }`
+/// that summons the owner to their corpse — all appended at the END of their enums.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3232; // "PD_W0022"
 
 pub type EntityId = u64;
 
@@ -799,6 +805,15 @@ pub enum ClientWorldMsg {
     GrantQuestXp {
         amount: i32,
     },
+
+    /// PD_W0022 — corpse / resurrection Slice 3. The dead player's response to a
+    /// `ResurrectOffer` on their corpse. `accept = false` declines. The server
+    /// re-validates (corpse still exists, owner in range / in-world, not already
+    /// resurrected) before summoning + refunding xp.
+    ResurrectAccept {
+        corpse_id: EntityId,
+        accept: bool,
+    },
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────
@@ -1241,6 +1256,23 @@ pub enum ServerWorldMsg {
         corpse_id: EntityId,
         items: Vec<(String, u32)>,
         coins: Coins,
+    },
+
+    /// PD_W0022 — corpse / resurrection Slice 3. A Cleric/Paladin cast a
+    /// resurrection on this corpse; offer it to the corpse's owner (sent PRIVATELY
+    /// to them). `xp_percent` is for the prompt text only — the server computes the
+    /// real refund from the corpse's stored lost xp on accept.
+    ResurrectOffer {
+        corpse_id: EntityId,
+        caster_name: String,
+        xp_percent: u32,
+    },
+
+    /// PD_W0022 — server-authoritative forced reposition (used by a resurrection to
+    /// summon the living player to their corpse). The client snaps its local player
+    /// to `pos`; peers see the move via the normal position fan.
+    Teleport {
+        pos: Vec3,
     },
 }
 

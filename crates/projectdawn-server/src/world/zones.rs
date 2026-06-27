@@ -49,8 +49,11 @@ pub struct MobTemplate {
     pub level: u32,
     pub hp: f32,
     pub dmg: i32,
-    /// Award on kill credit. Read by the enemy-death branch in
-    /// `tick.rs` to compute the private `XpGained` for the top damager.
+    /// LEGACY / unused: per-kill XP is now computed from `level` via the EQ
+    /// quadratic `progression::kill_xp` (mob_level^2 * ZEM), not this flat
+    /// constant. Kept (defaulted) so existing `zone_camps.toml` entries still
+    /// parse; safe to drop from the data in a later content pass.
+    #[serde(default)]
     pub xp: i32,
     pub speed: f32,
     pub aggro: f32,

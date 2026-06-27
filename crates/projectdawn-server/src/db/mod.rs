@@ -471,7 +471,17 @@ pub async fn load_character(
     // upgrades any pre-sub-task-2 character row (created with schema
     // defaults of stat=10, max_hp=100) on next login. Current hp/mp/
     // stamina are clamped against the freshly-computed max.
-    let computed = crate::char_data::compute(&row.race, &row.class, row.level);
+    //
+    // The same recompute reconciles the XP curve. Older saves can hold a level
+    // above MAX_LEVEL (early builds let a char climb past 60) and an xp_to_next
+    // from the previous 1.5x curve — often the i32::MAX-saturated band. Clamp the
+    // level, take the band from `computed`, and clamp stored xp into it, so the
+    // band, stats, and death-penalty math all use the live cubic curve from the
+    // first tick instead of self-healing only after the first XP event (where a
+    // death-before-award would otherwise charge 5% of a multi-billion stale band).
+    let level = row.level.clamp(1, crate::world::skills::MAX_LEVEL);
+    let computed = crate::char_data::compute(&row.race, &row.class, level);
+    let xp = row.xp.clamp(0, computed.xp_to_next);
     let _ = (row.base_strength, row.base_dexterity, row.base_agility,
              row.base_intelligence, row.base_wisdom, row.base_charisma,
              row.base_constitution, row.base_max_hp, row.base_max_mp,
@@ -483,9 +493,9 @@ pub async fn load_character(
         name: row.name,
         race: row.race,
         class: row.class,
-        level: row.level,
-        xp: row.xp,
-        xp_to_next: row.xp_to_next,
+        level,
+        xp,
+        xp_to_next: computed.xp_to_next,
         strength: computed.stats.strength,
         dexterity: computed.stats.dexterity,
         agility: computed.stats.agility,
@@ -1271,5 +1281,42 @@ mod corpse_loot_tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].lost_xp, 500, "lost_xp must survive a save/load round-trip");
         assert!(!loaded[0].resurrected, "a fresh corpse is not resurrected");
+    }
+
+    // XP curve — a character saved on a previous curve (the old 1.5x geometric
+    // band often saturated to i32::MAX) must be reconciled onto the live cubic
+    // curve + level cap on load, so the death-penalty math and the bar never see
+    // the stale multi-billion band and a stored level can't sit above the cap.
+    #[tokio::test]
+    async fn load_reconciles_stale_xp_curve() {
+        let (pool, _tmp) = fresh_pool().await;
+        let account = create_account(&pool, "old", "hunter2!", None)
+            .await
+            .expect("account");
+        let char_id = create_character(&pool, account, "Fert", "Human", "Warrior")
+            .await
+            .expect("char");
+
+        // A high-level old save: a level above the cap, the i32::MAX-saturated
+        // band, and xp far past the new (much smaller) band.
+        sqlx::query("UPDATE characters SET level = ?1, xp = ?2, xp_to_next = ?3 WHERE id = ?4")
+            .bind(75_i64)
+            .bind(1_771_674_013_i64)
+            .bind(2_147_483_647_i64) // old i32::MAX band
+            .bind(char_id)
+            .execute(&pool)
+            .await
+            .expect("update");
+
+        let spawn = load_character(&pool, char_id).await.expect("load");
+        let cap = crate::world::skills::MAX_LEVEL;
+        assert_eq!(spawn.level, cap, "a stored level above the cap clamps to it");
+        assert_eq!(
+            spawn.xp_to_next,
+            crate::char_data::xp_to_next_for(cap),
+            "the band must be the live cubic band, not the stale i32::MAX value",
+        );
+        assert_eq!(spawn.xp, spawn.xp_to_next, "over-band stored xp clamps to a full bar");
+        assert!(spawn.xp_to_next < 100_000_000, "the new band is tens of millions, not billions");
     }
 }

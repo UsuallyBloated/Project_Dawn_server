@@ -24,6 +24,7 @@ use crate::char_data;
 
 use super::connection::PerConnection;
 use super::handlers;
+use super::skills::MAX_LEVEL;
 
 /// Death penalty parameters, locked with the user 2026-06-22:
 /// a death costs 5% of the current level's XP band, the loss cascades past the
@@ -31,6 +32,23 @@ use super::handlers;
 /// cascade can never drop a character below level 5 (grace line == floor line).
 pub const DEATH_XP_LOSS_FRACTION: f32 = 0.05;
 pub const DEATH_PENALTY_FLOOR_LEVEL: i32 = 5;
+
+/// Per-kill XP follows EverQuest's QUADRATIC award, separate from the cubic level
+/// curve (`char_data::xp_to_next_for`): a kill is worth `mob_level^2 * ZEM *
+/// 35/10`. Pairing a quadratic reward with a cubic cost keeps kills-per-level
+/// roughly constant (~11 on an even-con kill: band(L) ~ 3*L^2*1000 over a kill ~
+/// L^2*262.5). `ZEM` is EQ's per-zone "Zone Experience Modifier" (P99 scale: 75
+/// normal, ~80 dungeon, ~100 newbie); one global value for now, per-zone ZEM is a
+/// later content pass. See `docs/design/everquest_xp_curve_reference.md`.
+pub const ZEM_NORMAL: f32 = 75.0;
+const ZEM_KILL_SCALE: f64 = 3.5; // EQEmu's 35/10 calibration
+
+/// XP for killing a `mob_level` mob in a zone with modifier `zem` (pass
+/// [`ZEM_NORMAL`] as the default). Floored at 1 so every kill is worth something.
+pub fn kill_xp(mob_level: i32, zem: f32) -> i32 {
+    let l = mob_level.max(1) as f64;
+    (l * l * zem as f64 * ZEM_KILL_SCALE).round().max(1.0) as i32
+}
 
 /// Award `amount` xp (negative drains it) and resolve any level change.
 ///
@@ -44,7 +62,10 @@ pub fn award_xp(server: &mut RenetServer, conn: &mut PerConnection, amount: i32)
     let owner_cid = conn.char_id as ClientId;
     let old_level = conn.level;
 
-    conn.xp += amount;
+    // saturating_add, not `+=`: a near-full band plus a large quest grant could
+    // overflow i32 (a debug panic / release wrap to negative). Saturating then
+    // lets resolve() fold the (clamped) total into the capped level cleanly.
+    conn.xp = conn.xp.saturating_add(amount);
     let (new_xp, new_level, new_xp_to_next) = resolve(conn.xp, conn.level);
     conn.xp = new_xp;
     conn.level = new_level;
@@ -125,11 +146,19 @@ pub fn kill_player(server: &mut RenetServer, conn: &mut PerConnection) {
 /// [`DEATH_PENALTY_FLOOR_LEVEL`] (any leftover deficit there is clamped to 0).
 fn resolve(mut xp: i32, mut level: i32) -> (i32, i32, i32) {
     let mut xp_to_next = char_data::xp_to_next_for(level);
-    // Level up: carry the overflow into successive bands.
-    while xp >= xp_to_next {
+    // Level up: carry the overflow into successive bands, but never past the
+    // level cap. The old 1.5x curve capped leveling by accident — its band
+    // saturated i32 at ~level 43, so xp (also i32) could never reach it. The
+    // cubic curve stays well inside i32, so MAX_LEVEL is now the explicit cap.
+    while xp >= xp_to_next && level < MAX_LEVEL {
         xp -= xp_to_next;
         level += 1;
         xp_to_next = char_data::xp_to_next_for(level);
+    }
+    // At the cap the bar sits full; any further overflow is discarded (there are
+    // no levels beyond MAX_LEVEL — AA-style spend of surplus xp is a future system).
+    if level >= MAX_LEVEL && xp > xp_to_next {
+        xp = xp_to_next;
     }
     // Level down: borrow the previous (smaller) band, floored at level 5.
     while xp < 0 && level > DEATH_PENALTY_FLOOR_LEVEL {
@@ -172,8 +201,9 @@ fn apply_intrinsic_delta(conn: &mut PerConnection, old_level: i32, new_level: i3
 mod tests {
     use super::*;
 
-    // Bands at the default curve: L1=100, L2=150, L3=225, L4=337, L5=505,
-    // L6=757 (each = prev * 1.5, truncated). resolve() must match.
+    // Bands at the default cubic curve: L1=1000, L2=7000, L3=19000, L4=37000,
+    // L5=61000, L6=91000 (= L^3*1000 deltas, hell_mod 1.0 below 30). resolve()
+    // must match.
 
     #[test]
     fn no_change_when_xp_in_band() {
@@ -183,7 +213,7 @@ mod tests {
 
     #[test]
     fn single_level_up_carries_remainder() {
-        // Level 5 band is 505; 505 + 30 over → level 6 with 30 left.
+        // Level 5 band is 61000; 30 past it (band5 + 30) lands at level 6, xp 30.
         let band5 = char_data::xp_to_next_for(5);
         let (xp, level, to_next) = resolve(band5 + 30, 5);
         assert_eq!(level, 6);
@@ -238,5 +268,42 @@ mod tests {
         let band6 = char_data::xp_to_next_for(6);
         let loss = (band6 as f32 * DEATH_XP_LOSS_FRACTION).floor() as i32;
         assert_eq!(loss, (band6 * 5) / 100);
+    }
+
+    #[test]
+    fn level_up_caps_at_max_level() {
+        // Even i32::MAX of grant can't climb past the cap; the bar sits full
+        // (xp == band) at MAX_LEVEL instead of spilling into level 61+.
+        let (xp, level, to_next) = resolve(i32::MAX, 5);
+        assert_eq!(level, MAX_LEVEL);
+        assert_eq!(xp, to_next);
+    }
+
+    #[test]
+    fn band_never_overflows_i32() {
+        // The cubic, clamped to the level cap, stays well inside i32. Unclamped
+        // it overruns i32 near level ~70, so the clamp is the guard. Bands are
+        // NOT monotonic: the level-59 "triple hell" (~89M) is the single largest
+        // band, bigger than 60, but still ~24x under i32::MAX.
+        for lvl in 1..=99 {
+            let band = char_data::xp_to_next_for(lvl);
+            assert!(band > 0, "band({lvl}) = {band} went non-positive");
+            assert!(band < 100_000_000, "band({lvl}) = {band} unexpectedly large");
+        }
+        // Above the cap the band is pinned to the cap band, never the raw cubic
+        // for that level (which would overflow i32).
+        assert_eq!(
+            char_data::xp_to_next_for(99),
+            char_data::xp_to_next_for(MAX_LEVEL),
+        );
+    }
+
+    #[test]
+    fn kill_xp_is_quadratic_in_mob_level() {
+        // mob_level^2 * 75 * 3.5: doubling the mob level ~4x the award.
+        assert_eq!(kill_xp(1, ZEM_NORMAL), 263); // 262.5 rounds up
+        assert_eq!(kill_xp(10, ZEM_NORMAL), 26_250);
+        assert_eq!(kill_xp(20, ZEM_NORMAL), 105_000);
+        assert!(kill_xp(0, ZEM_NORMAL) >= 1, "a kill is always worth >= 1");
     }
 }

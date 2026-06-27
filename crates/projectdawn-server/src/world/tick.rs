@@ -472,7 +472,9 @@ fn apply_spell_damage_to_enemy(
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .map(|(&id, _)| id);
-            let mob_xp = entity.mob.xp;
+            // EQ quadratic per-kill award, derived from the mob's level (not the
+            // legacy flat mob.xp constant). See progression::kill_xp.
+            let mob_xp = super::progression::kill_xp(entity.mob.level as i32, super::progression::ZEM_NORMAL);
             let mob_level = entity.mob.level;
             let death_pos = entity.pos;
             let mob_name = entity.mob.name.clone();
@@ -2937,7 +2939,9 @@ pub async fn run(
                                 .unwrap_or(std::cmp::Ordering::Equal)
                         })
                     {
-                        let base_xp = entity.mob.xp;
+                        // EQ quadratic per-kill award from the mob's level (see
+                        // progression::kill_xp); the group split applies below.
+                        let base_xp = super::progression::kill_xp(entity.mob.level as i32, super::progression::ZEM_NORMAL);
                         if base_xp > 0 {
                             // Track 6 sub-task 5 — group XP split.
                             // Killer's group (if any): boost base by
@@ -6440,7 +6444,9 @@ pub async fn run(
                         let new_hp = target_entity.hp;
                         let max_hp = target_entity.max_hp;
                         let died = new_hp <= 0.0;
-                        let mob_xp = target_entity.mob.xp;
+                        // EQ quadratic per-kill award from the mob's level (see
+                        // progression::kill_xp); pet kills credit the owner below.
+                        let mob_xp = super::progression::kill_xp(target_entity.mob.level as i32, super::progression::ZEM_NORMAL);
                         let mob_level = target_entity.mob.level;
                         let mob_name_dead = if died {
                             target_entity.transition(EnemyState::Dead, now);

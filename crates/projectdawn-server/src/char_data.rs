@@ -348,26 +348,58 @@ pub fn compute(race: &str, class: &str, level: i32) -> ComputedCharacter {
         max_hp += (stats.constitution - con_before) as f32 * 5.0;
     }
 
-    let mut xp_to_next: i32 = 100;
-    for _ in 1..lvl {
-        xp_to_next = ((xp_to_next as f32) * 1.5) as i32;
-    }
+    let xp_to_next = xp_to_next_for(level);
 
     ComputedCharacter { stats, max_hp, max_mp, max_stamina, xp_to_next }
 }
 
-/// The XP needed to clear `level` (the size of that level's band). Depends
-/// only on the level, not race/class. Mirrors the geometric 1.5x growth in
-/// `compute` and the GDScript `apply_character` loop. Used by the leveling
-/// path (`world::progression`) to resize the band on a level up/down without
-/// recomputing the whole character.
-pub fn xp_to_next_for(level: i32) -> i32 {
-    let lvl = level.clamp(1, 99);
-    let mut xp_to_next: i32 = 100;
-    for _ in 1..lvl {
-        xp_to_next = ((xp_to_next as f32) * 1.5) as i32;
+/// EverQuest "hell level" modifier. The per-level XP cost is cubic, and this
+/// multiplier rises at bracket boundaries to create the classic difficulty
+/// spikes (30/35/40/45, then every level 51-60 as Kunark crammed ten levels onto
+/// the curve). Values are from the Project 1999 experience table (see
+/// `docs/design/everquest_xp_curve_reference.md`). Mirrored in GDScript
+/// `PlayerStats._hell_mod` — change both in the same commit.
+fn hell_mod(level: i32) -> f64 {
+    match level {
+        1..=29 => 1.0,
+        30..=34 => 1.1,
+        35..=39 => 1.2,
+        40..=44 => 1.3,
+        45..=50 => 1.4,
+        51 => 1.5,
+        52 => 1.6,
+        53 => 1.7,
+        54 => 1.9,
+        55 => 2.1,
+        56 => 2.3,
+        57 => 2.5,
+        58 => 2.7,
+        59 => 3.0,
+        _ => 3.1, // 60 (clamped at the cap, so 60+ never differs)
     }
-    xp_to_next
+}
+
+/// Cumulative XP to *complete* `level`: EverQuest's cubic curve
+/// `L^3 x 1000 x hell_mod(L)` (e.g. completing level 60 totals 669,600,000).
+/// `total_xp(0) == 0` so the level-1 band is well defined. f64 throughout to
+/// match GDScript (whose `float` is f64) byte-for-byte after rounding.
+fn total_xp(level: i32) -> f64 {
+    if level < 1 {
+        return 0.0;
+    }
+    let l = level as f64;
+    l * l * l * 1000.0 * hell_mod(level)
+}
+
+/// The XP needed to clear `level` (the size of that level's band) — the cubic
+/// total for this level minus the previous level's total. Depends only on the
+/// level, not race/class. Mirrors the GDScript `PlayerStats._band_for`. Used by
+/// the leveling path (`world::progression`) to resize the band on a level
+/// up/down without recomputing the whole character. Clamped to the level cap so
+/// the cubic can never overrun i32 (it would near level ~70).
+pub fn xp_to_next_for(level: i32) -> i32 {
+    let lvl = level.clamp(1, crate::world::skills::MAX_LEVEL);
+    (total_xp(lvl) - total_xp(lvl - 1)).round() as i32
 }
 
 #[cfg(test)]
@@ -415,13 +447,15 @@ mod tests {
     }
 
     #[test]
-    fn xp_to_next_grows_geometrically() {
-        let c1 = compute("Human", "Warrior", 1);
-        let c2 = compute("Human", "Warrior", 2);
-        let c3 = compute("Human", "Warrior", 3);
-        assert_eq!(c1.xp_to_next, 100);
-        assert_eq!(c2.xp_to_next, 150);
-        assert_eq!(c3.xp_to_next, 225);
+    fn xp_to_next_follows_cubic_curve() {
+        // EQ cubic: band(L) = L^3*1000*hell(L) - (L-1)^3*1000*hell(L-1).
+        // band(1)=1000, band(2)=8000-1000=7000, band(3)=27000-8000=19000.
+        assert_eq!(compute("Human", "Warrior", 1).xp_to_next, 1000);
+        assert_eq!(compute("Human", "Warrior", 2).xp_to_next, 7000);
+        assert_eq!(compute("Human", "Warrior", 3).xp_to_next, 19000);
+        // Hell level 30 and the level-60 cap match the P99 table exactly.
+        assert_eq!(xp_to_next_for(30), 5_311_000); // 1.1 hell-mod kicks in
+        assert_eq!(xp_to_next_for(60), 53_463_000); // 669.6M total - 616.137M
     }
 
     #[test]

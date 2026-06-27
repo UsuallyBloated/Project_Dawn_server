@@ -28,7 +28,9 @@ mod persistence;
 mod pet_templates;
 mod progression;
 mod regen;
-mod skills;
+// `pub` so the persistence layer (`crate::db::load_character`) can read MAX_LEVEL
+// to clamp a stored level into the cap on load.
+pub mod skills;
 mod spawn_points;
 mod spells;
 mod tick;

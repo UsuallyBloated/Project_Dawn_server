@@ -891,8 +891,10 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     .await
     .expect("EntityDied arrives for the killed enemy");
 
-    // Track 5 sub-task 5 — kill credit. Decrepit Skeleton's authored
-    // xp is 10. Sole attacker → sole top damager → private XpGained.
+    // Track 5 sub-task 5 — kill credit. Per-kill XP is the EQ quadratic
+    // (mob_level^2 * ZEM * 3.5, see progression::kill_xp): a level-1
+    // Decrepit Skeleton pays round(1 * 75 * 3.5) = 263. Sole attacker →
+    // sole top damager → private XpGained.
     let xp_evt = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
             matches!(m, ServerWorldMsg::XpGained { .. })
@@ -900,7 +902,7 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
         .await
         .expect("XpGained arrives for the kill-credit recipient");
     if let ServerWorldMsg::XpGained { amount, .. } = xp_evt {
-        assert_eq!(amount, 10, "Decrepit Skeleton authored xp is 10");
+        assert_eq!(amount, 263, "level-1 mob kill pays kill_xp(1) = 263");
     }
 
     // CORPSE_LINGER_SECS is 5 s; budget extra for tick jitter and

@@ -402,6 +402,10 @@ pub struct CharacterSpawn {
     pub zone: Option<String>,
     pub pos: (f32, f32, f32),
     pub yaw: f32,
+    /// Quest ids this character has already turned in (quests pay once, ever).
+    /// Loaded into `PerConnection.completed_quests`; the tick loop consults it
+    /// before granting a `CompleteQuest` reward.
+    pub completed_quests: Vec<String>,
 }
 
 #[derive(FromRow)]
@@ -487,6 +491,14 @@ pub async fn load_character(
              row.base_constitution, row.base_max_hp, row.base_max_mp,
              row.base_max_stamina);
 
+    // Quest completions (server-authoritative rewards): loaded with the
+    // character so the world loop can reject a repeat turn-in without a query.
+    let completed_quests: Vec<String> =
+        sqlx::query_scalar("SELECT quest_id FROM completed_quests WHERE char_id = ?1")
+            .bind(char_id)
+            .fetch_all(pool)
+            .await?;
+
     Ok(CharacterSpawn {
         char_id: row.id,
         account_id: row.account_id,
@@ -528,7 +540,26 @@ pub async fn load_character(
             row.pos_z.unwrap_or(0.0),
         ),
         yaw: row.yaw.unwrap_or(0.0),
+        completed_quests,
     })
+}
+
+/// Record a quest turn-in (server-authoritative quest rewards). Idempotent —
+/// the (char_id, quest_id) primary key makes a repeat insert a no-op, and the
+/// world loop checks the in-memory set before awarding anyway. Persisted
+/// BEFORE the XP grant so a crash can't leave a paid-but-unrecorded quest that
+/// a relog could turn in again.
+pub async fn record_quest_completion(
+    pool: &SqlitePool,
+    char_id: i64,
+    quest_id: &str,
+) -> AuthResult<()> {
+    sqlx::query("INSERT OR IGNORE INTO completed_quests (char_id, quest_id) VALUES (?1, ?2)")
+        .bind(char_id)
+        .bind(quest_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Periodic position checkpoint. Track 6 split the resources path into its
@@ -1281,6 +1312,32 @@ mod corpse_loot_tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].lost_xp, 500, "lost_xp must survive a save/load round-trip");
         assert!(!loaded[0].resurrected, "a fresh corpse is not resurrected");
+    }
+
+    // Server-authoritative quest rewards — a completion persists across a
+    // save/load (so a relogged character can't re-turn-in the same quest),
+    // and recording twice is a harmless no-op.
+    #[tokio::test]
+    async fn quest_completion_round_trips_once_per_character() {
+        let (pool, _tmp) = fresh_pool().await;
+        let account = create_account(&pool, "quests", "hunter2!", None)
+            .await
+            .expect("account");
+        let char_id = create_character(&pool, account, "Quests", "Human", "Warrior")
+            .await
+            .expect("char");
+
+        let spawn = load_character(&pool, char_id).await.expect("load");
+        assert!(spawn.completed_quests.is_empty(), "fresh char has no completions");
+
+        record_quest_completion(&pool, char_id, "wolf_threat").await.expect("record");
+        record_quest_completion(&pool, char_id, "wolf_threat").await.expect("repeat is a no-op");
+        record_quest_completion(&pool, char_id, "rotfang_hunt").await.expect("record 2nd");
+
+        let spawn = load_character(&pool, char_id).await.expect("reload");
+        let mut done = spawn.completed_quests.clone();
+        done.sort();
+        assert_eq!(done, vec!["rotfang_hunt".to_string(), "wolf_threat".to_string()]);
     }
 
     // XP curve — a character saved on a previous curve (the old 1.5x geometric

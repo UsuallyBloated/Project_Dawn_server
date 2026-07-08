@@ -1655,6 +1655,7 @@ mod tests {
             hp: 100.0, mp: 100.0, stamina: 100.0,
             coins: protocol::world::Coins::ZERO, bank_coins: protocol::world::Coins::ZERO, zone: None,
             pos: (0.0, 0.0, 0.0), yaw: 0.0,
+            completed_quests: Vec::new(),
         };
         crate::world::connection::PerConnection::from_spawn(spawn, Instant::now())
     }

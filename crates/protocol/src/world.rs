@@ -75,7 +75,16 @@ use serde::{Deserialize, Serialize};
 /// `ServerWorldMsg::ResurrectOffer { corpse_id, caster_name, xp_percent }` (sent
 /// privately to the corpse owner) + a generic `ServerWorldMsg::Teleport { pos }`
 /// that summons the owner to their corpse — all appended at the END of their enums.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3232; // "PD_W0022"
+///
+/// PD_W0023: quests go online + server-authoritative. Appends
+/// `ServerWorldMsg::KillCredit { mob_name }` (private quest kill credit to
+/// whoever earned a kill — never the EntityDied broadcast, so bystanders get
+/// none), `ClientWorldMsg::DevSpawnMob { .. }` (dev-gated Test Panel world-mob
+/// spawn), and `ClientWorldMsg::CompleteQuest { quest_id }` (quest turn-in by
+/// id; the server computes the reward from its own quest table and pays once
+/// per character, ever — replaces `GrantQuestXp` for quests, which is now
+/// dev-gated like HealSelf).
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3233; // "PD_W0023"
 
 pub type EntityId = u64;
 
@@ -814,6 +823,31 @@ pub enum ClientWorldMsg {
         corpse_id: EntityId,
         accept: bool,
     },
+
+    /// PD_W0023 — dev-only (requires the server's PD_DEV_CMDS gate, like
+    /// HealSelf): ask the server to spawn a REAL world mob near the requester.
+    /// Backs the Test Panel spawn buttons in launcher mode so dev-spawned
+    /// monsters are true world creatures (server combat, XP, loot, corpse,
+    /// quest kill credit) instead of client-local puppets the server can't see.
+    DevSpawnMob {
+        name: String,
+        level: u32,
+        hp: f32,
+        dmg: i32,
+        speed: f32,
+        aggro: f32,
+    },
+
+    /// PD_W0023 — quest turn-in by id. Replaces the raw `GrantQuestXp{amount}`
+    /// for quests (which let a client name its own reward — one forged packet
+    /// was an instant level cap). The server looks the id up in its own quest
+    /// table, computes the XP itself (tier% x band(level_req)), and records the
+    /// completion so a quest pays once per character, ever (also kills the
+    /// relog + re-turn-in farm). `GrantQuestXp` survives dev-gated for the
+    /// Test Panel leveling buttons.
+    CompleteQuest {
+        quest_id: String,
+    },
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────
@@ -1273,6 +1307,15 @@ pub enum ServerWorldMsg {
     /// to `pos`; peers see the move via the normal position fan.
     Teleport {
         pos: Vec3,
+    },
+    /// PD_W0023 — quest kill credit, sent PRIVATELY to whoever earned XP for a
+    /// kill (the solo killer, a pet's owner, or each online group member on the
+    /// XP split), never broadcast. The client feeds `mob_name` to
+    /// `QuestManager.notify_kill` so "kill N X" objectives advance online. Kept
+    /// separate from the public `EntityDied` broadcast precisely so a bystander
+    /// who merely witnessed the death does NOT get quest credit.
+    KillCredit {
+        mob_name: String,
     },
 }
 

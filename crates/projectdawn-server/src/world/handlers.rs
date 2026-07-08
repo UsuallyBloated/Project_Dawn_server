@@ -329,6 +329,20 @@ pub enum Outcome {
         corpse_id: protocol::world::EntityId,
         accept: bool,
     },
+    /// PD_W0023 — dev-gated world-mob spawn (Test Panel in launcher mode). The
+    /// handler validates the dev gate + builds the template; the tick loop owns
+    /// the enemies map / AOI grid, so it does the actual insert + EnemySpawn fan.
+    DevSpawnMobIntent {
+        pos: super::connection::Vec3f,
+        mob: super::zones::MobTemplate,
+    },
+    /// PD_W0023 — server-authoritative quest turn-in. The tick loop validates
+    /// against the server quest table + the character's completed set, persists
+    /// the completion FIRST, then awards the server-computed XP.
+    CompleteQuestIntent {
+        responder: u64,
+        quest_id: String,
+    },
     /// Player → server chat. Handler returns this; the tick loop fans
     /// `ChatMessage` to recipients based on `channel`:
     /// - Say  → in-AOI peers (3×3 cell neighbourhood, sender excluded)
@@ -553,15 +567,39 @@ pub fn handle_message(
         }
 
         ClientWorldMsg::GrantQuestXp { amount } => {
-            if !conn.ready || amount <= 0 {
+            // DEV-ONLY as of PD_W0023 (same gate as HealSelf): this message lets
+            // the client name a raw XP amount, which as a normal gameplay path
+            // was the single worst exploit on the wire — one forged packet was
+            // an instant level cap. Real quest turn-ins now go through
+            // `CompleteQuest` (server-authored reward). This survives only for
+            // the Test Panel leveling buttons ("Level Up" / "Grant 250 XP").
+            if !conn.ready || amount <= 0 || !conn.is_dev {
                 return Outcome::Continue;
             }
-            // PD_W0018 — quests are still tracked client-side; the client reports
-            // a completed quest's xp reward and the server applies it through the
-            // authoritative leveling path, so a turn-in can level you like a kill.
-            tracing::info!(char_id = conn.char_id, amount, "quest xp grant");
+            tracing::info!(char_id = conn.char_id, amount, "dev quest xp grant");
             super::progression::award_xp(server, conn, amount);
             Outcome::Continue
+        }
+
+        ClientWorldMsg::CompleteQuest { quest_id } => {
+            // Real quest ids are snake_case; rejecting anything else at the
+            // door keeps attacker-controlled strings (newlines, control chars)
+            // out of the logs and the tick loop entirely.
+            let well_formed = !quest_id.is_empty()
+                && quest_id.len() <= 64
+                && quest_id
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+            if !conn.ready || !well_formed {
+                return Outcome::Continue;
+            }
+            // Validated + awarded in the tick loop (needs the DB pool to record
+            // the completion BEFORE granting, so a crash can't leave a paid
+            // quest replayable after relog).
+            Outcome::CompleteQuestIntent {
+                responder: conn.char_id as u64,
+                quest_id,
+            }
         }
 
         ClientWorldMsg::EquipUpdate { armor } => {
@@ -612,6 +650,62 @@ pub fn handle_message(
                 char_id: conn.char_id as u64,
                 on,
             }
+        }
+
+        ClientWorldMsg::DevSpawnMob { name, level, hp, dmg, speed, aggro } => {
+            // Same dev gate as HealSelf/DamageSelf: silently ignored unless the
+            // server runs with PD_DEV_CMDS=1. Spawns a REAL world mob ~3m in
+            // front of the requester (Godot forward = -Z rotated by yaw), so
+            // Test Panel spawns behave like authored camp mobs: server combat,
+            // XP, loot, corpse, quest kill credit.
+            if !conn.in_world || !conn.is_dev {
+                return Outcome::Continue;
+            }
+            // Name hygiene: the client's quest matcher is a bidirectional
+            // substring test, so an empty / 1-char name would tick every kill
+            // objective. Require a real name; cap length against absurd payloads.
+            let name = name.trim().to_string();
+            if name.len() < 2 || name.len() > 64 {
+                return Outcome::Continue;
+            }
+            // Warder-template names are keyed by exact string ("Wolf"): a wild
+            // spawn with that name, once charmed, would arm the free
+            // warder-respawn loop for any class on its death. Spawn something
+            // else (the Test Panel uses "Grey Wolf").
+            if super::pet_templates::is_warder_template(&name) {
+                return Outcome::Continue;
+            }
+            // f32::clamp propagates NaN — a NaN hp would make an unkillable mob
+            // (hp <= 0.0 is false for NaN) and NaN speed/pos would poison the
+            // AOI grid. Reject non-finite payloads outright.
+            if !hp.is_finite() || !speed.is_finite() || !aggro.is_finite() {
+                return Outcome::Continue;
+            }
+            let hp = hp.clamp(1.0, 1_000_000.0);
+            let mob = super::zones::MobTemplate {
+                name,
+                level: level.clamp(1, 99),
+                hp,
+                dmg: dmg.max(0),
+                xp: 0, // legacy field; kill XP derives from level
+                speed: speed.clamp(0.0, 20.0),
+                aggro: aggro.clamp(0.0, 50.0),
+                leash: None,
+                melee_range: None,
+                attack_interval: None,
+            };
+            let pos = super::connection::Vec3f {
+                x: conn.pos.x - conn.yaw.sin() * 3.0,
+                y: conn.pos.y,
+                z: conn.pos.z - conn.yaw.cos() * 3.0,
+            };
+            tracing::info!(
+                char_id = conn.char_id,
+                mob = %mob.name,
+                level = mob.level,
+                "dev spawn mob"
+            );
+            Outcome::DevSpawnMobIntent { pos, mob }
         }
 
         ClientWorldMsg::DamageSelf { amount } => {
@@ -1355,6 +1449,18 @@ pub fn send_xp_gained(
     to_next: i32,
 ) {
     let msg = ServerWorldMsg::XpGained { amount, current, to_next };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// PD_W0023 — private quest kill credit to one recipient (the solo killer, a
+/// pet's owner, or each online group member on the XP split). The client routes
+/// `mob_name` to `QuestManager.notify_kill` so "kill N X" objectives advance
+/// online. Deliberately single-recipient, not the `EntityDied` broadcast, so a
+/// bystander who only witnessed the death gets no credit.
+pub fn send_kill_credit(server: &mut RenetServer, recipient_id: ClientId, mob_name: &str) {
+    let msg = ServerWorldMsg::KillCredit { mob_name: mob_name.to_string() };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
     }

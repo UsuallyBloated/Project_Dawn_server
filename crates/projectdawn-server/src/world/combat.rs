@@ -161,6 +161,7 @@ mod tests {
             zone: None,
             pos: (0.0, 0.0, 0.0),
             yaw: 0.0,
+            completed_quests: Vec::new(),
         };
         PerConnection::from_spawn(spawn, Instant::now())
     }

@@ -170,6 +170,11 @@ pub struct PerConnection {
     /// the client) and cleared on accept/decline. In-memory only — a server
     /// restart simply drops an un-answered offer.
     pub pending_res_offer: Option<(protocol::world::EntityId, u32)>,
+    /// Quest ids this character has already turned in (server-authoritative
+    /// quest rewards: a quest pays once per character, ever). Loaded from the
+    /// `completed_quests` table at login; the tick loop checks it before
+    /// awarding a `CompleteQuest` and inserts after the DB write succeeds.
+    pub completed_quests: std::collections::HashSet<String>,
     /// Highest move sequence we've accepted from this client. Out-of-order
     /// packets get dropped (unreliable channel, so reorder is expected).
     pub last_move_seq: u32,
@@ -412,6 +417,7 @@ impl PerConnection {
             corpse_pending: false,
             death_lost_xp: 0,
             pending_res_offer: None,
+            completed_quests: spawn.completed_quests.into_iter().collect(),
             last_move_seq: 0,
             latest_direction: Vec3f::ZERO,
             last_move_received: None,
@@ -570,6 +576,7 @@ mod tests {
             zone: None,
             pos: (0.0, 0.0, 0.0),
             yaw: 0.0,
+            completed_quests: Vec::new(),
         }
     }
 

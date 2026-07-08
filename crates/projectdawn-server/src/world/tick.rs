@@ -402,6 +402,78 @@ fn fan_out_pet_buff_snapshot(
     }
 }
 
+/// Award a kill to the creditor's group: split the XP pool (with
+/// GROUP_XP_BONUS when grouped) among online members and send each a private
+/// quest `KillCredit`. EQ semantics: the group split applies regardless of HOW
+/// the mob died — melee, spell, or pet — so all three kill paths route here.
+/// Solo creditor = full base XP. Owned victims (pets / charmed mobs) grant XP
+/// but no quest credit (the warder is literally named "Wolf"). Non-player or
+/// fully-disconnected creditors award nothing.
+fn award_kill(
+    server: &mut RenetServer,
+    connections: &mut HashMap<ClientId, PerConnection>,
+    group_manager: &groups::GroupManager,
+    credit_id: u64,
+    base_xp: i32,
+    mob_name: &str,
+    victim_owned: bool,
+) {
+    if base_xp <= 0 || credit_id >= protocol::world::ENEMY_ID_BASE {
+        return; // no reward, or the top damager wasn't a player
+    }
+    // Owned victims (player pets, charmed mobs) award NOTHING — no XP and no
+    // quest credit. EQ semantics, and the XP half matters as much as the quest
+    // half: a Beast Master's warder respawns free every ~15s, so pet kills
+    // paying XP would be an infinite (and group-amplified) leveling loop.
+    if victim_owned {
+        return;
+    }
+    let credit_cid = credit_id as ClientId;
+    let online_members: Vec<ClientId> = match group_manager.group_of(credit_cid) {
+        Some(g) => g
+            .members
+            .iter()
+            .filter(|m| connections.contains_key(m))
+            .copied()
+            .collect(),
+        // Liveness check on the solo killer too: they may have disconnected
+        // between dealing top damage and the mob dying.
+        None if connections.contains_key(&credit_cid) => vec![credit_cid],
+        None => Vec::new(),
+    };
+    // Everyone eligible may be offline — nothing to award (and the division
+    // below must not see len 0).
+    if online_members.is_empty() {
+        return;
+    }
+    let pool = if online_members.len() > 1 {
+        ((base_xp as f32) * (1.0 + groups::GROUP_XP_BONUS)) as i32
+    } else {
+        base_xp
+    };
+    let per_member = (pool / online_members.len() as i32).max(1);
+    for m in &online_members {
+        if let Some(conn) = connections.get_mut(m) {
+            // Server-authoritative xp/leveling (Slice 0): every member's share
+            // runs through award_xp so leveling stays authoritative.
+            super::progression::award_xp(server, conn, per_member);
+            // Private quest kill credit alongside the XP share (inside the
+            // liveness guard by construction). The client feeds it to
+            // QuestManager.notify_kill; witnesses outside the group get none.
+            super::handlers::send_kill_credit(server, *m, mob_name);
+        }
+    }
+    tracing::info!(
+        killer = credit_id,
+        mob = %mob_name,
+        base_xp,
+        pool,
+        per_member,
+        members = online_members.len(),
+        "kill credit granted"
+    );
+}
+
 /// Track 9 — apply a single spell hit to one enemy. Shared by the
 /// single-target ENEMY arm and the AOE fan-out so the damage / death /
 /// kill-credit / loot / CC sequence stays in one place. Caller is
@@ -418,13 +490,14 @@ fn apply_spell_damage_to_enemy(
     enemies: &mut HashMap<EntityId, Entity>,
     loot_bags: &mut HashMap<EntityId, LootBag>,
     aoi: &mut AoiGrid,
+    group_manager: &groups::GroupManager,
     caster_id: u64,
     target_id: EntityId,
     spell: &spells::Spell,
     dmg_type: DamageType,
     now: Instant,
 ) -> bool {
-    let (died, credit_id_opt, mob_xp, mob_level, death_pos, mob_name, damage_done, warder_owner_opt) = {
+    let (died, credit_id_opt, mob_xp, mob_level, death_pos, mob_name, damage_done, warder_owner_opt, victim_owned) = {
         let Some(entity) = enemies.get_mut(&target_id) else {
             return false;
         };
@@ -484,7 +557,11 @@ fn apply_spell_damage_to_enemy(
                 } else {
                     None
                 };
-            (true, credit_id_opt, mob_xp, mob_level, death_pos, mob_name, damage_done, warder_owner_opt)
+            // Owned victims (pets, charmed mobs) must not grant quest kill
+            // credit — the warder is literally named "Wolf", so a respawning
+            // PvP warder would farm the wolf quest otherwise.
+            let victim_owned = entity.owner.is_some();
+            (true, credit_id_opt, mob_xp, mob_level, death_pos, mob_name, damage_done, warder_owner_opt, victim_owned)
         } else {
             if dmg > 0 {
                 entity.clear_mez();
@@ -504,7 +581,7 @@ fn apply_spell_damage_to_enemy(
                     spell.attack_slow_duration,
                 ));
             }
-            (false, None, 0, 0, entity.pos, String::new(), damage_done, None)
+            (false, None, 0, 0, entity.pos, String::new(), damage_done, None, false)
         }
     };
 
@@ -551,15 +628,17 @@ fn apply_spell_damage_to_enemy(
             }
         }
         if let Some(credit_id) = credit_id_opt {
-            if mob_xp > 0 {
-                let cid = credit_id as ClientId;
-                if let Some(conn) = connections.get_mut(&cid) {
-                    // Server-authoritative xp/leveling (Slice 0): solo spell
-                    // kill credit. award_xp adds the xp, resolves any level-up,
-                    // and tells the client.
-                    super::progression::award_xp(server, conn, mob_xp);
-                }
-            }
+            // Spell kills use the same group XP split + quest credit as melee
+            // kills (EQ semantics: the split is method-agnostic).
+            award_kill(
+                server,
+                connections,
+                group_manager,
+                credit_id,
+                mob_xp,
+                &mob_name,
+                victim_owned,
+            );
         }
         let loot_items = loot::roll_for_mob(&mob_name).unwrap_or_default();
         let loot_coins = loot::roll_coin_for_mob(&mob_name, mob_level);
@@ -1313,6 +1392,13 @@ pub async fn run(
         // Corpse / resurrection Slice 3 — (responder, corpse_id, accept) responses
         // to a res offer, applied after dispatch where the corpses map is in scope.
         let mut resurrect_accept_intents: Vec<(u64, protocol::world::EntityId, bool)> = Vec::new();
+        // PD_W0023 — dev-gated Test Panel spawns, applied alongside the natural
+        // spawner pass where the enemies map + AOI grid are in scope.
+        let mut dev_spawn_intents: Vec<(super::connection::Vec3f, super::zones::MobTemplate)> =
+            Vec::new();
+        // PD_W0023 — quest turn-ins (responder, quest_id), applied after dispatch
+        // where the DB pool is in scope (the completion persists before the award).
+        let mut complete_quest_intents: Vec<(u64, String)> = Vec::new();
         // Track 12 Piece A — pet commands. Buffered to apply after
         // message dispatch so we can mutate `enemies` (where pets
         // live) without overlapping the handler's mutable
@@ -1714,6 +1800,12 @@ pub async fn run(
                         }
                         Outcome::ResurrectAcceptIntent { responder, corpse_id, accept } => {
                             resurrect_accept_intents.push((responder, corpse_id, accept));
+                        }
+                        Outcome::DevSpawnMobIntent { pos, mob } => {
+                            dev_spawn_intents.push((pos, mob));
+                        }
+                        Outcome::CompleteQuestIntent { responder, quest_id } => {
+                            complete_quest_intents.push((responder, quest_id));
                         }
                         Outcome::Continue => {}
                     }
@@ -2306,6 +2398,35 @@ pub async fn run(
                     }
                     enemies.insert(entity.id, entity);
                 }
+            }
+        }
+
+        // PD_W0023 — dev-gated Test Panel spawns: same AOI-insert + EnemySpawn
+        // fan as the natural spawner above, but one-shot (spawn_point_idx =
+        // usize::MAX like pets, so death never arms a respawn timer — the
+        // spawner's on_enemy_died .get_mut() on it is a safe no-op).
+        if !dev_spawn_intents.is_empty() {
+            let spawn_recipients: Vec<ClientId> = connections
+                .iter()
+                .filter(|(_, c)| c.in_world)
+                .map(|(id, _)| *id)
+                .collect();
+            for (pos, mob) in dev_spawn_intents.drain(..) {
+                let entity = super::entity::Entity::from_spawn(usize::MAX, pos, mob, now);
+                let enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
+                aoi.insert(entity.id, enemy_cell);
+                if !spawn_recipients.is_empty() {
+                    let visible = aoi.entities_visible_from(enemy_cell);
+                    let aoi_recipients: Vec<ClientId> = spawn_recipients
+                        .iter()
+                        .copied()
+                        .filter(|id| visible.contains(id))
+                        .collect();
+                    if !aoi_recipients.is_empty() {
+                        handlers::fan_out_enemy_spawn(&mut server, &aoi_recipients, &entity);
+                    }
+                }
+                enemies.insert(entity.id, entity);
             }
         }
 
@@ -2940,49 +3061,23 @@ pub async fn run(
                         })
                     {
                         // EQ quadratic per-kill award from the mob's level (see
-                        // progression::kill_xp); the group split applies below.
+                        // progression::kill_xp), split across the killer's
+                        // group + quest credit via the shared helper (same
+                        // path as spell and pet kills).
                         let base_xp = super::progression::kill_xp(entity.mob.level as i32, super::progression::ZEM_NORMAL);
-                        if base_xp > 0 {
-                            // Track 6 sub-task 5 — group XP split.
-                            // Killer's group (if any): boost base by
-                            // GROUP_XP_BONUS and divide evenly among
-                            // online members. Solo killer: full base
-                            // XP. Mirrors GroupManager.distribute_kill_xp
-                            // semantics from the legacy enet path.
-                            let credit_cid = credit_id as ClientId;
-                            let online_members: Vec<ClientId> =
-                                match group_manager.group_of(credit_cid) {
-                                    Some(g) => g.members.iter()
-                                        .filter(|m| connections.contains_key(m))
-                                        .copied()
-                                        .collect(),
-                                    None => vec![credit_cid],
-                                };
-                            let pool = if online_members.len() > 1 {
-                                ((base_xp as f32) * (1.0 + groups::GROUP_XP_BONUS)) as i32
-                            } else {
-                                base_xp
-                            };
-                            let per_member = pool / online_members.len() as i32;
-                            let per_member = per_member.max(1);
-                            for m in &online_members {
-                                if let Some(conn) = connections.get_mut(m) {
-                                    // Server-authoritative xp/leveling (Slice 0):
-                                    // each group member's share runs through
-                                    // award_xp so leveling is authoritative.
-                                    super::progression::award_xp(&mut server, conn, per_member);
-                                }
-                            }
-                            tracing::info!(
-                                killer = credit_id,
-                                mob = %entity.mob.name,
-                                base_xp,
-                                pool,
-                                per_member,
-                                members = online_members.len(),
-                                "kill credit granted"
-                            );
-                        }
+                        let mob_name = entity.mob.name.clone();
+                        // Owned victims (pets / charmed mobs) grant no quest
+                        // credit — the warder is literally named "Wolf".
+                        let victim_owned = entity.owner.is_some();
+                        award_kill(
+                            &mut server,
+                            &mut connections,
+                            &group_manager,
+                            credit_id,
+                            base_xp,
+                            &mob_name,
+                            victim_owned,
+                        );
                     }
                     // Roll loot from the mob's archetype table; spawn
                     // a server-owned bag at the death pos if any
@@ -4019,6 +4114,7 @@ pub async fn run(
                             &mut enemies,
                             &mut loot_bags,
                             &mut aoi,
+                            &group_manager,
                             intent.caster,
                             target_id,
                             spell,
@@ -4127,6 +4223,7 @@ pub async fn run(
                                 &mut enemies,
                                 &mut loot_bags,
                                 &mut aoi,
+                                &group_manager,
                                 intent.caster,
                                 victim,
                                 spell,
@@ -6454,6 +6551,9 @@ pub async fn run(
                         } else {
                             None
                         };
+                        // Owned victims (pets / charmed mobs) grant no quest
+                        // credit — the warder is literally named "Wolf".
+                        let victim_owned = target_entity.owner.is_some();
                         // Capture the dying entity's owner so a
                         // warder-template kill can schedule the
                         // owner's respawn after the borrow drops. None
@@ -6527,13 +6627,21 @@ pub async fn run(
                                 }
                             }
                             if let Some(credit_id) = credit_id_opt {
-                                if mob_xp > 0 && credit_id < protocol::world::ENEMY_ID_BASE {
-                                    let cid = credit_id as ClientId;
-                                    if let Some(conn) = connections.get_mut(&cid) {
-                                        // Server-authoritative xp/leveling
-                                        // (Slice 0): solo pet kill credit.
-                                        super::progression::award_xp(&mut server, conn, mob_xp);
-                                    }
+                                // Pet kills credit the OWNER (aggro accrues
+                                // under the owner's id), through the same
+                                // group split + quest credit as melee/spell
+                                // kills. Name from the dying mob; a live mob
+                                // never reaches here with credit set.
+                                if let Some(name) = mob_name_dead.as_ref() {
+                                    award_kill(
+                                        &mut server,
+                                        &mut connections,
+                                        &group_manager,
+                                        credit_id,
+                                        mob_xp,
+                                        name,
+                                        victim_owned,
+                                    );
                                 }
                             }
                             if let Some(mob_name) = mob_name_dead.as_ref() {
@@ -6900,6 +7008,51 @@ pub async fn run(
                 }
             }
             tracing::info!(char_id = responder, corpse_id, xp_percent, refund, "resurrection accepted");
+        }
+
+        // 4k-quest. PD_W0023 — server-authoritative quest turn-ins. The reward
+        //      comes from the server's own quest table (never a client amount),
+        //      and each quest pays once per character, ever: reject ids the
+        //      character already completed, persist the completion FIRST (a
+        //      crash between award and record could otherwise leave a paid
+        //      quest replayable after relog), then award through award_xp.
+        for (responder, quest_id) in complete_quest_intents.drain(..) {
+            let responder_cid = responder as ClientId;
+            let Some(quest) = super::quests::lookup(&quest_id) else {
+                // {:?} escapes control chars — the id is attacker-controlled and
+                // a raw newline could forge log lines in the triage artifact.
+                tracing::info!(char_id = responder, quest_id = ?quest_id, "quest turn-in rejected — unknown quest id");
+                continue;
+            };
+            let Some(reward) = super::quests::xp_reward_for(&quest_id) else {
+                tracing::warn!(char_id = responder, quest_id = %quest_id, "quest turn-in rejected — bad reward tier in quests.toml");
+                continue;
+            };
+            let Some(conn_ro) = connections.get(&responder_cid) else {
+                continue; // disconnected mid-tick — nothing to award
+            };
+            // A legit client can only HOLD a quest it met level_req for, so this
+            // costs a real player nothing — it only shrinks a forged burst
+            // (send-every-known-id-at-login) to the quests a fresh char could
+            // actually have.
+            if conn_ro.level < quest.level_req {
+                tracing::info!(char_id = responder, quest_id = %quest_id, level = conn_ro.level, level_req = quest.level_req, "quest turn-in rejected — below level_req");
+                continue;
+            }
+            if conn_ro.completed_quests.contains(&quest_id) {
+                tracing::info!(char_id = responder, quest_id = %quest_id, "quest turn-in rejected — already completed");
+                continue;
+            }
+            if let Err(e) = db::record_quest_completion(&pool, responder as i64, &quest_id).await
+            {
+                tracing::error!(char_id = responder, quest_id = %quest_id, error = %e, "record_quest_completion failed — reward not granted");
+                continue;
+            }
+            if let Some(conn) = connections.get_mut(&responder_cid) {
+                conn.completed_quests.insert(quest_id.clone());
+                super::progression::award_xp(&mut server, conn, reward);
+                tracing::info!(char_id = responder, quest_id = %quest_id, reward, "quest completed");
+            }
         }
 
         // 4ka. Apply loot pickup intents. For each: validate bag, slot

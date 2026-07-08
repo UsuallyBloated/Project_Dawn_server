@@ -1,0 +1,37 @@
+# Server-side quest table — the authoritative source for quest XP rewards.
+# Mirror of the client's `data/quest_definitions.gd` (id / level_req /
+# reward_tier); when a quest is added or edited there, mirror it here in the
+# same commit (the same lockstep discipline as spells.toml). The server
+# computes the actual XP itself (tier% x the cubic band at level_req), so a
+# client can never name its own reward amount.
+#
+# reward_tier must be one of: trivial / standard / hard / named
+# (fractions live in world/quests.rs REWARD_TIERS, mirroring the GDScript
+# QuestDefinitions.REWARD_TIERS).
+
+[[quest]]
+id = "wolf_threat"
+level_req = 1
+reward_tier = "standard"
+
+[[quest]]
+id = "rat_infestation"
+level_req = 1
+reward_tier = "trivial"
+
+[[quest]]
+id = "gnoll_raiders"
+level_req = 3
+reward_tier = "standard"
+
+[[quest]]
+id = "rotfang_hunt"
+level_req = 5
+reward_tier = "named"
+
+# Test Panel quest ("Slay the Infected Wolves") — dev/test content, but it must
+# exist here or its turn-in pays nothing in launcher mode.
+[[quest]]
+id = "test_q1"
+level_req = 1
+reward_tier = "standard"

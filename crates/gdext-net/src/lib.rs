@@ -305,6 +305,12 @@ impl NetClient {
     #[signal]
     fn xp_gained(amount: i64, current: i64, to_next: i64);
 
+    /// PD_W0023 — private quest kill credit. The GDScript handler routes
+    /// `mob_name` to QuestManager.notify_kill so "kill N X" objectives advance
+    /// online (the local Test-Room path already calls notify_kill directly).
+    #[signal]
+    fn kill_credit(mob_name: GString);
+
     /// PD_W0018 — server-authoritative level change (up on xp gain, DOWN on a
     /// death penalty). The GDScript handler sets the level, mirrors the bar, and
     /// applies the matching intrinsic stat deltas; new max pools arrive via the
@@ -650,13 +656,50 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::CancelCamp)
     }
 
-    /// PD_W0018 — report a completed quest's xp reward. Quests are tracked
-    /// client-side; the server applies the xp through its authoritative leveling
-    /// path and replies with `XpGained` / `LevelUp`. Primitive payload so the
-    /// GDScript client can encode it.
+    /// PD_W0018 — raw XP grant. DEV-ONLY server-side as of PD_W0023 (the server
+    /// requires PD_DEV_CMDS, like Full Heal): kept for the Test Panel leveling
+    /// buttons. Real quest turn-ins go through `send_complete_quest`.
     #[func]
     fn send_grant_quest_xp(&mut self, amount: i32) -> bool {
         self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::GrantQuestXp { amount })
+    }
+
+    /// PD_W0023 — quest turn-in by id. The server looks the id up in its own
+    /// quest table, computes the XP itself, records the completion (a quest
+    /// pays once per character, ever), and replies with `XpGained` / `LevelUp`.
+    #[func]
+    fn send_complete_quest(&mut self, quest_id: GString) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::CompleteQuest { quest_id: quest_id.to_string() },
+        )
+    }
+
+    /// PD_W0023 — dev-only (server PD_DEV_CMDS gate): ask the server to spawn a
+    /// REAL world mob near this player. Backs the Test Panel spawn buttons in
+    /// launcher mode, so dev-spawned monsters get server combat / XP / loot /
+    /// corpse / quest kill credit like authored camp mobs.
+    #[func]
+    fn send_dev_spawn_mob(
+        &mut self,
+        name: GString,
+        level: i64,
+        hp: f64,
+        dmg: i64,
+        speed: f64,
+        aggro: f64,
+    ) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::DevSpawnMob {
+                name: name.to_string(),
+                level: level.max(1) as u32,
+                hp: hp as f32,
+                dmg: dmg as i32,
+                speed: speed as f32,
+                aggro: aggro as f32,
+            },
+        )
     }
 
     /// Track 6 — owning client respawned (local death-timer elapsed).
@@ -1380,6 +1423,9 @@ enum Incoming {
         current: i32,
         to_next: i32,
     },
+    KillCredit {
+        mob_name: String,
+    },
     LevelUp {
         new_level: u32,
         xp: i32,
@@ -1934,6 +1980,12 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::KillCredit { mob_name } => {
+                    self.base_mut().emit_signal(
+                        "kill_credit",
+                        &[GString::from(mob_name.as_str()).to_variant()],
+                    );
+                }
                 Incoming::LevelUp { new_level, xp, xp_to_next } => {
                     self.base_mut().emit_signal(
                         "level_up",
@@ -2333,6 +2385,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             current,
             to_next,
         },
+        ServerWorldMsg::KillCredit { mob_name } => Incoming::KillCredit { mob_name },
         ServerWorldMsg::LevelUp { new_level, xp, xp_to_next } => Incoming::LevelUp {
             new_level,
             xp,

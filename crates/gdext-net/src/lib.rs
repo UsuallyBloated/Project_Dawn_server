@@ -305,11 +305,44 @@ impl NetClient {
     #[signal]
     fn xp_gained(amount: i64, current: i64, to_next: i64);
 
-    /// PD_W0023 — private quest kill credit. The GDScript handler routes
-    /// `mob_name` to QuestManager.notify_kill so "kill N X" objectives advance
-    /// online (the local Test-Room path already calls notify_kill directly).
+    /// PD_W0023 — private quest kill credit. RETIRED as of PD_W0024 (the
+    /// server counts kills itself and drives the journal via
+    /// `quest_progress`); the server no longer sends it, but the signal stays
+    /// wired in case an old server build is on the other end.
     #[signal]
     fn kill_credit(mob_name: GString);
+
+    /// PD_W0024 — private quest-journal seed on EnterWorld. Parallel arrays:
+    /// `active_ids[i]` is an active quest whose per-objective progress is the
+    /// next `objective_counts[i]` values of `progress_flat` (flattened
+    /// because signal args are flat Packed arrays). `completed` is every
+    /// quest id this character has ever turned in. GDScript rebuilds the
+    /// journal from this — the journal survives relog/restart now.
+    #[signal]
+    fn quest_snapshot(
+        active_ids: PackedStringArray,
+        objective_counts: PackedInt32Array,
+        progress_flat: PackedInt32Array,
+        completed: PackedStringArray,
+    );
+
+    /// PD_W0024 — one objective counter moved on an active quest. `count` is
+    /// the new absolute value. Replaces `kill_credit` as the journal driver:
+    /// GDScript sets the count and re-renders; no client-side counting.
+    #[signal]
+    fn quest_progress(quest_id: GString, objective_index: i64, count: i64);
+
+    /// PD_W0024 — a quest accept / abandon / turn-in was refused. GDScript
+    /// prints `reason` to the combat log; `rollback` (accept-phase only) tells
+    /// it to undo the optimistic journal add.
+    #[signal]
+    fn quest_rejected(quest_id: GString, reason: GString, rollback: bool);
+
+    /// PD_W0024 — a turn-in succeeded and paid out (XP rides `xp_gained` /
+    /// `level_up` as usual). GDScript flips the journal entry to COMPLETED
+    /// off this, never optimistically.
+    #[signal]
+    fn quest_completed(quest_id: GString);
 
     /// PD_W0018 — server-authoritative level change (up on xp gain, DOWN on a
     /// death penalty). The GDScript handler sets the level, mirrors the bar, and
@@ -667,11 +700,35 @@ impl NetClient {
     /// PD_W0023 — quest turn-in by id. The server looks the id up in its own
     /// quest table, computes the XP itself, records the completion (a quest
     /// pays once per character, ever), and replies with `XpGained` / `LevelUp`.
+    /// As of PD_W0024 it also requires every server-counted objective met,
+    /// else a `quest_rejected` comes back.
     #[func]
     fn send_complete_quest(&mut self, quest_id: GString) -> bool {
         self.send_app(
             CHANNEL_SYSTEM,
             &ClientWorldMsg::CompleteQuest { quest_id: quest_id.to_string() },
+        )
+    }
+
+    /// PD_W0024 — accept a quest so the server starts counting its objectives.
+    /// Fire alongside the local QuestManager.add_quest (optimistic add); a
+    /// `quest_rejected` reply means roll the add back. giver_id is a scaffold
+    /// wire field with nothing to validate against yet — the bridge sends 0.
+    #[func]
+    fn send_accept_quest(&mut self, quest_id: GString) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::AcceptQuest { quest_id: quest_id.to_string(), giver_id: 0 },
+        )
+    }
+
+    /// PD_W0024 — drop an active quest server-side (progress is forgotten;
+    /// re-accepting starts from zero). Pair to the journal's abandon action.
+    #[func]
+    fn send_abandon_quest(&mut self, quest_id: GString) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::AbandonQuest { quest_id: quest_id.to_string() },
         )
     }
 
@@ -1426,6 +1483,23 @@ enum Incoming {
     KillCredit {
         mob_name: String,
     },
+    QuestSnapshot {
+        active: Vec<(String, Vec<i32>)>,
+        completed: Vec<String>,
+    },
+    QuestProgress {
+        quest_id: String,
+        objective_index: u32,
+        count: i32,
+    },
+    QuestRejected {
+        quest_id: String,
+        reason: String,
+        rollback: bool,
+    },
+    QuestCompleted {
+        quest_id: String,
+    },
     LevelUp {
         new_level: u32,
         xp: i32,
@@ -1986,6 +2060,61 @@ impl NetClient {
                         &[GString::from(mob_name.as_str()).to_variant()],
                     );
                 }
+                Incoming::QuestSnapshot { active, completed } => {
+                    // Flatten the per-quest progress vectors into parallel
+                    // arrays (signal args are flat Packed arrays): quest i's
+                    // progress is the next objective_counts[i] values of
+                    // progress_flat.
+                    let mut active_ids = PackedStringArray::new();
+                    let mut objective_counts = PackedInt32Array::new();
+                    let mut progress_flat = PackedInt32Array::new();
+                    for (id, progress) in &active {
+                        active_ids.push(&GString::from(id.as_str()));
+                        objective_counts.push(progress.len() as i32);
+                        for p in progress {
+                            progress_flat.push(*p);
+                        }
+                    }
+                    let mut completed_ids = PackedStringArray::new();
+                    for id in &completed {
+                        completed_ids.push(&GString::from(id.as_str()));
+                    }
+                    self.base_mut().emit_signal(
+                        "quest_snapshot",
+                        &[
+                            active_ids.to_variant(),
+                            objective_counts.to_variant(),
+                            progress_flat.to_variant(),
+                            completed_ids.to_variant(),
+                        ],
+                    );
+                }
+                Incoming::QuestProgress { quest_id, objective_index, count } => {
+                    self.base_mut().emit_signal(
+                        "quest_progress",
+                        &[
+                            GString::from(quest_id.as_str()).to_variant(),
+                            (objective_index as i64).to_variant(),
+                            (count as i64).to_variant(),
+                        ],
+                    );
+                }
+                Incoming::QuestRejected { quest_id, reason, rollback } => {
+                    self.base_mut().emit_signal(
+                        "quest_rejected",
+                        &[
+                            GString::from(quest_id.as_str()).to_variant(),
+                            GString::from(reason.as_str()).to_variant(),
+                            rollback.to_variant(),
+                        ],
+                    );
+                }
+                Incoming::QuestCompleted { quest_id } => {
+                    self.base_mut().emit_signal(
+                        "quest_completed",
+                        &[GString::from(quest_id.as_str()).to_variant()],
+                    );
+                }
                 Incoming::LevelUp { new_level, xp, xp_to_next } => {
                     self.base_mut().emit_signal(
                         "level_up",
@@ -2386,6 +2515,18 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             to_next,
         },
         ServerWorldMsg::KillCredit { mob_name } => Incoming::KillCredit { mob_name },
+        ServerWorldMsg::QuestSnapshot { active, completed } => {
+            Incoming::QuestSnapshot { active, completed }
+        }
+        ServerWorldMsg::QuestProgress { quest_id, objective_index, count } => {
+            Incoming::QuestProgress { quest_id, objective_index, count }
+        }
+        ServerWorldMsg::QuestRejected { quest_id, reason, rollback } => {
+            Incoming::QuestRejected { quest_id, reason, rollback }
+        }
+        ServerWorldMsg::QuestCompleted { quest_id } => {
+            Incoming::QuestCompleted { quest_id }
+        }
         ServerWorldMsg::LevelUp { new_level, xp, xp_to_next } => Incoming::LevelUp {
             new_level,
             xp,

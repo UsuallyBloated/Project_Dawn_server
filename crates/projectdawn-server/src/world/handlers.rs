@@ -337,9 +337,25 @@ pub enum Outcome {
         mob: super::zones::MobTemplate,
     },
     /// PD_W0023 — server-authoritative quest turn-in. The tick loop validates
-    /// against the server quest table + the character's completed set, persists
-    /// the completion FIRST, then awards the server-computed XP.
+    /// against the server quest table + the character's completed set +
+    /// (PD_W0024) full objective progress, persists the completion FIRST,
+    /// then awards the server-computed XP.
     CompleteQuestIntent {
+        responder: u64,
+        quest_id: String,
+    },
+    /// PD_W0024 — accept a quest so the server starts counting its objectives.
+    /// The tick loop validates (known id, level_req, not active, not
+    /// completed, active cap), seeds zeroed progress, and persists; failures
+    /// answer with a private `QuestRejected`.
+    AcceptQuestIntent {
+        responder: u64,
+        quest_id: String,
+    },
+    /// PD_W0024 — drop an active quest: the tick loop forgets the quest and
+    /// deletes its progress row (re-accepting starts from zero; the completed
+    /// record is untouched, so no repeat payout opens up).
+    AbandonQuestIntent {
         responder: u64,
         quest_id: String,
     },
@@ -366,6 +382,17 @@ pub enum Outcome {
     InspectIntent {
         target_char_id: i64,
     },
+}
+
+/// Real quest ids are snake_case; rejecting anything else at the door keeps
+/// attacker-controlled strings (newlines, control chars) out of the logs and
+/// the tick loop entirely. Shared by the Accept / Abandon / CompleteQuest arms.
+fn quest_id_well_formed(quest_id: &str) -> bool {
+    !quest_id.is_empty()
+        && quest_id.len() <= 64
+        && quest_id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 pub fn handle_message(
@@ -582,21 +609,37 @@ pub fn handle_message(
         }
 
         ClientWorldMsg::CompleteQuest { quest_id } => {
-            // Real quest ids are snake_case; rejecting anything else at the
-            // door keeps attacker-controlled strings (newlines, control chars)
-            // out of the logs and the tick loop entirely.
-            let well_formed = !quest_id.is_empty()
-                && quest_id.len() <= 64
-                && quest_id
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
-            if !conn.ready || !well_formed {
+            if !conn.ready || !quest_id_well_formed(&quest_id) {
                 return Outcome::Continue;
             }
             // Validated + awarded in the tick loop (needs the DB pool to record
             // the completion BEFORE granting, so a crash can't leave a paid
             // quest replayable after relog).
             Outcome::CompleteQuestIntent {
+                responder: conn.char_id as u64,
+                quest_id,
+            }
+        }
+
+        ClientWorldMsg::AcceptQuest { quest_id, giver_id: _ } => {
+            // PD_W0024 — validated in the tick loop (needs the quest table +
+            // the connection's active/completed sets + the DB pool to persist
+            // the zeroed progress row). giver_id is scaffold-era: NPCs aren't
+            // server entities yet, so there's nothing to validate it against.
+            if !conn.ready || !quest_id_well_formed(&quest_id) {
+                return Outcome::Continue;
+            }
+            Outcome::AcceptQuestIntent {
+                responder: conn.char_id as u64,
+                quest_id,
+            }
+        }
+
+        ClientWorldMsg::AbandonQuest { quest_id } => {
+            if !conn.ready || !quest_id_well_formed(&quest_id) {
+                return Outcome::Continue;
+            }
+            Outcome::AbandonQuestIntent {
                 responder: conn.char_id as u64,
                 quest_id,
             }
@@ -1454,13 +1497,71 @@ pub fn send_xp_gained(
     }
 }
 
-/// PD_W0023 — private quest kill credit to one recipient (the solo killer, a
-/// pet's owner, or each online group member on the XP split). The client routes
-/// `mob_name` to `QuestManager.notify_kill` so "kill N X" objectives advance
-/// online. Deliberately single-recipient, not the `EntityDied` broadcast, so a
-/// bystander who only witnessed the death gets no credit.
-pub fn send_kill_credit(server: &mut RenetServer, recipient_id: ClientId, mob_name: &str) {
-    let msg = ServerWorldMsg::KillCredit { mob_name: mob_name.to_string() };
+/// PD_W0024 — private quest-journal seed on EnterWorld: every active quest
+/// with its per-objective progress, plus the character's full completed set
+/// (so the client can grey out re-offers instead of letting a player redo a
+/// quest for zero XP). This is what makes the journal survive relog/restart.
+pub fn send_quest_snapshot(
+    server: &mut RenetServer,
+    recipient_id: ClientId,
+    active: Vec<(String, Vec<i32>)>,
+    completed: Vec<String>,
+) {
+    let msg = ServerWorldMsg::QuestSnapshot { active, completed };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// PD_W0024 — one objective counter moved, private to the quest holder (each
+/// group member tracks their own counts). `count` is absolute, not a delta.
+/// Replaced `KillCredit` as the online journal driver (the server counts
+/// kills now — deliberately single-recipient, never the `EntityDied`
+/// broadcast, so a bystander who only witnessed the death gets no credit).
+pub fn send_quest_progress(
+    server: &mut RenetServer,
+    recipient_id: ClientId,
+    quest_id: &str,
+    objective_index: u32,
+    count: i32,
+) {
+    let msg = ServerWorldMsg::QuestProgress {
+        quest_id: quest_id.to_string(),
+        objective_index,
+        count,
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// PD_W0024 — a turn-in succeeded and paid out. Private to the turn-in-er;
+/// the client flips its journal entry to COMPLETED off this (never
+/// optimistically — the server may have rejected instead).
+pub fn send_quest_completed(server: &mut RenetServer, recipient_id: ClientId, quest_id: &str) {
+    let msg = ServerWorldMsg::QuestCompleted { quest_id: quest_id.to_string() };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// PD_W0024 — a quest accept / abandon / turn-in was refused; the client
+/// prints `reason` to the combat log (a redo attempt now gets a visible line
+/// instead of silently paying nothing). `rollback = true` ONLY for accept-phase
+/// refusals, telling the client to undo its optimistic journal add; a turn-in
+/// refusal passes `false` so the client keeps the still-tracked entry.
+pub fn send_quest_rejected(
+    server: &mut RenetServer,
+    recipient_id: ClientId,
+    quest_id: &str,
+    reason: &str,
+    rollback: bool,
+) {
+    let msg = ServerWorldMsg::QuestRejected {
+        quest_id: quest_id.to_string(),
+        reason: reason.to_string(),
+        rollback,
+    };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
     }

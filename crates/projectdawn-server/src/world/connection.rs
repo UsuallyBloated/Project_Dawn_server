@@ -175,6 +175,18 @@ pub struct PerConnection {
     /// `completed_quests` table at login; the tick loop checks it before
     /// awarding a `CompleteQuest` and inserts after the DB write succeeds.
     pub completed_quests: std::collections::HashSet<String>,
+    /// PD_W0024: accepted-but-not-completed quests → per-objective progress
+    /// counts, in the same order as the quest's objectives in quests.toml.
+    /// Loaded from the `active_quests` table at login (normalized in
+    /// `from_spawn`), mutated by the kill sweep + accept/abandon/turn-in
+    /// intents, and persisted per-mutation (`db::save_quest_progress`) — NOT
+    /// via the 60s checkpoint, so neither a crash nor the disconnect flush
+    /// can lose counted kills.
+    pub active_quests: std::collections::HashMap<String, Vec<i32>>,
+    /// Quest ids whose progress changed this tick (the kill sweep is sync, so
+    /// it can't await the DB). Drained by the end-of-tick quest flush and by
+    /// the disconnect path in `reap_connection`.
+    pub quests_dirty: std::collections::HashSet<String>,
     /// Highest move sequence we've accepted from this client. Out-of-order
     /// packets get dropped (unreliable channel, so reorder is expected).
     pub last_move_seq: u32,
@@ -389,6 +401,33 @@ pub struct PerConnection {
 impl PerConnection {
     pub fn from_spawn(spawn: crate::db::CharacterSpawn, now: Instant) -> Self {
         let pos = Vec3f::from_tuple(spawn.pos);
+        let completed_quests: std::collections::HashSet<String> =
+            spawn.completed_quests.into_iter().collect();
+        // Normalize the loaded journal against the live quest table: drop
+        // quests that no longer exist in quests.toml or that are somehow both
+        // active and completed (a crash between the completion record and the
+        // active-row delete), and shape every progress vector to exactly one
+        // non-negative count per objective so QuestProgress indexing and
+        // objectives_met never see a malformed row.
+        let active_quests: std::collections::HashMap<String, Vec<i32>> = spawn
+            .active_quests
+            .into_iter()
+            .filter_map(|(quest_id, mut progress)| {
+                let Some(quest) = super::quests::lookup(&quest_id) else {
+                    tracing::warn!(quest_id = ?quest_id,
+                        "active quest not in quests.toml; dropping from journal");
+                    return None;
+                };
+                if completed_quests.contains(&quest_id) {
+                    return None;
+                }
+                progress.resize(quest.objectives.len(), 0);
+                for p in &mut progress {
+                    *p = (*p).max(0);
+                }
+                Some((quest_id, progress))
+            })
+            .collect();
         Self {
             char_id: spawn.char_id,
             account_id: spawn.account_id,
@@ -417,7 +456,9 @@ impl PerConnection {
             corpse_pending: false,
             death_lost_xp: 0,
             pending_res_offer: None,
-            completed_quests: spawn.completed_quests.into_iter().collect(),
+            completed_quests,
+            active_quests,
+            quests_dirty: std::collections::HashSet::new(),
             last_move_seq: 0,
             latest_direction: Vec3f::ZERO,
             last_move_received: None,
@@ -577,7 +618,32 @@ mod tests {
             pos: (0.0, 0.0, 0.0),
             yaw: 0.0,
             completed_quests: Vec::new(),
+            active_quests: Vec::new(),
         }
+    }
+
+    // PD_W0024 — the login-time journal normalization: unknown quest ids
+    // drop, an active quest that is somehow also completed drops (crash
+    // between the completion record and the active-row delete), short
+    // progress vectors pad with zeros, and negative counts clamp to 0. A
+    // malformed row must only ever UNDER-credit.
+    #[test]
+    fn from_spawn_normalizes_the_loaded_journal() {
+        let mut spawn = test_spawn();
+        spawn.completed_quests = vec!["rat_infestation".into()];
+        spawn.active_quests = vec![
+            ("wolf_threat".into(), vec![-2]),        // negative -> clamps to 0
+            ("rat_infestation".into(), vec![8]),     // also completed -> drops
+            ("deleted_old_quest".into(), vec![1]),   // not in quests.toml -> drops
+            ("test_q1".into(), Vec::new()),          // short (corrupt row) -> pads to len 1
+        ];
+        let conn = PerConnection::from_spawn(spawn, Instant::now());
+        assert_eq!(conn.active_quests.len(), 2);
+        assert_eq!(conn.active_quests.get("wolf_threat"), Some(&vec![0]));
+        assert_eq!(conn.active_quests.get("test_q1"), Some(&vec![0]));
+        assert!(!conn.active_quests.contains_key("rat_infestation"));
+        assert!(!conn.active_quests.contains_key("deleted_old_quest"));
+        assert!(conn.quests_dirty.is_empty());
     }
 
     #[test]

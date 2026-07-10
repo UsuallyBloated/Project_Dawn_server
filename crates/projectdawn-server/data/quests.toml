@@ -1,37 +1,53 @@
-# Server-side quest table — the authoritative source for quest XP rewards.
-# Mirror of the client's `data/quest_definitions.gd` (id / level_req /
-# reward_tier); when a quest is added or edited there, mirror it here in the
-# same commit (the same lockstep discipline as spells.toml). The server
-# computes the actual XP itself (tier% x the cubic band at level_req), so a
-# client can never name its own reward amount.
+# Server-side quest table — the authoritative source for quest XP rewards AND
+# (since PD_W0024) quest objectives. Mirror of the client's
+# `data/quest_definitions.gd` (id / level_req / reward_tier / kill objectives);
+# when a quest is added or edited there, mirror it here in the same commit (the
+# same lockstep discipline as spells.toml). The server computes the actual XP
+# itself (tier% x the cubic band at level_req) and counts objective kills
+# itself, so a client can never name its own reward or skip the gameplay.
 #
-# reward_tier must be one of: trivial / standard / hard / named
-# (fractions live in world/quests.rs REWARD_TIERS, mirroring the GDScript
+# reward_tier must be one of: trivial / standard / hard / named (fractions are
+# in world/quests.rs fn tier_fraction, mirroring the GDScript
 # QuestDefinitions.REWARD_TIERS).
+#
+# objectives: only kind = "kill" is counted server-side. target matches mob
+# names by the same bidirectional lowercased substring rule as the client's
+# QuestManager.notify_kill ("Wolf" ticks for "Grey Wolf" and vice versa).
+# Flavor objectives like test_q1's "report back" line are client display text
+# only — the turn-in itself is that step. Every quest MUST list at least one
+# objective (an objective-free quest would be a free turn-in; the parser
+# rejects it).
 
 [[quest]]
 id = "wolf_threat"
 level_req = 1
 reward_tier = "standard"
+objectives = [ { kind = "kill", target = "Wolf", count = 5 } ]
 
 [[quest]]
 id = "rat_infestation"
 level_req = 1
 reward_tier = "trivial"
+objectives = [ { kind = "kill", target = "Rat", count = 8 } ]
 
 [[quest]]
 id = "gnoll_raiders"
 level_req = 3
 reward_tier = "standard"
+objectives = [ { kind = "kill", target = "Gnoll", count = 8 } ]
 
 [[quest]]
 id = "rotfang_hunt"
 level_req = 5
 reward_tier = "named"
+objectives = [ { kind = "kill", target = "Rotfang", count = 1 } ]
 
 # Test Panel quest ("Slay the Infected Wolves") — dev/test content, but it must
-# exist here or its turn-in pays nothing in launcher mode.
+# exist here or its turn-in pays nothing in launcher mode. Its client journal
+# also shows a "Report back to Captain Aldren" flavor line; server-side the
+# five wolf kills are the whole requirement.
 [[quest]]
 id = "test_q1"
 level_req = 1
 reward_tier = "standard"
+objectives = [ { kind = "kill", target = "Wolf", count = 5 } ]

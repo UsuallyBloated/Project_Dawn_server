@@ -84,7 +84,19 @@ use serde::{Deserialize, Serialize};
 /// id; the server computes the reward from its own quest table and pays once
 /// per character, ever — replaces `GrantQuestXp` for quests, which is now
 /// dev-gated like HealSelf).
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3233; // "PD_W0023"
+///
+/// PD_W0024: quest phase 2 — objective STATE moves server-side. The server's
+/// quest table gains per-quest objectives, kills are counted server-side in
+/// `active_quests` (survives relog/restart), and turn-in requires every
+/// objective met (closes the forged-`CompleteQuest`-without-kills hole).
+/// Wires up the dormant scaffold variants `ClientWorldMsg::AcceptQuest` /
+/// `AbandonQuest` (mid-enum, never sent before, so reuse is positionally
+/// safe) and appends `ServerWorldMsg::QuestSnapshot` (journal seed on
+/// EnterWorld) / `QuestProgress` (private per-increment) / `QuestRejected`
+/// (visible accept/turn-in feedback) / `QuestCompleted` (turn-in success
+/// confirm) at the END of that enum. `KillCredit` stays in the enum but is
+/// no longer sent: `QuestProgress` replaces it as the journal driver.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3234; // "PD_W0024"
 
 pub type EntityId = u64;
 
@@ -465,13 +477,28 @@ pub enum ClientWorldMsg {
     },
 
     // Quests
+    /// PD_W0024 — accept a quest so the server starts counting its objectives
+    /// (a dormant scaffold variant until then; reusing it is positionally
+    /// safe because it was never sent). Sent when the player takes a quest
+    /// from NPC dialogue. The server validates (known id, level_req met, not
+    /// already active, not already completed, active-quest cap) and on
+    /// failure answers `QuestRejected`; success is silent (the client already
+    /// added the quest optimistically). `giver_id` is unused for now — NPCs
+    /// aren't server entities yet; send 0 (giver/proximity validation comes
+    /// with the faction system).
     AcceptQuest {
         quest_id: String,
         giver_id: EntityId,
     },
+    /// PD_W0024 — drop an active quest: the server forgets the quest and its
+    /// objective progress (re-accepting later starts from zero; the permanent
+    /// completion record is untouched, so no repeat payout opens up). Also a
+    /// reused dormant scaffold variant.
     AbandonQuest {
         quest_id: String,
     },
+    /// Dormant scaffold — never sent. The live turn-in is `CompleteQuest`
+    /// (PD_W0023, tail of this enum). Kept only for positional stability.
     TurnInQuest {
         quest_id: String,
         npc_id: EntityId,
@@ -1316,6 +1343,51 @@ pub enum ServerWorldMsg {
     /// who merely witnessed the death does NOT get quest credit.
     KillCredit {
         mob_name: String,
+    },
+
+    /// PD_W0024 — full quest-journal seed, sent PRIVATELY once on EnterWorld.
+    /// `active` is `(quest_id, per-objective progress counts)` for every quest
+    /// the character has accepted but not completed; `completed` is every
+    /// quest id that has ever paid out (so the client can grey out re-offers
+    /// instead of letting the player redo a quest for zero XP). This is what
+    /// makes the journal survive relog and server restart.
+    QuestSnapshot {
+        active: Vec<(String, Vec<i32>)>,
+        completed: Vec<String>,
+    },
+
+    /// PD_W0024 — one objective counter moved, sent PRIVATELY to the quest
+    /// holder (each group member tracks their own progress). `count` is the
+    /// new absolute value, not a delta, so a dropped packet self-heals on the
+    /// next increment. Replaces `KillCredit` as the online journal driver —
+    /// the server counts kills now, the client just renders.
+    QuestProgress {
+        quest_id: String,
+        objective_index: u32,
+        count: i32,
+    },
+
+    /// PD_W0024 — an Accept/Abandon/CompleteQuest was refused (unknown id,
+    /// level too low, already completed, objectives incomplete, ...). The
+    /// client prints `reason` to the combat log — a redo attempt now gets a
+    /// visible line instead of silently paying nothing. `rollback` is true
+    /// ONLY for accept-phase rejections: it tells the client to undo the
+    /// optimistic journal add (the server never started tracking this quest).
+    /// A turn-in rejection sends `rollback = false` so the client keeps the
+    /// still-tracked active entry (the server did NOT string-match reasons —
+    /// it knows which action it refused).
+    QuestRejected {
+        quest_id: String,
+        reason: String,
+        rollback: bool,
+    },
+
+    /// PD_W0024 — a turn-in succeeded and paid out (the XP itself rides the
+    /// usual `XpGained` / `LevelUp`). Private to the turn-in-er. The client
+    /// flips its journal entry to COMPLETED off this, never optimistically —
+    /// the server may have rejected the turn-in instead.
+    QuestCompleted {
+        quest_id: String,
     },
 }
 

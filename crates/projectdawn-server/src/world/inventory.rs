@@ -1656,6 +1656,7 @@ mod tests {
             coins: protocol::world::Coins::ZERO, bank_coins: protocol::world::Coins::ZERO, zone: None,
             pos: (0.0, 0.0, 0.0), yaw: 0.0,
             completed_quests: Vec::new(),
+            active_quests: Vec::new(),
         };
         crate::world::connection::PerConnection::from_spawn(spawn, Instant::now())
     }

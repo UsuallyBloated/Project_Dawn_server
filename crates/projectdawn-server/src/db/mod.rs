@@ -406,6 +406,11 @@ pub struct CharacterSpawn {
     /// Loaded into `PerConnection.completed_quests`; the tick loop consults it
     /// before granting a `CompleteQuest` reward.
     pub completed_quests: Vec<String>,
+    /// Accepted-but-not-completed quests with per-objective progress counts
+    /// (PD_W0024, `active_quests` table). Loaded into
+    /// `PerConnection.active_quests` and fanned to the client as
+    /// `QuestSnapshot` on EnterWorld — the persistent quest journal.
+    pub active_quests: Vec<(String, Vec<i32>)>,
 }
 
 #[derive(FromRow)]
@@ -499,6 +504,27 @@ pub async fn load_character(
             .fetch_all(pool)
             .await?;
 
+    // Active quest journal (PD_W0024): progress is a JSON array of counts.
+    // A malformed row decodes to an empty vector, which `objectives_met`
+    // treats as NOT met — corruption can only under-credit, never unlock a
+    // free turn-in.
+    let active_rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT quest_id, progress FROM active_quests WHERE char_id = ?1")
+            .bind(char_id)
+            .fetch_all(pool)
+            .await?;
+    let active_quests: Vec<(String, Vec<i32>)> = active_rows
+        .into_iter()
+        .map(|(quest_id, json)| {
+            let progress: Vec<i32> = serde_json::from_str(&json).unwrap_or_else(|e| {
+                tracing::warn!(char_id, quest_id = %quest_id, error = %e,
+                    "malformed active_quests.progress; resetting to empty");
+                Vec::new()
+            });
+            (quest_id, progress)
+        })
+        .collect();
+
     Ok(CharacterSpawn {
         char_id: row.id,
         account_id: row.account_id,
@@ -541,7 +567,46 @@ pub async fn load_character(
         ),
         yaw: row.yaw.unwrap_or(0.0),
         completed_quests,
+        active_quests,
     })
+}
+
+/// Upsert one active quest's objective progress (PD_W0024). Written
+/// per-mutation (accept = zeros, each counted kill) rather than on the 60s
+/// checkpoint — quest kills are rare, and immediate writes mean neither a
+/// crash nor the disconnect flush can lose counted progress.
+pub async fn save_quest_progress(
+    pool: &SqlitePool,
+    char_id: i64,
+    quest_id: &str,
+    progress: &[i32],
+) -> AuthResult<()> {
+    let json = serde_json::to_string(progress).expect("Vec<i32> serializes");
+    sqlx::query(
+        "INSERT INTO active_quests (char_id, quest_id, progress) VALUES (?1, ?2, ?3)
+         ON CONFLICT (char_id, quest_id) DO UPDATE SET progress = excluded.progress",
+    )
+    .bind(char_id)
+    .bind(quest_id)
+    .bind(json)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Drop one active quest row (abandon, or turn-in — the finished quest's
+/// permanent record is `completed_quests`, not this table). Idempotent.
+pub async fn delete_active_quest(
+    pool: &SqlitePool,
+    char_id: i64,
+    quest_id: &str,
+) -> AuthResult<()> {
+    sqlx::query("DELETE FROM active_quests WHERE char_id = ?1 AND quest_id = ?2")
+        .bind(char_id)
+        .bind(quest_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Record a quest turn-in (server-authoritative quest rewards). Idempotent —
@@ -1338,6 +1403,57 @@ mod corpse_loot_tests {
         let mut done = spawn.completed_quests.clone();
         done.sort();
         assert_eq!(done, vec!["rotfang_hunt".to_string(), "wolf_threat".to_string()]);
+    }
+
+    // Quest phase 2 (PD_W0024) — the active journal round-trips: an accept
+    // (zeroed progress) persists, a counted kill's upsert overwrites it, a
+    // delete (abandon / turn-in) removes it, and a malformed progress blob
+    // degrades to empty (which objectives_met treats as NOT met) instead of
+    // failing the whole character load.
+    #[tokio::test]
+    async fn active_quest_progress_round_trips() {
+        let (pool, _tmp) = fresh_pool().await;
+        let account = create_account(&pool, "journal", "hunter2!", None)
+            .await
+            .expect("account");
+        let char_id = create_character(&pool, account, "Journal", "Human", "Warrior")
+            .await
+            .expect("char");
+
+        let spawn = load_character(&pool, char_id).await.expect("load");
+        assert!(spawn.active_quests.is_empty(), "fresh char has an empty journal");
+
+        // Accept seeds zeros; a counted kill upserts the new counts.
+        save_quest_progress(&pool, char_id, "wolf_threat", &[0]).await.expect("accept");
+        save_quest_progress(&pool, char_id, "wolf_threat", &[3]).await.expect("upsert");
+        save_quest_progress(&pool, char_id, "rat_infestation", &[0]).await.expect("accept 2nd");
+
+        let spawn = load_character(&pool, char_id).await.expect("reload");
+        let mut active = spawn.active_quests.clone();
+        active.sort();
+        assert_eq!(
+            active,
+            vec![
+                ("rat_infestation".to_string(), vec![0]),
+                ("wolf_threat".to_string(), vec![3]),
+            ],
+        );
+
+        // Abandon / turn-in drops the row; deleting twice is a no-op.
+        delete_active_quest(&pool, char_id, "wolf_threat").await.expect("delete");
+        delete_active_quest(&pool, char_id, "wolf_threat").await.expect("repeat no-op");
+        let spawn = load_character(&pool, char_id).await.expect("reload 2");
+        assert_eq!(spawn.active_quests, vec![("rat_infestation".to_string(), vec![0])]);
+
+        // A hand-corrupted progress blob must not fail the load — it comes
+        // back as empty progress (not met), never as a free turn-in.
+        sqlx::query("UPDATE active_quests SET progress = 'not json' WHERE char_id = ?1")
+            .bind(char_id)
+            .execute(&pool)
+            .await
+            .expect("corrupt");
+        let spawn = load_character(&pool, char_id).await.expect("load survives corruption");
+        assert_eq!(spawn.active_quests, vec![("rat_infestation".to_string(), Vec::new())]);
     }
 
     // XP curve — a character saved on a previous curve (the old 1.5x geometric

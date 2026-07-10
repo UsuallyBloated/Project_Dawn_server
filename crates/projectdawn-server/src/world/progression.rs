@@ -45,10 +45,10 @@ const ZEM_KILL_SCALE: f64 = 3.5; // EQEmu's 35/10 calibration
 
 /// XP for killing a `mob_level` mob in a zone with modifier `zem` (pass
 /// [`ZEM_NORMAL`] as the default). Floored at 1 so every kill is worth something.
-/// NOTE: quest kill credit (`send_kill_credit`) rides inside the `xp > 0` blocks
-/// at the tick.rs kill sites, so this floor is also what keeps "kill N X"
-/// objectives advancing — if a future con-color rule lets this return 0, hoist
-/// the credit sends out of those blocks.
+/// NOTE: quest objective counting (PD_W0024, inside `award_kill`) rides the
+/// same `xp > 0` gate at the tick.rs kill sites, so this floor is also what
+/// keeps "kill N X" objectives advancing — if a future con-color rule lets
+/// this return 0, hoist the quest counting out of those blocks.
 pub fn kill_xp(mob_level: i32, zem: f32) -> i32 {
     let l = mob_level.max(1) as f64;
     (l * l * zem as f64 * ZEM_KILL_SCALE).round().max(1.0) as i32

@@ -403,12 +403,15 @@ fn fan_out_pet_buff_snapshot(
 }
 
 /// Award a kill to the creditor's group: split the XP pool (with
-/// GROUP_XP_BONUS when grouped) among online members and send each a private
-/// quest `KillCredit`. EQ semantics: the group split applies regardless of HOW
-/// the mob died — melee, spell, or pet — so all three kill paths route here.
-/// Solo creditor = full base XP. Owned victims (pets / charmed mobs) grant XP
-/// but no quest credit (the warder is literally named "Wolf"). Non-player or
-/// fully-disconnected creditors award nothing.
+/// GROUP_XP_BONUS when grouped) among online members and count the kill
+/// against each member's active quest objectives (PD_W0024 — the server
+/// counts kills now; each increment fans a private `QuestProgress`, which
+/// replaced the old `KillCredit`). EQ semantics: the group split applies
+/// regardless of HOW the mob died — melee, spell, or pet — so all three kill
+/// paths route here. Solo creditor = full base XP. Owned victims (pets /
+/// charmed mobs) award nothing — no XP and no quest credit (the warder is
+/// literally named "Wolf"). Non-player or fully-disconnected creditors award
+/// nothing.
 fn award_kill(
     server: &mut RenetServer,
     connections: &mut HashMap<ClientId, PerConnection>,
@@ -457,10 +460,29 @@ fn award_kill(
             // Server-authoritative xp/leveling (Slice 0): every member's share
             // runs through award_xp so leveling stays authoritative.
             super::progression::award_xp(server, conn, per_member);
-            // Private quest kill credit alongside the XP share (inside the
-            // liveness guard by construction). The client feeds it to
-            // QuestManager.notify_kill; witnesses outside the group get none.
-            super::handlers::send_kill_credit(server, *m, mob_name);
+            // PD_W0024 — count the kill against this member's active quest
+            // objectives (private, alongside the XP share, inside the liveness
+            // guard by construction — witnesses outside the group get none).
+            // Counts clamp at the requirement, mirroring the client's old
+            // notify_kill; each increment fans a private QuestProgress and
+            // marks the quest for the end-of-tick persist flush.
+            let mut updates: Vec<(String, u32, i32)> = Vec::new();
+            for (quest_id, progress) in conn.active_quests.iter_mut() {
+                let Some(quest) = super::quests::lookup(quest_id) else {
+                    continue; // normalized at login; stay defensive anyway
+                };
+                for (i, obj) in quest.objectives.iter().enumerate() {
+                    let Some(p) = progress.get_mut(i) else { continue };
+                    if *p < obj.count && super::quests::kill_matches(&obj.target, mob_name) {
+                        *p += 1;
+                        updates.push((quest_id.clone(), i as u32, *p));
+                    }
+                }
+            }
+            for (quest_id, index, count) in updates {
+                conn.quests_dirty.insert(quest_id.clone());
+                super::handlers::send_quest_progress(server, *m, &quest_id, index, count);
+            }
         }
     }
     tracing::info!(
@@ -942,6 +964,27 @@ async fn reap_connection(
                 conn.account_bank_items_dirty = false;
             }
         }
+        // PD_W0024 — reconcile quest state touched this tick on the way out (a
+        // reap can run before the end-of-tick flush reaches this connection;
+        // after removal from the map that flush won't see it). Same rule as
+        // step 6-ter: upsert if the quest is still active, else delete the row.
+        let dirty_quests: Vec<String> = conn.quests_dirty.drain().collect();
+        for quest_id in dirty_quests {
+            let result = match conn.active_quests.get(&quest_id) {
+                Some(progress) => {
+                    db::save_quest_progress(pool, conn.char_id, &quest_id, progress).await
+                }
+                None => db::delete_active_quest(pool, conn.char_id, &quest_id).await,
+            };
+            if let Err(e) = result {
+                tracing::warn!(
+                    char_id = conn.char_id,
+                    quest_id = %quest_id,
+                    error = %e,
+                    "final quest state flush on disconnect failed"
+                );
+            }
+        }
     }
 }
 
@@ -1399,6 +1442,19 @@ pub async fn run(
         // PD_W0023 — quest turn-ins (responder, quest_id), applied after dispatch
         // where the DB pool is in scope (the completion persists before the award).
         let mut complete_quest_intents: Vec<(u64, String)> = Vec::new();
+        // PD_W0024 — quest accept / abandon lifecycle intents in ONE
+        // arrival-order queue (not bucketed per-type), so a same-tick
+        // abandon-then-accept (or accept-then-abandon) on the same quest
+        // resolves to the client's LAST-stated intent instead of a per-type
+        // drain order. The drain only mutates in-memory `active_quests` +
+        // marks `quests_dirty`; the end-of-tick flush (step 6-ter) does the
+        // single reconciling DB write, so a forged storm can't amplify into an
+        // awaited write per message.
+        enum QuestLifecycle {
+            Accept,
+            Abandon,
+        }
+        let mut quest_lifecycle_intents: Vec<(u64, QuestLifecycle, String)> = Vec::new();
         // Track 12 Piece A — pet commands. Buffered to apply after
         // message dispatch so we can mutate `enemies` (where pets
         // live) without overlapping the handler's mutable
@@ -1807,6 +1863,12 @@ pub async fn run(
                         Outcome::CompleteQuestIntent { responder, quest_id } => {
                             complete_quest_intents.push((responder, quest_id));
                         }
+                        Outcome::AcceptQuestIntent { responder, quest_id } => {
+                            quest_lifecycle_intents.push((responder, QuestLifecycle::Accept, quest_id));
+                        }
+                        Outcome::AbandonQuestIntent { responder, quest_id } => {
+                            quest_lifecycle_intents.push((responder, QuestLifecycle::Abandon, quest_id));
+                        }
                         Outcome::Continue => {}
                     }
                 }
@@ -2041,6 +2103,20 @@ pub async fn run(
             // first advance fires.
             if let Some(new_conn) = connections.get(new_id) {
                 handlers::send_skill_progress_snapshot(&mut server, *new_id, new_conn);
+            }
+            // PD_W0024 — seed the joiner's quest journal: every active quest
+            // with its per-objective progress, plus the full completed set
+            // (so the client greys out re-offers of finished quests). This is
+            // what makes the journal survive relog and server restart.
+            if let Some(new_conn) = connections.get(new_id) {
+                let active: Vec<(String, Vec<i32>)> = new_conn
+                    .active_quests
+                    .iter()
+                    .map(|(id, p)| (id.clone(), p.clone()))
+                    .collect();
+                let completed: Vec<String> =
+                    new_conn.completed_quests.iter().cloned().collect();
+                handlers::send_quest_snapshot(&mut server, *new_id, active, completed);
             }
             // Track 5 sub-task 1B — seed the new joiner with alive enemies
             // in their AOI neighbourhood. Track 7: filter by aoi.can_see
@@ -7010,22 +7086,28 @@ pub async fn run(
             tracing::info!(char_id = responder, corpse_id, xp_percent, refund, "resurrection accepted");
         }
 
-        // 4k-quest. PD_W0023 — server-authoritative quest turn-ins. The reward
-        //      comes from the server's own quest table (never a client amount),
-        //      and each quest pays once per character, ever: reject ids the
-        //      character already completed, persist the completion FIRST (a
-        //      crash between award and record could otherwise leave a paid
-        //      quest replayable after relog), then award through award_xp.
+        // 4k-quest. PD_W0023/24 — server-authoritative quest turn-ins. The
+        //      reward comes from the server's own quest table (never a client
+        //      amount), the turn-in must be backed by real counted gameplay
+        //      (in the journal + every objective met — PD_W0024), and each
+        //      quest pays once per character, ever: reject ids the character
+        //      already completed, persist the completion FIRST (a crash
+        //      between award and record could otherwise leave a paid quest
+        //      replayable after relog), then award through award_xp. Every
+        //      rejection answers with a private QuestRejected so the player
+        //      sees WHY instead of silently getting nothing.
         for (responder, quest_id) in complete_quest_intents.drain(..) {
             let responder_cid = responder as ClientId;
             let Some(quest) = super::quests::lookup(&quest_id) else {
                 // {:?} escapes control chars — the id is attacker-controlled and
                 // a raw newline could forge log lines in the triage artifact.
                 tracing::info!(char_id = responder, quest_id = ?quest_id, "quest turn-in rejected — unknown quest id");
+                handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Unknown quest.", false);
                 continue;
             };
             let Some(reward) = super::quests::xp_reward_for(&quest_id) else {
                 tracing::warn!(char_id = responder, quest_id = %quest_id, "quest turn-in rejected — bad reward tier in quests.toml");
+                handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Quest data error.", false);
                 continue;
             };
             let Some(conn_ro) = connections.get(&responder_cid) else {
@@ -7037,21 +7119,117 @@ pub async fn run(
             // actually have.
             if conn_ro.level < quest.level_req {
                 tracing::info!(char_id = responder, quest_id = %quest_id, level = conn_ro.level, level_req = quest.level_req, "quest turn-in rejected — below level_req");
+                handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "You are too low level for this quest.", false);
                 continue;
             }
             if conn_ro.completed_quests.contains(&quest_id) {
                 tracing::info!(char_id = responder, quest_id = %quest_id, "quest turn-in rejected — already completed");
+                handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "You have already completed this quest.", false);
+                continue;
+            }
+            // PD_W0024 — the objective check. The quest must actually be in
+            // the server-side journal (an AcceptQuest landed) with every
+            // count met. This closes the phase-1 residual exploit: a forged
+            // CompleteQuest with no kills behind it pays nothing.
+            let Some(progress) = conn_ro.active_quests.get(&quest_id) else {
+                tracing::info!(char_id = responder, quest_id = %quest_id, "quest turn-in rejected — not in journal");
+                handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "That quest is not in your journal.", false);
+                continue;
+            };
+            if !super::quests::objectives_met(quest, progress) {
+                tracing::info!(char_id = responder, quest_id = %quest_id, progress = ?progress, "quest turn-in rejected — objectives incomplete");
+                handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Quest objectives are not complete.", false);
                 continue;
             }
             if let Err(e) = db::record_quest_completion(&pool, responder as i64, &quest_id).await
             {
                 tracing::error!(char_id = responder, quest_id = %quest_id, error = %e, "record_quest_completion failed — reward not granted");
+                handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Server error — try again.", false);
                 continue;
+            }
+            // The active row is now redundant (completed_quests is the
+            // permanent record). A failed delete self-heals: the login
+            // normalization drops actives that are already completed.
+            if let Err(e) = db::delete_active_quest(&pool, responder as i64, &quest_id).await {
+                tracing::warn!(char_id = responder, quest_id = %quest_id, error = %e, "delete_active_quest after completion failed");
             }
             if let Some(conn) = connections.get_mut(&responder_cid) {
                 conn.completed_quests.insert(quest_id.clone());
+                conn.active_quests.remove(&quest_id);
+                conn.quests_dirty.remove(&quest_id);
+                // Send the completion confirm BEFORE the reward XP: both ride the
+                // same reliable-ordered channel, so the client sees QuestCompleted
+                // first and can tag the immediately-following XpGained as
+                // quest-sourced (for the "quest experience" chat line).
+                handlers::send_quest_completed(&mut server, responder_cid, &quest_id);
                 super::progression::award_xp(&mut server, conn, reward);
                 tracing::info!(char_id = responder, quest_id = %quest_id, reward, "quest completed");
+            }
+        }
+
+        // 4k-quest-lifecycle. PD_W0024 — accept / abandon, drained in ARRIVAL
+        //      order so a same-tick abandon-then-accept (or the reverse) on one
+        //      quest ends in the client's last-stated state. These only mutate
+        //      in-memory `active_quests` and mark `quests_dirty`; the single
+        //      reconciling DB write happens in the end-of-tick flush (step
+        //      6-ter: upsert if still active, delete if not). So a forged
+        //      accept/abandon storm costs at most one write per quest per tick,
+        //      never an awaited write per message.
+        for (responder, action, quest_id) in quest_lifecycle_intents.drain(..) {
+            let responder_cid = responder as ClientId;
+            match action {
+                QuestLifecycle::Accept => {
+                    // Rejections here are accept-phase, so `rollback = true`:
+                    // the client undoes its optimistic journal add.
+                    let Some(quest) = super::quests::lookup(&quest_id) else {
+                        tracing::info!(char_id = responder, quest_id = ?quest_id, "quest accept rejected — unknown quest id");
+                        handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Unknown quest.", true);
+                        continue;
+                    };
+                    let Some(conn) = connections.get_mut(&responder_cid) else {
+                        continue; // disconnected mid-tick
+                    };
+                    if conn.level < quest.level_req {
+                        tracing::info!(char_id = responder, quest_id = %quest_id, level = conn.level, level_req = quest.level_req, "quest accept rejected — below level_req");
+                        handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "You are too low level for this quest.", true);
+                        continue;
+                    }
+                    if conn.completed_quests.contains(&quest_id) {
+                        tracing::info!(char_id = responder, quest_id = %quest_id, "quest accept rejected — already completed");
+                        handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "You have already completed this quest.", true);
+                        continue;
+                    }
+                    if conn.active_quests.contains_key(&quest_id) {
+                        // Already tracking (a duplicate send, e.g. a re-click
+                        // before the journal refreshed) — not an error, and no
+                        // rollback (the quest legitimately stays).
+                        tracing::debug!(char_id = responder, quest_id = %quest_id, "quest accept ignored — already active");
+                        continue;
+                    }
+                    if conn.active_quests.len() >= super::quests::MAX_ACTIVE {
+                        tracing::info!(char_id = responder, quest_id = %quest_id, "quest accept rejected — journal full");
+                        handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Your quest journal is full.", true);
+                        continue;
+                    }
+                    conn.active_quests.insert(quest_id.clone(), vec![0i32; quest.objectives.len()]);
+                    conn.quests_dirty.insert(quest_id.clone());
+                    tracing::info!(char_id = responder, quest_id = %quest_id, "quest accepted");
+                }
+                QuestLifecycle::Abandon => {
+                    // Re-accepting later starts from zero; the completion record
+                    // is a different table, so abandon can never re-open a payout.
+                    let Some(conn) = connections.get_mut(&responder_cid) else {
+                        continue;
+                    };
+                    if conn.active_quests.remove(&quest_id).is_none() {
+                        tracing::info!(char_id = responder, quest_id = ?quest_id, "quest abandon ignored — not active");
+                        continue;
+                    }
+                    // Mark dirty (not clear): the flush reconciles a now-absent
+                    // active quest into a row DELETE.
+                    conn.quests_dirty.insert(quest_id.clone());
+                    tracing::info!(char_id = responder, quest_id = %quest_id, "quest abandoned");
+                }
             }
         }
 
@@ -8173,6 +8351,35 @@ pub async fn run(
                     if visible.contains(recipient_id) {
                         server.send_message(*recipient_id, CHANNEL_POSITION, bytes.clone());
                     }
+                }
+            }
+        }
+
+        // 6-ter. PD_W0024 — flush quest state touched this tick (kill
+        //    increments, accepts, abandons — all sync, they only mark
+        //    `quests_dirty`). Drained EVERY tick (not the 60s checkpoint:
+        //    losing counted kills to a crash would be worse than the extra
+        //    writes) and RECONCILED to the DB: upsert the progress if the quest
+        //    is still active, else DELETE the row (abandoned). One write per
+        //    touched quest per tick, so a forged accept/abandon storm can't
+        //    amplify into an awaited write per message. A failed write
+        //    re-queues for next tick.
+        for conn in connections.values_mut() {
+            if conn.quests_dirty.is_empty() {
+                continue;
+            }
+            let dirty: Vec<String> = conn.quests_dirty.drain().collect();
+            for quest_id in dirty {
+                let result = match conn.active_quests.get(&quest_id) {
+                    Some(progress) => {
+                        db::save_quest_progress(&pool, conn.char_id, &quest_id, progress).await
+                    }
+                    None => db::delete_active_quest(&pool, conn.char_id, &quest_id).await,
+                };
+                if let Err(e) = result {
+                    tracing::error!(char_id = conn.char_id, quest_id = %quest_id, error = %e,
+                        "quest state flush failed — re-queueing for next tick");
+                    conn.quests_dirty.insert(quest_id);
                 }
             }
         }

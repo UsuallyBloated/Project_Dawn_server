@@ -7141,6 +7141,17 @@ pub async fn run(
                 handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Quest objectives are not complete.", false);
                 continue;
             }
+            // PD_W0024 slice B — item rewards. Pre-check capacity BEFORE the
+            // once-ever completion record: a full bag rejects the turn-in (keep
+            // the quest, make room, retry) rather than burning the completion
+            // with no item. rollback=false so the quest stays in the journal.
+            let rewards: Vec<(String, u32)> =
+                quest.item_rewards.iter().map(|p| (p.clone(), 1u32)).collect();
+            if !rewards.is_empty() && !conn_ro.inventory.can_accept(&rewards) {
+                tracing::info!(char_id = responder, quest_id = %quest_id, "quest turn-in rejected — inventory full");
+                handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Your inventory is full — make room and try again.", false);
+                continue;
+            }
             if let Err(e) = db::record_quest_completion(&pool, responder as i64, &quest_id).await
             {
                 tracing::error!(char_id = responder, quest_id = %quest_id, error = %e, "record_quest_completion failed — reward not granted");
@@ -7163,7 +7174,46 @@ pub async fn run(
                 // quest-sourced (for the "quest experience" chat line).
                 handlers::send_quest_completed(&mut server, responder_cid, &quest_id);
                 super::progression::award_xp(&mut server, conn, reward);
+                // Grant item reward(s). Capacity was pre-checked, so
+                // add_item_locating fits; the completion is already durable, so
+                // a crash here can only lose the item, never dup it (the forced
+                // save below closes even that window). Items ride the existing
+                // InventoryDelta + LootGranted path — same as looting.
+                for (path, count) in &rewards {
+                    match conn.inventory.add_item_locating(path, *count) {
+                        Ok((touched, leftover)) => {
+                            conn.inventory_dirty = true;
+                            if leftover > 0 {
+                                tracing::error!(char_id = responder, quest_id = %quest_id, %path, leftover, "quest reward partially placed despite capacity pre-check");
+                            }
+                            for slot in &touched {
+                                let (dpath, dcount) = match &conn.inventory.base[*slot] {
+                                    Some(e) => (Some(e.item_path.clone()), e.count),
+                                    None => (None, 0),
+                                };
+                                handlers::send_inventory_delta(&mut server, responder_cid, "base".to_string(), *slot as u32, dpath, dcount);
+                            }
+                            handlers::send_loot_granted(&mut server, responder_cid, path.clone(), count.saturating_sub(leftover));
+                        }
+                        Err(e) => {
+                            tracing::error!(char_id = responder, quest_id = %quest_id, %path, error = e, "quest reward grant failed after completion recorded");
+                        }
+                    }
+                }
                 tracing::info!(char_id = responder, quest_id = %quest_id, reward, "quest completed");
+            }
+            // Force-persist the granted inventory so a crash after the (already
+            // durable) completion record can't lose the reward. Rare path; a
+            // failed save just falls back to the periodic checkpoint.
+            if !rewards.is_empty() {
+                let inv = connections
+                    .get(&responder_cid)
+                    .map(|c| (c.char_id, c.inventory.to_rows()));
+                if let Some((cid, rows)) = inv {
+                    if let Err(e) = db::save_inventory(&pool, cid, &rows).await {
+                        tracing::warn!(char_id = responder, quest_id = %quest_id, error = %e, "quest reward inventory save failed (will retry on checkpoint)");
+                    }
+                }
             }
         }
 

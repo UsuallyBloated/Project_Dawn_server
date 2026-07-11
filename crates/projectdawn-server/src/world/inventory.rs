@@ -649,6 +649,56 @@ impl PlayerInventory {
         Ok((touched, remaining))
     }
 
+    /// Non-mutating pre-flight: would EVERY `(item_path, count)` grant fit in
+    /// the base slots the way `add_item_locating` places them (same-item
+    /// stacking, then empty slots at `max_stack`)? Compounds across the list —
+    /// an earlier grant that claims a slot reduces room for a later one.
+    ///
+    /// Used by the quest turn-in (PD_W0024 slice B): the once-ever completion
+    /// is recorded only if the reward will actually land, so a full bag rejects
+    /// the turn-in (keep the quest, "make room and try again") rather than
+    /// burning the completion with no item.
+    pub fn can_accept(&self, grants: &[(String, u32)]) -> bool {
+        // Working copy of just the base-slot occupancy (path, count).
+        let mut base: Vec<Option<(String, u32)>> = self
+            .base
+            .iter()
+            .map(|s| s.as_ref().map(|e| (e.item_path.clone(), e.count)))
+            .collect();
+        for (path, count) in grants {
+            let cap = items::max_stack(path);
+            let mut remaining = *count;
+            // Pass 1 — top up existing stacks of the same item.
+            for slot in base.iter_mut() {
+                if remaining == 0 {
+                    break;
+                }
+                if let Some((p, c)) = slot {
+                    if p == path && *c < cap {
+                        let put = remaining.min(cap - *c);
+                        *c += put;
+                        remaining -= put;
+                    }
+                }
+            }
+            // Pass 2 — claim empty slots, each capped at max_stack.
+            for slot in base.iter_mut() {
+                if remaining == 0 {
+                    break;
+                }
+                if slot.is_none() {
+                    let put = remaining.min(cap);
+                    *slot = Some((path.clone(), put));
+                    remaining -= put;
+                }
+            }
+            if remaining > 0 {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Banker slice 2 — read `(item_path, count)` at `(loc, slot)` without
     /// removing it. Supports `base` and `bag_<i>` (equip is not a banking
     /// source). `None` if the location is unsupported or the slot is empty.
@@ -1610,6 +1660,43 @@ mod tests {
             count: 1,
         });
         assert!(inv.equip_from_location("base", 0, 0).is_err());
+    }
+
+    #[test]
+    fn can_accept_matches_add_item_placement() {
+        // Quest turn-in pre-flight (PD_W0024 slice B). SWORD stacks at 1, so
+        // each needs its own empty base slot; POTION stacks at 10.
+        let mut inv = PlayerInventory::new();
+        // 8 empty slots — one unique item fits, and 8 distinct ones fit.
+        assert!(inv.can_accept(&[(SWORD.to_string(), 1)]));
+        // Fill 7 slots with distinct occupied items; 1 free slot remains.
+        for i in 0..7 {
+            inv.base[i] = Some(InventoryEntry {
+                item_path: format!("res://data/loot/items/filler_{i}.tres"),
+                count: 1,
+            });
+        }
+        assert!(inv.can_accept(&[(SWORD.to_string(), 1)]), "1 free slot fits 1 item");
+        // Two distinct non-stacking items need two slots -> only one free.
+        assert!(
+            !inv.can_accept(&[(SWORD.to_string(), 1), (ROBE.to_string(), 1)]),
+            "two items, one free slot -> rejected"
+        );
+        // A stackable partial fits in the last empty slot up to its cap.
+        assert!(inv.can_accept(&[(POTION.to_string(), 10)]));
+        assert!(!inv.can_accept(&[(POTION.to_string(), 11)]), "11 > one slot of cap 10");
+        // Fill the last slot -> nothing fits.
+        inv.base[7] = Some(InventoryEntry {
+            item_path: "res://data/loot/items/filler_7.tres".to_string(),
+            count: 1,
+        });
+        assert!(!inv.can_accept(&[(SWORD.to_string(), 1)]), "no free slot");
+        // Pre-check agrees with the real placement: what can_accept passes,
+        // add_item_locating places with zero leftover, and vice versa.
+        let mut inv2 = PlayerInventory::new();
+        assert!(inv2.can_accept(&[(POTION.to_string(), 25)]));
+        let (_t, leftover) = inv2.add_item_locating(POTION, 25).unwrap();
+        assert_eq!(leftover, 0);
     }
 
     #[test]

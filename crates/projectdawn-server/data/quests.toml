@@ -17,12 +17,18 @@
 # only — the turn-in itself is that step. Every quest MUST list at least one
 # objective (an objective-free quest would be a free turn-in; the parser
 # rejects it).
+#
+# item_rewards (PD_W0024 slice B): optional list of item `.tres` paths granted
+# server-side on turn-in (one each). Each path MUST exist in items.toml or the
+# parser rejects it (regenerate items.toml after adding the .tres). Kept in
+# lockstep with the client's QuestDefinitions.item_rewards.
 
 [[quest]]
 id = "wolf_threat"
 level_req = 1
 reward_tier = "standard"
 objectives = [ { kind = "kill", target = "Wolf", count = 5 } ]
+item_rewards = [ "res://data/loot/items/tarnished_silver_ring.tres" ]
 
 [[quest]]
 id = "rat_infestation"
@@ -35,12 +41,14 @@ id = "gnoll_raiders"
 level_req = 3
 reward_tier = "standard"
 objectives = [ { kind = "kill", target = "Gnoll", count = 8 } ]
+item_rewards = [ "res://data/loot/items/scouts_leather_boots.tres" ]
 
 [[quest]]
 id = "rotfang_hunt"
 level_req = 5
 reward_tier = "named"
 objectives = [ { kind = "kill", target = "Rotfang", count = 1 } ]
+item_rewards = [ "res://data/loot/items/hunters_medal.tres" ]
 
 # Test Panel quest ("Slay the Infected Wolves") — dev/test content, but it must
 # exist here or its turn-in pays nothing in launcher mode. Its client journal

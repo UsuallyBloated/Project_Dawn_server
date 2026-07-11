@@ -602,6 +602,16 @@ stack_size = 20
 vendor_price = 3
 
 [[item]]
+path = "res://data/loot/items/hunters_medal.tres"
+name = "Hunter's Medal"
+item_type = "neck"
+rarity = 1
+stack_size = 1
+str_bonus = 2
+con_bonus = 2
+vendor_price = 100
+
+[[item]]
 path = "res://data/loot/items/hunters_shortbow.tres"
 name = "Hunter's Shortbow"
 item_type = "weapon"
@@ -1079,6 +1089,17 @@ stack_size = 20
 vendor_price = 3
 
 [[item]]
+path = "res://data/loot/items/scouts_leather_boots.tres"
+name = "Scout's Leather Boots"
+item_type = "feet"
+rarity = 1
+stack_size = 1
+armor = 6
+armor_type = "leather"
+agi_bonus = 2
+vendor_price = 65
+
+[[item]]
 path = "res://data/loot/items/scraped_leather_boots.tres"
 name = "Scraped Leather Boots"
 item_type = "feet"
@@ -1258,6 +1279,14 @@ name = "Tarnished Silver Setting"
 item_type = "misc"
 stack_size = 10
 vendor_price = 12
+
+[[item]]
+path = "res://data/loot/items/tarnished_silver_ring.tres"
+name = "Tarnished Silver Ring"
+item_type = "ring"
+stack_size = 1
+agi_bonus = 1
+vendor_price = 30
 
 [[item]]
 path = "res://data/loot/items/tattered_cloth_tunic.tres"

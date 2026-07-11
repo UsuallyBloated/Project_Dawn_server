@@ -40,6 +40,13 @@ pub struct Quest {
     /// Required and non-empty: a quest with no objectives would be a free
     /// turn-in, so the parser rejects it (see `parse`).
     pub objectives: Vec<Objective>,
+    /// PD_W0024 slice B — item reward `.tres` paths granted server-side on
+    /// turn-in (one each of `count = 1`), keyed into the item registry
+    /// (`items.toml`). Optional; the parser rejects a path that isn't a known
+    /// item so a typo fails a test instead of silently granting nothing. Kept
+    /// in lockstep with the client's `QuestDefinitions.item_rewards`.
+    #[serde(default)]
+    pub item_rewards: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -125,6 +132,16 @@ fn parse(toml_str: &str) -> HashMap<String, Quest> {
                 o.count
             );
         }
+        // Every reward path must resolve in the item registry, or the turn-in
+        // would grant nothing — fail here (a test / first boot) instead.
+        for path in &q.item_rewards {
+            assert!(
+                super::items::lookup(path).is_some(),
+                "quest {:?}: item_reward {:?} is not a known item (regenerate items.toml)",
+                q.id,
+                path
+            );
+        }
     }
     file.quests.into_iter().map(|q| (q.id.clone(), q)).collect()
 }
@@ -192,6 +209,31 @@ mod tests {
     }
 
     #[test]
+    fn authored_item_rewards_resolve_in_the_registry() {
+        // table() ran the validating parse, which asserts every item_reward
+        // path resolves in items.toml — reaching here means they do. Anchor the
+        // wiring (lockstep with client QuestDefinitions.item_rewards).
+        assert_eq!(
+            lookup("wolf_threat").unwrap().item_rewards,
+            vec!["res://data/loot/items/tarnished_silver_ring.tres".to_string()]
+        );
+        assert_eq!(
+            lookup("gnoll_raiders").unwrap().item_rewards,
+            vec!["res://data/loot/items/scouts_leather_boots.tres".to_string()]
+        );
+        assert_eq!(
+            lookup("rotfang_hunt").unwrap().item_rewards,
+            vec!["res://data/loot/items/hunters_medal.tres".to_string()]
+        );
+        assert!(lookup("rat_infestation").unwrap().item_rewards.is_empty());
+        assert!(lookup("test_q1").unwrap().item_rewards.is_empty());
+        // The registry actually knows the reward item.
+        assert!(
+            crate::world::items::lookup("res://data/loot/items/hunters_medal.tres").is_some()
+        );
+    }
+
+    #[test]
     fn kill_match_mirrors_the_client_rule() {
         // The client rule (quest_manager.gd notify_kill): lowercased substring
         // containment in either direction. These anchors are the contract —
@@ -245,6 +287,11 @@ mod tests {
         // Unknown kind would silently never count.
         assert!(catch_unwind(|| parse(
             "[[quest]]\nid = \"q\"\nlevel_req = 1\nreward_tier = \"trivial\"\nobjectives = [ { kind = \"collect\", target = \"Pelt\", count = 1 } ]\n"
+        ))
+        .is_err());
+        // An item_reward path not in the registry would grant nothing at turn-in.
+        assert!(catch_unwind(|| parse(
+            "[[quest]]\nid = \"q\"\nlevel_req = 1\nreward_tier = \"trivial\"\nobjectives = [ { kind = \"kill\", target = \"Wolf\", count = 1 } ]\nitem_rewards = [ \"res://data/loot/items/does_not_exist.tres\" ]\n"
         ))
         .is_err());
     }

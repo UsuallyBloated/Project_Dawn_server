@@ -2158,6 +2158,16 @@ pub async fn run(
             if let Some(new_conn) = connections.get(new_id) {
                 handlers::send_coins_update(&mut server, *new_id, new_conn.coins);
             }
+            // Seed the new joiner with their persisted XP into the current level.
+            // ConnectOk carries level but not xp, so `apply_character` leaves the
+            // client bar at 0/band until the first XpGained; without this seed a
+            // relog reads "0/X" until the next kill snaps it up (playtest report).
+            // amount = 0 sets the bar absolutely with NO combat line client-side
+            // (`apply_remote_xp` only emits the "gained" line when amount > 0);
+            // kill / quest XpGained keep it in sync after.
+            if let Some(new_conn) = connections.get(new_id) {
+                handlers::send_xp_gained(&mut server, *new_id, 0, new_conn.xp, new_conn.xp_to_next);
+            }
             // PD_W0015 — seed the new joiner with their bank balance so the
             // BankWindow shows the right total the moment they open it (the
             // client caches it; deposit/withdraw keep it in sync after).

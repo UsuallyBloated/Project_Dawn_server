@@ -964,6 +964,82 @@ async fn reap_connection(
                 conn.account_bank_items_dirty = false;
             }
         }
+        // Inventory flush on the way out (mirrors coins/bank above). Without
+        // this, an equip / unequip / loot / move / drop in the last 60 s before
+        // a clean logout rolls back to the last periodic checkpoint on relog —
+        // e.g. an unequipped item reappears equipped. The periodic checkpoint
+        // owns this row too; here we just make logout not lose the tail.
+        if conn.inventory_dirty {
+            let rows = conn.inventory.to_rows();
+            if let Err(e) = db::save_inventory(pool, conn.char_id, &rows).await {
+                tracing::warn!(
+                    char_id = conn.char_id,
+                    error = %e,
+                    "final inventory save on disconnect failed"
+                );
+            } else {
+                conn.inventory_dirty = false;
+            }
+        }
+        // Resources (hp / mp / stamina / xp / level) — a kill's XP or a de-level
+        // right before logout shouldn't roll back either.
+        if conn.is_dirty_for_resource_persist() {
+            if let Err(e) = db::checkpoint_resources(
+                pool,
+                conn.char_id,
+                conn.hp,
+                conn.mp,
+                conn.stamina,
+                conn.xp,
+                conn.xp_to_next,
+                conn.level,
+            )
+            .await
+            {
+                tracing::warn!(
+                    char_id = conn.char_id,
+                    error = %e,
+                    "final resource save on disconnect failed"
+                );
+            } else {
+                conn.mark_resources_persisted();
+            }
+        }
+        // Passive skill scores — an advance (weapon / armor / casting) that
+        // landed since the last checkpoint shouldn't roll back on relog.
+        if conn.skills_dirty {
+            let mut rows: Vec<db::SkillRow> = Vec::new();
+            for (key, score) in &conn.weapon_skills {
+                rows.push(db::SkillRow {
+                    kind: "weapon".to_string(),
+                    key: key.clone(),
+                    score: *score,
+                });
+            }
+            for (key, score) in &conn.armor_skills {
+                rows.push(db::SkillRow {
+                    kind: "armor".to_string(),
+                    key: key.clone(),
+                    score: *score,
+                });
+            }
+            for (key, score) in &conn.casting_skills {
+                rows.push(db::SkillRow {
+                    kind: "casting".to_string(),
+                    key: key.clone(),
+                    score: *score,
+                });
+            }
+            if let Err(e) = db::save_skills(pool, conn.char_id, &rows).await {
+                tracing::warn!(
+                    char_id = conn.char_id,
+                    error = %e,
+                    "final skill save on disconnect failed"
+                );
+            } else {
+                conn.skills_dirty = false;
+            }
+        }
         // PD_W0024 — reconcile quest state touched this tick on the way out (a
         // reap can run before the end-of-tick flush reaches this connection;
         // after removal from the map that flush won't see it). Same rule as

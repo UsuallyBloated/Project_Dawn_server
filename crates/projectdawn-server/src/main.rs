@@ -19,14 +19,25 @@ async fn main() -> anyhow::Result<()> {
     // `Config::load` enforces PROJECTDAWN_NETCODE_KEY presence — we'll fail
     // loud here before binding any sockets if it's missing or malformed.
     let cfg = Config::load().context("loading server config")?;
+    // Surface the dev-command gate at boot so it's never ambiguous whether
+    // PD_DEV_CMDS is active (a `$env:` var persists across restarts in the same
+    // shell, the usual reason "/give still works after restarting without it").
+    // Matches `world::connection::dev_cmds_enabled` (env == "1").
+    let dev_cmds = std::env::var("PD_DEV_CMDS").as_deref() == Ok("1");
     tracing::info!(
         auth_bind = %cfg.auth_bind,
         world_bind = %cfg.world_bind,
         world_endpoint = %cfg.world_endpoint,
         db = %cfg.database_url,
         min_client = %cfg.min_client_version,
+        dev_cmds,
         "starting projectdawn-server"
     );
+    if dev_cmds {
+        tracing::warn!(
+            "PD_DEV_CMDS=1: dev commands (/give, dev spawn, HealSelf, GrantQuestXp) are ENABLED for ALL clients; do not run a public server with this set"
+        );
+    }
 
     let pool = db::open(&cfg.database_url).await?;
     db::migrate(&pool).await?;

@@ -1270,7 +1270,13 @@ pub fn handle_message(
         }
 
         ClientWorldMsg::GmCommand { line } => {
-            if !conn.in_world {
+            // DEV-ONLY (PD_DEV_CMDS / is_dev), like HealSelf / DevSpawnMob. Was
+            // ungated: the exploit audit's top finding was that any in-world
+            // client could mint any registry item free and persisted (also an
+            // unlimited coin source via vendor resale). The gate closes that and
+            // still backs the Test Panel's server-side item grants (which run
+            // with PD_DEV_CMDS=1).
+            if !conn.in_world || !conn.is_dev {
                 return Outcome::Continue;
             }
             // Parse `give <item name> [qty]`. Trailing integer = stack

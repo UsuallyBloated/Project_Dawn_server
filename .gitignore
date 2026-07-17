@@ -6,6 +6,8 @@
 *.db-journal
 *.db-shm
 *.db-wal
+# Hand-taken DB snapshots before a risky migration (e.g. world.db.bak-pre0009).
+*.db.bak*
 
 # Local config / secrets
 .env

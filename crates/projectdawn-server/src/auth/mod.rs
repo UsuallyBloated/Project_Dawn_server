@@ -206,11 +206,13 @@ async fn dispatch(
         } => {
             let account_id = db::touch_session(pool, &session_token).await?;
             db::verify_char_owned(pool, account_id, char_id).await?;
+            let is_gm = db::account_is_gm(pool, account_id).await?;
             let (token_bytes, expires_at_unix) = world::mint_connect_token(
                 cfg,
                 &cfg.world_endpoint,
                 char_id as u64,
                 account_id,
+                is_gm,
             )
             .map_err(AuthError::Internal)?;
             Ok(ServerAuthMsg::WorldConnectToken {

@@ -247,10 +247,18 @@ pub struct PerConnection {
     /// will layer atop the same flag.
     pub pvp_override_on: bool,
 
-    /// True when the server was started with `PD_DEV_CMDS=1`. Gates
-    /// `HealSelf` / `DamageSelf` so non-dev clients can't use them.
-    /// Future: wire to a DB `is_gm` flag from the auth token.
+    /// True when the server was started with `PD_DEV_CMDS=1`. A process-wide
+    /// switch: same for every connection. Good for local solo iteration, but
+    /// all-or-nothing on a shared server. Gate dev commands via
+    /// `can_use_dev_cmds`, not this field directly.
     pub is_dev: bool,
+
+    /// Per-account GM flag, carried from the signed connect token's `user_data`
+    /// (the auth service reads it from `accounts.is_gm` at token mint). Unlike
+    /// `is_dev`, this is per-connection, so a hosted server run with
+    /// `PD_DEV_CMDS` off can grant dev tools to a GM account only. A modified
+    /// client can't forge it: `user_data` rides the signed netcode token.
+    pub is_gm: bool,
 
     /// Track 7 — AOI grid cell the player currently occupies. Derived from
     /// `pos.x` / `pos.z` via `aoi::cell_for`; updated by the tick loop
@@ -483,6 +491,10 @@ impl PerConnection {
             equipped_armor: 0,
             pvp_override_on: false,
             is_dev: dev_cmds_enabled(),
+            // Defaulted here; the real value is stamped from the connect
+            // token's user_data at the connect site in tick.rs (from_spawn
+            // only sees the character spawn, not the account's GM flag).
+            is_gm: false,
             aoi_cell: (0, 0), // tick.rs sets the real cell from aoi::cell_for after construction
             regen_hp_acc: 0.0,
             regen_mp_acc: 0.0,
@@ -518,6 +530,16 @@ impl PerConnection {
             casting_skills: HashMap::new(),
             skills_dirty: false,
         }
+    }
+
+    /// May this connection use dev / GM commands (`/give`, `HealSelf`,
+    /// spawn-mob, grant-XP, etc.)? True if the whole server is a dev box
+    /// (`PD_DEV_CMDS=1`, so `is_dev`) OR this specific account is a GM
+    /// (`is_gm`). Every dev-command handler gates on this, never on the raw
+    /// fields, so a hosted server can run with `PD_DEV_CMDS` off and still let
+    /// a GM account keep its tools.
+    pub fn can_use_dev_cmds(&self) -> bool {
+        self.is_dev || self.is_gm
     }
 
     /// True if the connection has gone silent for at least
@@ -620,6 +642,23 @@ mod tests {
             completed_quests: Vec::new(),
             active_quests: Vec::new(),
         }
+    }
+
+    // Dev/GM commands gate on can_use_dev_cmds() = is_dev || is_gm, so a hosted
+    // server (PD_DEV_CMDS off) can still grant tools to a GM account only.
+    #[test]
+    fn can_use_dev_cmds_is_dev_or_gm() {
+        let mut conn = PerConnection::from_spawn(test_spawn(), Instant::now());
+        // Pin both flags so the assertion doesn't depend on the ambient
+        // PD_DEV_CMDS in the test environment.
+        conn.is_dev = false;
+        conn.is_gm = false;
+        assert!(!conn.can_use_dev_cmds(), "neither dev nor GM");
+        conn.is_gm = true;
+        assert!(conn.can_use_dev_cmds(), "a GM account may use dev commands");
+        conn.is_gm = false;
+        conn.is_dev = true;
+        assert!(conn.can_use_dev_cmds(), "a dev server may use dev commands");
     }
 
     // PD_W0024 — the login-time journal normalization: unknown quest ids

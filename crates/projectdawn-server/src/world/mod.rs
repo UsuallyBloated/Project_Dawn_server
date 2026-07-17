@@ -174,9 +174,11 @@ pub fn bind_world_socket(world_bind: &str) -> std::io::Result<UdpSocket> {
 /// Mint a renet `ConnectToken` signed with the shared netcode key. Called
 /// from the auth handler when the launcher hits `RequestWorldToken`.
 ///
-/// `account_id` is packed into the token's `user_data` so the world server
-/// can attribute the connection back to an account without another DB
-/// round-trip on `ClientConnected`.
+/// `account_id` (and the account's `is_gm` flag) are packed into the token's
+/// `user_data` so the world server can attribute the connection back to an
+/// account, and know whether it is a GM, without another DB round-trip on
+/// `ClientConnected`. The token is signed with the netcode private key, so a
+/// client cannot forge either field.
 ///
 /// Returns `(token_bytes, expires_at_unix)` — the bytes are the wire form
 /// the launcher hands to the game .exe.
@@ -185,6 +187,7 @@ pub fn mint_connect_token(
     advertised_endpoint: &str,
     char_id: u64,
     account_id: i64,
+    is_gm: bool,
 ) -> anyhow::Result<(Vec<u8>, i64)> {
     let server_addr = advertised_endpoint
         .parse()
@@ -194,10 +197,15 @@ pub fn mint_connect_token(
         .context("system clock before UNIX epoch")?;
     let expires_at_unix = (now.as_secs() + CONNECT_TOKEN_EXPIRE_SECS) as i64;
 
-    // user_data is fixed at 256 bytes. We pack: [account_id_le u64][zeros].
-    // Future fields (premium flag, group hint, etc.) take more of the slot.
+    // user_data is fixed at 256 bytes. We pack:
+    //   [0..8]  account_id (LE u64)
+    //   [8]     is_gm (0 / 1)
+    //   [9..]   zeros (future: premium flag, group hint, etc.)
+    // Keep the world-side `parse_*_from_user_data` helpers in tick.rs in step
+    // with this layout.
     let mut user_data = [0u8; 256];
     user_data[..8].copy_from_slice(&account_id.to_le_bytes());
+    user_data[8] = is_gm as u8;
 
     let token = ConnectToken::generate(
         now,

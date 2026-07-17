@@ -369,6 +369,17 @@ pub async fn verify_char_owned(
     Ok(())
 }
 
+/// Read an account's GM flag, to stamp into the world connect token. A missing
+/// account reads as non-GM (defensive; the caller has already validated the
+/// session, so the row should exist).
+pub async fn account_is_gm(pool: &SqlitePool, account_id: i64) -> AuthResult<bool> {
+    let row = sqlx::query("SELECT is_gm FROM accounts WHERE id = ?1")
+        .bind(account_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| r.get::<bool, _>("is_gm")).unwrap_or(false))
+}
+
 /// Loaded snapshot of the persistent fields the world server cares about
 /// at character spawn. Track 6 promoted resources + stats + xp to load-time
 /// (server is authoritative on these now); inventory / equipment land later.

@@ -213,8 +213,8 @@ pub enum Outcome {
     /// dispatch arm: the line `give <item name> [qty]` becomes
     /// `(item_name, qty)`. Apply phase looks up the item by name and
     /// calls `add_item_locating`, then fans `InventoryDelta` per
-    /// touched slot. Until the accounts table grows an `is_gm` flag,
-    /// any in-world client can issue this.
+    /// touched slot. Gated on `can_use_dev_cmds` (dev server or a GM
+    /// account), same as the other dev commands.
     GmGiveIntent {
         owner: u64,
         item_name: String,
@@ -600,7 +600,7 @@ pub fn handle_message(
             // an instant level cap. Real quest turn-ins now go through
             // `CompleteQuest` (server-authored reward). This survives only for
             // the Test Panel leveling buttons ("Level Up" / "Grant 250 XP").
-            if !conn.ready || amount <= 0 || !conn.is_dev {
+            if !conn.ready || amount <= 0 || !conn.can_use_dev_cmds() {
                 return Outcome::Continue;
             }
             tracing::info!(char_id = conn.char_id, amount, "dev quest xp grant");
@@ -701,7 +701,7 @@ pub fn handle_message(
             // front of the requester (Godot forward = -Z rotated by yaw), so
             // Test Panel spawns behave like authored camp mobs: server combat,
             // XP, loot, corpse, quest kill credit.
-            if !conn.in_world || !conn.is_dev {
+            if !conn.in_world || !conn.can_use_dev_cmds() {
                 return Outcome::Continue;
             }
             // Name hygiene: the client's quest matcher is a bidirectional
@@ -752,7 +752,7 @@ pub fn handle_message(
         }
 
         ClientWorldMsg::DamageSelf { amount } => {
-            if !conn.in_world || conn.hp <= 0.0 || !conn.is_dev {
+            if !conn.in_world || conn.hp <= 0.0 || !conn.can_use_dev_cmds() {
                 return Outcome::Continue;
             }
             let delta = amount.max(0) as f32;
@@ -768,7 +768,7 @@ pub fn handle_message(
         }
 
         ClientWorldMsg::HealSelf { amount } => {
-            if !conn.in_world || !conn.is_dev {
+            if !conn.in_world || !conn.can_use_dev_cmds() {
                 return Outcome::Continue;
             }
             let delta = amount.max(0) as f32;
@@ -791,7 +791,7 @@ pub fn handle_message(
         }
 
         ClientWorldMsg::GiveCoins { platinum, gold, silver, copper } => {
-            if !conn.in_world || !conn.is_dev {
+            if !conn.in_world || !conn.can_use_dev_cmds() {
                 return Outcome::Continue;
             }
             // Exact per-tier credit, no reduction — a raw-copper grant must
@@ -1270,13 +1270,13 @@ pub fn handle_message(
         }
 
         ClientWorldMsg::GmCommand { line } => {
-            // DEV-ONLY (PD_DEV_CMDS / is_dev), like HealSelf / DevSpawnMob. Was
-            // ungated: the exploit audit's top finding was that any in-world
-            // client could mint any registry item free and persisted (also an
-            // unlimited coin source via vendor resale). The gate closes that and
-            // still backs the Test Panel's server-side item grants (which run
-            // with PD_DEV_CMDS=1).
-            if !conn.in_world || !conn.is_dev {
+            // DEV/GM-ONLY (dev server via PD_DEV_CMDS, or a per-account GM),
+            // like HealSelf / DevSpawnMob. Was ungated: the exploit audit's top
+            // finding was that any in-world client could mint any registry item
+            // free and persisted (also an unlimited coin source via vendor
+            // resale). The gate closes that and still backs the Test Panel's
+            // server-side item grants (dev server or GM account).
+            if !conn.in_world || !conn.can_use_dev_cmds() {
                 return Outcome::Continue;
             }
             // Parse `give <item name> [qty]`. Trailing integer = stack

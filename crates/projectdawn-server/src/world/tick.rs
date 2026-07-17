@@ -1154,6 +1154,7 @@ pub async fn run(
                 ServerEvent::ClientConnected { client_id } => {
                     let user_data = transport.user_data(client_id);
                     let account_id = parse_account_id_from_user_data(user_data);
+                    let is_gm = parse_is_gm_from_user_data(user_data);
                     // The renet ClientId equals the ConnectToken's `client_id`,
                     // which the auth handler set to `char_id`.
                     let char_id = client_id_to_char(client_id);
@@ -1296,6 +1297,12 @@ pub async fn run(
                             // stat bonuses before the EnterWorld snapshot
                             // fans the resource update.
                             if let Some(conn) = connections.get_mut(&client_id) {
+                                // Stamp the GM flag from the signed token
+                                // (from_spawn only sees the character spawn).
+                                conn.is_gm = is_gm;
+                                if is_gm {
+                                    tracing::info!(account_id, char_id, "GM account connected");
+                                }
                                 conn.aoi_cell = aoi::cell_for(conn.pos.x, conn.pos.z);
                                 conn.inventory = inventory::PlayerInventory::from_rows(&inv_rows);
                                 conn.bank_items = inventory::ItemVault::from_rows(
@@ -8546,6 +8553,12 @@ fn parse_account_id_from_user_data(user_data: Option<[u8; 256]>) -> i64 {
     i64::from_le_bytes(buf)
 }
 
+/// Per-account GM flag, packed at `user_data[8]` by `mint_connect_token`.
+/// Absent user_data (shouldn't happen for a Secure token) reads as non-GM.
+fn parse_is_gm_from_user_data(user_data: Option<[u8; 256]>) -> bool {
+    user_data.map(|d| d[8] != 0).unwrap_or(false)
+}
+
 /// Corpse / resurrection — a corpse despawns ONLY when a loot action emptied it:
 /// it held something before and is empty now. A corpse that was ALREADY empty (a
 /// naked-death res anchor) is NOT removed by a Take-All — it lingers for a Cleric
@@ -8558,6 +8571,26 @@ fn corpse_emptied_by_loot(had_content: bool, empty_now: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::corpse_emptied_by_loot;
+
+    // The connect token's user_data layout is a contract between
+    // mint_connect_token (packs) and these parsers (read): account_id LE in
+    // bytes [0..8], is_gm at byte [8]. If the layout drifts, GM access breaks
+    // silently, so pin it.
+    #[test]
+    fn user_data_roundtrips_account_id_and_gm_flag() {
+        use super::{parse_account_id_from_user_data, parse_is_gm_from_user_data};
+        let mut ud = [0u8; 256];
+        ud[..8].copy_from_slice(&12345i64.to_le_bytes());
+        ud[8] = 1;
+        assert_eq!(parse_account_id_from_user_data(Some(ud)), 12345);
+        assert!(parse_is_gm_from_user_data(Some(ud)));
+        ud[8] = 0;
+        assert!(!parse_is_gm_from_user_data(Some(ud)));
+        // A Secure token always carries user_data, but be defensive: absent
+        // reads as account 0 / non-GM (never accidentally-GM).
+        assert_eq!(parse_account_id_from_user_data(None), 0);
+        assert!(!parse_is_gm_from_user_data(None));
+    }
 
     #[test]
     fn corpse_lingers_unless_a_loot_emptied_it() {

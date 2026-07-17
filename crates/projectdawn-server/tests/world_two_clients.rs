@@ -814,7 +814,7 @@ async fn enemy_aggros_chases_and_attacks_player() {
 ///   * `HealthUpdate { id = enemy_id, hp = 0.0 }` arrives;
 ///   * `EntityDied { id = enemy_id }` arrives;
 ///   * `EntityDespawn { id = enemy_id }` arrives after the corpse linger
-///     (CORPSE_LINGER_SECS = 5 s server-side).
+///     (ENEMY_DESPAWN_LINGER_SECS = 5 s server-side).
 ///
 /// Respawn cadence (35 s default for camp 0) is covered by the
 /// `death_notification_arms_respawn_timer` unit test in
@@ -905,7 +905,7 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
         assert_eq!(amount, 263, "level-1 mob kill pays kill_xp(1) = 263");
     }
 
-    // CORPSE_LINGER_SECS is 5 s; budget extra for tick jitter and
+    // ENEMY_DESPAWN_LINGER_SECS is 5 s; budget extra for tick jitter and
     // parallel contention.
     a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(15), |m| {
         matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id)

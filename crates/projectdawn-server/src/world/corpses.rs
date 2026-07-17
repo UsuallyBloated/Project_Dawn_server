@@ -20,9 +20,15 @@ use super::connection::Vec3f;
 use super::loot::LootItemStack;
 
 /// How long a corpse lingers before it decays and its gear is lost for good.
-/// Deliberately short for the Slice 1 playtest (so a tester can watch it decay);
-/// raise it substantially for production (EQ used tens of minutes to days).
-pub const CORPSE_LINGER_SECS: f32 = 300.0; // 5 minutes
+/// 7 days, matching the EQ-authentic target: long enough that a friend who dies
+/// deep can log off and do their corpse run the next evening. Was 300s (5 min)
+/// through the corpse-epic playtests (short so a tester could watch it decay),
+/// which lost gear permanently on a first bad death. Phase 4 revisits the exact
+/// production value; this is the friends-build raise. Distinct from
+/// `ENEMY_DESPAWN_LINGER_SECS` in `world/mod.rs` (5.0), which is dead-ENEMY
+/// despawn timing (both were once named `CORPSE_LINGER_SECS`; renamed the enemy
+/// one 2026-07-17 so a grep can't return both and edit the wrong one).
+pub const CORPSE_LINGER_SECS: f32 = 604_800.0; // 7 days
 
 /// One server-owned player corpse. Lives in `tick::run`'s
 /// `HashMap<EntityId, Corpse>` between creation/boot-load and decay/retrieval.

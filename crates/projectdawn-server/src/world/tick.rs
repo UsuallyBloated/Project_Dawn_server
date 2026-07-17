@@ -20,7 +20,7 @@ use super::{
     spawn_points::Spawner,
     spells,
     ATTACK_RANGE_TOLERANCE, CAMP_SECS, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL,
-    CORPSE_LINGER_SECS, GROUP_COIN_SHARE_RANGE, LINKDEAD_SECS, LOOT_BAG_LINGER_SECS,
+    ENEMY_DESPAWN_LINGER_SECS, GROUP_COIN_SHARE_RANGE, LINKDEAD_SECS, LOOT_BAG_LINGER_SECS,
     LOOT_PICKUP_RANGE, MAX_MOVE_SPEED,
     RANGED_ATTACK_RANGE, STALE_MOVE_THRESHOLD, TICK_DT,
 };
@@ -7093,12 +7093,12 @@ pub async fn run(
         }
 
         // 4j. Corpse cleanup. Dead enemies hold at their death pos for
-        //     CORPSE_LINGER_SECS so the client can play the fall-over
+        //     ENEMY_DESPAWN_LINGER_SECS so the client can play the fall-over
         //     animation; afterwards we fan out EntityDespawn, arm the
         //     spawn point's respawn timer, and drop the row from the
         //     world map. Collect ids in a first pass to avoid borrowing
         //     `enemies` mutably twice in the same loop.
-        let corpse_linger = Duration::from_secs_f32(CORPSE_LINGER_SECS);
+        let corpse_linger = Duration::from_secs_f32(ENEMY_DESPAWN_LINGER_SECS);
         let mut expired_ids: Vec<EntityId> = Vec::new();
         for entity in enemies.values() {
             if entity.is_alive() {

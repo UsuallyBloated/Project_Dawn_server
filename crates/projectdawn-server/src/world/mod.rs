@@ -94,7 +94,12 @@ pub const NETCODE_TIMEOUT_SECS: i32 = 15;
 /// skinnable ones; server-authoritative version splits the difference
 /// (sub-task 4's skinning support, when it lands, can branch on
 /// MobTemplate.is_skinnable).
-pub const CORPSE_LINGER_SECS: f32 = 5.0;
+///
+/// NOT to be confused with the unrelated `corpses::CORPSE_LINGER_SECS`
+/// (player-corpse decay, days). This one is dead-ENEMY despawn timing;
+/// renamed off the shared `CORPSE_LINGER_SECS` name (2026-07-17) so a
+/// grep can't return both and edit the wrong one.
+pub const ENEMY_DESPAWN_LINGER_SECS: f32 = 5.0;
 /// Slack factor on the server-side range check for player attack
 /// intents. The client computes its own player-to-target distance,
 /// which can disagree with the server's view by snapshot-interpolation

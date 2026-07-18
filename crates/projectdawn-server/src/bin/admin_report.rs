@@ -42,7 +42,17 @@ struct Character {
     race: String,
     class: String,
     level: i64,
-    coins: i64,
+    // Carried four-tier wallet (100:1 per tier). NOT the legacy `coins` column,
+    // which migration 0004 froze and nothing reads anymore.
+    platinum: i64,
+    gold: i64,
+    silver: i64,
+    copper: i64,
+    // Coins held at the Banker NPC (per-character bank wallet).
+    bank_platinum: i64,
+    bank_gold: i64,
+    bank_silver: i64,
+    bank_copper: i64,
     alignment_score: i64,
     zone: Option<String>,
     created_at: Option<String>,
@@ -50,6 +60,16 @@ struct Character {
     /// Non-null once the character was deleted. The row lingers (soft delete)
     /// so the name stays reserved and the character can be inspected/restored.
     deleted_at: Option<String>,
+}
+
+/// Per-character inventory aggregate from `character_items` (rows are per-stack,
+/// `count` is the stack size; `location` is 'base' / 'bag_<i>' / 'equip').
+#[derive(FromRow, Default, Clone, Copy)]
+struct ItemAgg {
+    char_id: i64,
+    stacks: i64,
+    items: i64,
+    equipped: i64,
 }
 
 #[tokio::main]
@@ -77,19 +97,34 @@ async fn main() -> Result<()> {
 
     // No `deleted_at IS NULL` filter — we WANT the soft-deleted rows here.
     let characters: Vec<Character> = sqlx::query_as(
-        "SELECT id, account_id, name, race, class, level, coins, alignment_score,
-                zone, created_at, last_played_at, deleted_at
+        "SELECT id, account_id, name, race, class, level,
+                platinum, gold, silver, copper,
+                bank_platinum, bank_gold, bank_silver, bank_copper,
+                alignment_score, zone, created_at, last_played_at, deleted_at
          FROM characters ORDER BY account_id, id",
     )
     .fetch_all(&pool)
     .await
     .context("querying characters")?;
 
+    // Per-character inventory rollup, one grouped query. char_id -> aggregate.
+    let item_rows: Vec<ItemAgg> = sqlx::query_as(
+        "SELECT char_id,
+                COUNT(*)                                                    AS stacks,
+                COALESCE(SUM(count), 0)                                     AS items,
+                COALESCE(SUM(CASE WHEN location = 'equip' THEN 1 ELSE 0 END), 0) AS equipped
+         FROM character_items GROUP BY char_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .context("aggregating character_items")?;
+    let items: HashMap<i64, ItemAgg> = item_rows.into_iter().map(|a| (a.char_id, a)).collect();
+
     let generated = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
 
-    print_console_summary(&db_path, &accounts, &characters);
+    print_console_summary(&db_path, &accounts, &characters, &items);
 
-    let html = render_html(&db_path, &generated, &accounts, &characters);
+    let html = render_html(&db_path, &generated, &accounts, &characters, &items);
     std::fs::write(&out_path, html).with_context(|| format!("writing '{out_path}'"))?;
     println!("\nHTML report written to: {out_path}");
     println!("Open it in a browser (double-click, or 'Open with' a browser).");
@@ -99,7 +134,12 @@ async fn main() -> Result<()> {
 
 // ─── Console output ──────────────────────────────────────────────────────────
 
-fn print_console_summary(db_path: &str, accounts: &[Account], characters: &[Character]) {
+fn print_console_summary(
+    db_path: &str,
+    accounts: &[Account],
+    characters: &[Character],
+    items: &HashMap<i64, ItemAgg>,
+) {
     let deleted = characters.iter().filter(|c| c.deleted_at.is_some()).count();
     let active = characters.len() - deleted;
     let gm = accounts.iter().filter(|a| a.is_gm).count();
@@ -149,14 +189,17 @@ fn print_console_summary(db_path: &str, accounts: &[Account], characters: &[Char
                         Some(when) => format!("DELETED {when}"),
                         None => "active".to_string(),
                     };
+                    let agg = items.get(&c.id).copied().unwrap_or_default();
                     println!(
-                        "        - {:<16} Lv{:<3} {} {}   zone:{}   {}c   [{}]",
+                        "        - {:<16} Lv{:<3} {} {}   zone:{}   {}   items:{} (equip {})   [{}]",
                         c.name,
                         c.level,
                         c.race,
                         c.class,
                         c.zone.as_deref().unwrap_or("-"),
-                        c.coins,
+                        fmt_coins(c.platinum, c.gold, c.silver, c.copper),
+                        agg.items,
+                        agg.equipped,
                         status,
                     );
                 }
@@ -195,11 +238,39 @@ fn cell(value: Option<&str>, fallback: &str) -> String {
     }
 }
 
+/// Format a four-tier wallet like "2g 15s 30c" (zero tiers omitted); "0c" if empty.
+fn fmt_coins(p: i64, g: i64, s: i64, c: i64) -> String {
+    let mut parts = Vec::new();
+    if p != 0 {
+        parts.push(format!("{p}p"));
+    }
+    if g != 0 {
+        parts.push(format!("{g}g"));
+    }
+    if s != 0 {
+        parts.push(format!("{s}s"));
+    }
+    if c != 0 {
+        parts.push(format!("{c}c"));
+    }
+    if parts.is_empty() {
+        "0c".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+/// Total wallet value in copper (100:1 per tier), for tooltips.
+fn total_copper(p: i64, g: i64, s: i64, c: i64) -> i64 {
+    p * 1_000_000 + g * 10_000 + s * 100 + c
+}
+
 fn render_html(
     db_path: &str,
     generated: &str,
     accounts: &[Account],
     characters: &[Character],
+    items: &HashMap<i64, ItemAgg>,
 ) -> String {
     let deleted = characters.iter().filter(|c| c.deleted_at.is_some()).count();
     let active = characters.len() - deleted;
@@ -277,7 +348,7 @@ fn render_html(
 
         match by_account.get(&a.id) {
             None => h.push_str("<p class=\"no-chars\">No characters.</p>\n"),
-            Some(chars) => render_char_table(&mut h, chars),
+            Some(chars) => render_char_table(&mut h, chars, items),
         }
         h.push_str("</section>\n");
     }
@@ -292,7 +363,7 @@ fn render_html(
         h.push_str("<section class=\"card orphan\" data-name=\"orphan\">\n");
         h.push_str("<div class=\"card-head\"><span class=\"acc-name\">Orphan characters</span><span class=\"badge ban\">NO ACCOUNT</span></div>\n");
         h.push_str("<p class=\"acc-meta\"><span>Characters whose account row is missing.</span></p>\n");
-        render_char_table(&mut h, &orphans);
+        render_char_table(&mut h, &orphans, items);
         h.push_str("</section>\n");
     }
 
@@ -311,11 +382,11 @@ fn tile(h: &mut String, label: &str, value: &str, kind: &str) {
     );
 }
 
-fn render_char_table(h: &mut String, chars: &[&Character]) {
+fn render_char_table(h: &mut String, chars: &[&Character], items: &HashMap<i64, ItemAgg>) {
     h.push_str("<div class=\"table-wrap\">\n<table class=\"chars\">\n<thead><tr>");
     for col in [
-        "Name", "ID", "Lvl", "Race", "Class", "Zone", "Coins", "Align", "Created", "Last played",
-        "Status",
+        "Name", "ID", "Lvl", "Race", "Class", "Zone", "Coins", "Bank", "Items", "Align", "Created",
+        "Last played", "Status",
     ] {
         let _ = write!(h, "<th>{col}</th>");
     }
@@ -331,7 +402,39 @@ fn render_char_table(h: &mut String, chars: &[&Character]) {
         let _ = write!(h, "<td>{}</td>", esc(&c.race));
         let _ = write!(h, "<td>{}</td>", esc(&c.class));
         let _ = write!(h, "<td>{}</td>", cell(c.zone.as_deref(), "-"));
-        let _ = write!(h, "<td>{}</td>", c.coins);
+        // Carried wallet.
+        let carried_cu = total_copper(c.platinum, c.gold, c.silver, c.copper);
+        if carried_cu == 0 {
+            h.push_str("<td class=\"muted\">0c</td>");
+        } else {
+            let _ = write!(
+                h,
+                "<td class=\"coins\" title=\"{carried_cu} copper total\">{}</td>",
+                esc(&fmt_coins(c.platinum, c.gold, c.silver, c.copper))
+            );
+        }
+        // Bank wallet.
+        let bank_cu = total_copper(c.bank_platinum, c.bank_gold, c.bank_silver, c.bank_copper);
+        if bank_cu == 0 {
+            h.push_str("<td class=\"muted\">-</td>");
+        } else {
+            let _ = write!(
+                h,
+                "<td class=\"coins\" title=\"{bank_cu} copper total\">{}</td>",
+                esc(&fmt_coins(c.bank_platinum, c.bank_gold, c.bank_silver, c.bank_copper))
+            );
+        }
+        // Inventory rollup (base + bags + equipped).
+        let agg = items.get(&c.id).copied().unwrap_or_default();
+        if agg.items == 0 {
+            h.push_str("<td class=\"muted\">-</td>");
+        } else {
+            let _ = write!(
+                h,
+                "<td title=\"{} stacks, {} equipped\">{}</td>",
+                agg.stacks, agg.equipped, agg.items
+            );
+        }
         let _ = write!(h, "<td>{}</td>", c.alignment_score);
         let _ = write!(h, "<td class=\"muted\">{}</td>", cell(c.created_at.as_deref(), "?"));
         let _ = write!(h, "<td>{}</td>", cell(c.last_played_at.as_deref(), "never"));
@@ -413,6 +516,7 @@ main { padding: 18px clamp(14px, 4vw, 40px) 40px; display: grid; gap: 14px; }
 .badge.del { color: #fff; background: var(--del); }
 .muted { color: var(--ink-soft); }
 .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12px; }
+.coins { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .table-wrap { overflow-x: auto; }
 table.chars { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
 .chars th {

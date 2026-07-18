@@ -78,9 +78,13 @@ async fn main() -> Result<()> {
     let db_path = args.next().unwrap_or_else(|| "world.db".to_string());
     let out_path = args.next().unwrap_or_else(|| "world_report.html".to_string());
 
-    // Read-only: never touches the DB. `immutable=1` also lets us read a DB a
-    // running server holds open, without contending on its lock.
-    let url = format!("sqlite://{db_path}?mode=ro&immutable=1");
+    // Read-only (`mode=ro`): the tool only ever issues SELECTs and never creates
+    // the file. Deliberately NOT `immutable=1`: the server runs the DB in WAL
+    // mode (sqlx's default), and `immutable` would ignore the -wal file, showing
+    // stale data while the server is live. Plain read-only is WAL-aware, so a
+    // report taken while the server is up reflects the latest committed state,
+    // and readers don't block the server's writes.
+    let url = format!("sqlite://{db_path}?mode=ro");
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect(&url)

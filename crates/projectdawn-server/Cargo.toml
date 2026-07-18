@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
+# The crate ships extra ops bins (admin_report, grant_gm) alongside the server,
+# so `cargo run -p projectdawn-server` needs to know which is the default.
+default-run = "projectdawn-server"
 
 [dependencies]
 protocol = { workspace = true }

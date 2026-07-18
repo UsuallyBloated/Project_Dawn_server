@@ -380,6 +380,31 @@ pub async fn account_is_gm(pool: &SqlitePool, account_id: i64) -> AuthResult<boo
     Ok(row.map(|r| r.get::<bool, _>("is_gm")).unwrap_or(false))
 }
 
+/// Set (or clear) an account's GM flag by username. Returns the previous value,
+/// or `None` if no such account. Backs the `grant_gm` bin and the is_gm-gate
+/// integration test.
+pub async fn set_account_gm(
+    pool: &SqlitePool,
+    username: &str,
+    value: bool,
+) -> AuthResult<Option<bool>> {
+    let row = sqlx::query("SELECT id, is_gm FROM accounts WHERE username = ?1 COLLATE NOCASE")
+        .bind(username)
+        .fetch_optional(pool)
+        .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let id: i64 = row.get("id");
+    let before: bool = row.get("is_gm");
+    sqlx::query("UPDATE accounts SET is_gm = ?1 WHERE id = ?2")
+        .bind(value)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(Some(before))
+}
+
 /// Loaded snapshot of the persistent fields the world server cares about
 /// at character spawn. Track 6 promoted resources + stats + xp to load-time
 /// (server is authoritative on these now); inventory / equipment land later.

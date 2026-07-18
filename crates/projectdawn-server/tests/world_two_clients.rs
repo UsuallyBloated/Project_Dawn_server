@@ -267,6 +267,17 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::PvpToggle { on });
     }
 
+    /// Dev/GM command probe: awards xp through the server's authoritative path.
+    /// Gated on `can_use_dev_cmds()` (dev server or GM account), so it applies
+    /// for a GM and is a silent no-op for a plain account.
+    fn send_grant_quest_xp(&mut self, amount: i32) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::GrantQuestXp { amount },
+        );
+    }
+
     fn send_pet_command(&mut self, command: u8, target_id: Option<u64>) {
         let msg = ClientWorldMsg::PetCommand { command, target_id };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
@@ -2867,4 +2878,96 @@ async fn rpc(
 fn decode_token_bytes(hex_str: &str) -> [u8; 32] {
     let v = hex::decode(hex_str).expect("hex decode session_token");
     v.try_into().expect("32 bytes")
+}
+
+/// Request a FRESH world ConnectToken for an existing session + char. Used when
+/// account state changed after the initial `provision_client` (e.g. `is_gm` was
+/// flipped), so the new token reflects it — the flag is packed at mint time.
+async fn request_world_token(auth_url: &str, session_token_hex: &str, char_id: i64) -> Vec<u8> {
+    let (mut ws, _) = tokio_tungstenite::connect_async(auth_url)
+        .await
+        .expect("auth ws connect");
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "RequestWorldToken",
+            "session_token": session_token_hex,
+            "char_id": char_id,
+        }),
+    )
+    .await;
+    assert_eq!(resp["type"], "WorldConnectToken", "request token: {resp}");
+    resp["token_bytes"]
+        .as_array()
+        .expect("token_bytes is array")
+        .iter()
+        .map(|v| v.as_u64().expect("byte") as u8)
+        .collect()
+}
+
+/// Phase 1 keystone: the per-account GM gate. A dev/GM command must APPLY for an
+/// `is_gm` account and be a silent no-op for a plain account, when the server is
+/// NOT in process-wide dev mode. This exercises the whole real path: the account
+/// flag is packed into the signed connect token's `user_data`, read into
+/// `PerConnection.is_gm` at connect, and every dev command gates on
+/// `can_use_dev_cmds()` (`is_dev || is_gm`). `GrantQuestXp` is the probe — the
+/// GM sees an `XpGained`, the plain account sees nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn is_gm_gates_dev_commands() {
+    // Only meaningful when the process is NOT in dev mode: `dev_cmds_enabled()`
+    // reads PD_DEV_CMDS once, process-wide, so if it were "1" both accounts
+    // would be dev and the plain-account assertion would be a false failure.
+    if std::env::var("PD_DEV_CMDS").as_deref() == Ok("1") {
+        eprintln!("skipping is_gm_gates_dev_commands: PD_DEV_CMDS=1 makes every connection dev");
+        return;
+    }
+
+    let h = start_both().await;
+
+    // GM account: provision (mints a token while is_gm is still 0), flip the DB
+    // flag, then mint a FRESH token that actually carries is_gm=1.
+    let (gm_session, gm_char, _stale_token) =
+        provision_client(&h.auth_url, "gmuser", "GmHero", "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    let prev = db::set_account_gm(&pool, "gmuser", true)
+        .await
+        .expect("set is_gm");
+    assert_eq!(prev, Some(false), "account existed and was non-GM before");
+    let gm_token = request_world_token(&h.auth_url, &gm_session, gm_char).await;
+    let mut gm = WorldClient::start(gm_token, &gm_session, gm_char).await;
+
+    // Plain account: is_gm stays 0.
+    let (pl_session, pl_char, pl_token) =
+        provision_client(&h.auth_url, "plainuser", "PlainJane", "Human", "Warrior").await;
+    let mut plain = WorldClient::start(pl_token, &pl_session, pl_char).await;
+
+    // Every client gets a connect-time XpGained { amount: 0 } to seed its xp bar
+    // (tick.rs). Match on the PROBE amount, not just any XpGained, so the seed is
+    // not mistaken for a GrantQuestXp-caused gain.
+    const PROBE_XP: i32 = 250;
+
+    // GM sends the dev command → the server applies it and fans the gain back.
+    gm.send_grant_quest_xp(PROBE_XP);
+    let gm_xp = gm
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount == PROBE_XP)
+        })
+        .await;
+    assert!(
+        gm_xp.is_some(),
+        "GM account: GrantQuestXp should apply and produce an XpGained(amount={PROBE_XP})"
+    );
+
+    // Plain account sends the same → the server ignores it, so no gain arrives
+    // (only the connect-time seed, which the amount filter excludes).
+    plain.send_grant_quest_xp(PROBE_XP);
+    let plain_xp = plain
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount == PROBE_XP)
+        })
+        .await;
+    assert!(
+        plain_xp.is_none(),
+        "plain account: GrantQuestXp must be a silent no-op (no gain applied)"
+    );
 }

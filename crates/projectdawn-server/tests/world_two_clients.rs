@@ -249,6 +249,10 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::DeathBroadcast);
     }
 
+    fn send_respawn(&mut self) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Respawn);
+    }
+
     fn send_heartbeat(&mut self) {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Heartbeat);
     }
@@ -2969,5 +2973,55 @@ async fn is_gm_gates_dev_commands() {
     assert!(
         plain_xp.is_none(),
         "plain account: GrantQuestXp must be a silent no-op (no gain applied)"
+    );
+}
+
+/// Phase 1 finding 3 — the Respawn dead-check. A LIVING player's Respawn must be a
+/// no-op (the exploit spammed it to floor HP at 25% for near-invulnerability); a
+/// DEAD player's Respawn must still restore ~25% (the legit path). Drives the real
+/// flow: connect at full HP, Respawn (rejected), DeathBroadcast (kill), Respawn
+/// (restores). HP is observed via HealthUpdate. ~25% is the Respawn floor value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn respawn_requires_being_dead() {
+    let h = start_both().await;
+    let (session, char_id, token) =
+        provision_client(&h.auth_url, "respawner", "Respawna", "Human", "Warrior").await;
+    let mut c = WorldClient::start(token, &session, char_id).await;
+    let cid = char_id as u64;
+
+    // (1) LIVING player: Respawn must NOT floor HP. We start at full HP and take no
+    //     damage, so a ~25% HealthUpdate would only come from a wrongly-honored Respawn.
+    c.send_respawn();
+    let floored = c
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::HealthUpdate { id, hp, max_hp }
+                if *id == cid && *hp >= *max_hp * 0.2 && *hp <= *max_hp * 0.3)
+        })
+        .await;
+    assert!(
+        floored.is_none(),
+        "a living player's Respawn must be a no-op, not a floor to 25% (finding 3)"
+    );
+
+    // (2) Legit path intact: die (DeathBroadcast -> kill_player -> hp 0) ...
+    c.send_death();
+    let dead = c
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp <= 0.01)
+        })
+        .await;
+    assert!(dead.is_some(), "DeathBroadcast should kill the player (hp -> 0)");
+
+    // ... then Respawn now restores HP to ~25%.
+    c.send_respawn();
+    let respawned = c
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::HealthUpdate { id, hp, max_hp }
+                if *id == cid && *hp >= *max_hp * 0.2 && *hp <= *max_hp * 0.3)
+        })
+        .await;
+    assert!(
+        respawned.is_some(),
+        "a dead player's Respawn should still restore HP to ~25%"
     );
 }

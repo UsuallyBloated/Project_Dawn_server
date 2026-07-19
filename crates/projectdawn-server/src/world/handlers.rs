@@ -813,7 +813,14 @@ pub fn handle_message(
         }
 
         ClientWorldMsg::Respawn => {
-            if !conn.ready {
+            // Only a DEAD player awaiting respawn may respawn. `death_processed`
+            // is set by the death path (the tick death sweep or the DeathBroadcast
+            // handler) alongside `hp = 0`, and is cleared below. Gating on it closes
+            // exploit-audit finding 3 — a LIVING client spamming Respawn to floor
+            // its HP at 25% for near-invulnerability — and also stops a Respawn from
+            // racing the death sweep to skip the death penalty. A living player has
+            // `death_processed == false`, so their Respawn is a silent no-op.
+            if !conn.ready || !conn.death_processed {
                 return Outcome::Continue;
             }
             // The dying client's local respawn timer elapsed. Reset

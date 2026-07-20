@@ -148,6 +148,11 @@ pub struct PerConnection {
     /// last-hit marker, only meaningful relative to `camp_since`).
     pub last_damaged_at: Option<Instant>,
 
+    /// Wall-clock of this connection's most recent melee swing, stamped in the
+    /// attack-apply. With `last_damaged_at` it marks "in combat" so the seated
+    /// regen bonus is suppressed mid-fight (see `regen::sitting_bonus_applies`).
+    pub last_attack_at: Option<Instant>,
+
     /// Corpse/resurrection Slice 0: set true when the server-side death sweep
     /// has already processed this player's death (applied the xp penalty, fanned
     /// EntityDied). Guards the sweep from re-running every tick while hp stays 0,
@@ -460,6 +465,7 @@ impl PerConnection {
             linkdead_since: None,
             camp_since: None,
             last_damaged_at: None,
+            last_attack_at: None,
             death_processed: false,
             corpse_pending: false,
             death_lost_xp: 0,

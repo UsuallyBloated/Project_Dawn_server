@@ -2738,6 +2738,14 @@ pub async fn run(
                 // so the attacker's char_id (also u64 on the wire) is the
                 // map key directly.
                 let attacker_cid = intent.attacker as ClientId;
+                // A swing forces the attacker to STAND (you can't fight seated)
+                // and marks them in combat, so the seated regen bonus stops (see
+                // regen::sitting_bonus_applies). Closes the attack-while-seated
+                // behaviour + the latent free-in-combat-regen exploit.
+                if let Some(a) = connections.get_mut(&attacker_cid) {
+                    a.is_sitting = false;
+                    a.last_attack_at = Some(now);
+                }
                 let Some(attacker_conn) = connections.get(&attacker_cid) else {
                     // Attacker disconnected between sending and apply.
                     continue;

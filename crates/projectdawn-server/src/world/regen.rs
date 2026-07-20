@@ -2,10 +2,11 @@
 //!
 //! Mirror of the GDScript `autoloads/regen.gd` math, ticked on the 20 Hz
 //! server clock instead of every 3 s on the client. Constants match the
-//! client baseline; sit multiplier applies when `conn.is_sitting` is true.
-//! Combat suppression (no regen while engaged) is left to a future track —
-//! the server doesn't yet model "in combat" as state (sub-task 3 lands
-//! PvP damage which is the natural trigger).
+//! client baseline; the sit multiplier applies when `conn.is_sitting` is true
+//! AND the player is out of combat (`sitting_bonus_applies`) — a seated player
+//! who dealt or took damage within `COMBAT_REGEN_LOCKOUT` regenerates at the
+//! standing rate, closing the free-in-combat-regen exploit. (Base regen is
+//! currently 0, so this guard is latent until regen is re-enabled.)
 //!
 //! Broadcast policy: regen mutates `conn.hp` / `conn.mp` / `conn.stamina`
 //! continuously, but a fan-out only fires when one of:
@@ -38,6 +39,11 @@ const SITTING_HP_MULT: f32 = 5.0;
 const SITTING_MP_MULT: f32 = 5.0;
 const SITTING_ST_MULT: f32 = 3.0;
 
+/// The seated meditation bonus is suppressed for this long after the player last
+/// dealt OR took damage. Stops a mid-fight sit (including a re-sit between
+/// swings) from earning the boosted regen rate — roughly two melee swings.
+const COMBAT_REGEN_LOCKOUT: Duration = Duration::from_secs(6);
+
 /// GDScript regen.gd ticks every 3.0 s; the per-second rate is the value
 /// divided by `TICK_INTERVAL`. We tick the server every `TICK_DT` (50 ms),
 /// so multiply by `TICK_DT / 3.0` to land identical totals over time.
@@ -60,15 +66,43 @@ pub struct RegenResult {
     pub stamina_fanout: bool,
 }
 
+/// Does the seated meditation bonus (`SITTING_*_MULT`) apply right now? Only when
+/// the player is seated AND out of combat: a player who has dealt or taken damage
+/// within `COMBAT_REGEN_LOCKOUT` regenerates at the standing rate even while
+/// seated. Closes the free-in-combat-regen exploit — a seated auto-attacker
+/// keeping the sit bonus mid-fight. (Currently moot because the base regen rates
+/// are 0, i.e. regen is disabled by playtest request; this guards the exploit for
+/// when regen is re-enabled.)
+pub(super) fn sitting_bonus_applies(conn: &PerConnection, now: Instant) -> bool {
+    sitting_bonus_from(conn.is_sitting, conn.last_damaged_at, conn.last_attack_at, now)
+}
+
+/// The pure decision behind `sitting_bonus_applies`, split out so it can be unit
+/// tested without constructing a whole `PerConnection`.
+fn sitting_bonus_from(
+    is_sitting: bool,
+    last_damaged_at: Option<Instant>,
+    last_attack_at: Option<Instant>,
+    now: Instant,
+) -> bool {
+    if !is_sitting {
+        return false;
+    }
+    let in_lockout =
+        |t: Option<Instant>| t.is_some_and(|t| now.duration_since(t) < COMBAT_REGEN_LOCKOUT);
+    !in_lockout(last_damaged_at) && !in_lockout(last_attack_at)
+}
+
 /// Apply one tick (`dt` wall-clock seconds since the previous tick) of
 /// regen to `conn`. Returns which resources crossed the broadcast
 /// threshold; the tick loop fans them out to in-world recipients.
 pub fn tick_one(conn: &mut PerConnection, dt: f32, now: Instant) -> RegenResult {
     let mut result = RegenResult::default();
     let scale = dt / CLIENT_TICK_INTERVAL_SECS;
-    let hp_mult = if conn.is_sitting { SITTING_HP_MULT } else { 1.0 };
-    let mp_mult = if conn.is_sitting { SITTING_MP_MULT } else { 1.0 };
-    let st_mult = if conn.is_sitting { SITTING_ST_MULT } else { 1.0 };
+    let sitting = sitting_bonus_applies(conn, now);
+    let hp_mult = if sitting { SITTING_HP_MULT } else { 1.0 };
+    let mp_mult = if sitting { SITTING_MP_MULT } else { 1.0 };
+    let st_mult = if sitting { SITTING_ST_MULT } else { 1.0 };
 
     // Track 6 sub-task 4a: Lich Form disables natural HP regen. The
     // buff still grants its MP/sec via the buff tick (step 5a).
@@ -147,4 +181,34 @@ pub fn tick_one(conn: &mut PerConnection, dt: f32, now: Instant) -> RegenResult 
 /// 5 % threshold wouldn't otherwise trigger.
 pub fn mark_dirty(conn: &mut PerConnection) {
     conn.last_bcast_at = None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The seated meditation bonus applies ONLY when seated and out of combat.
+    // A player who dealt or took damage within COMBAT_REGEN_LOCKOUT gets the
+    // standing rate even while seated — this is the free-in-combat-regen gate.
+    #[test]
+    fn sitting_bonus_only_when_seated_and_out_of_combat() {
+        // Build times relative to a base so "now - N" never underflows Instant.
+        let base = Instant::now();
+        let now = base + Duration::from_secs(60);
+        let recent = now - Duration::from_secs(1); // inside the lockout
+        let old = now - Duration::from_secs(30); // well outside it
+
+        // Standing: never a bonus, regardless of combat timers.
+        assert!(!sitting_bonus_from(false, None, None, now));
+        assert!(!sitting_bonus_from(false, Some(recent), Some(recent), now));
+
+        // Seated and out of combat (no recent damage dealt or taken): bonus.
+        assert!(sitting_bonus_from(true, None, None, now));
+        assert!(sitting_bonus_from(true, Some(old), Some(old), now));
+
+        // Seated but recently dealt damage: no bonus (the exploit case).
+        assert!(!sitting_bonus_from(true, None, Some(recent), now));
+        // Seated but recently took damage: no bonus.
+        assert!(!sitting_bonus_from(true, Some(recent), None, now));
+    }
 }

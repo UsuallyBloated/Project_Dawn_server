@@ -8439,6 +8439,32 @@ pub async fn run(
             if result.hp_fanout || result.mp_fanout || result.stamina_fanout {
                 regen_fanouts.push(conn.char_id as u64);
             }
+            // Meditate skill-up: while actually meditating (seated, out of combat,
+            // mana below full) advance the `meditate` casting skill once per ~6 s
+            // med-tick — server-authoritative, gated to that cadence via
+            // `last_meditate_at`. `try_advance` returns None for classes that can't
+            // train it (cap 0), and drives the sitting MP regen in regen.rs. Fans
+            // a private SkillProgressUpdate on a gain so the client mirror keeps up.
+            if conn.mp < conn.max_mp && regen::sitting_bonus_applies(conn, now) {
+                let due = conn
+                    .last_meditate_at
+                    .map_or(true, |t| now.duration_since(t) >= Duration::from_secs(6));
+                if due {
+                    conn.last_meditate_at = Some(now);
+                    if let Some(new_score) =
+                        skills::try_advance(conn, skills::Skill::Casting, "meditate")
+                    {
+                        let cid = conn.char_id as ClientId;
+                        handlers::send_skill_progress_update(
+                            &mut server,
+                            cid,
+                            skills::Skill::Casting.as_protocol(),
+                            "meditate".to_string(),
+                            new_score,
+                        );
+                    }
+                }
+            }
         }
         if !regen_fanouts.is_empty() {
             let recipients: Vec<ClientId> = connections

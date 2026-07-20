@@ -153,6 +153,11 @@ pub struct PerConnection {
     /// regen bonus is suppressed mid-fight (see `regen::sitting_bonus_applies`).
     pub last_attack_at: Option<Instant>,
 
+    /// Wall-clock of the last Meditate skill-up tick. The regen loop advances
+    /// the `meditate` casting skill roughly once per 6 s of medding (sitting with
+    /// mana below full); this gates it to that cadence.
+    pub last_meditate_at: Option<Instant>,
+
     /// Corpse/resurrection Slice 0: set true when the server-side death sweep
     /// has already processed this player's death (applied the xp penalty, fanned
     /// EntityDied). Guards the sweep from re-running every tick while hp stays 0,
@@ -466,6 +471,7 @@ impl PerConnection {
             camp_since: None,
             last_damaged_at: None,
             last_attack_at: None,
+            last_meditate_at: None,
             death_processed: false,
             corpse_pending: false,
             death_lost_xp: 0,

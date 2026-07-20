@@ -83,25 +83,29 @@ const ARMOR_CAPS: CapTable<'static> = &[
     ("Blood Mage",    &[("cloth", 200), ("leather", 100), ("chain",  50), ("plate",   0), ("shield",   0)]),
 ];
 
+// `meditate` is a casting skill for regen purposes only (it never trains on a
+// cast; the tick loop advances it while the player sits and meditates). Cap 250
+// for any class with a mana pool, 0 for the pure-melee classes. See regen.rs
+// (`mp_regen_per_tick`) and docs/design/regen_model.md.
 const CASTING_CAPS: CapTable<'static> = &[
-    ("Warrior",       &[("evocation",   0), ("alteration",   0), ("abjuration",   0), ("conjuration",   0), ("divination",   0), ("channeling",   0)]),
-    ("Paladin",       &[("evocation", 125), ("alteration", 150), ("abjuration", 225), ("conjuration",   0), ("divination",  50), ("channeling", 225)]),
-    ("Shadow Knight", &[("evocation", 125), ("alteration", 125), ("abjuration", 100), ("conjuration",   0), ("divination",  50), ("channeling", 225)]),
-    ("Cleric",        &[("evocation", 150), ("alteration", 200), ("abjuration", 250), ("conjuration",  75), ("divination", 200), ("channeling", 175)]),
-    ("Druid",         &[("evocation", 175), ("alteration", 225), ("abjuration", 175), ("conjuration",  75), ("divination", 175), ("channeling", 175)]),
-    ("Shaman",        &[("evocation", 175), ("alteration", 250), ("abjuration", 125), ("conjuration",  75), ("divination", 150), ("channeling", 200)]),
-    ("Rogue",         &[("evocation",   0), ("alteration",   0), ("abjuration",   0), ("conjuration",   0), ("divination",   0), ("channeling",   0)]),
-    ("Monk",          &[("evocation",   0), ("alteration",   0), ("abjuration",   0), ("conjuration",   0), ("divination",   0), ("channeling",   0)]),
-    ("Ranger",        &[("evocation", 125), ("alteration", 150), ("abjuration",  75), ("conjuration",   0), ("divination", 150), ("channeling", 200)]),
-    ("Beast Master",  &[("evocation", 125), ("alteration", 150), ("abjuration", 100), ("conjuration",  75), ("divination",  75), ("channeling", 175)]),
-    ("Bard",          &[("evocation", 125), ("alteration", 200), ("abjuration", 100), ("conjuration", 150), ("divination",  75), ("channeling", 200)]),
-    ("Witch Hunter",  &[("evocation", 225), ("alteration", 125), ("abjuration", 100), ("conjuration",   0), ("divination",  75), ("channeling", 200)]),
-    ("Magician",      &[("evocation", 225), ("alteration", 100), ("abjuration",  75), ("conjuration", 250), ("divination",  75), ("channeling", 150)]),
-    ("Wizard",        &[("evocation", 250), ("alteration", 100), ("abjuration", 150), ("conjuration", 100), ("divination", 225), ("channeling", 150)]),
-    ("Sorcerer",      &[("evocation", 250), ("alteration", 100), ("abjuration",  75), ("conjuration",  75), ("divination",  50), ("channeling", 150)]),
-    ("Necromancer",   &[("evocation", 200), ("alteration", 175), ("abjuration",  50), ("conjuration", 225), ("divination", 100), ("channeling", 150)]),
-    ("Enchanter",     &[("evocation", 150), ("alteration", 250), ("abjuration", 200), ("conjuration", 175), ("divination", 125), ("channeling", 150)]),
-    ("Blood Mage",    &[("evocation", 200), ("alteration", 175), ("abjuration",  75), ("conjuration",   0), ("divination",  50), ("channeling", 175)]),
+    ("Warrior",       &[("evocation",   0), ("alteration",   0), ("abjuration",   0), ("conjuration",   0), ("divination",   0), ("channeling",   0), ("meditate",   0)]),
+    ("Paladin",       &[("evocation", 125), ("alteration", 150), ("abjuration", 225), ("conjuration",   0), ("divination",  50), ("channeling", 225), ("meditate", 250)]),
+    ("Shadow Knight", &[("evocation", 125), ("alteration", 125), ("abjuration", 100), ("conjuration",   0), ("divination",  50), ("channeling", 225), ("meditate", 250)]),
+    ("Cleric",        &[("evocation", 150), ("alteration", 200), ("abjuration", 250), ("conjuration",  75), ("divination", 200), ("channeling", 175), ("meditate", 250)]),
+    ("Druid",         &[("evocation", 175), ("alteration", 225), ("abjuration", 175), ("conjuration",  75), ("divination", 175), ("channeling", 175), ("meditate", 250)]),
+    ("Shaman",        &[("evocation", 175), ("alteration", 250), ("abjuration", 125), ("conjuration",  75), ("divination", 150), ("channeling", 200), ("meditate", 250)]),
+    ("Rogue",         &[("evocation",   0), ("alteration",   0), ("abjuration",   0), ("conjuration",   0), ("divination",   0), ("channeling",   0), ("meditate",   0)]),
+    ("Monk",          &[("evocation",   0), ("alteration",   0), ("abjuration",   0), ("conjuration",   0), ("divination",   0), ("channeling",   0), ("meditate",   0)]),
+    ("Ranger",        &[("evocation", 125), ("alteration", 150), ("abjuration",  75), ("conjuration",   0), ("divination", 150), ("channeling", 200), ("meditate", 250)]),
+    ("Beast Master",  &[("evocation", 125), ("alteration", 150), ("abjuration", 100), ("conjuration",  75), ("divination",  75), ("channeling", 175), ("meditate", 250)]),
+    ("Bard",          &[("evocation", 125), ("alteration", 200), ("abjuration", 100), ("conjuration", 150), ("divination",  75), ("channeling", 200), ("meditate", 250)]),
+    ("Witch Hunter",  &[("evocation", 225), ("alteration", 125), ("abjuration", 100), ("conjuration",   0), ("divination",  75), ("channeling", 200), ("meditate", 250)]),
+    ("Magician",      &[("evocation", 225), ("alteration", 100), ("abjuration",  75), ("conjuration", 250), ("divination",  75), ("channeling", 150), ("meditate", 250)]),
+    ("Wizard",        &[("evocation", 250), ("alteration", 100), ("abjuration", 150), ("conjuration", 100), ("divination", 225), ("channeling", 150), ("meditate", 250)]),
+    ("Sorcerer",      &[("evocation", 250), ("alteration", 100), ("abjuration",  75), ("conjuration",  75), ("divination",  50), ("channeling", 150), ("meditate", 250)]),
+    ("Necromancer",   &[("evocation", 200), ("alteration", 175), ("abjuration",  50), ("conjuration", 225), ("divination", 100), ("channeling", 150), ("meditate", 250)]),
+    ("Enchanter",     &[("evocation", 150), ("alteration", 250), ("abjuration", 200), ("conjuration", 175), ("divination", 125), ("channeling", 150), ("meditate", 250)]),
+    ("Blood Mage",    &[("evocation", 200), ("alteration", 175), ("abjuration",  75), ("conjuration",   0), ("divination",  50), ("channeling", 175), ("meditate", 250)]),
 ];
 
 /// All weapon keys (10). Used by load_character to seed starting
@@ -115,7 +119,7 @@ pub const WEAPON_KEYS: &[&str] = &[
 pub const ARMOR_KEYS: &[&str] = &["cloth", "leather", "chain", "plate", "shield"];
 
 pub const CASTING_KEYS: &[&str] = &[
-    "evocation", "alteration", "abjuration", "conjuration", "divination", "channeling",
+    "evocation", "alteration", "abjuration", "conjuration", "divination", "channeling", "meditate",
 ];
 
 fn lookup_table(skill: Skill) -> CapTable<'static> {
@@ -399,6 +403,18 @@ mod tests {
     fn class_without_skill_returns_zero_cap() {
         assert_eq!(cap_for(Skill::Weapon, "Wizard", 60, "2h_slashing"), 0);
         assert_eq!(cap_for(Skill::Armor, "Monk", 60, "plate"), 0);
+    }
+
+    #[test]
+    fn meditate_cap_mana_classes_only() {
+        // Any class with a mana pool caps meditate at 250 at level 60 (scales by
+        // level like every other skill); the pure-melee classes never train it.
+        assert_eq!(cap_for(Skill::Casting, "Wizard", 60, "meditate"), 250);
+        assert_eq!(cap_for(Skill::Casting, "Cleric", 60, "meditate"), 250);
+        assert_eq!(cap_for(Skill::Casting, "Paladin", 60, "meditate"), 250);
+        assert_eq!(cap_for(Skill::Casting, "Warrior", 60, "meditate"), 0);
+        assert_eq!(cap_for(Skill::Casting, "Rogue", 60, "meditate"), 0);
+        assert_eq!(cap_for(Skill::Casting, "Monk", 60, "meditate"), 0);
     }
 
     #[test]

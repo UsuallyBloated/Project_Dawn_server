@@ -3335,6 +3335,53 @@ pub async fn run(
                     );
                     continue;
                 };
+                // Phase 1 exploit gate — class/level eligibility. Any cast that
+                // reaches here names a real spell; verify the caster's class is in
+                // the spell's `classes` and the caster meets `min_level`. A legit
+                // client only offers spells your class knows, so this rejects a
+                // forged CastSpell (the audit's "any class can cast any spell it can
+                // name"). Checked before the mana / cooldown / skill side effects so
+                // a rejected forgery costs nothing to retry against. Every spell in
+                // spells.toml has a non-empty `classes` and a `min_level`, so no
+                // legit spell trips this on missing data. The CORPSE / resurrection
+                // arm keeps its own copy as defense-in-depth.
+                {
+                    let caster_cl = connections
+                        .get(&caster_cid)
+                        .map(|c| (c.class.clone(), c.level));
+                    let class_ok = caster_cl
+                        .as_ref()
+                        .map(|(class, _)| spell.classes.iter().any(|cl| cl == class))
+                        .unwrap_or(false);
+                    let level_ok = caster_cl
+                        .as_ref()
+                        .map(|(_, level)| *level >= spell.min_level)
+                        .unwrap_or(false);
+                    if !(class_ok && level_ok) {
+                        let (class, level) = caster_cl.unwrap_or_default();
+                        let reason = if !class_ok {
+                            "Your class cannot cast that."
+                        } else {
+                            "You are not high enough level for that spell."
+                        };
+                        tracing::info!(
+                            caster = intent.caster,
+                            spell = %spell.name,
+                            class = %class,
+                            level,
+                            required_level = spell.min_level,
+                            class_ok,
+                            "CastSpell rejected — class/level not eligible"
+                        );
+                        handlers::fan_out_cast_fail(
+                            &mut server,
+                            &in_world_recipients_now,
+                            intent.caster,
+                            reason.to_string(),
+                        );
+                        continue;
+                    }
+                }
                 // Track 10 — cast-time gate. Instant casts (cast_time
                 // == 0) skip; for timed casts we require a matching
                 // CastStartBroadcast on file with enough wall time

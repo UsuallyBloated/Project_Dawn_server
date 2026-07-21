@@ -244,4 +244,42 @@ mod tests {
             assert!(s.classes.iter().any(|c| c == class), "{name} castable by {class}");
         }
     }
+
+    #[test]
+    fn every_spell_is_class_and_level_tagged() {
+        // The Phase 1 cast gate (tick.rs) rejects a cast when the caster's
+        // class isn't in `spell.classes` or their level < `spell.min_level`.
+        // It leans on every spell carrying that data — an untagged spell (empty
+        // classes) would reject EVERY caster and silently break casting for it.
+        // Guard the invariant here so a newly-authored spell can't reopen the gap.
+        for s in spells().values() {
+            assert!(
+                !s.classes.is_empty(),
+                "{} has no classes — cast gate would reject all casters",
+                s.name
+            );
+            assert!(s.min_level >= 1, "{} has min_level {} (< 1)", s.name, s.min_level);
+        }
+    }
+
+    #[test]
+    fn cast_gate_eligibility_matches_class_and_level() {
+        // Mirror of the tick.rs gate predicate (class in spell.classes AND
+        // level >= spell.min_level), pinned to real table rows so a data or
+        // logic drift trips a test rather than shipping an exploit or a
+        // false rejection.
+        let eligible = |name: &str, class: &str, level: i32| {
+            let s = lookup(name).unwrap_or_else(|| panic!("{name} missing from spells.toml"));
+            s.classes.iter().any(|c| c == class) && level >= s.min_level
+        };
+        // Right class, lowest bar: Magician casts Fireball (min_level 1).
+        assert!(eligible("Fireball", "Magician", 1));
+        // Wrong class: a max-level Cleric still can't cast the Magician's Fireball.
+        assert!(!eligible("Fireball", "Cleric", 60));
+        // Level gate: Meteor is Wizard, min_level 18.
+        assert!(!eligible("Meteor", "Wizard", 17), "below min_level must fail");
+        assert!(eligible("Meteor", "Wizard", 18), "at min_level must pass");
+        // Wrong class trumps level entirely.
+        assert!(!eligible("Meteor", "Cleric", 60));
+    }
 }

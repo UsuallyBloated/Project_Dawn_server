@@ -52,7 +52,10 @@ enum CastEvent {
 struct AttackIntent {
     attacker: u64,
     target_id: protocol::world::EntityId,
-    weapon_path: String,
+    // The wire `weapon_path` is intentionally dropped here: the resolver derives
+    // the weapon from the server's equipment map, not the client's claim (Phase 1
+    // exploit gate, finding 5). `is_offhand` is kept — it selects the equip slot
+    // (0 main / 1 off) and applies the off-hand damage penalty.
     is_offhand: bool,
     dmg_type: protocol::world::DamageType,
 }
@@ -1721,14 +1724,12 @@ pub async fn run(
                         Outcome::AttackIntent {
                             attacker,
                             target_id,
-                            weapon_path,
                             is_offhand,
                             dmg_type,
                         } => {
                             attack_intents.push(AttackIntent {
                                 attacker,
                                 target_id,
-                                weapon_path,
                                 is_offhand,
                                 dmg_type,
                             });
@@ -2752,12 +2753,28 @@ pub async fn run(
                 };
                 let attacker_pos = attacker_conn.pos;
                 let attacker_zone = attacker_conn.zone.clone();
+                // Phase 1 exploit gate — weapon_path trust (audit finding 5). The
+                // Attack message carries the weapon the client CLAIMS to swing; a
+                // modified client could name a heavier weapon (more damage), a
+                // ranged one (more reach), or one that trains a skill it hasn't
+                // equipped. Ignore the wire field and read the SERVER's equipment
+                // map: slot 0 = main hand, slot 1 = off hand (protocol EquipSlot
+                // order, items.rs). Equipping only ever happens through the
+                // server-side EquipItem intent, so this map is authoritative and
+                // in sync for anything actually worn. An empty slot is an unarmed
+                // swing — items::lookup("") falls through to the 1-4 fist /
+                // hand_to_hand path in calc_swing + the skill lookup below, so
+                // bare-handed combat still works. is_offhand now only selects the
+                // slot, so a client can't fabricate an off-hand swing it isn't
+                // geared for (empty slot 1 -> fists, not the main-hand weapon).
+                let server_weapon_path: String =
+                    attacker_conn.equipped_weapon_path(intent.is_offhand);
                 // Track 6 sub-task 2: server computes the damage roll.
                 // Client-supplied amount is ignored — even a malicious
                 // client can't claim 999 damage anymore.
                 let swing = combat::calc_swing(
                     attacker_conn,
-                    &intent.weapon_path,
+                    &server_weapon_path,
                     intent.is_offhand,
                 );
 
@@ -2796,7 +2813,7 @@ pub async fn run(
                             t.in_world
                                 && t.hp > 0.0
                                 && t.pos.distance_to(attacker_pos) <= match items::lookup(
-                                    &intent.weapon_path,
+                                    &server_weapon_path,
                                 ) {
                                     Some(w) if w.is_ranged => RANGED_ATTACK_RANGE,
                                     _ => 3.0 * ATTACK_RANGE_TOLERANCE,
@@ -3097,7 +3114,7 @@ pub async fn run(
                 // produce silent Miss broadcasts even though the swing
                 // visually fired. Lookup is by weapon_path; an empty or
                 // unknown path uses the melee envelope.
-                let allowed = match items::lookup(&intent.weapon_path) {
+                let allowed = match items::lookup(&server_weapon_path) {
                     Some(w) if w.is_ranged => RANGED_ATTACK_RANGE,
                     _ => entity.melee_range() * ATTACK_RANGE_TOLERANCE,
                 };
@@ -3107,7 +3124,7 @@ pub async fn run(
                         target = intent.target_id,
                         dist,
                         allowed,
-                        weapon = %intent.weapon_path,
+                        weapon = %server_weapon_path,
                         "attack out of range, fanning Miss"
                     );
                     handlers::fan_out_miss(
@@ -3140,7 +3157,7 @@ pub async fn run(
                 // Fan a SkillProgressUpdate privately if the roll
                 // lands; client mirrors the score for the character
                 // window.
-                let weapon_skill_key: String = items::lookup(&intent.weapon_path)
+                let weapon_skill_key: String = items::lookup(&server_weapon_path)
                     .map(|w| {
                         if w.skill.is_empty() {
                             "hand_to_hand".to_string()

@@ -79,7 +79,10 @@ pub enum Outcome {
     AttackIntent {
         attacker: u64,
         target_id: protocol::world::EntityId,
-        weapon_path: String,
+        // The wire `Attack.weapon_path` is dropped at this boundary: the resolver
+        // derives the weapon from the server's equipment map, never the client's
+        // claim (Phase 1 exploit gate, finding 5). `is_offhand` stays — it selects
+        // the equip slot (0 main / 1 off).
         is_offhand: bool,
         dmg_type: protocol::world::DamageType,
     },
@@ -912,7 +915,7 @@ pub fn handle_message(
 
         ClientWorldMsg::Attack {
             target_id,
-            weapon_path,
+            weapon_path: _, // ignored — server derives the weapon from equipment
             is_offhand,
             dmg_type,
         } => {
@@ -929,7 +932,6 @@ pub fn handle_message(
             Outcome::AttackIntent {
                 attacker: conn.char_id as u64,
                 target_id,
-                weapon_path,
                 is_offhand,
                 dmg_type,
             }

@@ -614,6 +614,22 @@ impl PerConnection {
     pub fn note_damage_taken(&mut self, now: Instant) {
         self.last_damaged_at = Some(now);
     }
+
+    /// The `item_path` of the weapon the SERVER considers equipped in the hand
+    /// this swing uses — main hand (equip slot 0) or off hand (slot 1), per the
+    /// `protocol::world::EquipSlot` order. Empty string = that hand is bare (an
+    /// unarmed swing). The attack resolver reads this instead of the client's
+    /// claimed `weapon_path`, so a modified client can't swing a weapon it hasn't
+    /// equipped (Phase 1 exploit gate, audit finding 5). Equipping only happens
+    /// through the server-side `EquipItem` intent, so this map is authoritative.
+    pub fn equipped_weapon_path(&self, is_offhand: bool) -> String {
+        let slot: u8 = if is_offhand { 1 } else { 0 };
+        self.inventory
+            .equipment
+            .get(&slot)
+            .map(|e| e.item_path.clone())
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -654,6 +670,34 @@ mod tests {
             completed_quests: Vec::new(),
             active_quests: Vec::new(),
         }
+    }
+
+    // The attack resolver reads the equipped weapon from the SERVER's equipment
+    // map, not the client's claimed weapon_path (Phase 1 exploit gate, finding 5):
+    // main hand = slot 0, off hand = slot 1, empty slot = unarmed swing.
+    #[test]
+    fn equipped_weapon_path_reads_the_server_slot() {
+        use super::super::inventory::InventoryEntry;
+        let mut conn = PerConnection::from_spawn(test_spawn(), Instant::now());
+        // Bare hands: both slots empty -> unarmed (empty path -> fists downstream).
+        assert_eq!(conn.equipped_weapon_path(false), "");
+        assert_eq!(conn.equipped_weapon_path(true), "");
+        // Equip a main-hand and an off-hand weapon.
+        conn.inventory.equipment.insert(
+            0,
+            InventoryEntry { item_path: "res://items/iron_short_sword.tres".into(), count: 1 },
+        );
+        conn.inventory.equipment.insert(
+            1,
+            InventoryEntry { item_path: "res://items/rusty_dagger.tres".into(), count: 1 },
+        );
+        assert_eq!(conn.equipped_weapon_path(false), "res://items/iron_short_sword.tres");
+        assert_eq!(conn.equipped_weapon_path(true), "res://items/rusty_dagger.tres");
+        // An off-hand swing with an empty off-hand is unarmed, NOT the main-hand
+        // weapon — a client can't fabricate an off-hand hit it isn't geared for.
+        conn.inventory.equipment.remove(&1);
+        assert_eq!(conn.equipped_weapon_path(true), "");
+        assert_eq!(conn.equipped_weapon_path(false), "res://items/iron_short_sword.tres");
     }
 
     // Dev/GM commands gate on can_use_dev_cmds() = is_dev || is_gm, so a hosted

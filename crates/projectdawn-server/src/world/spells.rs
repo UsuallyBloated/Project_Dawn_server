@@ -282,4 +282,20 @@ mod tests {
         // Wrong class trumps level entirely.
         assert!(!eligible("Meteor", "Cleric", 60));
     }
+
+    #[test]
+    fn ported_client_spells_resolve() {
+        // Life Drain + Dark Shroud were client-only (playtest 2026-07-22: server
+        // dropped the cast as "unknown spell", mana spent, no effect). Ported into
+        // spells.toml; lock them so the client/server drift can't silently reopen.
+        let ld = lookup("Life Drain").expect("Life Drain ported into spells.toml");
+        assert_eq!(ld.target_type, "ENEMY");
+        assert!(ld.classes.iter().any(|c| c == "Blood Mage"));
+        assert_eq!(ld.min_level, 6);
+        assert!(ld.heal_amount > 0.0, "Life Drain is a lifetap (self-heal)");
+        let ds = lookup("Dark Shroud").expect("Dark Shroud ported into spells.toml");
+        assert_eq!(ds.target_type, "ENEMY");
+        assert!(ds.classes.iter().any(|c| c == "Shadow Knight"));
+        assert_eq!(ds.min_level, 10);
+    }
 }

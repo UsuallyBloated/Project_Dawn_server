@@ -640,6 +640,20 @@ cooldown = 12.0
 min_level = 12
 classes = ["Blood Mage"]
 
+# Ported from client spell_definitions.gd (was client-only; server dropped the
+# cast as "unknown spell"). Lifetap: heals the caster for min(heal_amount, dmg).
+[[spell]]
+name = "Life Drain"
+target_type = "ENEMY"
+damage_type = "SHADOW"
+base_damage = 40.0
+heal_amount = 20.0
+mana_cost = 30.0
+cast_time = 0.5
+cooldown = 7.0
+min_level = 6
+classes = ["Blood Mage"]
+
 # ── Paladin ─────────────────────────────────────────────────────────
 [[spell]]
 name = "Lay on Hands"
@@ -688,6 +702,20 @@ mana_cost = 15.0
 cast_time = 0.0
 cooldown = 3.0
 min_level = 1
+classes = ["Shadow Knight"]
+
+# Ported from client spell_definitions.gd (was client-only; server dropped the
+# cast as "unknown spell"). Straight shadow nuke.
+[[spell]]
+name = "Dark Shroud"
+target_type = "ENEMY"
+damage_type = "SHADOW"
+base_damage = 55.0
+heal_amount = 0.0
+mana_cost = 35.0
+cast_time = 1.5
+cooldown = 9.0
+min_level = 10
 classes = ["Shadow Knight"]
 
 # ── Necromancer ─────────────────────────────────────────────────────

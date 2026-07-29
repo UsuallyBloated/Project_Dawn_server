@@ -60,6 +60,67 @@ struct AttackIntent {
     dmg_type: protocol::world::DamageType,
 }
 
+// ── Melee swing-rate limit (Phase 1 exploit gate) ───────────────────────────
+// Player auto-attack is client-paced, so the server must floor how fast the
+// SAME hand may swing or a modified client can spam Attack for an attack-speed
+// hack. These mirror the client pacing in `autoloads/combat.gd`; keep in step.
+
+/// Fist (empty-hand) attack delay in seconds — the client's fallback when no
+/// weapon is equipped (`combat.gd::_get_weapon_delay` returns 2.0).
+const FIST_WEAPON_DELAY: f32 = 2.0;
+/// Off-hand swings are slower than main-hand by this factor (client
+/// `OFFHAND_DELAY_MULT`).
+const OFFHAND_DELAY_MULT: f32 = 1.5;
+/// Strongest single non-stacking haste the client models (Enchanter "Haste",
+/// `haste_amount` 0.5 = 50% faster). The floor assumes a player is fully hasted
+/// so a legitimately-hasted swing is never rejected. (Player haste is otherwise
+/// a server no-op today; this is the safe over-estimate.)
+const MAX_MODELED_HASTE: f32 = 0.5;
+/// Tolerance subtracted from the computed minimum to absorb the 20 Hz tick, UDP
+/// bunching, and Godot timer granularity — so honest jitter never trips it.
+/// Sized for the tightest legit case: a fully-hasted player on the fastest
+/// weapon swings its main hand every 1.0s, and arrival gaps compress under
+/// real-internet jitter (mobile / congested / transcontinental). 0.35s keeps
+/// that player's margin comfortably above realistic jitter once the target
+/// server is remote (schedule Phase 2), at the cost of letting a forged client
+/// swing at most ~1.5x the fully-hasted rate — a bounded residual, since the
+/// gate's job is to kill wire-speed spam, not enforce exact cadence.
+const SWING_RATE_GRACE_SECS: f32 = 0.35;
+/// Absolute per-hand swing floor. The client's `maxf(0.5, ...)` makes any
+/// same-hand interval below ~0.5s physically impossible for an honest client, so
+/// 0.4s (0.5 minus jitter) is a safe unconditional forgery line.
+const HARD_MIN_SWING_SECS: f32 = 0.4;
+
+/// Minimum wall-clock seconds allowed between two SAME-HAND swings before the
+/// faster one is a forgery. Mirrors the client pacing (`combat.gd`):
+/// `weapon_delay` (fists 2.0) times the off-hand multiplier, scaled by the
+/// strongest modeled haste so a fully-hasted player never trips, minus a jitter
+/// grace, floored at `HARD_MIN_SWING_SECS`. Only ever used to reject "too fast"
+/// — never "too slow" (the client sends an Attack only on a landed hit, so real
+/// arrivals are already >= the interval).
+///
+/// Deliberate residual: because we can't tell a hasted client from a non-hasted
+/// one at the gate (haste is client-paced, a server no-op today), we ASSUME max
+/// haste for everyone. A forged non-hasted client can therefore swing up to the
+/// fully-hasted rate (~2x a non-hasted honest swing). That is an accepted trade
+/// — the gate exists to kill wire-speed spam (dozens/sec), not to enforce exact
+/// cadence. Tighten `MAX_MODELED_HASTE` toward the player's real haste only once
+/// server-authoritative haste exists, or false positives return for hasted play.
+fn min_swing_interval_secs(weapon_delay: f32, is_offhand: bool) -> f32 {
+    let hand_mult = if is_offhand { OFFHAND_DELAY_MULT } else { 1.0 };
+    let fastest_legit =
+        (weapon_delay * hand_mult * (1.0 - MAX_MODELED_HASTE)).max(HARD_MIN_SWING_SECS);
+    (fastest_legit - SWING_RATE_GRACE_SECS).max(HARD_MIN_SWING_SECS)
+}
+
+/// True if a same-hand swing arriving `now` is faster than `min_interval` since
+/// that hand's last accepted swing (`last`). A hand that has never swung
+/// (`None`) is always allowed. Split out so the accept/reject decision is unit
+/// testable without the whole attack loop.
+fn swing_too_fast(last: Option<Instant>, now: Instant, min_interval: f32) -> bool {
+    last.is_some_and(|t| now.duration_since(t).as_secs_f32() < min_interval)
+}
+
 /// Track 6 sub-task 3b — buffered spell-cast intent. Server resolves
 /// the spell in spells.toml, validates mana / target, and applies
 /// damage or heal authoritatively.
@@ -2769,6 +2830,48 @@ pub async fn run(
                 // geared for (empty slot 1 -> fists, not the main-hand weapon).
                 let server_weapon_path: String =
                     attacker_conn.equipped_weapon_path(intent.is_offhand);
+                // Phase 1 exploit gate — off-hand swings require an actual off-hand
+                // weapon. A stock client only sends is_offhand=true when
+                // dual-wielding a real slot-1 weapon (combat.gd `_is_dual_wielding`);
+                // an off-hand Attack with an EMPTY slot 1 is a forged free second
+                // damage stream (it would otherwise resolve to a 1-4 fist swing x the
+                // off-hand mult). A bare hand is not an off-hand weapon — reject it.
+                if intent.is_offhand && server_weapon_path.is_empty() {
+                    tracing::info!(
+                        attacker = intent.attacker,
+                        "Attack rejected — off-hand swing with no off-hand weapon equipped"
+                    );
+                    continue;
+                }
+                // Phase 1 exploit gate — melee swing-rate limit. No swing timer
+                // existed, so a modified client could spam Attack for an
+                // attack-speed hack. Player auto-attack is client-paced, so the
+                // server floors how fast the SAME hand may swing. Keyed PER HAND
+                // (main = slot 0, off = slot 1) because dual-wield emits two
+                // independent Attack streams that legitimately co-fire in one tick
+                // — a single combined timer would false-throttle a legit
+                // dual-wielder. The client sends an Attack only on a landed hit and
+                // has no burst / catch-up (combat.gd), so arrivals are already >=
+                // its swing interval; we only reject "too fast", never "too slow".
+                // Dropped silently (no Miss fan-out — that would reward the spammer
+                // and desync their local timer). The timestamp advances only on an
+                // ACCEPTED swing (below, after calc_swing), so a spammer can't walk
+                // the window forward with rejected swings.
+                let hand = intent.is_offhand as usize;
+                let base_delay = items::lookup(&server_weapon_path)
+                    .map(|w| w.weapon_delay)
+                    .unwrap_or(FIST_WEAPON_DELAY);
+                let min_interval = min_swing_interval_secs(base_delay, intent.is_offhand);
+                if swing_too_fast(attacker_conn.last_swing_at[hand], now, min_interval) {
+                    tracing::info!(
+                        attacker = intent.attacker,
+                        is_offhand = intent.is_offhand,
+                        weapon_delay = base_delay,
+                        min_interval,
+                        "Attack rejected — swing-rate limit (too fast)"
+                    );
+                    continue;
+                }
                 // Track 6 sub-task 2: server computes the damage roll.
                 // Client-supplied amount is ignored — even a malicious
                 // client can't claim 999 damage anymore.
@@ -2777,6 +2880,14 @@ pub async fn run(
                     &server_weapon_path,
                     intent.is_offhand,
                 );
+                // Swing accepted at a legal cadence — advance THIS hand's timer.
+                // Stamped here on cadence-acceptance (before the range / hit / PvP
+                // resolution below) because the client paces by swing attempt, not
+                // by landed hit; the attacker_conn immutable borrow ends at
+                // calc_swing above, so this get_mut is clear.
+                if let Some(a) = connections.get_mut(&attacker_cid) {
+                    a.last_swing_at[hand] = Some(now);
+                }
 
                 // Track 6 sub-task 3: player-target branch (PvP). The
                 // attack-id partition has player char_ids below
@@ -8669,6 +8780,64 @@ fn corpse_emptied_by_loot(had_content: bool, empty_now: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::corpse_emptied_by_loot;
+
+    // Melee swing-rate limit: the per-hand minimum interval the server allows
+    // between same-hand swings. It must (a) sit comfortably BELOW the fastest a
+    // legit fully-hasted client swings for each weapon (so no false positives),
+    // and (b) never fall below the absolute hard floor. Mirror of combat.gd
+    // pacing (weapon_delay x offhand-mult x (1-haste), maxf 0.5).
+    #[test]
+    fn swing_rate_min_interval_is_below_client_fastest_but_above_floor() {
+        use super::{
+            min_swing_interval_secs, HARD_MIN_SWING_SECS, MAX_MODELED_HASTE, OFFHAND_DELAY_MULT,
+        };
+        let approx = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        // Default 2.0 weapon, main hand: 2.0*0.5=1.0 fastest legit, minus 0.35 grace = 0.65.
+        assert!(approx(min_swing_interval_secs(2.0, false), 0.65));
+        // Off hand 2.0: 2.0*1.5*0.5=1.5, minus grace = 1.15.
+        assert!(approx(min_swing_interval_secs(2.0, true), 1.15));
+        // Slow war axe 3.2 main: 3.2*0.5=1.6, minus grace = 1.25.
+        assert!(approx(min_swing_interval_secs(3.2, false), 1.25));
+        // The gate must ALWAYS be <= the client's fastest legit same-hand interval
+        // (weapon_delay * hand_mult * (1-max_haste), floored 0.5 client-side) so a
+        // fully-hasted legit swing is never rejected. Sweep the real range PLUS
+        // hypothetical fast weapons (<2.0) where the client's 0.5s floor and the
+        // server's 0.4s floor diverge most.
+        for &delay in &[1.0_f32, 1.4, 2.0, 2.5, 2.8, 3.0, 3.2] {
+            for &off in &[false, true] {
+                let hand_mult = if off { OFFHAND_DELAY_MULT } else { 1.0 };
+                let client_fastest = (delay * hand_mult * (1.0 - MAX_MODELED_HASTE)).max(0.5);
+                assert!(
+                    min_swing_interval_secs(delay, off) <= client_fastest,
+                    "gate {} must be <= client fastest {} (delay {delay}, off {off})",
+                    min_swing_interval_secs(delay, off),
+                    client_fastest
+                );
+            }
+        }
+        // Never below the absolute floor, even for an implausibly fast weapon.
+        assert!(min_swing_interval_secs(0.1, false) >= HARD_MIN_SWING_SECS);
+        assert!(min_swing_interval_secs(0.0, true) >= HARD_MIN_SWING_SECS);
+    }
+
+    // The per-hand accept/reject decision: a never-swung hand is always allowed;
+    // a swing within min_interval is "too fast" (rejected); one at/after it is
+    // allowed. Per-hand independence is by construction (last_swing_at is indexed
+    // by is_offhand), so a main + off swing at the same instant never interfere.
+    #[test]
+    fn swing_too_fast_gates_only_within_the_interval() {
+        use super::swing_too_fast;
+        use std::time::Duration;
+        let base = std::time::Instant::now() + Duration::from_secs(60);
+        // Never swung -> always accepted.
+        assert!(!swing_too_fast(None, base, 0.65));
+        // 0.5s after last, min 0.65 -> too fast (rejected).
+        assert!(swing_too_fast(Some(base - Duration::from_millis(500)), base, 0.65));
+        // Exactly at the interval -> allowed (not "less than").
+        assert!(!swing_too_fast(Some(base - Duration::from_millis(650)), base, 0.65));
+        // Well after -> allowed.
+        assert!(!swing_too_fast(Some(base - Duration::from_secs(2)), base, 0.65));
+    }
 
     // The connect token's user_data layout is a contract between
     // mint_connect_token (packs) and these parsers (read): account_id LE in

@@ -151,7 +151,16 @@ pub struct PerConnection {
     /// Wall-clock of this connection's most recent melee swing, stamped in the
     /// attack-apply. With `last_damaged_at` it marks "in combat" so the seated
     /// regen bonus is suppressed mid-fight (see `regen::sitting_bonus_applies`).
+    /// Hand-agnostic on purpose — it is a combat marker, not a rate limit.
     pub last_attack_at: Option<Instant>,
+
+    /// Phase 1 exploit gate — per-hand last-ACCEPTED-swing timestamps for the
+    /// melee swing-rate limit. Index 0 = main hand, 1 = off hand (keyed by the
+    /// Attack's `is_offhand`). Kept separate from `last_attack_at` because
+    /// dual-wield swings two independent hands that legitimately co-fire in one
+    /// tick; a single combined timer would false-throttle a legit dual-wielder.
+    /// Advanced only on a swing the rate gate accepts (`tick.rs`).
+    pub last_swing_at: [Option<Instant>; 2],
 
     /// Wall-clock of the last Meditate skill-up tick. The regen loop advances
     /// the `meditate` casting skill roughly once per 6 s of medding (sitting with
@@ -471,6 +480,7 @@ impl PerConnection {
             camp_since: None,
             last_damaged_at: None,
             last_attack_at: None,
+            last_swing_at: [None, None],
             last_meditate_at: None,
             death_processed: false,
             corpse_pending: false,

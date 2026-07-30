@@ -12,15 +12,97 @@ use crate::{
 use futures_util::{SinkExt, StreamExt};
 use protocol::auth::{ClientAuthMsg, ServerAuthMsg};
 use sqlx::SqlitePool;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
+
+// ── Auth-path rate limiting ─────────────────────────────────────────────────
+// Brute-force / enumeration defense: cap Login+Register attempts per client IP
+// within a rolling window. Keyed by IP (not username) so an attacker can only
+// throttle THEIR OWN source address — a victim's account can never be locked out
+// by someone guessing at it. A slot is consumed per attempt at CHECK TIME (one
+// atomic lock), so concurrent same-IP attempts can't all slip through before the
+// count catches up; a successful LOGIN clears the IP so an honest user's earlier
+// fumbles don't linger. Shared across every per-connection task behind a Mutex
+// (the critical section is tiny and never held across an await).
+
+/// Auth attempts allowed per IP per `LOGIN_WINDOW` before further attempts are
+/// rejected until the window rolls over. A successful login clears the count.
+const MAX_LOGIN_ATTEMPTS: u32 = 5;
+/// The rolling window for `MAX_LOGIN_ATTEMPTS`.
+const LOGIN_WINDOW: Duration = Duration::from_secs(60);
+/// Once this many IPs are tracked, drop expired windows on the next attempt so
+/// the map can't grow without bound if an attacker cycles source addresses.
+const RATE_LIMIT_PRUNE_AT: usize = 4096;
+
+struct Window {
+    count: u32,
+    start: Instant,
+}
+
+pub struct LoginRateLimiter {
+    inner: Mutex<HashMap<IpAddr, Window>>,
+}
+
+impl LoginRateLimiter {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Try to consume one attempt slot for `ip`. Returns true (and consumes a
+    /// slot) if the IP is under `MAX_LOGIN_ATTEMPTS` for the current window;
+    /// false if it is already at the cap. Check-and-consume happen under a SINGLE
+    /// lock, so N concurrent same-IP attempts can never all pass before the count
+    /// is bumped (the TOCTOU a check-then-increment design would have).
+    fn try_acquire(&self, ip: IpAddr, now: Instant) -> bool {
+        let mut map = self.inner.lock().expect("login limiter poisoned");
+        if map.len() >= RATE_LIMIT_PRUNE_AT {
+            map.retain(|_, w| now.duration_since(w.start) < LOGIN_WINDOW);
+        }
+        let w = map.entry(ip).or_insert(Window { count: 0, start: now });
+        if now.duration_since(w.start) >= LOGIN_WINDOW {
+            w.count = 0;
+            w.start = now;
+        }
+        if w.count >= MAX_LOGIN_ATTEMPTS {
+            return false;
+        }
+        w.count += 1;
+        true
+    }
+
+    /// Clear `ip` after a successful login so a legit user isn't penalized for
+    /// earlier fumbles. Only a *login* success clears — a Register success must
+    /// not, or junk-registering would reset an enumeration budget.
+    fn clear(&self, ip: IpAddr) {
+        self.inner
+            .lock()
+            .expect("login limiter poisoned")
+            .remove(&ip);
+    }
+}
+
+impl Default for LoginRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 pub async fn serve(cfg: Arc<Config>, pool: SqlitePool) -> anyhow::Result<()> {
     let listener = TcpListener::bind(&cfg.auth_bind).await?;
     let actual = listener.local_addr()?;
     tracing::info!(addr = %actual, "auth WS listening");
 
+    // Precompute the auth-timing equalizer hash now so no live request pays the
+    // one-time init (see db::verify_login's enumeration defense).
+    db::warm_login_timing_defense();
+
+    let limiter = Arc::new(LoginRateLimiter::new());
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(p) => p,
@@ -31,8 +113,9 @@ pub async fn serve(cfg: Arc<Config>, pool: SqlitePool) -> anyhow::Result<()> {
         };
         let cfg = cfg.clone();
         let pool = pool.clone();
+        let limiter = limiter.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, peer.to_string(), cfg, pool).await {
+            if let Err(e) = handle_connection(stream, peer, cfg, pool, limiter).await {
                 tracing::warn!(peer = %peer, error = %e, "connection ended with error");
             }
         });
@@ -47,6 +130,7 @@ pub async fn serve_bound(
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
     let listener = TcpListener::bind(&cfg.auth_bind).await?;
     let addr = listener.local_addr()?;
+    let limiter = Arc::new(LoginRateLimiter::new());
     let handle = tokio::spawn(async move {
         loop {
             let (stream, peer) = match listener.accept().await {
@@ -55,8 +139,9 @@ pub async fn serve_bound(
             };
             let cfg = cfg.clone();
             let pool = pool.clone();
+            let limiter = limiter.clone();
             tokio::spawn(async move {
-                let _ = handle_connection(stream, peer.to_string(), cfg, pool).await;
+                let _ = handle_connection(stream, peer, cfg, pool, limiter).await;
             });
         }
     });
@@ -65,12 +150,16 @@ pub async fn serve_bound(
 
 async fn handle_connection(
     stream: TcpStream,
-    peer: String,
+    peer: SocketAddr,
     cfg: Arc<Config>,
     pool: SqlitePool,
+    limiter: Arc<LoginRateLimiter>,
 ) -> anyhow::Result<()> {
     let ws = tokio_tungstenite::accept_async(stream).await?;
     let (mut write, mut read) = ws.split();
+    // Key the login rate limiter on the IP only — the ephemeral source port
+    // changes every connection, so keying on the full SocketAddr would defeat it.
+    let client_ip = peer.ip();
     tracing::debug!(%peer, "ws upgraded");
 
     while let Some(frame) = read.next().await {
@@ -113,7 +202,7 @@ async fn handle_connection(
             }
         };
 
-        let response = dispatch(&cfg, &pool, msg).await;
+        let response = dispatch(&cfg, &pool, msg, client_ip, &limiter).await;
         let response = match response {
             Ok(r) => r,
             Err(e) => {
@@ -138,6 +227,8 @@ async fn dispatch(
     cfg: &Config,
     pool: &SqlitePool,
     msg: ClientAuthMsg,
+    client_ip: IpAddr,
+    limiter: &LoginRateLimiter,
 ) -> AuthResult<ServerAuthMsg> {
     match msg {
         ClientAuthMsg::Register {
@@ -145,6 +236,17 @@ async fn dispatch(
             password,
             email,
         } => {
+            // Same per-IP gate as Login: NameTaken vs RegisterOk is a username
+            // existence oracle, so Register must be throttled too or it negates
+            // the Login-path enumeration defense. No clear on success — a Register
+            // success must NOT reset the budget (junk-registering would give an
+            // attacker a way to keep enumerating). Loopback exempt for dev.
+            let now = Instant::now();
+            if !client_ip.is_loopback() && !limiter.try_acquire(client_ip, now) {
+                return Err(AuthError::RateLimited(
+                    "Too many attempts. Please wait a minute and try again.".into(),
+                ));
+            }
             let id = db::create_account(pool, &username, &password, email.as_deref()).await?;
             Ok(ServerAuthMsg::RegisterOk { account_id: id })
         }
@@ -153,6 +255,8 @@ async fn dispatch(
             password,
             client_version,
         } => {
+            // Version check first — an outdated client is not a credential guess,
+            // so it must not consume a rate-limit slot.
             let cv = crate::config::semver::Version::parse(&client_version)
                 .ok_or_else(|| AuthError::InvalidInput(format!(
                     "client_version is not semver: {client_version}"
@@ -163,15 +267,34 @@ async fn dispatch(
                     required: cfg.min_client_version.to_string(),
                 });
             }
-            let outcome = db::verify_login(pool, &username, &password).await?;
-            let chars = db::list_characters(pool, outcome.account_id).await?;
-            Ok(ServerAuthMsg::LoginOk {
-                session_token: outcome.session_token_hex,
-                account_id: outcome.account_id,
-                is_gm: outcome.is_gm,
-                world_endpoint: cfg.world_endpoint.clone(),
-                characters: chars,
-            })
+            // Brute-force gate: consume one attempt slot for this IP BEFORE the
+            // expensive Argon2 verify — reserving at check time closes the
+            // concurrent-burst TOCTOU. Loopback is exempt so local dev / the
+            // PD_DEV_CMDS relog loop is never throttled.
+            let now = Instant::now();
+            if !client_ip.is_loopback() && !limiter.try_acquire(client_ip, now) {
+                return Err(AuthError::RateLimited(
+                    "Too many login attempts. Please wait a minute and try again.".into(),
+                ));
+            }
+            match db::verify_login(pool, &username, &password).await {
+                Ok(outcome) => {
+                    // Valid credentials: clear the IP so earlier fumbles by an
+                    // honest user (or a NAT-mate) stop counting.
+                    limiter.clear(client_ip);
+                    let chars = db::list_characters(pool, outcome.account_id).await?;
+                    Ok(ServerAuthMsg::LoginOk {
+                        session_token: outcome.session_token_hex,
+                        account_id: outcome.account_id,
+                        is_gm: outcome.is_gm,
+                        world_endpoint: cfg.world_endpoint.clone(),
+                        characters: chars,
+                    })
+                }
+                // Any failure keeps the slot already consumed at try_acquire
+                // (wrong password, banned, etc.) — nothing more to record.
+                Err(e) => Err(e),
+            }
         }
         ClientAuthMsg::CharList { session_token } => {
             let account_id = db::touch_session(pool, &session_token).await?;
@@ -235,4 +358,37 @@ where
     sink.send(Message::Text(serde_json::to_string(&resp)?))
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn try_acquire_caps_per_ip_window_and_clear_resets() {
+        let lim = LoginRateLimiter::new();
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        // Base well in the future so `now - start` never underflows Instant.
+        let t0 = Instant::now() + Duration::from_secs(3600);
+
+        // MAX attempts consume their slots; the (MAX+1)th is refused. Because
+        // consume is atomic, back-to-back calls at the SAME instant still cap at
+        // MAX (this is what defeats the concurrent-burst TOCTOU).
+        for i in 0..MAX_LOGIN_ATTEMPTS {
+            assert!(lim.try_acquire(ip, t0), "attempt {i} within budget");
+        }
+        assert!(!lim.try_acquire(ip, t0), "over budget -> refused");
+        // A different IP has its own budget.
+        let ip2: IpAddr = "5.6.7.8".parse().unwrap();
+        assert!(lim.try_acquire(ip2, t0));
+        // Window rollover frees the original IP.
+        assert!(lim.try_acquire(ip, t0 + LOGIN_WINDOW + Duration::from_secs(1)));
+        // clear() (login success) frees the budget immediately.
+        lim.clear(ip);
+        let t = t0 + LOGIN_WINDOW + Duration::from_secs(2);
+        for _ in 0..MAX_LOGIN_ATTEMPTS {
+            assert!(lim.try_acquire(ip, t));
+        }
+        assert!(!lim.try_acquire(ip, t), "cap re-applies after clear + reuse");
+    }
 }

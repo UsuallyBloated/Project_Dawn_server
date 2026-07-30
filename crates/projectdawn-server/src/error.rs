@@ -9,6 +9,11 @@ pub enum AuthError {
     NameTaken,
     #[error("authentication failed")]
     AuthFailed,
+    /// Too many auth attempts from this client. Display is the bare message (no
+    /// "rate limited:" prefix) so the launcher renders it cleanly; maps to the
+    /// existing `InvalidInput` wire code to avoid a protocol change.
+    #[error("{0}")]
+    RateLimited(String),
     #[error("client version {client} below required {required}")]
     VersionMismatch { client: String, required: String },
     #[error("session token expired or unknown")]
@@ -28,6 +33,9 @@ impl AuthError {
         match self {
             Self::NameTaken => ErrorCode::NameTaken,
             Self::AuthFailed => ErrorCode::AuthFailed,
+            // No dedicated wire code — reuse InvalidInput so the client (which
+            // already handles it) needs no change; the message carries the detail.
+            Self::RateLimited(_) => ErrorCode::InvalidInput,
             Self::VersionMismatch { .. } => ErrorCode::VersionMismatch,
             Self::SessionExpired => ErrorCode::SessionExpired,
             Self::Banned(_) => ErrorCode::Banned,

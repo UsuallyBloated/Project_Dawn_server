@@ -104,6 +104,28 @@ struct AccountAuthRow {
     ban_reason: Option<String>,
 }
 
+/// A fixed, valid Argon2 PHC hash used only to burn the same CPU as a real
+/// password verify when the username doesn't exist (see `verify_login`).
+/// Computed once with the server's Argon2 params so its verify cost matches
+/// production. The password it hashes is irrelevant — the verify always fails.
+fn dummy_login_hash() -> &'static str {
+    static H: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    H.get_or_init(|| {
+        let salt = SaltString::generate(&mut OsRng);
+        Argon2::default()
+            .hash_password(b"timing-equalizer", &salt)
+            .expect("hash dummy password")
+            .to_string()
+    })
+}
+
+/// Precompute the timing-equalizer hash at startup so the first missing-user
+/// login never pays the one-time `OnceLock` init cost (which would make that one
+/// request ~2x Argon2 and stand out). Call once during boot.
+pub fn warm_login_timing_defense() {
+    let _ = dummy_login_hash();
+}
+
 pub async fn verify_login(
     pool: &SqlitePool,
     username: &str,
@@ -117,7 +139,22 @@ pub async fn verify_login(
     .fetch_optional(pool)
     .await?;
 
-    let row = row.ok_or(AuthError::AuthFailed)?;
+    let row = match row {
+        Some(r) => r,
+        None => {
+            // Enumeration defense (auth-timing): a missing username must cost the
+            // same wall-clock as a wrong password. A real account runs an Argon2
+            // verify below; without this, a missing account would return instantly,
+            // letting an attacker distinguish "user exists" by response time. Burn
+            // one dummy verify against a fixed valid hash, discard it, then fail
+            // with the SAME error as a wrong password.
+            let _ = Argon2::default().verify_password(
+                password.as_bytes(),
+                &PasswordHash::new(dummy_login_hash()).expect("dummy hash is valid PHC"),
+            );
+            return Err(AuthError::AuthFailed);
+        }
+    };
     if row.is_banned {
         return Err(AuthError::Banned(row.ban_reason.unwrap_or_default()));
     }

@@ -240,9 +240,9 @@ async fn dispatch(
             // existence oracle, so Register must be throttled too or it negates
             // the Login-path enumeration defense. No clear on success — a Register
             // success must NOT reset the budget (junk-registering would give an
-            // attacker a way to keep enumerating). Loopback exempt for dev.
+            // attacker a way to keep enumerating).
             let now = Instant::now();
-            if !client_ip.is_loopback() && !limiter.try_acquire(client_ip, now) {
+            if !limiter.try_acquire(client_ip, now) {
                 return Err(AuthError::RateLimited(
                     "Too many attempts. Please wait a minute and try again.".into(),
                 ));
@@ -269,10 +269,12 @@ async fn dispatch(
             }
             // Brute-force gate: consume one attempt slot for this IP BEFORE the
             // expensive Argon2 verify — reserving at check time closes the
-            // concurrent-burst TOCTOU. Loopback is exempt so local dev / the
-            // PD_DEV_CMDS relog loop is never throttled.
+            // concurrent-burst TOCTOU. Applies to loopback too (so it's testable +
+            // protected locally): a SUCCESSFUL login clears the IP, so dev / the
+            // PD_DEV_CMDS relog loop (which logs in fine) never accumulates — only
+            // a burst of BAD logins throttles, and it clears after the window.
             let now = Instant::now();
-            if !client_ip.is_loopback() && !limiter.try_acquire(client_ip, now) {
+            if !limiter.try_acquire(client_ip, now) {
                 return Err(AuthError::RateLimited(
                     "Too many login attempts. Please wait a minute and try again.".into(),
                 ));

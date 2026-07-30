@@ -43,8 +43,19 @@ struct Window {
     start: Instant,
 }
 
+/// Which auth flow an attempt belongs to. Login and Register keep SEPARATE
+/// per-IP budgets: a login success clears only the Login budget, so it can't
+/// wipe an in-progress Register (enumeration) budget. Without this split, the
+/// launcher's auto-login after a Register would clear the shared counter every
+/// account, and Register would never throttle (playtest 2026-07-30).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum AuthKind {
+    Login,
+    Register,
+}
+
 pub struct LoginRateLimiter {
-    inner: Mutex<HashMap<IpAddr, Window>>,
+    inner: Mutex<HashMap<(IpAddr, AuthKind), Window>>,
 }
 
 impl LoginRateLimiter {
@@ -54,17 +65,17 @@ impl LoginRateLimiter {
         }
     }
 
-    /// Try to consume one attempt slot for `ip`. Returns true (and consumes a
-    /// slot) if the IP is under `MAX_LOGIN_ATTEMPTS` for the current window;
-    /// false if it is already at the cap. Check-and-consume happen under a SINGLE
-    /// lock, so N concurrent same-IP attempts can never all pass before the count
-    /// is bumped (the TOCTOU a check-then-increment design would have).
-    fn try_acquire(&self, ip: IpAddr, now: Instant) -> bool {
+    /// Try to consume one attempt slot for `(ip, kind)`. Returns true (and
+    /// consumes a slot) if under `MAX_LOGIN_ATTEMPTS` for the current window;
+    /// false if already at the cap. Check-and-consume happen under a SINGLE lock,
+    /// so N concurrent same-IP attempts can never all pass before the count is
+    /// bumped (the TOCTOU a check-then-increment design would have).
+    fn try_acquire(&self, ip: IpAddr, kind: AuthKind, now: Instant) -> bool {
         let mut map = self.inner.lock().expect("login limiter poisoned");
         if map.len() >= RATE_LIMIT_PRUNE_AT {
             map.retain(|_, w| now.duration_since(w.start) < LOGIN_WINDOW);
         }
-        let w = map.entry(ip).or_insert(Window { count: 0, start: now });
+        let w = map.entry((ip, kind)).or_insert(Window { count: 0, start: now });
         if now.duration_since(w.start) >= LOGIN_WINDOW {
             w.count = 0;
             w.start = now;
@@ -76,14 +87,15 @@ impl LoginRateLimiter {
         true
     }
 
-    /// Clear `ip` after a successful login so a legit user isn't penalized for
-    /// earlier fumbles. Only a *login* success clears — a Register success must
-    /// not, or junk-registering would reset an enumeration budget.
-    fn clear(&self, ip: IpAddr) {
+    /// Clear `(ip, kind)` after a success so a legit user isn't penalized for
+    /// earlier fumbles. Only ever called for `Login` — a Register success must
+    /// NOT clear (its budget is what throttles enumeration), and clearing Login
+    /// must not touch the Register budget (hence the per-kind key).
+    fn clear(&self, ip: IpAddr, kind: AuthKind) {
         self.inner
             .lock()
             .expect("login limiter poisoned")
-            .remove(&ip);
+            .remove(&(ip, kind));
     }
 }
 
@@ -242,7 +254,7 @@ async fn dispatch(
             // success must NOT reset the budget (junk-registering would give an
             // attacker a way to keep enumerating).
             let now = Instant::now();
-            if !limiter.try_acquire(client_ip, now) {
+            if !limiter.try_acquire(client_ip, AuthKind::Register, now) {
                 return Err(AuthError::RateLimited(
                     "Too many attempts. Please wait a minute and try again.".into(),
                 ));
@@ -274,16 +286,17 @@ async fn dispatch(
             // PD_DEV_CMDS relog loop (which logs in fine) never accumulates — only
             // a burst of BAD logins throttles, and it clears after the window.
             let now = Instant::now();
-            if !limiter.try_acquire(client_ip, now) {
+            if !limiter.try_acquire(client_ip, AuthKind::Login, now) {
                 return Err(AuthError::RateLimited(
                     "Too many login attempts. Please wait a minute and try again.".into(),
                 ));
             }
             match db::verify_login(pool, &username, &password).await {
                 Ok(outcome) => {
-                    // Valid credentials: clear the IP so earlier fumbles by an
-                    // honest user (or a NAT-mate) stop counting.
-                    limiter.clear(client_ip);
+                    // Valid credentials: clear the IP's LOGIN budget so earlier
+                    // fumbles by an honest user (or a NAT-mate) stop counting. Does
+                    // NOT touch the Register budget.
+                    limiter.clear(client_ip, AuthKind::Login);
                     let chars = db::list_characters(pool, outcome.account_id).await?;
                     Ok(ServerAuthMsg::LoginOk {
                         session_token: outcome.session_token_hex,
@@ -368,6 +381,7 @@ mod tests {
 
     #[test]
     fn try_acquire_caps_per_ip_window_and_clear_resets() {
+        use AuthKind::Login;
         let lim = LoginRateLimiter::new();
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
         // Base well in the future so `now - start` never underflows Instant.
@@ -377,20 +391,42 @@ mod tests {
         // consume is atomic, back-to-back calls at the SAME instant still cap at
         // MAX (this is what defeats the concurrent-burst TOCTOU).
         for i in 0..MAX_LOGIN_ATTEMPTS {
-            assert!(lim.try_acquire(ip, t0), "attempt {i} within budget");
+            assert!(lim.try_acquire(ip, Login, t0), "attempt {i} within budget");
         }
-        assert!(!lim.try_acquire(ip, t0), "over budget -> refused");
+        assert!(!lim.try_acquire(ip, Login, t0), "over budget -> refused");
         // A different IP has its own budget.
         let ip2: IpAddr = "5.6.7.8".parse().unwrap();
-        assert!(lim.try_acquire(ip2, t0));
+        assert!(lim.try_acquire(ip2, Login, t0));
         // Window rollover frees the original IP.
-        assert!(lim.try_acquire(ip, t0 + LOGIN_WINDOW + Duration::from_secs(1)));
+        assert!(lim.try_acquire(ip, Login, t0 + LOGIN_WINDOW + Duration::from_secs(1)));
         // clear() (login success) frees the budget immediately.
-        lim.clear(ip);
+        lim.clear(ip, Login);
         let t = t0 + LOGIN_WINDOW + Duration::from_secs(2);
         for _ in 0..MAX_LOGIN_ATTEMPTS {
-            assert!(lim.try_acquire(ip, t));
+            assert!(lim.try_acquire(ip, Login, t));
         }
-        assert!(!lim.try_acquire(ip, t), "cap re-applies after clear + reuse");
+        assert!(!lim.try_acquire(ip, Login, t), "cap re-applies after clear + reuse");
+    }
+
+    // The launcher auto-logs-in after each Register; a login success clears the
+    // LOGIN budget but must NOT wipe the REGISTER budget, or Register never
+    // throttles (playtest 2026-07-30: 8 accounts in 30s with no error).
+    #[test]
+    fn register_budget_survives_login_success_clear() {
+        use AuthKind::{Login, Register};
+        let lim = LoginRateLimiter::new();
+        let ip: IpAddr = "9.9.9.9".parse().unwrap();
+        let t = Instant::now() + Duration::from_secs(3600);
+        // Simulate register-then-login-success MAX times: each register consumes a
+        // Register slot; each login success clears only the Login budget.
+        for i in 0..MAX_LOGIN_ATTEMPTS {
+            assert!(lim.try_acquire(ip, Register, t), "register {i} within budget");
+            assert!(lim.try_acquire(ip, Login, t)); // the auto-login attempt
+            lim.clear(ip, Login); // login succeeded -> clears LOGIN only
+        }
+        // Register budget is now exhausted despite all the login-success clears.
+        assert!(!lim.try_acquire(ip, Register, t), "register throttles at the cap");
+        // And Login is still freely available (its budget was cleared each time).
+        assert!(lim.try_acquire(ip, Login, t));
     }
 }

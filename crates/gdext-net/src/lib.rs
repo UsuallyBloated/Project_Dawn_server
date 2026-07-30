@@ -150,6 +150,19 @@ impl NetClient {
     #[signal]
     fn hit(attacker: i64, target: i64, amount: i64, crit: bool, dmg_type: i64);
 
+    /// PD_W0025 — a server-authoritative weapon proc landed. Same shape as a
+    /// hit plus the proc's display name, so the client renders "<proc_name> for
+    /// <amount>" with the elemental flash for `dmg_type`.
+    #[signal]
+    fn proc_triggered(
+        attacker: i64,
+        target: i64,
+        proc_name: GString,
+        amount: i64,
+        crit: bool,
+        dmg_type: i64,
+    );
+
     #[signal]
     fn miss(attacker: i64, target: i64);
 
@@ -1390,6 +1403,14 @@ enum Incoming {
         crit: bool,
         dmg_type: u8,
     },
+    ProcTriggered {
+        attacker: i64,
+        target: i64,
+        proc_name: String,
+        amount: i32,
+        crit: bool,
+        dmg_type: u8,
+    },
     Miss {
         attacker: i64,
         target: i64,
@@ -1806,6 +1827,26 @@ impl NetClient {
                         &[
                             attacker.to_variant(),
                             target.to_variant(),
+                            (amount as i64).to_variant(),
+                            crit.to_variant(),
+                            (dmg_type as i64).to_variant(),
+                        ],
+                    );
+                }
+                Incoming::ProcTriggered {
+                    attacker,
+                    target,
+                    proc_name,
+                    amount,
+                    crit,
+                    dmg_type,
+                } => {
+                    self.base_mut().emit_signal(
+                        "proc_triggered",
+                        &[
+                            attacker.to_variant(),
+                            target.to_variant(),
+                            GString::from(proc_name.as_str()).to_variant(),
                             (amount as i64).to_variant(),
                             crit.to_variant(),
                             (dmg_type as i64).to_variant(),
@@ -2404,6 +2445,21 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
         } => Incoming::Hit {
             attacker: attacker as i64,
             target: target as i64,
+            amount,
+            crit,
+            dmg_type: damage_type_to_u8(dmg_type),
+        },
+        ServerWorldMsg::ProcTriggered {
+            attacker,
+            target,
+            proc_name,
+            amount,
+            crit,
+            dmg_type,
+        } => Incoming::ProcTriggered {
+            attacker: attacker as i64,
+            target: target as i64,
+            proc_name,
             amount,
             crit,
             dmg_type: damage_type_to_u8(dmg_type),

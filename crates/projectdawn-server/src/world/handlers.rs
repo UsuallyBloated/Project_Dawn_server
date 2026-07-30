@@ -2016,6 +2016,38 @@ pub fn fan_out_hit(
     }
 }
 
+/// PD_W0025 — announce a server-authoritative weapon proc so the client renders
+/// the named proc hit ("<proc_name> for <amount>", elemental flash by dmg_type).
+/// The damage itself was already applied to the target on the server (folded into
+/// the swing); this is display-only, like `fan_out_hit`.
+#[allow(clippy::too_many_arguments)]
+pub fn fan_out_proc_triggered(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    attacker: u64,
+    target: u64,
+    proc_name: String,
+    amount: i32,
+    crit: bool,
+    dmg_type: protocol::world::DamageType,
+) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::ProcTriggered {
+        attacker,
+        target,
+        proc_name,
+        amount,
+        crit,
+        dmg_type,
+    };
+    let Some(bytes) = encode(&msg) else { return };
+    for recipient in recipients {
+        server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
 /// Track 6 — broadcast a DamageShieldTrigger so both attacker + defender
 /// clients can log the reflect and render floating damage on the attacker.
 pub fn fan_out_damage_shield_trigger(

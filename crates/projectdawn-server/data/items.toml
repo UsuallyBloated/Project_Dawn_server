@@ -464,7 +464,7 @@ weapon_delay = 2.5
 skill = "1h_slashing"
 proc_chance = 0.15
 proc_damage = 25
-proc_damage_type = 1
+proc_damage_type = 0
 proc_name = "Flaming Strike"
 
 [[item]]

@@ -96,7 +96,23 @@ use serde::{Deserialize, Serialize};
 /// (visible accept/turn-in feedback) / `QuestCompleted` (turn-in success
 /// confirm) at the END of that enum. `KillCredit` stays in the enum but is
 /// no longer sent: `QuestProgress` replaces it as the journal driver.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3234; // "PD_W0024"
+///
+/// PD_W0025: server-authoritative weapon procs. Appends
+/// `ServerWorldMsg::ProcTriggered { attacker, target, proc_name, amount, crit,
+/// dmg_type }` at the END of that enum — the server now rolls a weapon's
+/// proc_chance on a landed melee swing and applies proc_damage itself (folded
+/// into the same swing's death cascade), announcing it via this message so the
+/// client renders the named "<proc> for N" hit. Replaces the old client-driven
+/// proc (a second Attack the client sent, which double-hit and is now dropped by
+/// the swing-rate limit).
+///
+/// Note: this ID is a wire *marker*, not the connection gate. The client takes
+/// its `protocol_id` from the server-minted ConnectToken, so bumping it here does
+/// NOT by itself refuse a stale client — an old client still connects and simply
+/// ignores the unknown `ProcTriggered` (decode returns `Raw`, no crash). To
+/// actually refuse an out-of-date client, raise the auth `min_client_version` at
+/// deploy time alongside the new client build.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3235; // "PD_W0025"
 
 pub type EntityId = u64;
 
@@ -1388,6 +1404,20 @@ pub enum ServerWorldMsg {
     /// the server may have rejected the turn-in instead.
     QuestCompleted {
         quest_id: String,
+    },
+
+    /// PD_W0025 — a weapon proc fired on a landed melee swing. The server rolls
+    /// proc_chance + applies proc_damage itself (folded into the swing's own
+    /// damage/death), then sends this so the client renders the named proc hit
+    /// ("<proc_name> for <amount>", elemental flash by `dmg_type`). Private to
+    /// the attacker (their outgoing damage), like the `You hit X` lines.
+    ProcTriggered {
+        attacker: EntityId,
+        target: EntityId,
+        proc_name: String,
+        amount: i32,
+        crit: bool,
+        dmg_type: DamageType,
     },
 }
 

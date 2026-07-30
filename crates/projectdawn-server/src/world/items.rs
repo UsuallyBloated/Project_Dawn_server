@@ -257,6 +257,18 @@ mod tests {
     }
 
     #[test]
+    fn flamebrand_proc_data_resolves_as_fire() {
+        // Server-authoritative procs read these off the equipped weapon. The
+        // element is authored in SpellData space (FIRE=0); it was mis-tagged 1
+        // (ICE) — a fire sword must be 0. Guard it so it can't regress.
+        let w = lookup("res://data/loot/items/flamebrand.tres").expect("flamebrand in table");
+        assert!((w.proc_chance - 0.15).abs() < 0.001);
+        assert_eq!(w.proc_damage, 25);
+        assert_eq!(w.proc_damage_type, 0, "Flamebrand procs FIRE (SpellData 0), not ICE");
+        assert_eq!(w.proc_name, "Flaming Strike");
+    }
+
+    #[test]
     fn cloth_robe_resolves_as_chest() {
         let i = lookup("res://data/loot/items/cloth_robe.tres")
             .expect("cloth robe in table");

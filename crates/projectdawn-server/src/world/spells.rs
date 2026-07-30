@@ -170,6 +170,27 @@ pub fn lookup(name: &str) -> Option<&'static Spell> {
     spells().get(name)
 }
 
+/// Map a weapon's `proc_damage_type` (a `u8` authored in the client's
+/// `SpellData.DamageType` enum space: FIRE=0, ICE=1, LIGHTNING=2, ARCANE=3,
+/// HEALING=4, HOLY=5, NATURE=6, SPIRIT=7, SHADOW=8, NONE=9) onto the wire
+/// `DamageType`. Mirror of the client's `combat.gd::_spell_to_net_damage_type`
+/// so the server-rolled proc flashes the same element the item author intended.
+/// HEALING / NONE / anything unknown fall back to Physical (no elemental flash).
+pub fn proc_damage_type_to_wire(t: u8) -> protocol::world::DamageType {
+    use protocol::world::DamageType;
+    match t {
+        0 => DamageType::Fire,
+        1 => DamageType::Ice,
+        2 => DamageType::Lightning,
+        3 => DamageType::Arcane,
+        5 => DamageType::Holy,
+        6 => DamageType::Nature,
+        7 => DamageType::Spirit,
+        8 => DamageType::Shadow,
+        _ => DamageType::Physical,
+    }
+}
+
 /// Map a damage_type string from the TOML onto the wire enum. The
 /// `Hit` broadcast carries this so peers render the right color flash.
 pub fn parse_damage_type(s: &str) -> protocol::world::DamageType {
@@ -226,6 +247,19 @@ mod tests {
         assert!(matches!(parse_damage_type("FIRE"), DamageType::Fire));
         assert!(matches!(parse_damage_type("HOLY"), DamageType::Holy));
         assert!(matches!(parse_damage_type("UNKNOWN"), DamageType::Physical));
+    }
+
+    #[test]
+    fn proc_damage_type_u8_maps_from_spelldata_space_to_wire() {
+        use protocol::world::DamageType;
+        // SpellData space: FIRE=0, ICE=1, ... (offset from wire, where Physical=0).
+        assert!(matches!(proc_damage_type_to_wire(0), DamageType::Fire));
+        assert!(matches!(proc_damage_type_to_wire(1), DamageType::Ice));
+        assert!(matches!(proc_damage_type_to_wire(8), DamageType::Shadow));
+        // HEALING(4) / NONE(9) / unknown -> Physical (no elemental flash).
+        assert!(matches!(proc_damage_type_to_wire(4), DamageType::Physical));
+        assert!(matches!(proc_damage_type_to_wire(9), DamageType::Physical));
+        assert!(matches!(proc_damage_type_to_wire(200), DamageType::Physical));
     }
 
     #[test]

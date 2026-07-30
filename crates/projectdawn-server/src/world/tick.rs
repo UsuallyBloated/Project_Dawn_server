@@ -3304,6 +3304,53 @@ pub async fn run(
                         );
                     }
                 }
+                // PD_W0025 — server-authoritative weapon proc. Roll the equipped
+                // weapon's proc_chance on this landed swing; on a proc, fold the
+                // proc_damage into THIS swing's resolution (same entity borrow +
+                // aggro, and the death/loot/xp block below), so a proc killing
+                // blow is credited/looted correctly with no duplicate cascade, and
+                // announce it via ProcTriggered so the client renders the named
+                // "<proc> for N" hit. Only fires if the main swing didn't already
+                // kill (no proc-on-a-corpse). Flat 5% proc crit (1.5-2.0x) mirrors
+                // the old client roll; no elemental resist (the server has no
+                // enemy-resist model — enemies take raw damage). This replaces the
+                // old client-sent proc Attack (which double-hit and is now dropped
+                // by the swing-rate limit).
+                if entity.hp > 0.0 {
+                    if let Some(w) = items::lookup(&server_weapon_path) {
+                        if w.proc_chance > 0.0 && w.proc_damage > 0 {
+                            let mut rng = rand::thread_rng();
+                            if rng.gen::<f32>() < w.proc_chance {
+                                let proc_crit = rng.gen::<f32>() < 0.05;
+                                let proc_dmg = (if proc_crit {
+                                    (w.proc_damage as f32 * rng.gen_range(1.5..=2.0)) as i32
+                                } else {
+                                    w.proc_damage
+                                })
+                                .max(1);
+                                entity.hp = (entity.hp - proc_dmg as f32).max(0.0);
+                                *entity.aggro.entry(intent.attacker).or_insert(0.0) +=
+                                    proc_dmg as f32;
+                                *entity.threat.entry(intent.attacker).or_insert(0.0) +=
+                                    proc_dmg as f32;
+                                // Private to the attacker — the proc's named
+                                // number/flash/log is their flavor; the mob's HP
+                                // drop is already fanned to everyone via the
+                                // HealthUpdate below.
+                                handlers::fan_out_proc_triggered(
+                                    &mut server,
+                                    &[attacker_cid],
+                                    intent.attacker,
+                                    intent.target_id,
+                                    w.proc_name.clone(),
+                                    proc_dmg,
+                                    proc_crit,
+                                    spells::proc_damage_type_to_wire(w.proc_damage_type),
+                                );
+                            }
+                        }
+                    }
+                }
                 handlers::fan_out_hit(
                     &mut server,
                     &in_world_recipients_now,

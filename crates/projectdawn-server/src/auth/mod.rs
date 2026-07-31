@@ -255,6 +255,14 @@ async fn dispatch(
             // attacker a way to keep enumerating).
             let now = Instant::now();
             if !limiter.try_acquire(client_ip, AuthKind::Register, now) {
+                // INFO for the same reason as the Login throttle: account-spam /
+                // username-enumeration attempts must be visible to an operator.
+                tracing::info!(
+                    ip = %client_ip,
+                    window_secs = LOGIN_WINDOW.as_secs(),
+                    max_attempts = MAX_LOGIN_ATTEMPTS,
+                    "Register rejected — rate limited (too many attempts from this IP)"
+                );
                 return Err(AuthError::RateLimited(
                     "Too many attempts. Please wait a minute and try again.".into(),
                 ));
@@ -287,6 +295,16 @@ async fn dispatch(
             // a burst of BAD logins throttles, and it clears after the window.
             let now = Instant::now();
             if !limiter.try_acquire(client_ip, AuthKind::Login, now) {
+                // INFO, not debug: a throttled IP is the brute-force signal an
+                // operator needs to see in server.log on a hosted server. The
+                // generic "auth error" line below is debug-level, so without this
+                // the gate leaves no trace at all.
+                tracing::info!(
+                    ip = %client_ip,
+                    window_secs = LOGIN_WINDOW.as_secs(),
+                    max_attempts = MAX_LOGIN_ATTEMPTS,
+                    "Login rejected — rate limited (too many attempts from this IP)"
+                );
                 return Err(AuthError::RateLimited(
                     "Too many login attempts. Please wait a minute and try again.".into(),
                 ));

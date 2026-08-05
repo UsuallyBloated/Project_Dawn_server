@@ -1,0 +1,62 @@
+# systemd unit for the Project Dawn server (Phase 2 hosting).
+#
+# Install:
+#   sudo cp scripts/projectdawn.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now projectdawn
+#
+# Read docs/deployment_linux.md first — several settings here are load-bearing.
+
+[Unit]
+Description=Project Dawn game server (auth WS + world UDP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=projectdawn
+Group=projectdawn
+
+# LOAD-BEARING. Both `.env` and `world.db` are resolved relative to the process
+# working directory. Point this at the wrong place and the server silently
+# creates a BRAND NEW EMPTY DATABASE with no accounts, while looking healthy in
+# the log. If you move the install, change this line.
+WorkingDirectory=/opt/projectdawn
+
+# The release binary, not `cargo run` (which builds debug and is much slower).
+ExecStart=/opt/projectdawn/projectdawn-server
+
+# Deliberately NOT setting PD_DEV_CMDS. systemd starts services with a clean
+# environment, which kills the usual "a leftover shell variable is still
+# enabling dev commands" trap. Do not add it here, and do not put it in `.env`
+# either — the app's own .env loader would re-enable it and hand every player
+# /give, mob spawning and instant levels. Verify `dev_cmds=false` in the boot
+# log after every start.
+
+# Config comes from /opt/projectdawn/.env, which the binary loads itself
+# (relative to WorkingDirectory above). Keeping it in one place avoids systemd
+# and the app disagreeing about the value of, say, world_endpoint.
+
+Restart=on-failure
+RestartSec=5s
+
+# The server has no SIGTERM handler yet, so a stop or restart drops up to
+# CHECKPOINT_INTERVAL (60 s) of position/HP/XP/inventory for everyone online.
+# Give it a moment rather than SIGKILLing instantly, and see the "Stopping
+# safely" section of docs/deployment_linux.md for the operational rule.
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+
+# Modest hardening. The service only needs its own directory and the network.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/projectdawn
+
+# Journal captures stdout/stderr; view with `journalctl -u projectdawn -f`.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

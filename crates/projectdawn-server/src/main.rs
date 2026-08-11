@@ -24,6 +24,9 @@ async fn main() -> anyhow::Result<()> {
     // shell, the usual reason "/give still works after restarting without it").
     // Matches `world::connection::dev_cmds_enabled` (env == "1").
     let dev_cmds = std::env::var("PD_DEV_CMDS").as_deref() == Ok("1");
+    // Same shape as dev_cmds: a dangerous env toggle belongs on the boot line so
+    // it is never ambiguous which posture the process is running in.
+    let rate_limit = std::env::var("PD_NO_RATE_LIMIT").as_deref() != Ok("1");
     tracing::info!(
         auth_bind = %cfg.auth_bind,
         world_bind = %cfg.world_bind,
@@ -31,11 +34,17 @@ async fn main() -> anyhow::Result<()> {
         db = %cfg.database_url,
         min_client = %cfg.min_client_version,
         dev_cmds,
+        rate_limit,
         "starting projectdawn-server"
     );
     if dev_cmds {
         tracing::warn!(
             "PD_DEV_CMDS=1: dev commands (/give, dev spawn, HealSelf, GrantQuestXp) are ENABLED for ALL clients; do not run a public server with this set"
+        );
+    }
+    if !rate_limit {
+        tracing::warn!(
+            "PD_NO_RATE_LIMIT=1: auth rate limiting is DISABLED — login and register are unthrottled and open to brute force. Acceptable only on a private tailnet; unset this before any public exposure"
         );
     }
 

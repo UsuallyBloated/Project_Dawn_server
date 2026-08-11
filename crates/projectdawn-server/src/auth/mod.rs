@@ -14,7 +14,7 @@ use protocol::auth::{ClientAuthMsg, ServerAuthMsg};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
@@ -37,6 +37,24 @@ const LOGIN_WINDOW: Duration = Duration::from_secs(60);
 /// Once this many IPs are tracked, drop expired windows on the next attempt so
 /// the map can't grow without bound if an attacker cycles source addresses.
 const RATE_LIMIT_PRUNE_AT: usize = 4096;
+
+/// Returns true when the server was launched with `PD_NO_RATE_LIMIT=1`, which
+/// turns the auth rate limiter into a no-op. Checked once, cached for the
+/// process lifetime — same idiom as `world::connection::dev_cmds_enabled`.
+///
+/// **This disables a security control.** It exists because the 5-per-60s cap
+/// is too tight for a real person on their first evening: the first external
+/// tester (2026-08-11) tripped it after a clean logout and created a SECOND
+/// ACCOUNT rather than wait, and there is no account-deletion tooling to tidy
+/// that up. Acceptable only while the server is reachable solely over a private
+/// tailnet, where brute-force risk is near zero.
+///
+/// **Must be unset before any public exposure.** The startup log line reports
+/// `rate_limit` so this is never ambiguous, and an extra WARN fires at boot.
+fn rate_limit_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| std::env::var("PD_NO_RATE_LIMIT").as_deref() == Ok("1"))
+}
 
 struct Window {
     count: u32,
@@ -71,6 +89,11 @@ impl LoginRateLimiter {
     /// so N concurrent same-IP attempts can never all pass before the count is
     /// bumped (the TOCTOU a check-then-increment design would have).
     fn try_acquire(&self, ip: IpAddr, kind: AuthKind, now: Instant) -> bool {
+        // Single choke point for both the Login and Register gates, so the
+        // kill switch belongs here rather than at the two call sites.
+        if rate_limit_disabled() {
+            return true;
+        }
         let mut map = self.inner.lock().expect("login limiter poisoned");
         if map.len() >= RATE_LIMIT_PRUNE_AT {
             map.retain(|_, w| now.duration_since(w.start) < LOGIN_WINDOW);

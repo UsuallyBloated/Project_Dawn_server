@@ -781,6 +781,15 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::Respawn)
     }
 
+    /// Bind your soul at your current location — this becomes where `Respawn`
+    /// teleports you. Sent by the Soul Binder NPC's dialogue. The wire variant
+    /// existed since PD_W0019 but had no sender here and no server handler, so
+    /// binding was impossible; both halves landed with the respawn fix.
+    #[func]
+    fn send_bind_at_current_location(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::BindAtCurrentLocation)
+    }
+
     /// Track 6 sub-task 3 — client tells the server its current total
     /// armor class. Server applies AC/(AC+100) reduction to incoming
     /// damage in tick step 4h.

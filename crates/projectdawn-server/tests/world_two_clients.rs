@@ -135,6 +135,30 @@ async fn provision_client(
     (session, char_id, token_bytes)
 }
 
+/// Raise a freshly-provisioned character's level (and top up its mana).
+///
+/// `provision_client` always creates a LEVEL 1 character (`db::create_character`
+/// hardcodes level 1), but the CastSpell class/level gate added 2026-07-20
+/// rejects a cast unless the caster meets the spell's `min_level`. Any test that
+/// casts something above level 1 has to say so, or the server correctly refuses
+/// and the awaited message never arrives.
+///
+/// Mana matters too: the character loader recomputes `max_mp` from the stored
+/// level, but carries current `mp` over as `row.mp.min(computed.max_mp)`. A
+/// bumped character would otherwise still hold its level-1 mana and fail on cost
+/// instead of on the gate — swapping one confusing failure for another. Setting
+/// mp high lets the loader clamp it to the new maximum, i.e. "full mana at the
+/// new level".
+async fn set_char_level(db_url: &str, char_id: i64, level: i32) {
+    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    sqlx::query("UPDATE characters SET level = ?1, mp = 99999.0 WHERE id = ?2")
+        .bind(level)
+        .bind(char_id)
+        .execute(&pool)
+        .await
+        .expect("bump character level");
+}
+
 struct WorldClient {
     client: RenetClient,
     transport: NetcodeClientTransport,
@@ -698,6 +722,8 @@ async fn two_clients_buff_snapshot_fanout() {
 
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "eta", "Eta", "Human", "Shaman").await;
+    // Healing Wave requires level 4; provisioned characters start at 1.
+    set_char_level(&h.db_url, a_char_id, 4).await;
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "theta", "The", "Elf", "Druid").await;
 
@@ -765,7 +791,10 @@ async fn enemy_aggros_chases_and_attacks_player() {
 
     // Walk for ~2 s at 50 ms cadence. Each Move refreshes the server-side
     // stale-move clock so integration continues until we stop sending.
-    let walk_end = Instant::now() + Duration::from_millis(2_000);
+    // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
+    // whether an enemy locks on before the wait expires depended on where it
+    // happened to be wandering. Walking fully in makes the pull deterministic.
+    let walk_end = Instant::now() + Duration::from_millis(3_500);
     let mut seq: u32 = 1;
     while Instant::now() < walk_end {
         a.send_move(seq, dir);
@@ -847,7 +876,10 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     // Walk toward camp 0's [20, 0, 5] for ~2 s.
     let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
     let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
-    let walk_end = Instant::now() + Duration::from_millis(2_000);
+    // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
+    // whether an enemy locks on before the wait expires depended on where it
+    // happened to be wandering. Walking fully in makes the pull deterministic.
+    let walk_end = Instant::now() + Duration::from_millis(3_500);
     let mut seq: u32 = 1;
     while Instant::now() < walk_end {
         a.send_move(seq, dir);
@@ -878,15 +910,25 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     // Track 6 sub-task 2: server runs the damage formula now — the
     // client can't claim 999 anymore. A bare-handed Human Warrior
     // lands ~5-8/swing (1-4 + STR/5 with STR 22). Decrepit Skeleton has
-    // 25 HP; ~5 swings cover worst case. Burst 10 to absorb the
-    // 50% miss-on-edge if the server-side fan-out drops an Attack on
-    // the unreliable boundary, then drain.
-    for _ in 0..10 {
+    // 25 HP, so ~5 landed swings cover the worst case.
+    //
+    // Swings must be PACED. This used to burst 10 Attacks in a single
+    // frame, which the melee swing-rate limit (added 2026-07-29) now
+    // correctly treats as forgery: it enforces a per-hand minimum
+    // interval derived from the weapon's delay — 0.65 s bare-handed —
+    // and silently drops anything faster. All but the first swing
+    // vanished and the skeleton survived. Sleeping past the floor
+    // between swings is what an honest client does anyway.
+    const SWING_GAP: Duration = Duration::from_millis(700);
+    for _ in 0..8 {
         a.send_attack(enemy_id, "", false, DamageType::Physical);
-    }
-    for _ in 0..6 {
-        tick_one(&mut a.client, &mut a.transport);
-        tokio::time::sleep(TICK_DT).await;
+        // Pump the transport across the gap so the Attack actually goes
+        // out (a bare sleep does not advance renet).
+        let until = Instant::now() + SWING_GAP;
+        while Instant::now() < until {
+            tick_one(&mut a.client, &mut a.transport);
+            tokio::time::sleep(TICK_DT).await;
+        }
     }
 
     let hu = a
@@ -1087,6 +1129,8 @@ async fn aoe_spell_damages_nearby_enemies() {
 
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "ino", "Inora", "Human", "Magician").await;
+    // Inferno requires level 12; provisioned characters start at 1.
+    set_char_level(&h.db_url, a_char_id, 12).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
@@ -1094,7 +1138,10 @@ async fn aoe_spell_damages_nearby_enemies() {
     // player_attack_kills_enemy_and_corpse_despawns.
     let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
     let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
-    let walk_end = Instant::now() + Duration::from_millis(2_000);
+    // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
+    // whether an enemy locks on before the wait expires depended on where it
+    // happened to be wandering. Walking fully in makes the pull deterministic.
+    let walk_end = Instant::now() + Duration::from_millis(3_500);
     let mut seq: u32 = 1;
     while Instant::now() < walk_end {
         a.send_move(seq, dir);
@@ -1219,7 +1266,9 @@ async fn cast_spell_accepted_after_cast_time() {
     let h = start_both().await;
 
     let (a_session, a_char_id, a_token) =
-        provision_client(&h.auth_url, "nuu", "Nura", "Human", "Cleric").await;
+        provision_client(&h.auth_url, "nuu", "Nura", "Human", "Shaman").await;
+    // Healing Wave requires level 4; provisioned characters start at 1.
+    set_char_level(&h.db_url, a_char_id, 4).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
@@ -1284,6 +1333,8 @@ async fn pet_summon_visible_to_peer() {
 
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "xio", "Xiora", "Human", "Necromancer").await;
+    // Summon Skeleton requires level 6; provisioned characters start at 1.
+    set_char_level(&h.db_url, a_char_id, 6).await;
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "yuu", "Yuusu", "Elf", "Cleric").await;
 
@@ -1343,6 +1394,8 @@ async fn pet_follows_owner() {
 
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "zii", "Ziorel", "Human", "Necromancer").await;
+    // Summon Skeleton requires level 6; provisioned characters start at 1.
+    set_char_level(&h.db_url, a_char_id, 6).await;
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "qqq", "Qqua", "Elf", "Cleric").await;
 
@@ -1435,13 +1488,18 @@ async fn pet_attacks_owners_target() {
 
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "rrr", "Rune", "Human", "Necromancer").await;
+    // Summon Skeleton requires level 6; provisioned characters start at 1.
+    set_char_level(&h.db_url, a_char_id, 6).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
-    // Walk toward camp 0's [20, 0, 5] for ~2 s.
+    // Walk toward camp 0's [20, 0, 5]. 3.5 s, not 2 s: at 2 s the player only
+    // just clips the aggro radius, so whether an enemy locks on before the
+    // 35 s wait expires depended on where it happened to be wandering. Walking
+    // fully into the camp makes the pull deterministic.
     let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
     let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
-    let walk_end = Instant::now() + Duration::from_millis(2_000);
+    let walk_end = Instant::now() + Duration::from_millis(3_500);
     let mut seq: u32 = 1;
     while Instant::now() < walk_end {
         a.send_move(seq, dir);
@@ -1526,33 +1584,23 @@ async fn pet_command_attack_locks_onto_target() {
 
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "sss", "Suun", "Human", "Necromancer").await;
+    // Summon Skeleton requires level 6; provisioned characters start at 1.
+    set_char_level(&h.db_url, a_char_id, 6).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
-    // Walk into camp 0; wait until at least one enemy aggros and
-    // hits the player so we have an enemy id to command on.
-    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
-    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
-    let walk_end = Instant::now() + Duration::from_millis(2_000);
-    let mut seq: u32 = 1;
-    while Instant::now() < walk_end {
-        a.send_move(seq, dir);
-        seq += 1;
-        tick_one(&mut a.client, &mut a.transport);
-        tokio::time::sleep(TICK_DT).await;
-    }
-    let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
-            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
-        })
-        .await
-        .expect("an enemy aggros and hits the player");
-    let enemy_id: u64 = match hit_evt {
-        ServerWorldMsg::Hit { attacker, .. } => attacker,
-        _ => unreachable!(),
-    };
-
-    // Summon Skeleton (cast_time 3.0s).
+    // Summon FIRST, in peace, before walking into aggro range.
+    //
+    // Ordering matters: this used to walk in, wait to be hit, and only then
+    // start the 3 s Summon Skeleton cast — i.e. it cast while an enemy was
+    // actively swinging at it. Track 19A's on-hit cast interrupt
+    // (`roll_cast_interrupt`) then cleared the cast, so the pet never spawned.
+    // That is not a fixable-by-tuning race: the interrupt chance is
+    // `max(0.10, 0.70 - channeling_ratio * 0.60)`, which is ~0.70 for a level-6
+    // caster and never drops below 0.10 even at max skill, so casting under fire
+    // is inherently unreliable. Summoning before the pull avoids the interrupt
+    // entirely and does not weaken the test: the point below is that the player
+    // never attacks the enemy themselves, which is still true.
     a.send_cast_start("Summon Skeleton", 3.0);
     for _ in 0..3 {
         tick_one(&mut a.client, &mut a.transport);
@@ -1572,6 +1620,32 @@ async fn pet_command_attack_locks_onto_target() {
         .expect("A receives own PetSpawn")
     {
         ServerWorldMsg::PetSpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    // Now walk into camp 0; wait until at least one enemy aggros and
+    // hits the player so we have an enemy id to command on.
+    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
+    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
+    // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
+    // whether an enemy locks on before the wait expires depended on where it
+    // happened to be wandering. Walking fully in makes the pull deterministic.
+    let walk_end = Instant::now() + Duration::from_millis(3_500);
+    let mut seq: u32 = 1;
+    while Instant::now() < walk_end {
+        a.send_move(seq, dir);
+        seq += 1;
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    let hit_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
+            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
+        })
+        .await
+        .expect("an enemy aggros and hits the player");
+    let enemy_id: u64 = match hit_evt {
+        ServerWorldMsg::Hit { attacker, .. } => attacker,
         _ => unreachable!(),
     };
 
@@ -1607,13 +1681,18 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
 
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "tnk", "Tanker", "Human", "Necromancer").await;
+    // Summon Skeleton requires level 6; provisioned characters start at 1.
+    set_char_level(&h.db_url, a_char_id, 6).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     // Walk into camp 0.
     let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
     let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
-    let walk_end = Instant::now() + Duration::from_millis(2_000);
+    // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
+    // whether an enemy locks on before the wait expires depended on where it
+    // happened to be wandering. Walking fully in makes the pull deterministic.
+    let walk_end = Instant::now() + Duration::from_millis(3_500);
     let mut seq: u32 = 1;
     while Instant::now() < walk_end {
         a.send_move(seq, dir);
@@ -1705,13 +1784,18 @@ async fn charm_converts_enemy_to_pet() {
 
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "ench", "Enchanted", "Human", "Enchanter").await;
+    // Charm requires level 20; provisioned characters start at 1.
+    set_char_level(&h.db_url, a_char_id, 20).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     // Walk into camp 0 to aggro an enemy (gives us a target id).
     let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
     let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
-    let walk_end = Instant::now() + Duration::from_millis(2_000);
+    // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
+    // whether an enemy locks on before the wait expires depended on where it
+    // happened to be wandering. Walking fully in makes the pull deterministic.
+    let walk_end = Instant::now() + Duration::from_millis(3_500);
     let mut seq: u32 = 1;
     while Instant::now() < walk_end {
         a.send_move(seq, dir);
@@ -2235,7 +2319,10 @@ async fn lifesteal_spell_heals_caster() {
     // and aggro tests.
     let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
     let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
-    let walk_end = Instant::now() + Duration::from_millis(2_000);
+    // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
+    // whether an enemy locks on before the wait expires depended on where it
+    // happened to be wandering. Walking fully in makes the pull deterministic.
+    let walk_end = Instant::now() + Duration::from_millis(3_500);
     let mut seq: u32 = 1;
     while Instant::now() < walk_end {
         a.send_move(seq, dir);
@@ -2557,7 +2644,9 @@ async fn cast_spell_rejected_during_cooldown() {
     let h = start_both().await;
 
     let (a_session, a_char_id, a_token) =
-        provision_client(&h.auth_url, "cdc", "Cooler", "Human", "Cleric").await;
+        provision_client(&h.auth_url, "cdc", "Cooler", "Human", "Shaman").await;
+    // Healing Wave requires level 4; provisioned characters start at 1.
+    set_char_level(&h.db_url, a_char_id, 4).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     for _ in 0..4 {
@@ -2624,7 +2713,9 @@ async fn cast_spell_rejected_when_caster_moved_during_cast() {
     let h = start_both().await;
 
     let (a_session, a_char_id, a_token) =
-        provision_client(&h.auth_url, "mvc", "Walker", "Human", "Cleric").await;
+        provision_client(&h.auth_url, "mvc", "Walker", "Human", "Shaman").await;
+    // Healing Wave requires level 4; provisioned characters start at 1.
+    set_char_level(&h.db_url, a_char_id, 4).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     for _ in 0..4 {
@@ -2757,12 +2848,13 @@ async fn skill_progress_snapshot_seeded_on_enter_world() {
         .expect("SkillProgressSnapshot arrives on EnterWorld");
 
     if let ServerWorldMsg::SkillProgressSnapshot { weapon, armor, casting } = snap {
-        // Shape: 10 weapon keys, 5 armor keys, 6 casting keys (one per
+        // Shape: 10 weapon keys, 5 armor keys, 7 casting keys (one per
         // GDScript definition entry, regardless of whether the class
-        // can train it).
+        // can train it). Casting went 6 -> 7 on 2026-07-20 when the
+        // `meditate` regen skill was added (skills.rs CASTING_KEYS).
         assert_eq!(weapon.len(), 10, "weapon map has 10 keys");
         assert_eq!(armor.len(), 5, "armor map has 5 keys");
-        assert_eq!(casting.len(), 6, "casting map has 6 keys");
+        assert_eq!(casting.len(), 7, "casting map has 7 keys");
 
         // Track 22.F rebalance: starting score is cap(L1) / 4 with
         // a floor of 1. Warrior 1h_slashing L1 cap = 4 → 4/4 = 1.

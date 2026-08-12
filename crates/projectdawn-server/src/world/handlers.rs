@@ -327,6 +327,20 @@ pub enum Outcome {
     /// declined) a resurrection offer on their corpse. The tick loop reads the
     /// owner's recorded pending offer, and on accept summons the player to the
     /// corpse + refunds a % of that death's lost xp + marks the corpse rezzed.
+    /// A respawn moved the player to their bind point. The tick loop fans the
+    /// `Teleport` so the client snaps there instead of being dragged back to the
+    /// death site by the next authoritative Position.
+    RespawnTeleport {
+        pos: super::connection::Vec3f,
+    },
+    /// The player bound their soul at their current location (Soul Binder NPC).
+    /// `conn.bind` is already updated synchronously; this carries the write to
+    /// the tick loop, which owns the DB pool.
+    BindIntent {
+        char_id: i64,
+        zone: Option<String>,
+        pos: (f32, f32, f32),
+    },
     ResurrectAcceptIntent {
         responder: u64,
         corpse_id: protocol::world::EntityId,
@@ -472,6 +486,14 @@ pub fn handle_message(
             direction,
             jumping: _,
         } => {
+            // Death lock: a dead player stays put. Without this you could walk
+            // your corpse around during the respawn countdown, and worse, keep
+            // drifting after the death sweep — which made "am I dead?" ambiguous
+            // and let a player wander into more mobs while awaiting respawn.
+            // Cleared by Respawn, which resets `death_processed`.
+            if conn.death_processed {
+                return Outcome::Continue;
+            }
             if !conn.ready {
                 // Client started sending moves before completing the
                 // handshake — drop silently.
@@ -815,6 +837,28 @@ pub fn handle_message(
             Outcome::Continue
         }
 
+        ClientWorldMsg::BindAtCurrentLocation => {
+            // Bind your soul here: this is where Respawn will put you. Dormant
+            // wire variant until now (declared in PD_W0019's enum, never handled).
+            // Gated on being alive and in-world so a corpse can't bind where it
+            // fell, which would rebuild the death loop this feature exists to fix.
+            if !conn.in_world || conn.death_processed || conn.hp <= 0.0 {
+                return Outcome::Continue;
+            }
+            let pos = conn.pos.into_tuple();
+            conn.bind = Some(crate::db::BindPoint { pos });
+            tracing::info!(
+                char_id = conn.char_id,
+                x = pos.0, y = pos.1, z = pos.2,
+                "bind point set"
+            );
+            Outcome::BindIntent {
+                char_id: conn.char_id,
+                zone: conn.zone.clone(),
+                pos,
+            }
+        }
+
         ClientWorldMsg::Respawn => {
             // Only a DEAD player awaiting respawn may respawn. `death_processed`
             // is set by the death path (the tick death sweep or the DeathBroadcast
@@ -844,7 +888,23 @@ pub fn handle_message(
             // process the next death afresh.
             conn.death_processed = false;
             super::regen::mark_dirty(conn);
-            Outcome::Continue
+            // Move them to their bind point. Until now Respawn only restored
+            // resources and left position untouched — and since the SERVER owns
+            // position, the client's own attempt to move the player was
+            // immediately overridden by the next Position fan-out. The result was
+            // that you always woke up exactly where you died, beside whatever
+            // killed you (first external tester, 2026-08-11: died, respawned,
+            // died again 20 s later). An unbound character falls back to the
+            // starter spawn rather than staying put.
+            let dest = conn
+                .bind
+                .map(|b| super::connection::Vec3f::from_tuple(b.pos))
+                .unwrap_or(super::STARTER_SPAWN);
+            // Mutating pos makes `is_dirty_for_persist()` true on its own, so the
+            // next checkpoint writes the bind location rather than leaving the DB
+            // pointing at the death site.
+            conn.pos = dest;
+            Outcome::RespawnTeleport { pos: dest }
         }
 
         ClientWorldMsg::BuffSnapshotBroadcast { buffs: _ } => {

@@ -163,6 +163,7 @@ mod tests {
             yaw: 0.0,
             completed_quests: Vec::new(),
             active_quests: Vec::new(),
+            bind: None,
         };
         PerConnection::from_spawn(spawn, Instant::now())
     }

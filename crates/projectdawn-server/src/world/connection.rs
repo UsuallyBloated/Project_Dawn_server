@@ -154,6 +154,11 @@ pub struct PerConnection {
     /// Hand-agnostic on purpose — it is a combat marker, not a rate limit.
     pub last_attack_at: Option<Instant>,
 
+    /// Server-authoritative bind point: where `Respawn` teleports this player.
+    /// `None` = never bound, which respawns them at the starter spawn instead.
+    /// Loaded from `characters.bind_*`, set by `BindAtCurrentLocation`.
+    pub bind: Option<crate::db::BindPoint>,
+
     /// Phase 1 exploit gate — per-hand last-ACCEPTED-swing timestamps for the
     /// melee swing-rate limit. Index 0 = main hand, 1 = off hand (keyed by the
     /// Attack's `is_offhand`). Kept separate from `last_attack_at` because
@@ -480,6 +485,7 @@ impl PerConnection {
             camp_since: None,
             last_damaged_at: None,
             last_attack_at: None,
+            bind: spawn.bind,
             last_swing_at: [None, None],
             last_meditate_at: None,
             death_processed: false,
@@ -625,6 +631,16 @@ impl PerConnection {
         self.last_damaged_at = Some(now);
     }
 
+    /// Where `Respawn` should put this player: their bind point, or the starter
+    /// spawn if they have never bound. Never returns the death position — that
+    /// was the old behaviour (respawn restored HP but left position untouched)
+    /// and it produced an unwinnable loop for anyone who died beside a mob.
+    pub fn respawn_destination(&self) -> Vec3f {
+        self.bind
+            .map(|b| Vec3f::from_tuple(b.pos))
+            .unwrap_or(super::STARTER_SPAWN)
+    }
+
     /// The `item_path` of the weapon the SERVER considers equipped in the hand
     /// this swing uses — main hand (equip slot 0) or off hand (slot 1), per the
     /// `protocol::world::EquipSlot` order. Empty string = that hand is bare (an
@@ -679,6 +695,7 @@ mod tests {
             yaw: 0.0,
             completed_quests: Vec::new(),
             active_quests: Vec::new(),
+            bind: None,
         }
     }
 
@@ -708,6 +725,28 @@ mod tests {
         conn.inventory.equipment.remove(&1);
         assert_eq!(conn.equipped_weapon_path(true), "");
         assert_eq!(conn.equipped_weapon_path(false), "res://items/iron_short_sword.tres");
+    }
+
+    // Respawn must never leave the player where they died. An unbound character
+    // falls back to the starter spawn; a bound one goes to their bind point.
+    #[test]
+    fn respawn_destination_prefers_bind_then_starter_spawn() {
+        let mut conn = PerConnection::from_spawn(test_spawn(), Instant::now());
+        // Simulate having died somewhere dangerous.
+        conn.pos = Vec3f { x: 120.0, y: 4.0, z: -80.0 };
+
+        // Unbound -> starter spawn, NOT the death position.
+        assert!(conn.bind.is_none(), "fixture starts unbound");
+        let d = conn.respawn_destination();
+        assert_eq!((d.x, d.y, d.z), (super::super::STARTER_SPAWN.x,
+                                     super::super::STARTER_SPAWN.y,
+                                     super::super::STARTER_SPAWN.z));
+        assert_ne!((d.x, d.z), (conn.pos.x, conn.pos.z), "must not respawn at the death site");
+
+        // Bound -> the bind point.
+        conn.bind = Some(crate::db::BindPoint { pos: (10.0, 1.0, -5.0) });
+        let d2 = conn.respawn_destination();
+        assert_eq!((d2.x, d2.y, d2.z), (10.0, 1.0, -5.0));
     }
 
     // Dev/GM commands gate on can_use_dev_cmds() = is_dev || is_gm, so a hosted

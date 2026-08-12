@@ -442,6 +442,15 @@ pub async fn set_account_gm(
     Ok(Some(before))
 }
 
+/// A character's bind point: where `Respawn` puts them. Coordinates are
+/// authoritative; the zone is persisted alongside (see `set_bind_point`) so a
+/// future multi-zone world can refuse or route a cross-zone respawn. A character
+/// with no bind has `None` and respawns at the starter spawn instead.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BindPoint {
+    pub pos: (f32, f32, f32),
+}
+
 /// Loaded snapshot of the persistent fields the world server cares about
 /// at character spawn. Track 6 promoted resources + stats + xp to load-time
 /// (server is authoritative on these now); inventory / equipment land later.
@@ -475,6 +484,10 @@ pub struct CharacterSpawn {
     pub zone: Option<String>,
     pub pos: (f32, f32, f32),
     pub yaw: f32,
+    /// Server-authoritative bind point (respawn location). `None` means the
+    /// character has never bound, and respawn falls back to the starter spawn.
+    /// Coordinates and zone travel together: a bind is only meaningful with both.
+    pub bind: Option<BindPoint>,
     /// Quest ids this character has already turned in (quests pay once, ever).
     /// Loaded into `PerConnection.completed_quests`; the tick loop consults it
     /// before granting a `CompleteQuest` reward.
@@ -522,6 +535,10 @@ struct SpawnRow {
     pos_y: Option<f32>,
     pos_z: Option<f32>,
     yaw: Option<f32>,
+    bind_zone: Option<String>,
+    bind_x: Option<f32>,
+    bind_y: Option<f32>,
+    bind_z: Option<f32>,
 }
 
 pub async fn load_character(
@@ -536,7 +553,8 @@ pub async fn load_character(
                 base_max_hp, base_max_mp, base_max_stamina,
                 hp, mp, stamina, platinum, gold, silver, copper,
                 bank_platinum, bank_gold, bank_silver, bank_copper,
-                zone, pos_x, pos_y, pos_z, yaw
+                zone, pos_x, pos_y, pos_z, yaw,
+                bind_zone, bind_x, bind_y, bind_z
          FROM characters
          WHERE id = ?1 AND deleted_at IS NULL",
     )
@@ -639,6 +657,13 @@ pub async fn load_character(
             row.pos_z.unwrap_or(0.0),
         ),
         yaw: row.yaw.unwrap_or(0.0),
+        // A bind counts only when all three coordinates are present. A partial
+        // row (somehow) reads as unbound rather than teleporting the player to a
+        // half-origin position.
+        bind: match (row.bind_x, row.bind_y, row.bind_z) {
+            (Some(x), Some(y), Some(z)) => Some(BindPoint { pos: (x, y, z) }),
+            _ => None,
+        },
         completed_quests,
         active_quests,
     })
@@ -704,6 +729,31 @@ pub async fn record_quest_completion(
 /// own `checkpoint_resources` since the server now mutates HP/MP/Stamina
 /// on every regen tick — checkpointing them separately keeps the position
 /// path cheap (single-row UPDATE).
+/// Persist a character's bind point (where `Respawn` sends them). Written
+/// immediately when the player binds rather than riding the 60 s checkpoint:
+/// binding is a deliberate, rare act, and losing it to an ungraceful shutdown
+/// would send the player somewhere they explicitly chose not to be.
+pub async fn set_bind_point(
+    pool: &SqlitePool,
+    char_id: i64,
+    zone: Option<&str>,
+    pos: (f32, f32, f32),
+) -> AuthResult<()> {
+    sqlx::query(
+        "UPDATE characters
+         SET bind_zone = ?1, bind_x = ?2, bind_y = ?3, bind_z = ?4
+         WHERE id = ?5 AND deleted_at IS NULL",
+    )
+    .bind(zone)
+    .bind(pos.0)
+    .bind(pos.1)
+    .bind(pos.2)
+    .bind(char_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn checkpoint_position(
     pool: &SqlitePool,
     char_id: i64,

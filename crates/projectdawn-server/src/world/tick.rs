@@ -1582,6 +1582,8 @@ pub async fn run(
         // Corpse / resurrection Slice 3 — (responder, corpse_id, accept) responses
         // to a res offer, applied after dispatch where the corpses map is in scope.
         let mut resurrect_accept_intents: Vec<(u64, protocol::world::EntityId, bool)> = Vec::new();
+        // (char_id, zone, pos) — bind writes, persisted immediately (see db::set_bind_point).
+        let mut bind_intents: Vec<(i64, Option<String>, (f32, f32, f32))> = Vec::new();
         // PD_W0023 — dev-gated Test Panel spawns, applied alongside the natural
         // spawner pass where the enemies map + AOI grid are in scope.
         let mut dev_spawn_intents: Vec<(super::connection::Vec3f, super::zones::MobTemplate)> =
@@ -2001,6 +2003,16 @@ pub async fn run(
                         }
                         Outcome::ResurrectAcceptIntent { responder, corpse_id, accept } => {
                             resurrect_accept_intents.push((responder, corpse_id, accept));
+                        }
+                        Outcome::BindIntent { char_id, zone, pos } => {
+                            bind_intents.push((char_id, zone, pos));
+                        }
+                        Outcome::RespawnTeleport { pos } => {
+                            // Snap the client to the bind point. Without this the
+                            // client keeps rendering the death site until the next
+                            // Position broadcast drags it back — the teleport IS
+                            // the respawn from the player's point of view.
+                            handlers::send_teleport(&mut server, client_id, pos);
                         }
                         Outcome::DevSpawnMobIntent { pos, mob } => {
                             dev_spawn_intents.push((pos, mob));
@@ -7360,6 +7372,17 @@ pub async fn run(
                 }
             }
             spawner.on_enemy_died(entity.spawn_point_idx, now);
+        }
+
+        // 4k-bind. Persist bind points immediately rather than waiting for the
+        //      60 s checkpoint. Binding is deliberate and rare, and losing it to
+        //      an ungraceful shutdown (there is no SIGTERM handler) would respawn
+        //      the player somewhere they explicitly chose not to be — the exact
+        //      failure this feature exists to prevent.
+        for (char_id, zone, pos) in bind_intents.drain(..) {
+            if let Err(e) = db::set_bind_point(&pool, char_id, zone.as_deref(), pos).await {
+                tracing::warn!(char_id, error = %e, "set_bind_point failed; bind is live in memory but not persisted");
+            }
         }
 
         // 4k-res. Corpse / resurrection Slice 3 — apply accepted res offers.

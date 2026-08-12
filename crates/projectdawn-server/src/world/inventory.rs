@@ -1744,6 +1744,7 @@ mod tests {
             pos: (0.0, 0.0, 0.0), yaw: 0.0,
             completed_quests: Vec::new(),
             active_quests: Vec::new(),
+            bind: None,
         };
         crate::world::connection::PerConnection::from_spawn(spawn, Instant::now())
     }

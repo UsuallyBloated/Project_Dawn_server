@@ -74,6 +74,13 @@ pub const CAMP_SECS: Duration = Duration::from_secs(30);
 pub const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);
 /// Server-side speed cap for movement intents (m/s). Anything faster
 /// than this gets clamped — server-authoritative, no exceptions.
+/// Where a character with no bind point respawns, and the position a freshly
+/// created character starts at (`create_character` leaves `pos_*` NULL, which
+/// loads as 0,0,0). Keeping the fallback identical to the new-character spawn
+/// means an unbound player always wakes up somewhere known-safe rather than
+/// beside whatever just killed them.
+pub const STARTER_SPAWN: connection::Vec3f = connection::Vec3f::ZERO;
+
 pub const MAX_MOVE_SPEED: f32 = 7.5;
 /// How long we keep integrating the last received direction after the
 /// most recent Move message. Beyond this window, the connection is

@@ -1,6 +1,57 @@
 # Flaky integration tests — `tests/world_two_clients.rs`
 
-**Status: known tech debt, deferred (2026-06-15).** Not a gameplay bug; the
+**Status: largely fixed 2026-08-11 (commit `6a1a92e`); a small genuinely-flaky
+residue remains.** Read the update below before the original 2026-06-15 notes,
+which are kept for history but no longer describe the main problem.
+
+---
+
+## Update 2026-08-11 — most of this was NOT flakiness
+
+Between roughly 2026-07-20 and 2026-08-11 this suite sat at a **stable**
+`29 passed; 13 failed`. The *same* 13 failed in parallel, with `--test-threads=1`,
+and on a stashed tree — which is the opposite of the varying set described below.
+That stability was the tell: it was **stale test fixtures**, not timing.
+
+The file was last edited 2026-07-19 and three server changes landed after it:
+
+| Cause | Tests | What the test assumed |
+|---|---|---|
+| CastSpell class/level gate (`a96826d`) | 11 | that a **level 1** character could cast Healing Wave (min 4), Summon Skeleton (6), Inferno (12), Charm (20). Three also cast a **Shaman-only** spell as a Cleric. |
+| Melee swing-rate limit (`335b5b1`) | 1 | that 10 Attacks in one frame all land. The limiter correctly drops 9 as forgery. |
+| `meditate` casting skill (`d97031a`) | 1 | that there are 6 casting keys. There are 7. |
+
+**The server was correct in every case.** The tests were asserting pre-gate
+behavior. Fixed by teaching the fixtures about the gates: a `set_char_level`
+helper (which also tops up mana, since the loader recomputes `max_mp` from level
+but carries current `mp` over), Shaman casters for the Shaman-only spell, paced
+swings, and an updated key count.
+
+Two timing weaknesses surfaced while fixing those and were also corrected: a test
+that started a 3 s summon **while being hit** (Track 19A's on-hit interrupt made
+that unwinnable — the chance never drops below 10% even at max channeling), and a
+2 s approach walk that only clipped camp 0's aggro radius.
+
+### What "green" looks like now
+39 to 42 of 42, and a **fully green run is reachable** (previously the ceiling was
+29). The residue is three enemy-AI-aggro tests that are genuinely load-sensitive
+and vary run to run, all of which pass in isolation:
+
+- `aoe_spell_damages_nearby_enemies`
+- `pet_attacks_owners_target`
+- `pet_pulls_aggro_via_threat_reaggro`
+
+**Practical rule: a failure OUTSIDE those three is a real regression.** That is
+the property the suite lost for three weeks and has now got back. Re-run, or run
+the named test in isolation, before blaming a change.
+
+The original 2026-06-15 analysis below still describes that residue accurately.
+
+---
+
+## Original notes (2026-06-15)
+
+**Status: known tech debt, deferred.** Not a gameplay bug; the
 features under test work. This is test-harness fragility. Recorded so a failing
 `world_two_clients` run isn't mistaken for a regression.
 

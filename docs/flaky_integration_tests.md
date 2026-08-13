@@ -104,3 +104,26 @@ A *changing* failure set on identical code = non-determinism, not a logic bug.
 The 2026-06-15 loot-rights/coin work (`groups`/`loot`/`coin` paths) — those changes
 don't touch aggro/pet/AOE code, and the deterministic lib tests (incl. the new
 loot-auth + coin-roll tests) pass every run.
+
+## 2026-08-12 — `player_attack_kills_enemy_and_corpse_despawns` rejoined the flaky set
+
+It was among the 13 fixed on 08-11, but resurfaced. Investigated during the
+respawn/bind sprint and **ruled out as a regression**: a full-suite A/B with the
+sprint's server change stashed failed identically, and the same commit had passed
+42/42 hours earlier, so it is non-determinism, not a code fault.
+
+Partial cause found and fixed: the test paced swings at **700 ms** against the
+bare-hand swing-rate floor of **0.65 s**, leaving only 50 ms of margin. Timing
+jitter pushed swings under the floor, where the rate limiter silently drops them,
+and the 25 HP skeleton survived the 8-swing budget. Widening the pace to 1000 ms
+took it from 0/3 to 2/3 in isolation.
+
+Residual flakiness remains and is the same root as the other three: the test
+depends on an enemy wandering into aggro range, locking on, and STAYING in melee
+for the duration. Until the harness waits on AI state rather than wall-clock, the
+failing test varies run to run.
+
+**Practical rule, updated:** the suite sits at 41-42 of 42. A failure drawn from
+{`aoe_spell_damages_nearby_enemies`, `pet_attacks_owners_target`,
+`pet_pulls_aggro_via_threat_reaggro`, `player_attack_kills_enemy_and_corpse_despawns`}
+is the known flakiness. A failure OUTSIDE that set is a real regression.

@@ -919,7 +919,13 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     // and silently drops anything faster. All but the first swing
     // vanished and the skeleton survived. Sleeping past the floor
     // between swings is what an honest client does anyway.
-    const SWING_GAP: Duration = Duration::from_millis(700);
+    // 1000 ms, not 700: the bare-hand swing-rate floor is 0.65 s, so a 700 ms
+    // pace left only 50 ms of margin and timing jitter pushed swings under the
+    // floor, where they are silently dropped and the skeleton survives. Widening
+    // the margin makes it much more reliable, though this test still has residual
+    // enemy-AI timing sensitivity (see docs/flaky_integration_tests.md) — it
+    // depends on an enemy wandering into range, locking on, and STAYING in melee.
+    const SWING_GAP: Duration = Duration::from_millis(1000);
     for _ in 0..8 {
         a.send_attack(enemy_id, "", false, DamageType::Physical);
         // Pump the transport across the gap so the Attack actually goes

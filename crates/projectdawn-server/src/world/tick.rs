@@ -6602,9 +6602,16 @@ pub async fn run(
         //     per-entity borrow.
         if !enemies.is_empty() && !in_world_recipients_now.is_empty() {
             const PET_TARGET_DECAY_SECS: f32 = 10.0;
+            // Dead players are NOT aggro-able. Enemies previously kept chasing and
+            // hitting a corpse because this list filtered only on `in_world` —
+            // note the pet-AI snapshot a few lines below always carried
+            // `c.hp > 0.0`, so pets already knew and only the enemy AI did not.
+            // Dropping the dead from the list makes an enemy lose its target the
+            // moment you die, so it leashes home instead of beating your body
+            // (playtest 2026-08-12).
             let player_snapshots: Vec<(EntityId, Vec3f)> = connections
                 .values()
-                .filter(|c| c.in_world)
+                .filter(|c| c.in_world && c.hp > 0.0)
                 .map(|c| (c.char_id as u64, c.pos))
                 .collect();
             // Track 11.4 — enemies aggro on pets too. Build a combined
@@ -8566,16 +8573,35 @@ pub async fn run(
             .filter(|(_, c)| c.in_world)
             .map(|(id, _)| *id)
             .collect();
+        let mut newly_dead: Vec<EntityId> = Vec::new();
         for conn in connections.values_mut() {
             if conn.in_world && conn.hp <= 0.0 && !conn.death_processed {
                 super::progression::kill_player(&mut server, conn);
                 conn.death_processed = true;
                 handlers::fan_out_entity_died(&mut server, &death_recipients, conn.char_id as u64);
+                newly_dead.push(conn.char_id as u64);
                 tracing::info!(
                     char_id = conn.char_id,
                     level = conn.level,
                     "server-detected player death",
                 );
+            }
+        }
+        // Break aggro on death. Excluding the dead from the AI target list (step
+        // 4-ai) stops enemies picking them up again, but a mob mid-Chase still
+        // holds them in its aggro/threat tables; wiping the entry makes it drop
+        // the target immediately and leash home rather than standing over the
+        // corpse. Also keeps a dead player from skewing kill credit on a mob
+        // someone else finishes.
+        if !newly_dead.is_empty() {
+            for entity in enemies.values_mut() {
+                for id in &newly_dead {
+                    entity.aggro.remove(id);
+                    entity.threat.remove(id);
+                    if entity.target == Some(*id) {
+                        entity.target = None;
+                    }
+                }
             }
         }
 

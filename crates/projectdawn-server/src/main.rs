@@ -28,6 +28,7 @@ async fn main() -> anyhow::Result<()> {
     // it is never ambiguous which posture the process is running in.
     let rate_limit = std::env::var("PD_NO_RATE_LIMIT").as_deref() != Ok("1");
     tracing::info!(
+        build = env!("PD_BUILD_COMMIT"),
         auth_bind = %cfg.auth_bind,
         world_bind = %cfg.world_bind,
         world_endpoint = %cfg.world_endpoint,

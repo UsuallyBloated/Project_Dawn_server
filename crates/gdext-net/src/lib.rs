@@ -88,6 +88,7 @@ impl NetClient {
         race: GString,
         class: GString,
         level: i64,
+        is_gm: bool,
     );
 
     /// Server sent a `Kick`. `code` is the `KickCode` variant name.
@@ -1348,6 +1349,7 @@ enum Incoming {
         race: String,
         class: String,
         level: u32,
+        is_gm: bool,
     },
     Heartbeat,
     Kick {
@@ -1691,6 +1693,7 @@ impl NetClient {
                     race,
                     class,
                     level,
+                    is_gm,
                 } => {
                     self.base_mut().emit_signal(
                         "connect_ok",
@@ -1700,6 +1703,7 @@ impl NetClient {
                             GString::from(race.as_str()).to_variant(),
                             GString::from(class.as_str()).to_variant(),
                             (level as i64).to_variant(),
+                            is_gm.to_variant(),
                         ],
                     );
                 }
@@ -2363,12 +2367,14 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             race,
             class,
             level,
+            is_gm,
         } => Incoming::ConnectOk {
             player_id: player_id as i64,
             name,
             race,
             class,
             level,
+            is_gm,
         },
         ServerWorldMsg::Heartbeat => Incoming::Heartbeat,
         ServerWorldMsg::Kick { reason, code, .. } => Incoming::Kick {

@@ -2336,6 +2336,7 @@ fn send_connect_ok(server: &mut RenetServer, client_id: ClientId, conn: &PerConn
         race: conn.race.clone(),
         class: conn.class.clone(),
         level: conn.level.max(0) as u32,
+        is_gm: conn.is_gm,
     };
     if let Some(bytes) = encode(&msg) {
         server.send_message(client_id, CHANNEL_SYSTEM, bytes);

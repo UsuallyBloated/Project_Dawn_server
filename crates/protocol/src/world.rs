@@ -112,7 +112,10 @@ use serde::{Deserialize, Serialize};
 /// ignores the unknown `ProcTriggered` (decode returns `Raw`, no crash). To
 /// actually refuse an out-of-date client, raise the auth `min_client_version` at
 /// deploy time alongside the new client build.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3235; // "PD_W0025"
+///
+/// PD_W0026: `ConnectOk` gains `is_gm`, so the client learns its GM status from
+/// the world handshake instead of caching it from the auth `LoginOk`.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3236; // "PD_W0026"
 
 pub type EntityId = u64;
 
@@ -926,6 +929,15 @@ pub enum ServerWorldMsg {
         race: String,
         class: String,
         level: u32,
+        /// PD_W0026 — whether this account holds GM. The client previously
+        /// cached this from the AUTH LoginOk, which meant any path into the
+        /// world that skipped the login screen (the retired standalone launcher,
+        /// or re-entering the login scene with a live session) left the client
+        /// believing it was not a GM while the server knew otherwise. Sending it
+        /// on the world handshake makes it authoritative and path-independent.
+        /// Display-gating only: every dev command is gated server-side on the
+        /// is_gm bit in the signed token, never on this.
+        is_gm: bool,
     },
     Kick {
         reason: String,

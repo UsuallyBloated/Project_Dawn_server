@@ -2604,19 +2604,26 @@ async fn snapshot_includes_persisted_equipment() {
     }
 }
 
-/// Track 13.2 — MoveItem on a non-existent source slot is rejected
-/// silently (no Delta fan-out). Negative test for the dispatch
-/// validation. Tests both that the wire path round-trips and that
-/// the server doesn't crash on bogus inputs.
+/// A rejected `MoveItem` must TELL the client the truth about the slots it
+/// named, rather than being dropped silently.
+///
+/// This test previously asserted the opposite ("must not fan an
+/// InventoryDelta"), which enshrined a real bug: authority over inventory only
+/// helps if disagreement is reported. A client that asked to move an item the
+/// server does not have there learned nothing from being refused, kept
+/// rendering the phantom, and kept asking. A playtest on 2026-08-18 caught the
+/// same slots refused for half an hour, resolving only on relog, and presenting
+/// to the player as items vanishing.
+///
+/// Both slots here are genuinely empty, so the corrective deltas should say so.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn move_item_empty_source_drops_silently() {
+async fn move_item_empty_source_corrects_client() {
     let h = start_both().await;
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "mvi", "Mover", "Human", "Warrior").await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
-    // Wait for the EnterWorld snapshot so we know we're past the
-    // seed loop.
+    // Wait for the EnterWorld snapshot so we know we're past the seed loop.
     let _ = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(m, ServerWorldMsg::InventorySnapshot { .. })
@@ -2624,20 +2631,49 @@ async fn move_item_empty_source_drops_silently() {
         .await
         .expect("snapshot seed");
 
-    // Empty slot 0 → empty slot 3. Server should reject (source
-    // empty) without fanning a Delta.
+    // Empty slot 0 -> empty slot 3. The server rejects it, and must answer with
+    // the real contents of both named slots.
     a.send_move_item("base", 0, "base", 3);
     for _ in 0..4 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
 
-    let stray = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
-            matches!(m, ServerWorldMsg::InventoryDelta { .. })
-        })
-        .await;
-    assert!(stray.is_none(), "MoveItem on empty source must not fan an InventoryDelta");
+    let mut corrected: Vec<(String, u32, bool)> = Vec::new();
+    for _ in 0..2 {
+        let msg = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_millis(700), |m| {
+                matches!(m, ServerWorldMsg::InventoryDelta { .. })
+            })
+            .await;
+        match msg {
+            Some(ServerWorldMsg::InventoryDelta {
+                location,
+                slot,
+                item_path,
+                count,
+            }) => corrected.push((location, slot, item_path.is_none() && count == 0)),
+            _ => break,
+        }
+    }
+
+    assert_eq!(
+        corrected.len(),
+        2,
+        "a rejected MoveItem must correct both named slots; got {corrected:?}"
+    );
+    assert!(
+        corrected.iter().any(|(l, s, _)| l == "base" && *s == 0),
+        "source slot must be corrected; got {corrected:?}"
+    );
+    assert!(
+        corrected.iter().any(|(l, s, _)| l == "base" && *s == 3),
+        "destination slot must be corrected; got {corrected:?}"
+    );
+    assert!(
+        corrected.iter().all(|(_, _, empty)| *empty),
+        "both slots are genuinely empty, so both corrections must say empty; got {corrected:?}"
+    );
 }
 
 /// Track 17.2 — per-spell cooldown gate. Cast Healing Wave (6 s

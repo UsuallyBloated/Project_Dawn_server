@@ -5309,10 +5309,38 @@ pub async fn run(
                             error = %e,
                             "MoveItem rejected"
                         );
+                        // A rejection used to send the client NOTHING, which made
+                        // every divergence permanent: the client asked to move an
+                        // item the server does not have there, learned nothing from
+                        // being refused, and asked again. Playtest 2026-08-18 shows
+                        // the same slot refused for half an hour, only resolving on
+                        // relog. Answer with the truth about both slots so a wrong
+                        // client corrects itself on its next mistake.
+                        correct_client_slots(
+                            &mut server,
+                            owner_cid,
+                            conn,
+                            &intent.src_location,
+                            intent.src_slot,
+                            &intent.dst_location,
+                            intent.dst_slot,
+                        );
                         continue;
                     }
                 };
                 if touched.is_empty() {
+                    // A move the server treats as a no-op. The client still moved
+                    // something on its own screen to get here, so it needs the same
+                    // correction as an outright rejection.
+                    correct_client_slots(
+                        &mut server,
+                        owner_cid,
+                        conn,
+                        &intent.src_location,
+                        intent.src_slot,
+                        &intent.dst_location,
+                        intent.dst_slot,
+                    );
                     continue;
                 }
                 conn.inventory_dirty = true;
@@ -8842,6 +8870,44 @@ pub async fn run(
         // 8. Push outbound packets to the network.
         transport.send_packets(&mut server);
 
+    }
+}
+
+/// Tell one client the true contents of the two slots a failed `MoveItem`
+/// named, so a client whose view has drifted can correct itself.
+///
+/// The server is authoritative over inventory, but authority only helps if
+/// disagreement is *reported*. Before this, a rejected or no-op move sent the
+/// client nothing at all: it kept rendering a phantom item, kept asking to move
+/// it, and kept being refused, with no path back to the truth short of a relog.
+/// A playtest on 2026-08-18 caught the same slots refused for half an hour.
+///
+/// Sending the real contents of exactly the two slots involved keeps this
+/// proportional: at most two small messages per bad request the client made, so
+/// it cannot be used to amplify traffic, and it converges because every wrong
+/// belief is corrected the moment the client acts on it.
+fn correct_client_slots(
+    server: &mut RenetServer,
+    cid: ClientId,
+    conn: &PerConnection,
+    src_loc: &str,
+    src_slot: u32,
+    dst_loc: &str,
+    dst_slot: u32,
+) {
+    let mut targets: Vec<(&str, u32)> = vec![(src_loc, src_slot)];
+    // A move onto itself names one slot twice; no reason to send it twice.
+    if !(src_loc == dst_loc && src_slot == dst_slot) {
+        targets.push((dst_loc, dst_slot));
+    }
+    for (loc, slot) in targets {
+        let (item_path, count) = match conn.inventory.peek_at(loc, slot) {
+            Some((p, c)) => (Some(p), c),
+            // Empty is a real answer and the one the client most needs: it is
+            // usually the phantom item that started the divergence.
+            None => (None, 0),
+        };
+        handlers::send_inventory_delta(server, cid, loc.to_string(), slot, item_path, count);
     }
 }
 

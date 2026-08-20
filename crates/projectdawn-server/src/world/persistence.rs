@@ -61,67 +61,51 @@ pub async fn checkpoint_dirty(pool: &SqlitePool, conns: &mut [&mut PerConnection
                 }
             }
         }
-        if conn.inventory_dirty {
-            let rows = conn.inventory.to_rows();
-            match db::save_inventory(pool, conn.char_id, &rows).await {
-                Ok(()) => conn.inventory_dirty = false,
+        // Items and coins move BETWEEN these stores, so they are written in one
+        // transaction rather than five. A bank deposit touches inventory and the
+        // vault; a vendor sale touches inventory and the wallet. Writing them
+        // separately left a crash window that either loses the item (gone from
+        // inventory, never arrived) or duplicates it (arrived and still in
+        // inventory) — and a dupe is the worse half, because losses get reported
+        // and dupes get exploited quietly. See db::save_stores_atomic.
+        let any_store_dirty = conn.inventory_dirty
+            || conn.coins_dirty
+            || conn.bank_dirty
+            || conn.bank_items_dirty
+            || conn.account_bank_items_dirty;
+        if any_store_dirty {
+            let inv_rows = conn.inventory_dirty.then(|| conn.inventory.to_rows());
+            let bank_rows = conn.bank_items_dirty.then(|| conn.bank_items.to_rows());
+            let acct_rows = conn
+                .account_bank_items_dirty
+                .then(|| conn.account_bank_items.to_rows());
+            match db::save_stores_atomic(
+                pool,
+                conn.char_id,
+                conn.account_id,
+                inv_rows.as_deref(),
+                conn.coins_dirty.then_some(conn.coins),
+                conn.bank_dirty.then_some(conn.bank_coins),
+                bank_rows.as_deref(),
+                acct_rows.as_deref(),
+            )
+            .await
+            {
+                Ok(()) => {
+                    // All-or-nothing: the transaction committed, so every flag it
+                    // covered is clean. Clearing them individually would reopen
+                    // the very window this closes.
+                    conn.inventory_dirty = false;
+                    conn.coins_dirty = false;
+                    conn.bank_dirty = false;
+                    conn.bank_items_dirty = false;
+                    conn.account_bank_items_dirty = false;
+                }
                 Err(e) => {
                     tracing::warn!(
                         char_id = conn.char_id,
                         error = %e,
-                        "inventory checkpoint failed; will retry next interval"
-                    );
-                }
-            }
-        }
-        if conn.coins_dirty {
-            match db::save_coins(pool, conn.char_id, conn.coins).await {
-                Ok(()) => conn.coins_dirty = false,
-                Err(e) => {
-                    tracing::warn!(
-                        char_id = conn.char_id,
-                        error = %e,
-                        "coin checkpoint failed; will retry next interval"
-                    );
-                }
-            }
-        }
-        if conn.bank_dirty {
-            match db::save_bank(pool, conn.char_id, conn.bank_coins).await {
-                Ok(()) => conn.bank_dirty = false,
-                Err(e) => {
-                    tracing::warn!(
-                        char_id = conn.char_id,
-                        error = %e,
-                        "bank checkpoint failed; will retry next interval"
-                    );
-                }
-            }
-        }
-        // Banker slice 2 — the two item vaults. Personal is char-keyed;
-        // the account-shared vault is keyed on account_id.
-        if conn.bank_items_dirty {
-            let rows = conn.bank_items.to_rows();
-            match db::save_bank_items(pool, conn.char_id, &rows).await {
-                Ok(()) => conn.bank_items_dirty = false,
-                Err(e) => {
-                    tracing::warn!(
-                        char_id = conn.char_id,
-                        error = %e,
-                        "bank-items checkpoint failed; will retry next interval"
-                    );
-                }
-            }
-        }
-        if conn.account_bank_items_dirty {
-            let rows = conn.account_bank_items.to_rows();
-            match db::save_account_bank_items(pool, conn.account_id, &rows).await {
-                Ok(()) => conn.account_bank_items_dirty = false,
-                Err(e) => {
-                    tracing::warn!(
-                        account_id = conn.account_id,
-                        error = %e,
-                        "account-bank-items checkpoint failed; will retry next interval"
+                        "store checkpoint failed; will retry next interval"
                     );
                 }
             }

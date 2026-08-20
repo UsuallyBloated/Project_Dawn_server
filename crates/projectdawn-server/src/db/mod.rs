@@ -946,6 +946,7 @@ pub async fn save_corpse(
     coins: protocol::world::Coins,
     items: &[(String, u32)],
     lost_xp: i32,
+    strip_owner: bool,
 ) -> AuthResult<()> {
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -983,6 +984,27 @@ pub async fn save_corpse(
         .bind(slot as i64)
         .bind(item_path)
         .bind(*count as i64)
+        .execute(&mut *tx)
+        .await?;
+    }
+    // Strip the owner INSIDE the same transaction that creates the corpse.
+    // These are two halves of one movement: the gear and coin are leaving the
+    // player and arriving on the body. Done as separate writes, a crash landing
+    // between them leaves the corpse holding everything while the player still
+    // has it too — a straight duplication, and of coin specifically, which is
+    // the worst thing to duplicate. Now it is all-or-nothing: either the corpse
+    // exists and the player is empty, or neither happened and the death can be
+    // retried.
+    if strip_owner {
+        sqlx::query("DELETE FROM character_items WHERE char_id = ?1")
+            .bind(char_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE characters SET platinum = 0, gold = 0, silver = 0, copper = 0
+             WHERE id = ?1",
+        )
+        .bind(char_id)
         .execute(&mut *tx)
         .await?;
     }
@@ -1233,6 +1255,133 @@ pub async fn save_account_bank_items(
     Ok(())
 }
 
+/// Persist every mutable item and coin store for one connection in a **single
+/// transaction**. Pass `Some` for each store that is dirty; `None` leaves that
+/// table untouched.
+///
+/// Why this exists: each store used to be written by its own function, each
+/// opening its own transaction, with an `.await` between them. But an item
+/// never simply changes — it *moves* between two stores, and every such move
+/// spans two tables:
+///
+/// | Action              | Stores touched                    |
+/// |---------------------|-----------------------------------|
+/// | Bank item deposit   | `character_items` + `bank_items`  |
+/// | Bank coin deposit   | `characters` wallet + bank columns|
+/// | Vendor buy / sell   | `character_items` + wallet        |
+///
+/// So a crash landing between the two commits either **loses** the item (gone
+/// from inventory, never arrived in the vault) or **duplicates** it (in the
+/// vault and still in inventory). A duplication bug is worse than a loss:
+/// losses get reported, dupes get exploited quietly.
+///
+/// Writing all of them under one transaction makes every transfer atomic no
+/// matter which pair of stores it spans, without having to enumerate the pairs.
+/// Same reasoning as `apply_corpse_loot`, which folded the corpse delete into
+/// the looter's inventory write for exactly this reason.
+#[allow(clippy::too_many_arguments)]
+pub async fn save_stores_atomic(
+    pool: &SqlitePool,
+    char_id: i64,
+    account_id: i64,
+    inventory: Option<&[InventoryRow]>,
+    coins: Option<Coins>,
+    bank_coins: Option<Coins>,
+    bank_items: Option<&[BankItemRow]>,
+    account_bank_items: Option<&[BankItemRow]>,
+) -> AuthResult<()> {
+    let mut tx = pool.begin().await?;
+
+    if let Some(rows) = inventory {
+        sqlx::query("DELETE FROM character_items WHERE char_id = ?1")
+            .bind(char_id)
+            .execute(&mut *tx)
+            .await?;
+        for row in rows {
+            sqlx::query(
+                "INSERT INTO character_items (char_id, location, slot, item_path, count)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .bind(char_id)
+            .bind(&row.location)
+            .bind(row.slot)
+            .bind(&row.item_path)
+            .bind(row.count)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    if let Some(c) = coins {
+        sqlx::query(
+            "UPDATE characters SET platinum = ?1, gold = ?2, silver = ?3, copper = ?4
+             WHERE id = ?5",
+        )
+        .bind(c.platinum)
+        .bind(c.gold)
+        .bind(c.silver)
+        .bind(c.copper)
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    if let Some(b) = bank_coins {
+        sqlx::query(
+            "UPDATE characters SET bank_platinum = ?1, bank_gold = ?2,
+                    bank_silver = ?3, bank_copper = ?4
+             WHERE id = ?5",
+        )
+        .bind(b.platinum)
+        .bind(b.gold)
+        .bind(b.silver)
+        .bind(b.copper)
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    if let Some(rows) = bank_items {
+        sqlx::query("DELETE FROM bank_items WHERE char_id = ?1")
+            .bind(char_id)
+            .execute(&mut *tx)
+            .await?;
+        for row in rows {
+            sqlx::query(
+                "INSERT INTO bank_items (char_id, slot, item_path, count) VALUES (?1, ?2, ?3, ?4)",
+            )
+            .bind(char_id)
+            .bind(row.slot)
+            .bind(&row.item_path)
+            .bind(row.count)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    if let Some(rows) = account_bank_items {
+        sqlx::query("DELETE FROM account_bank_items WHERE account_id = ?1")
+            .bind(account_id)
+            .execute(&mut *tx)
+            .await?;
+        for row in rows {
+            sqlx::query(
+                "INSERT INTO account_bank_items (account_id, slot, item_path, count)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )
+            .bind(account_id)
+            .bind(row.slot)
+            .bind(&row.item_path)
+            .bind(row.count)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Persist the four-tier wallet. Called from the checkpoint sweep +
 /// disconnect flush whenever `coins_dirty` is set — without this the
 /// in-session wallet (vendor buys/sells, dev grants) silently resets
@@ -1375,7 +1524,8 @@ mod corpse_loot_tests {
                 ("res://items/sword.tres".to_string(), 1),
                 ("res://items/shield.tres".to_string(), 1),
             ],
-            0, // lost_xp
+            0,     // lost_xp
+            false, // strip_owner: tests exercise corpse creation only
         )
         .await
         .expect("save corpse");
@@ -1472,6 +1622,88 @@ mod corpse_loot_tests {
 
     // Slice 3 — the corpse remembers the death's lost XP (for the res refund) and
     // its un-resurrected state across a save/load (a server restart).
+    /// Death moves gear and coin from the player onto the corpse. Both halves
+    /// must land together: a corpse written while the player kept their
+    /// inventory means the items exist twice. Coin duplication is the worst
+    /// case, being fungible and quiet.
+    #[tokio::test]
+    async fn save_corpse_strips_the_owner_in_the_same_transaction() {
+        let (pool, _tmp) = fresh_pool().await;
+        let account = create_account(&pool, "striptest", "password123", None)
+            .await
+            .expect("account");
+        let char_id = create_character(&pool, account, "Doomed", "Human", "Warrior")
+            .await
+            .expect("char");
+
+        save_inventory(
+            &pool,
+            char_id,
+            &[
+                InventoryRow {
+                    location: "base".into(),
+                    slot: 0,
+                    item_path: "res://items/sword.tres".into(),
+                    count: 1,
+                },
+                InventoryRow {
+                    location: "base".into(),
+                    slot: 1,
+                    item_path: "res://items/shield.tres".into(),
+                    count: 1,
+                },
+            ],
+        )
+        .await
+        .expect("seed inventory");
+        save_coins(&pool, char_id, protocol::world::Coins::from_copper(1234))
+            .await
+            .expect("seed coins");
+
+        save_corpse(
+            &pool,
+            2_000_000_500,
+            char_id,
+            "Doomed",
+            "test_zone",
+            (0.0, 0.0, 0.0),
+            protocol::world::Coins::from_copper(1234),
+            &[
+                ("res://items/sword.tres".to_string(), 1),
+                ("res://items/shield.tres".to_string(), 1),
+            ],
+            0,
+            true, // strip_owner
+        )
+        .await
+        .expect("save corpse + strip");
+
+        // The corpse holds everything...
+        let corpses = load_corpses(&pool).await.expect("load corpses");
+        let corpse = corpses
+            .iter()
+            .find(|c| c.char_id == char_id)
+            .expect("corpse exists");
+        assert_eq!(corpse.items.len(), 2, "corpse should hold both items");
+        assert_eq!(
+            corpse.coins.total_copper(),
+            1234,
+            "corpse should hold the coin"
+        );
+
+        // ...and the player holds none of it. Anything else is a duplication.
+        let inv = load_inventory(&pool, char_id).await.expect("load inventory");
+        assert!(
+            inv.is_empty(),
+            "owner inventory must be empty after the strip, got {inv:?}"
+        );
+        assert_eq!(
+            wallet_cols(&pool, char_id).await,
+            (0, 0, 0, 0),
+            "owner wallet must be zeroed after the strip"
+        );
+    }
+
     #[tokio::test]
     async fn corpse_lost_xp_round_trips() {
         let (pool, _tmp) = fresh_pool().await;
@@ -1491,7 +1723,8 @@ mod corpse_loot_tests {
             (3.0, 0.0, 4.0),
             protocol::world::Coins::ZERO,
             &[("res://items/staff.tres".to_string(), 1)],
-            500, // lost_xp
+            500,   // lost_xp
+            false, // strip_owner: tests exercise corpse creation only
         )
         .await
         .expect("save");

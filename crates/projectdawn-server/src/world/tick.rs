@@ -974,75 +974,50 @@ async fn reap_connection(
                 conn.mark_persisted();
             }
         }
-        // Coins flush on the way out too — a logout right after a vendor run
-        // shouldn't roll the wallet back to the last 60 s checkpoint.
-        if conn.coins_dirty {
-            if let Err(e) = db::save_coins(pool, conn.char_id, conn.coins).await {
-                tracing::warn!(
-                    char_id = conn.char_id,
-                    error = %e,
-                    "final coin save on disconnect failed"
-                );
-            } else {
-                conn.coins_dirty = false;
-            }
-        }
-        // Bank flush on the way out too (mirror coins) — a deposit right before
-        // logout shouldn't roll back.
-        if conn.bank_dirty {
-            if let Err(e) = db::save_bank(pool, conn.char_id, conn.bank_coins).await {
-                tracing::warn!(
-                    char_id = conn.char_id,
-                    error = %e,
-                    "final bank save on disconnect failed"
-                );
-            } else {
-                conn.bank_dirty = false;
-            }
-        }
-        // Banker slice 2 — flush both item vaults on the way out (personal
-        // char-keyed, shared account-keyed).
-        if conn.bank_items_dirty {
-            let rows = conn.bank_items.to_rows();
-            if let Err(e) = db::save_bank_items(pool, conn.char_id, &rows).await {
-                tracing::warn!(
-                    char_id = conn.char_id,
-                    error = %e,
-                    "final bank-items save on disconnect failed"
-                );
-            } else {
-                conn.bank_items_dirty = false;
-            }
-        }
-        if conn.account_bank_items_dirty {
-            let rows = conn.account_bank_items.to_rows();
-            if let Err(e) =
-                db::save_account_bank_items(pool, conn.account_id, &rows).await
+        // Every item/coin store flushes on the way out, in ONE transaction.
+        // A logout right after a vendor run or a bank deposit shouldn't roll
+        // back to the last 60 s checkpoint — and, more importantly, these
+        // stores must not be written separately: an item moving between two of
+        // them (inventory to vault, wallet to bank) would otherwise have a
+        // crash window that loses or duplicates it. Same reasoning and same
+        // helper as the periodic sweep. See db::save_stores_atomic.
+        let any_store_dirty = conn.inventory_dirty
+            || conn.coins_dirty
+            || conn.bank_dirty
+            || conn.bank_items_dirty
+            || conn.account_bank_items_dirty;
+        if any_store_dirty {
+            let inv_rows = conn.inventory_dirty.then(|| conn.inventory.to_rows());
+            let bank_rows = conn.bank_items_dirty.then(|| conn.bank_items.to_rows());
+            let acct_rows = conn
+                .account_bank_items_dirty
+                .then(|| conn.account_bank_items.to_rows());
+            match db::save_stores_atomic(
+                pool,
+                conn.char_id,
+                conn.account_id,
+                inv_rows.as_deref(),
+                conn.coins_dirty.then_some(conn.coins),
+                conn.bank_dirty.then_some(conn.bank_coins),
+                bank_rows.as_deref(),
+                acct_rows.as_deref(),
+            )
+            .await
             {
-                tracing::warn!(
-                    account_id = conn.account_id,
-                    error = %e,
-                    "final account-bank-items save on disconnect failed"
-                );
-            } else {
-                conn.account_bank_items_dirty = false;
-            }
-        }
-        // Inventory flush on the way out (mirrors coins/bank above). Without
-        // this, an equip / unequip / loot / move / drop in the last 60 s before
-        // a clean logout rolls back to the last periodic checkpoint on relog —
-        // e.g. an unequipped item reappears equipped. The periodic checkpoint
-        // owns this row too; here we just make logout not lose the tail.
-        if conn.inventory_dirty {
-            let rows = conn.inventory.to_rows();
-            if let Err(e) = db::save_inventory(pool, conn.char_id, &rows).await {
-                tracing::warn!(
-                    char_id = conn.char_id,
-                    error = %e,
-                    "final inventory save on disconnect failed"
-                );
-            } else {
-                conn.inventory_dirty = false;
+                Ok(()) => {
+                    conn.inventory_dirty = false;
+                    conn.coins_dirty = false;
+                    conn.bank_dirty = false;
+                    conn.bank_items_dirty = false;
+                    conn.account_bank_items_dirty = false;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        char_id = conn.char_id,
+                        error = %e,
+                        "final store save on disconnect failed"
+                    );
+                }
             }
         }
         // Resources (hp / mp / stamina / xp / level) — a kill's XP or a de-level
@@ -8670,7 +8645,12 @@ pub async fn run(
             // body to be rezzed back to. An empty corpse is just a corpses row
             // with no items; it renders and decays like any other.
             let corpse_id = super::loot::mint_bag_id();
-            // 1. Persist the corpse first (durable before we touch the player).
+            // 1. Create the corpse AND strip the owner in ONE transaction. These
+            //    are two halves of a single movement — the gear and coin leave
+            //    the player and arrive on the body — so they must not be able to
+            //    half-happen. Written separately (as they were), a crash between
+            //    them left the corpse holding everything while the player still
+            //    had it: a straight duplication, of coin especially.
             if let Err(e) = db::save_corpse(
                 &pool,
                 corpse_id as i64,
@@ -8681,22 +8661,25 @@ pub async fn run(
                 coins,
                 &items,
                 lost_xp,
+                true, // strip the owner in the same transaction
             )
             .await
             {
                 tracing::error!(char_id = cid, error = %e, "save_corpse failed; leaving inventory intact (no strip)");
                 continue;
             }
-            // 2. Strip the live player + persist the now-empty inventory / coins,
-            //    and fan the emptied snapshot (drives the naked respawn), the new
-            //    gear-free max stats, and the zeroed wallet to the owner.
+            // 2. Mirror that committed state in memory and tell the client: the
+            //    emptied snapshot drives the naked respawn, plus gear-free max
+            //    stats and the zeroed wallet. The DB write already happened
+            //    above, so there is nothing further to persist here.
             if let Some(conn) = connections.get_mut(&client_id) {
                 conn.inventory.clear_all();
                 inventory::recompute_equipped_stats(conn);
                 conn.coins = protocol::world::Coins::ZERO;
-                conn.coins_dirty = true;
-                let _ = db::save_inventory(&pool, cid, &[]).await;
-                let _ = db::save_coins(&pool, cid, protocol::world::Coins::ZERO).await;
+                // Already durable via save_corpse's transaction. Clearing these
+                // stops the next checkpoint rewriting rows it does not need to.
+                conn.inventory_dirty = false;
+                conn.coins_dirty = false;
                 let entries = conn.inventory.to_snapshot_entries();
                 handlers::send_inventory_snapshot(&mut server, client_id, entries);
                 handlers::fan_out_resources(&mut server, std::slice::from_ref(&client_id), conn);

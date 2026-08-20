@@ -187,6 +187,41 @@ pub struct InventoryEntry {
     pub count: u32,
 }
 
+/// Merge a moved stack into a same-item destination, respecting the item's
+/// `stack_size`. Returns the new destination entry plus whatever did not fit,
+/// which the caller must put back at the source slot.
+///
+/// The move paths used to merge with a bare `saturating_add`, so dragging one
+/// stack onto another could build a stack larger than the item allows — a
+/// 41-stack of bread whose limit was 10 turned up in a 2026-08-20 playtest log.
+/// It is not a duplication (the total is conserved), but it quietly sidesteps
+/// the carry-weight pressure that four-tier coin and `Encumbrance` exist to
+/// create, and it means the client and server disagreed about what a legal
+/// stack even is: the client's own consolidation has always capped correctly.
+///
+/// Overflow stays put rather than being rejected or destroyed. Refusing the
+/// whole move would be surprising when the destination has *some* room, and
+/// `items::max_stack` returns `u32::MAX` for paths absent from the registry, so
+/// runtime-built items keep their old unlimited behaviour.
+fn merge_capped(
+    existing: InventoryEntry,
+    incoming: InventoryEntry,
+) -> (InventoryEntry, Option<InventoryEntry>) {
+    let cap = items::max_stack(&existing.item_path);
+    let space = cap.saturating_sub(existing.count);
+    let moved = incoming.count.min(space);
+    let leftover = incoming.count - moved;
+    let merged = InventoryEntry {
+        item_path: existing.item_path,
+        count: existing.count.saturating_add(moved),
+    };
+    let back = (leftover > 0).then(|| InventoryEntry {
+        item_path: incoming.item_path,
+        count: leftover,
+    });
+    (merged, back)
+}
+
 /// Banker slice 2 — a flat, fixed-size item store with no bags/equip. Used
 /// for both the 10-slot per-character bank and the 2-slot account-shared
 /// bank (they differ only in size and persistence key). Reuses
@@ -751,7 +786,15 @@ impl PlayerInventory {
         // Validate dst before mutating either slot.
         match self.base.get(dst).and_then(|s| s.as_ref()) {
             None => {} // empty dst — clean transfer.
-            Some(existing) if existing.item_path == src_path => {} // merge.
+            Some(existing) if existing.item_path == src_path => {
+                // Merging must not build a stack larger than the item allows.
+                // Rejected rather than clamped: a split names an explicit count,
+                // so silently moving fewer than asked would be the confusing
+                // option. The caller now resyncs on a rejection anyway.
+                if existing.count.saturating_add(count) > items::max_stack(&src_path) {
+                    return Err("destination stack would exceed the item's stack size");
+                }
+            }
             Some(_) => return Err("dst holds a different item"),
         }
         // Apply: subtract from src (clear if zero) then add to dst.
@@ -1027,11 +1070,10 @@ impl PlayerInventory {
                 self.base[dst] = Some(src_entry);
             }
             Some(existing) if existing.item_path == src_entry.item_path => {
-                let merged_count = existing.count.saturating_add(src_entry.count);
-                self.base[dst] = Some(InventoryEntry {
-                    item_path: existing.item_path,
-                    count: merged_count,
-                });
+                let (merged, leftover) = merge_capped(existing, src_entry);
+                self.base[dst] = Some(merged);
+                // Anything over the stack cap stays where it came from.
+                self.base[src] = leftover;
             }
             Some(existing) => {
                 // Different item — swap. Src now holds what was in dst.
@@ -1076,11 +1118,9 @@ impl PlayerInventory {
                 arr[dst] = Some(src_entry);
             }
             Some(existing) if existing.item_path == src_entry.item_path => {
-                let merged_count = existing.count.saturating_add(src_entry.count);
-                arr[dst] = Some(InventoryEntry {
-                    item_path: existing.item_path,
-                    count: merged_count,
-                });
+                let (merged, leftover) = merge_capped(existing, src_entry);
+                arr[dst] = Some(merged);
+                arr[src] = leftover;
             }
             Some(existing) => {
                 arr[src] = Some(existing);
@@ -1165,11 +1205,9 @@ impl PlayerInventory {
                 arr[dst] = Some(src_entry);
             }
             Some(existing) if existing.item_path == src_entry.item_path => {
-                let merged_count = existing.count.saturating_add(src_entry.count);
-                arr[dst] = Some(InventoryEntry {
-                    item_path: existing.item_path,
-                    count: merged_count,
-                });
+                let (merged, leftover) = merge_capped(existing, src_entry);
+                arr[dst] = Some(merged);
+                self.base[src] = leftover;
             }
             Some(existing) => {
                 // Swap — bag inner's old item goes back to base[src].
@@ -1220,11 +1258,14 @@ impl PlayerInventory {
                 self.base[dst] = Some(src_entry);
             }
             Some(existing) if existing.item_path == src_entry.item_path => {
-                let merged_count = existing.count.saturating_add(src_entry.count);
-                self.base[dst] = Some(InventoryEntry {
-                    item_path: existing.item_path,
-                    count: merged_count,
-                });
+                let (merged, leftover) = merge_capped(existing, src_entry);
+                self.base[dst] = Some(merged);
+                // Overflow goes back into the bag slot it came from.
+                let arr = self
+                    .bags
+                    .get_mut(&base_idx)
+                    .expect("bag existed at start of fn");
+                arr[src] = leftover;
             }
             Some(existing) => {
                 // Swap — base[dst]'s item goes back to the bag inner.
@@ -1293,11 +1334,9 @@ impl PlayerInventory {
                 self.bags.get_mut(&dst_base).expect("checked")[dst_slot] = Some(src_entry);
             }
             Some(existing) if existing.item_path == src_entry.item_path => {
-                let merged_count = existing.count.saturating_add(src_entry.count);
-                self.bags.get_mut(&dst_base).expect("checked")[dst_slot] = Some(InventoryEntry {
-                    item_path: existing.item_path,
-                    count: merged_count,
-                });
+                let (merged, leftover) = merge_capped(existing, src_entry);
+                self.bags.get_mut(&dst_base).expect("checked")[dst_slot] = Some(merged);
+                self.bags.get_mut(&src_base).expect("checked")[src_slot] = leftover;
             }
             Some(existing) => {
                 self.bags.get_mut(&dst_base).expect("checked")[dst_slot] = Some(src_entry);
@@ -2083,6 +2122,93 @@ mod tests {
         assert!(
             !inv.bags.contains_key(&0u8),
             "bag entry leaves the old slot"
+        );
+    }
+
+    const BREAD: &str = "res://data/loot/items/bread_loaf.tres"; // stack_size 20
+
+    /// Dragging one stack onto another must not build a stack larger than the
+    /// item allows. A 2026-08-20 playtest log caught a 41-stack of bread whose
+    /// limit was 10, built by hand-merging: the move paths merged with a bare
+    /// `saturating_add` and never consulted `items::max_stack`.
+    #[test]
+    fn move_merge_caps_at_stack_size_and_leaves_the_remainder() {
+        let mut inv = PlayerInventory::new();
+        inv.base[0] = Some(InventoryEntry {
+            item_path: BREAD.into(),
+            count: 15,
+        });
+        inv.base[1] = Some(InventoryEntry {
+            item_path: BREAD.into(),
+            count: 15,
+        });
+
+        inv.move_across("base", 0, "base", 1).expect("merge");
+
+        // 15 + 15 = 30, but the cap is 20: dst fills, src keeps the rest.
+        assert_eq!(
+            inv.base[1].as_ref().map(|e| e.count),
+            Some(20),
+            "destination must stop at the item's stack size"
+        );
+        assert_eq!(
+            inv.base[0].as_ref().map(|e| e.count),
+            Some(10),
+            "the overflow must stay in the source slot, not vanish"
+        );
+
+        // Nothing invented, nothing destroyed.
+        let total: u32 = inv.base.iter().flatten().map(|e| e.count).sum();
+        assert_eq!(total, 30, "total count must be conserved");
+    }
+
+    /// A merge that fits entirely still empties the source, as before.
+    #[test]
+    fn move_merge_under_the_cap_still_moves_the_whole_stack() {
+        let mut inv = PlayerInventory::new();
+        inv.base[0] = Some(InventoryEntry {
+            item_path: BREAD.into(),
+            count: 5,
+        });
+        inv.base[1] = Some(InventoryEntry {
+            item_path: BREAD.into(),
+            count: 5,
+        });
+
+        inv.move_across("base", 0, "base", 1).expect("merge");
+
+        assert_eq!(inv.base[1].as_ref().map(|e| e.count), Some(10));
+        assert!(
+            inv.base[0].is_none(),
+            "source must be empty when everything fit"
+        );
+    }
+
+    /// The split path names an explicit count, so it rejects rather than
+    /// silently moving fewer than asked.
+    #[test]
+    fn split_rejects_when_it_would_exceed_the_stack_size() {
+        let mut inv = PlayerInventory::new();
+        inv.base[0] = Some(InventoryEntry {
+            item_path: BREAD.into(),
+            count: 20,
+        });
+        inv.base[1] = Some(InventoryEntry {
+            item_path: BREAD.into(),
+            count: 18,
+        });
+
+        let err = inv.split_base(0, 1, 10);
+        assert!(err.is_err(), "18 + 10 exceeds the cap of 20, so reject");
+        assert_eq!(
+            inv.base[0].as_ref().map(|e| e.count),
+            Some(20),
+            "a rejected split must not mutate the source"
+        );
+        assert_eq!(
+            inv.base[1].as_ref().map(|e| e.count),
+            Some(18),
+            "a rejected split must not mutate the destination"
         );
     }
 

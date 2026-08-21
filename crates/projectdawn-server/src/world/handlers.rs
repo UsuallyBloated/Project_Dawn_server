@@ -750,18 +750,45 @@ pub fn handle_message(
                 return Outcome::Continue;
             }
             let hp = hp.clamp(1.0, 1_000_000.0);
-            let mob = super::zones::MobTemplate {
-                name,
-                level: level.clamp(1, 99),
-                hp,
-                dmg: dmg.max(0),
-                xp: 0, // legacy field; kill XP derives from level
-                speed: speed.clamp(0.0, 20.0),
-                aggro: aggro.clamp(0.0, 50.0),
-                leash: None,
-                melee_range: None,
-                attack_interval: None,
-                named_id: None,
+            // If the requested name is a known named mob, ignore the client's
+            // stat numbers entirely and rebuild the template from the server's
+            // own table. Two reasons. It is what makes the existing Test Panel
+            // spawn a REAL named mob (enrage, guaranteed drops) with no wire
+            // change: the client already sends the display name, so the id can
+            // be recovered here. And it is strictly less trusting — the client
+            // currently hands over six numbers the server takes at face value,
+            // whereas a named mob is now defined entirely server-side.
+            let mob = match super::named::resolve_for_dev_spawn(&name) {
+                Some(n) => super::zones::MobTemplate {
+                    // from_spawn applies the multipliers, so these are the
+                    // client's enemy-scene BASE values, not the scaled ones the
+                    // Test Panel computes locally. Passing pre-scaled numbers
+                    // here would multiply them twice.
+                    name: n.display_name.clone(),
+                    level: n.level,
+                    hp: super::named::SCENE_BASE_HP,
+                    dmg: super::named::SCENE_BASE_DMG,
+                    xp: 0,
+                    speed: super::named::SCENE_BASE_SPEED,
+                    aggro: super::named::SCENE_BASE_AGGRO,
+                    leash: None,
+                    melee_range: None,
+                    attack_interval: None,
+                    named_id: Some(n.id.clone()),
+                },
+                None => super::zones::MobTemplate {
+                    name,
+                    level: level.clamp(1, 99),
+                    hp,
+                    dmg: dmg.max(0),
+                    xp: 0, // legacy field; kill XP derives from level
+                    speed: speed.clamp(0.0, 20.0),
+                    aggro: aggro.clamp(0.0, 50.0),
+                    leash: None,
+                    melee_range: None,
+                    attack_interval: None,
+                    named_id: None,
+                },
             };
             let pos = super::connection::Vec3f {
                 x: conn.pos.x - conn.yaw.sin() * 3.0,

@@ -126,6 +126,22 @@ pub fn lookup_by_display_name(full_name: &str) -> Option<&'static NamedMob> {
     table().values().find(|m| m.full_name() == full_name)
 }
 
+/// Resolve a dev-spawn request to a named mob by the name the client sent.
+///
+/// The Test Panel sends `display_name` ("Rotfang"), while a spawned mob's
+/// nameplate is `full_name()` ("Rotfang the Feared"), so both spellings are
+/// accepted. This is what lets the existing Test Panel spawn a real named mob
+/// with no wire change: the id is recovered server-side from a name the client
+/// already sends.
+pub fn resolve_for_dev_spawn(name: &str) -> Option<&'static NamedMob> {
+    if name.is_empty() {
+        return None;
+    }
+    table()
+        .values()
+        .find(|m| m.display_name == name || m.full_name() == name)
+}
+
 /// Every named id, for dev tooling and tests.
 pub fn all_ids() -> Vec<&'static str> {
     table().keys().map(|s| s.as_str()).collect()
@@ -163,6 +179,27 @@ mod tests {
         for id in ["rotfang", "greth", "ancient_crawler", "the_undying"] {
             assert!(lookup(id).expect(id).enrages(), "{id} should enrage");
         }
+    }
+
+    /// The Test Panel sends `display_name`, not the nameplate text, so a dev
+    /// spawn must resolve from either spelling. This is what lets the existing
+    /// panel spawn a real named mob with no wire change.
+    #[test]
+    fn dev_spawn_resolves_from_either_spelling() {
+        let by_display = resolve_for_dev_spawn("Rotfang").expect("display name");
+        let by_full = resolve_for_dev_spawn("Rotfang the Feared").expect("full name");
+        assert_eq!(by_display.id, "rotfang");
+        assert_eq!(by_full.id, "rotfang");
+
+        // A mob with no subtitle has both spellings identical.
+        assert_eq!(
+            resolve_for_dev_spawn("Ancient Crawler").expect("crawler").id,
+            "ancient_crawler"
+        );
+
+        // An ordinary dev spawn is untouched.
+        assert!(resolve_for_dev_spawn("Plague Rat").is_none());
+        assert!(resolve_for_dev_spawn("").is_none());
     }
 
     #[test]

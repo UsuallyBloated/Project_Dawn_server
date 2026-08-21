@@ -6382,13 +6382,20 @@ pub async fn run(
                 handlers::send_bank_rejected(&mut server, cid, "Nothing to deposit.".to_string());
                 continue;
             }
-            if !conn.coins.has_at_least(intent.coins) {
+            // Pay by VALUE, not tier by tier. Depositing 5 silver from a purse
+            // of 10 gold leaves 9 gold 95 silver, and depositing 1 gold from a
+            // purse of 100 silver works too. Refusing either reads as a bug
+            // rather than as the independent-stacks rule it actually is, and the
+            // Banker already offers a free tier exchange, so refusing protected
+            // nothing.
+            let mut wallet_after = conn.coins;
+            if !wallet_after.pay_value_of(intent.coins) {
                 handlers::send_bank_rejected(
-                    &mut server, cid, "You don't have that coin to deposit.".to_string(),
+                    &mut server, cid, "You don't have that much coin to deposit.".to_string(),
                 );
                 continue;
             }
-            conn.coins = conn.coins.sub_each(intent.coins);
+            conn.coins = wallet_after;
             conn.bank_coins = conn.bank_coins.add_each(intent.coins);
             conn.coins_dirty = true;
             conn.bank_dirty = true;
@@ -6409,13 +6416,16 @@ pub async fn run(
                 handlers::send_bank_rejected(&mut server, cid, "Nothing to withdraw.".to_string());
                 continue;
             }
-            if !conn.bank_coins.has_at_least(intent.coins) {
+            // Same rule on the way out, so the bank is symmetric: a balance is
+            // worth what it is worth, whichever coins it happens to be in.
+            let mut bank_after = conn.bank_coins;
+            if !bank_after.pay_value_of(intent.coins) {
                 handlers::send_bank_rejected(
-                    &mut server, cid, "Your bank doesn't hold that coin.".to_string(),
+                    &mut server, cid, "Your bank doesn't hold that much coin.".to_string(),
                 );
                 continue;
             }
-            conn.bank_coins = conn.bank_coins.sub_each(intent.coins);
+            conn.bank_coins = bank_after;
             conn.coins = conn.coins.add_each(intent.coins);
             conn.coins_dirty = true;
             conn.bank_dirty = true;
@@ -7725,19 +7735,25 @@ pub async fn run(
                     // Coins: credited WHOLE to the owner (their own carried wallet
                     // returning — no group split), then the corpse's coin is zeroed.
                     let mut coin_update: Option<protocol::world::Coins> = None;
-                    let coin_pot = {
+                    // Returned TIER BY TIER, not as a copper total.
+                    //
+                    // This used to flatten the corpse to `total_copper()` and add
+                    // it back with `add_payout`, which re-normalises: a player who
+                    // died holding 312 copper got back 3 silver 12 copper. The
+                    // value matched, but coin weight is charged flat PER COIN, so
+                    // 312 coins became 15 and they rose lighter than they fell.
+                    // Dying was a way to compress your purse. The four tiers are
+                    // deliberately independent stacks, so what went onto the corpse
+                    // is what comes back off it.
+                    let corpse_coins = {
                         let corpse = corpses.get_mut(&corpse_id).unwrap();
-                        if corpse.coins != protocol::world::Coins::ZERO {
-                            let pot = corpse.coins.total_copper();
-                            corpse.coins = protocol::world::Coins::ZERO;
-                            pot
-                        } else {
-                            0
-                        }
+                        let c = corpse.coins;
+                        corpse.coins = protocol::world::Coins::ZERO;
+                        c
                     };
-                    if coin_pot > 0 {
+                    if corpse_coins != protocol::world::Coins::ZERO {
                         if let Some(c) = connections.get_mut(&looter_cid) {
-                            c.coins.add_payout(coin_pot);
+                            c.coins = c.coins.add_each(corpse_coins);
                             c.coins_dirty = true;
                             coin_update = Some(c.coins);
                         }

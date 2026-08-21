@@ -205,6 +205,28 @@ impl Coins {
     /// without re-reducing (unlike `add_payout`). For bank deposit/withdraw.
     /// Saturating to match the overflow-safe discipline of `total_copper` /
     /// `add_payout` (a tier never wraps to a negative balance).
+    /// Pay the VALUE of `want` out of this purse, whatever tiers that takes.
+    /// Returns false and leaves the purse untouched if it cannot be afforded.
+    ///
+    /// The four tiers are independent stacks, so a plain per-tier check refuses
+    /// to pay 6 silver from a purse holding 5 silver and 10 gold, and refuses to
+    /// pay 1 gold from a purse of 100 silver. Both read to a player as a bug
+    /// rather than as a rule. Money is money: what matters is whether the purse
+    /// is worth enough, and `spend` already works out the coins, breaking a
+    /// larger one and scattering the change back down when it has to. 10 gold
+    /// paying 5 silver leaves 9 gold 95 silver.
+    ///
+    /// The distinction that does matter is CONSENT, not direction. Converting
+    /// coin the player asked to move is just carrying out the request. Silently
+    /// re-denominating coin they are merely holding is not, which is why corpse
+    /// loot returns its tiers exactly as they were left.
+    pub fn pay_value_of(&mut self, want: Coins) -> bool {
+        if want.has_negative() {
+            return false;
+        }
+        self.spend(want.total_copper())
+    }
+
     pub fn add_each(self, other: Coins) -> Coins {
         Coins {
             platinum: self.platinum.saturating_add(other.platinum),
@@ -1574,5 +1596,85 @@ mod coins_tests {
     fn has_negative_flags_malformed_amounts() {
         assert!(Coins { copper: -1, ..Coins::ZERO }.has_negative());
         assert!(!Coins { copper: 1, ..Coins::ZERO }.has_negative());
+    }
+}
+
+#[cfg(test)]
+mod coin_breaking_tests {
+    use super::Coins;
+
+    fn c(p: i64, g: i64, s: i64, cu: i64) -> Coins {
+        Coins { platinum: p, gold: g, silver: s, copper: cu }
+    }
+
+    /// The case the tester raised: 10 gold, pay 5 silver, expect 9g 95s.
+    #[test]
+    fn paying_silver_breaks_one_gold() {
+        let mut purse = c(0, 10, 0, 0);
+        assert!(purse.pay_value_of(c(0, 0, 5, 0)));
+        assert_eq!(purse, c(0, 9, 95, 0));
+    }
+
+    /// Breaking cascades a tier at a time, so change comes back as coins of the
+    /// next tier rather than a heap of copper.
+    #[test]
+    fn paying_copper_from_gold_cascades_one_tier_at_a_time() {
+        let mut purse = c(0, 10, 0, 0);
+        assert!(purse.pay_value_of(c(0, 0, 0, 5)));
+        assert_eq!(purse, c(0, 9, 99, 95));
+    }
+
+    /// Nothing is invented: the total is identical before and after.
+    #[test]
+    fn breaking_conserves_total_value() {
+        let mut purse = c(1, 5, 5, 75);
+        let before = purse.total_copper();
+        let want = c(0, 0, 6, 0);
+        assert!(purse.pay_value_of(want));
+        assert_eq!(purse.total_copper() + want.total_copper(), before);
+    }
+
+    /// A purse of silver CAN pay a gold. Money is money: what matters is
+    /// whether the purse is worth enough, not which coins it happens to hold.
+    /// Refusing this was the original complaint.
+    #[test]
+    fn silver_can_pay_a_gold() {
+        let mut purse = c(0, 0, 100, 0);
+        assert!(purse.pay_value_of(c(0, 1, 0, 0)));
+        assert_eq!(purse, Coins::ZERO, "100 silver is exactly one gold");
+    }
+
+    /// Paying upward takes only what is needed and leaves the rest alone.
+    #[test]
+    fn paying_a_gold_from_mixed_silver_leaves_the_remainder() {
+        let mut purse = c(0, 0, 150, 0);
+        assert!(purse.pay_value_of(c(0, 1, 0, 0)));
+        assert_eq!(purse, c(0, 0, 50, 0));
+    }
+
+    /// A purse that simply does not hold enough is still refused, untouched.
+    #[test]
+    fn insufficient_total_is_refused_without_mutating() {
+        let mut purse = c(0, 0, 3, 0);
+        assert!(!purse.pay_value_of(c(0, 0, 5, 0)));
+        assert_eq!(purse, c(0, 0, 3, 0));
+    }
+
+    /// An exact per-tier payment behaves exactly as sub_each did, so the common
+    /// case is unchanged.
+    #[test]
+    fn exact_payment_needs_no_breaking() {
+        let mut purse = c(1, 2, 3, 4);
+        assert!(purse.pay_value_of(c(1, 2, 3, 4)));
+        assert_eq!(purse, Coins::ZERO);
+    }
+
+    /// Platinum breaks down through gold when silver is short.
+    #[test]
+    fn breaking_reaches_across_multiple_tiers() {
+        let mut purse = c(1, 0, 0, 0);
+        assert!(purse.pay_value_of(c(0, 0, 1, 0)));
+        assert_eq!(purse, c(0, 99, 99, 0));
+        assert_eq!(purse.total_copper(), 1_000_000 - 100);
     }
 }

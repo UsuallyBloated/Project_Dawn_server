@@ -1,0 +1,106 @@
+# Named / boss mobs. Server-side mirror of the client's
+# `data/named_mob_definitions.gd` — keep the two in step, the same way
+# items.toml mirrors the .tres files.
+#
+# The multipliers are applied against whatever MobTemplate the mob spawns
+# from, so tagging a camp entry with `named_id` makes that camp's mob a
+# scaled-up version of itself. A dev spawn by id has no base template, so it
+# uses the client's enemy-scene defaults (hp 50, dmg 5, speed 2.5, aggro 10)
+# to match what the offline path produces.
+#
+# enrage_threshold is a fraction of max HP; 0 disables enrage entirely.
+# Enrage fires ONCE per life and does not wear off.
+#
+# ── Placing one in the world ─────────────────────────────────────────────
+# Nothing spawns a named mob yet. They were never placed: no client scene or
+# spawner sets `named_mob_id`, so even offline the only way to meet one was
+# the Test Panel. To put one in the world, tag a camp's mob in
+# zone_camps.toml:
+#
+#     mob = { name = "Gnoll Chief", level = 8, hp = 120.0, dmg = 14,
+#             xp = 60, speed = 3.0, aggro = 14.0, named_id = "greth" }
+#
+# The multipliers then scale THAT template, so the camp's own numbers decide
+# how big the named version is. Which camps get which named mob (and whether
+# they deserve their own longer respawn, as the client's 300 s
+# `named_respawn_time` intended) is a content decision, deliberately left
+# open rather than guessed at here.
+#
+# ── xp_mult is currently NOT applied ─────────────────────────────────────
+# The client multiplied a flat `xp_reward` by this. The server derives
+# per-kill XP from level instead (`progression::kill_xp`, level^2 * ZEM), so
+# the `level` override below already scales the reward steeply — a level 6
+# Rotfang is worth ~36x a level 1 mob before any multiplier. Stacking
+# xp_mult on top of that would be a balance decision, not a mechanical one,
+# so it is parsed and ignored until someone chooses deliberately.
+
+[[named]]
+id = "rotfang"
+display_name = "Rotfang"
+subtitle = "the Feared"
+hp_mult = 3.5
+damage_mult = 1.8
+xp_mult = 4.0
+level = 6
+enrage_threshold = 0.20
+enrage_damage_mult = 1.4
+enrage_speed_mult = 1.3
+guaranteed_loot = ["res://data/loot/items/rotfangs_fang.tres"]
+rare_loot = [{ path = "res://data/loot/items/predators_collar.tres", drop_chance = 0.30 }]
+
+[[named]]
+id = "greth"
+display_name = "Greth Bonecrusher"
+subtitle = ""
+hp_mult = 4.0
+damage_mult = 2.0
+xp_mult = 5.0
+level = 10
+enrage_threshold = 0.25
+enrage_damage_mult = 1.5
+enrage_speed_mult = 1.2
+guaranteed_loot = ["res://data/loot/items/gnoll_chiefs_seal.tres"]
+rare_loot = [{ path = "res://data/loot/items/bonecrushers_war_axe.tres", drop_chance = 0.25 }]
+
+[[named]]
+id = "ancient_crawler"
+display_name = "Ancient Crawler"
+subtitle = ""
+hp_mult = 3.0
+damage_mult = 1.6
+xp_mult = 3.5
+level = 8
+enrage_threshold = 0.30
+enrage_damage_mult = 1.3
+enrage_speed_mult = 1.4
+guaranteed_loot = ["res://data/loot/items/pristine_venom_sac.tres"]
+rare_loot = [{ path = "res://data/loot/items/chitinous_ring.tres", drop_chance = 0.25 }]
+
+# Sable is the one named mob with enrage deliberately disabled (threshold 0).
+[[named]]
+id = "sable"
+display_name = "Sable"
+subtitle = "the Dark"
+hp_mult = 2.5
+damage_mult = 1.5
+xp_mult = 3.0
+level = 5
+enrage_threshold = 0.0
+enrage_damage_mult = 1.0
+enrage_speed_mult = 1.0
+guaranteed_loot = ["res://data/loot/items/sable_wing_membrane.tres"]
+rare_loot = [{ path = "res://data/loot/items/shadow_signet.tres", drop_chance = 0.20 }]
+
+[[named]]
+id = "the_undying"
+display_name = "The Undying"
+subtitle = ""
+hp_mult = 5.0
+damage_mult = 2.2
+xp_mult = 6.0
+level = 12
+enrage_threshold = 0.40
+enrage_damage_mult = 1.6
+enrage_speed_mult = 1.1
+guaranteed_loot = ["res://data/loot/items/undying_marrow.tres"]
+rare_loot = [{ path = "res://data/loot/items/cursed_femur.tres", drop_chance = 0.20 }]

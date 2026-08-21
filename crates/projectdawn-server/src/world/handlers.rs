@@ -761,6 +761,7 @@ pub fn handle_message(
                 leash: None,
                 melee_range: None,
                 attack_interval: None,
+                named_id: None,
             };
             let pos = super::connection::Vec3f {
                 x: conn.pos.x - conn.yaw.sin() * 3.0,

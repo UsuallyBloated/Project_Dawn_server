@@ -149,6 +149,11 @@ pub struct Entity {
     /// despawns the pet (mob "runs away") once this passes.
     /// `None` for normal summoned pets and world-spawned enemies.
     pub charm_expires_at: Option<Instant>,
+    /// Named-mob enrage. `None` for ordinary mobs and for named mobs whose
+    /// `enrage_threshold` is 0. Once it fires it stays on for the rest of the
+    /// life — enrage is a last stand, not a temporary buff, so unlike
+    /// `active_cc` it has no expiry.
+    pub enrage: Option<EnrageState>,
 
     /// Track 15.3 — pet stance. Set by `PetCommand::Guard` / `Sit` /
     /// `Back` (the latter restores Follow). Defaults to Follow on
@@ -202,6 +207,18 @@ pub struct AiEvents {
     pub moved: bool,
 }
 
+/// A named mob's enrage, once it has fired.
+///
+/// Deliberately not modelled as an `ActiveCc` or a buff: those expire, and
+/// enrage does not. It is the mob's last stand, so it lasts until death. The
+/// multipliers are read every tick by `melee_swing_damage` and by the chase /
+/// leash speed lookups.
+#[derive(Debug, Clone, Copy)]
+pub struct EnrageState {
+    pub damage_mult: f32,
+    pub speed_mult: f32,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct HitIntent {
     pub target: EntityId,
@@ -217,7 +234,11 @@ impl Entity {
     ) -> Self {
         let id = mint_enemy_id();
         let hp = mob.hp;
-        Self {
+        let named = mob
+            .named_id
+            .as_deref()
+            .and_then(crate::world::named::lookup);
+        let mut e = Self {
             id,
             spawn_point_idx,
             spawn_pos,
@@ -237,11 +258,19 @@ impl Entity {
             owner: None,
             command_at: None,
             charm_expires_at: None,
+            enrage: None,
             stance: PetStance::Follow,
             stats: PrimaryStats::default(),
             base_stats: PrimaryStats::default(),
             active_buffs: Vec::new(),
+        };
+        // Single choke point for both spawn paths (camp spawner and dev
+        // spawn), so a named mob is scaled exactly once no matter how it
+        // entered the world.
+        if let Some(n) = named {
+            e.apply_named(n);
         }
+        e
     }
 
     /// Track 11 — instantiate a player-owned pet. Uses the pet id
@@ -291,6 +320,7 @@ impl Entity {
             owner: Some(owner),
             command_at: None,
             charm_expires_at: None,
+            enrage: None,
             stance: PetStance::Follow,
             stats: base,
             base_stats: base,
@@ -459,7 +489,7 @@ impl Entity {
                 }
             }
         }
-        self.mob.speed * mult
+        self.enraged_speed() * mult
     }
 
     /// Track 13 — melee swing damage: `mob.dmg` plus the STR buff bonus
@@ -469,7 +499,58 @@ impl Entity {
     /// Floored at 1.
     pub fn melee_swing_damage(&self) -> i32 {
         let str_bonus = (self.stats.strength - self.base_stats.strength) / 5;
-        (self.mob.dmg + str_bonus).max(1)
+        let base = (self.mob.dmg + str_bonus).max(1);
+        match self.enrage {
+            Some(e) => ((base as f32) * e.damage_mult).round().max(1.0) as i32,
+            None => base,
+        }
+    }
+
+    /// Move speed including a named mob's enrage bonus.
+    ///
+    /// Every movement path must read speed through this. `move_speed()` below
+    /// is consulted only by pet AI, while world mobs read their speed directly
+    /// in chase and leash — so a multiplier applied in `move_speed()` alone
+    /// would silently do nothing to the very creatures enrage is for.
+    fn enraged_speed(&self) -> f32 {
+        match self.enrage {
+            Some(e) => self.mob.speed * e.speed_mult,
+            None => self.mob.speed,
+        }
+    }
+
+    /// Apply a named-mob definition at spawn: stat multipliers, level and
+    /// display name. Enrage is armed here but does not fire until HP crosses
+    /// the threshold. Scales whatever template the mob spawned from, so a
+    /// tagged camp mob becomes a bigger version of itself.
+    pub fn apply_named(&mut self, named: &crate::world::named::NamedMob) {
+        self.mob.name = named.full_name();
+        self.mob.level = named.level;
+        self.mob.hp *= named.hp_mult;
+        self.hp = self.mob.hp;
+        self.max_hp = self.mob.hp;
+        self.mob.dmg = ((self.mob.dmg as f32) * named.damage_mult).round().max(1.0) as i32;
+    }
+
+    /// Fire enrage if this is a named mob that enrages, it has not already
+    /// fired, and HP has crossed the threshold. Returns true on the tick it
+    /// fires so the caller can log it.
+    ///
+    /// Checked once per AI tick rather than at each damage site: enemy HP is
+    /// reduced in six separate places with no shared helper, and the AI sweep
+    /// is downstream of all of them in the same tick.
+    pub fn maybe_enrage(&mut self, named: &crate::world::named::NamedMob) -> bool {
+        if self.enrage.is_some() || !named.enrages() || self.max_hp <= 0.0 {
+            return false;
+        }
+        if self.hp / self.max_hp > named.enrage_threshold {
+            return false;
+        }
+        self.enrage = Some(EnrageState {
+            damage_mult: named.enrage_damage_mult,
+            speed_mult: named.enrage_speed_mult,
+        });
+        true
     }
 
     /// Tick all active CC durations down by `dt`. Call once per AI tick
@@ -715,7 +796,7 @@ impl Entity {
             return;
         }
         let snare = self.snare_factor();
-        let step = self.mob.speed * (1.0 - snare) * dt;
+        let step = self.enraged_speed() * (1.0 - snare) * dt;
         self.face_toward(target_pos);
         self.pos = self.pos.step_toward(target_pos, step);
     }
@@ -771,7 +852,7 @@ impl Entity {
             self.transition(EnemyState::Idle, now);
             return;
         }
-        let step = self.mob.speed * dt;
+        let step = self.enraged_speed() * dt;
         self.face_toward(self.spawn_pos);
         self.pos = self.pos.step_toward(self.spawn_pos, step);
     }
@@ -872,7 +953,90 @@ mod tests {
             leash: None,
             melee_range: None,
             attack_interval: None,
+            named_id: None,
         }
+    }
+
+    fn named_template(id: &str) -> MobTemplate {
+        MobTemplate {
+            named_id: Some(id.into()),
+            ..template()
+        }
+    }
+
+    /// A tagged mob is scaled once, at the single spawn choke point, against
+    /// whatever template it spawned from. Rotfang is hp x3.5, dmg x1.8, lvl 6.
+    #[test]
+    fn named_mob_is_scaled_at_spawn() {
+        let e = Entity::from_spawn(0, Vec3f::ZERO, named_template("rotfang"), Instant::now());
+        assert_eq!(e.mob.name, "Rotfang the Feared", "nameplate uses full_name()");
+        assert_eq!(e.mob.level, 6, "level is overridden, not multiplied");
+        assert_eq!(e.max_hp, 50.0 * 3.5);
+        assert_eq!(e.hp, e.max_hp, "spawns at full health");
+        assert_eq!(e.mob.dmg, 9, "5 * 1.8 = 9");
+        assert!(e.enrage.is_none(), "armed but not fired at spawn");
+    }
+
+    /// An untagged mob, or one with an unknown id, must behave exactly as
+    /// before — this is the safety property that keeps every existing camp
+    /// mob unchanged.
+    #[test]
+    fn untagged_and_unknown_mobs_are_untouched() {
+        let now = Instant::now();
+        let plain = Entity::from_spawn(0, Vec3f::ZERO, template(), now);
+        assert_eq!(plain.mob.name, "Test");
+        assert_eq!(plain.max_hp, 50.0);
+        assert_eq!(plain.mob.dmg, 5);
+
+        let bogus = Entity::from_spawn(0, Vec3f::ZERO, named_template("no_such_mob"), now);
+        assert_eq!(bogus.mob.name, "Test", "unknown id falls back to ordinary");
+        assert_eq!(bogus.max_hp, 50.0);
+    }
+
+    /// Enrage fires once, below the threshold, and then stays on. It boosts
+    /// both damage and speed.
+    #[test]
+    fn enrage_fires_once_below_the_threshold_and_persists() {
+        let named = crate::world::named::lookup("rotfang").expect("rotfang");
+        let mut e =
+            Entity::from_spawn(0, Vec3f::ZERO, named_template("rotfang"), Instant::now());
+        let calm_dmg = e.melee_swing_damage();
+        let calm_speed = e.enraged_speed();
+
+        // Above the 20% threshold: nothing happens.
+        e.hp = e.max_hp * 0.5;
+        assert!(!e.maybe_enrage(named));
+        assert!(e.enrage.is_none());
+        assert_eq!(e.melee_swing_damage(), calm_dmg);
+
+        // Crossing it fires exactly once.
+        e.hp = e.max_hp * 0.10;
+        assert!(e.maybe_enrage(named), "should fire below 20%");
+        assert!(!e.maybe_enrage(named), "must not re-fire");
+
+        // And it is felt in both damage and speed.
+        assert!(
+            e.melee_swing_damage() > calm_dmg,
+            "enraged damage {} should exceed calm {}",
+            e.melee_swing_damage(),
+            calm_dmg
+        );
+        assert!(e.enraged_speed() > calm_speed, "enraged speed should exceed calm");
+
+        // Healing back up does not calm it — enrage is a last stand.
+        e.hp = e.max_hp;
+        assert!(e.enrage.is_some(), "enrage must not wear off");
+    }
+
+    /// Sable has enrage disabled with threshold 0, and must never fire even
+    /// at 1 HP.
+    #[test]
+    fn a_named_mob_with_enrage_disabled_never_fires() {
+        let named = crate::world::named::lookup("sable").expect("sable");
+        let mut e = Entity::from_spawn(0, Vec3f::ZERO, named_template("sable"), Instant::now());
+        e.hp = 1.0;
+        assert!(!e.maybe_enrage(named));
+        assert!(e.enrage.is_none());
     }
 
     #[test]

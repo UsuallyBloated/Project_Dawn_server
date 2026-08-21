@@ -63,6 +63,12 @@ pub struct MobTemplate {
     pub melee_range: Option<f32>,
     /// Optional override; defaults to `2.5` (matches `Enemy.attack_interval`).
     pub attack_interval: Option<f32>,
+    /// Named / boss mob id, looked up in `named_mobs.toml`. When set, the
+    /// mob spawns with that entry's stat multipliers, enrage behaviour and
+    /// guaranteed / rare drops applied on top of this template. An unknown or
+    /// missing id simply behaves like an ordinary mob.
+    #[serde(default)]
+    pub named_id: Option<String>,
 }
 
 /// One spawn-point definition. The `SpawnPoint` runtime type in

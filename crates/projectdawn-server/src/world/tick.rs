@@ -6755,6 +6755,27 @@ pub async fn run(
                 if !entity.is_alive() {
                     continue;
                 }
+                // Named-mob enrage. Checked here rather than at each damage
+                // site because enemy HP is reduced in six separate places with
+                // no shared helper, and this sweep runs downstream of all of
+                // them in the same tick. One check, every damage source, plus
+                // any added later.
+                if let Some(named) = entity
+                    .mob
+                    .named_id
+                    .as_deref()
+                    .and_then(super::named::lookup)
+                {
+                    if entity.maybe_enrage(named) {
+                        tracing::info!(
+                            entity_id = entity.id,
+                            mob = %entity.mob.name,
+                            hp = entity.hp,
+                            max_hp = entity.max_hp,
+                            "named mob enraged"
+                        );
+                    }
+                }
                 let old_enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
                 let events = entity.tick_ai(&targets_for_enemy_ai, &enemy_target_snapshots, dt, now);
                 if let Some(new_target) = events.target_changed {

@@ -24,6 +24,7 @@ mod handlers;
 mod inventory;
 mod items;
 mod loot;
+mod named;
 mod persistence;
 mod pet_templates;
 mod progression;

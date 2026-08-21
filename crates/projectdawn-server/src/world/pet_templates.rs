@@ -24,6 +24,7 @@ pub fn lookup(pet_type: &str) -> Option<MobTemplate> {
             leash: None,
             melee_range: Some(1.8),
             attack_interval: Some(2.2),
+            named_id: None,
         }),
         // Track 12 Piece B — Beast Master's Wolf warder. Faster and
         // hits slightly less than the skeleton; the warder's edge is
@@ -41,6 +42,7 @@ pub fn lookup(pet_type: &str) -> Option<MobTemplate> {
             leash: None,
             melee_range: Some(1.8),
             attack_interval: Some(2.0),
+            named_id: None,
         }),
         _ => None,
     }

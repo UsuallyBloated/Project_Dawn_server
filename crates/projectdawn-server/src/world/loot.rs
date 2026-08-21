@@ -141,9 +141,36 @@ pub fn reserve_bag_ids_through(max_id: EntityId) {
 /// roll produced zero stacks (the empty bucket won for every roll), so
 /// the caller can skip the spawn entirely.
 pub fn roll_for_mob(mob_name: &str) -> Option<Vec<LootItemStack>> {
-    let table = find_table(mob_name)?;
     let mut rng = rand::thread_rng();
     let mut out: Vec<LootItemStack> = Vec::new();
+
+    // Named / boss drops come first and are independent of the ordinary table:
+    // a named mob still rolls its normal loot, and still drops its signature
+    // item even if that roll comes up empty. Resolved from the nameplate rather
+    // than an id because all three kill paths have only the name in scope; see
+    // named::lookup_by_display_name.
+    if let Some(named) = super::named::lookup_by_display_name(mob_name) {
+        for path in &named.guaranteed_loot {
+            out.push(LootItemStack {
+                item_path: path.clone(),
+                count: 1,
+            });
+        }
+        for rare in &named.rare_loot {
+            if rng.gen::<f32>() < rare.drop_chance {
+                out.push(LootItemStack {
+                    item_path: rare.path.clone(),
+                    count: 1,
+                });
+            }
+        }
+    }
+
+    // Ordinary table roll. A mob with no table (which every named mob may well
+    // be) still returns its named drops rather than nothing.
+    let Some(table) = find_table(mob_name) else {
+        return (!out.is_empty()).then_some(out);
+    };
     for _ in 0..table.rolls {
         // Skip rolls where the entry pool is empty (shouldn't happen
         // for any authored table but keeps the loop robust).
@@ -398,6 +425,61 @@ mod tests {
     #[test]
     fn unknown_mob_returns_no_loot() {
         assert!(roll_for_mob("Unknown Test Mob").is_none());
+    }
+
+    /// A named mob always drops its signature item, even though no loot table
+    /// is keyed to its nameplate. Before this, the drop existed only in
+    /// client-side data that launcher mode never ran, which is why Rotfang's
+    /// fang never appeared.
+    #[test]
+    fn named_mob_always_drops_its_guaranteed_item() {
+        let drops = roll_for_mob("Rotfang the Feared").expect("named drops");
+        assert!(
+            drops
+                .iter()
+                .any(|d| d.item_path == "res://data/loot/items/rotfangs_fang.tres"),
+            "guaranteed fang missing from {drops:?}"
+        );
+    }
+
+    /// The guaranteed drop must be reliable, not probabilistic. Rolling many
+    /// times, it appears every single time; the rare collar (30%) appears at
+    /// least sometimes but not always.
+    #[test]
+    fn guaranteed_is_always_and_rare_is_sometimes() {
+        let mut rare_seen = 0;
+        const N: usize = 400;
+        for _ in 0..N {
+            let drops = roll_for_mob("Rotfang the Feared").expect("named drops");
+            assert!(
+                drops
+                    .iter()
+                    .any(|d| d.item_path.ends_with("rotfangs_fang.tres")),
+                "guaranteed drop must appear on every kill"
+            );
+            if drops
+                .iter()
+                .any(|d| d.item_path.ends_with("predators_collar.tres"))
+            {
+                rare_seen += 1;
+            }
+        }
+        // 30% over 400 rolls: seeing none or all would mean the chance is not
+        // being applied. Bounds are wide enough not to flake.
+        assert!(
+            rare_seen > 20 && rare_seen < N - 20,
+            "rare drop seen {rare_seen}/{N}, expected roughly 30%"
+        );
+    }
+
+    /// An ordinary mob is unaffected by any of this.
+    #[test]
+    fn ordinary_mob_gets_no_named_drops() {
+        let drops = roll_for_mob("Plague Rat").unwrap_or_default();
+        assert!(
+            !drops.iter().any(|d| d.item_path.contains("rotfangs_fang")),
+            "ordinary mobs must not receive named drops"
+        );
     }
 
     #[test]

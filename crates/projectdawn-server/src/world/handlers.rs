@@ -1866,6 +1866,28 @@ pub fn fan_out_entity_target(
     }
 }
 
+/// Tell one client, in plain words, why the server refused something.
+///
+/// Server-authoritative actions that fail used to log the reason and return,
+/// sending the client nothing at all. The client then either kept a stale view
+/// (the 2026-08-18 inventory desync, which lasted until relog) or announced a
+/// success that never happened (a vendor purchase saying "Ordered" while the
+/// server refused for a full inventory, so the item looked like it vanished).
+/// Authority only helps if disagreement is reported.
+///
+/// Uses the System chat channel, which already exists, is already decoded, and
+/// already renders as an unattributed line — so reporting a refusal costs no
+/// protocol bump, no gdext rebuild and no client re-export.
+pub fn send_refusal(server: &mut RenetServer, recipient: ClientId, text: &str) {
+    fan_out_chat_message(
+        server,
+        &[recipient],
+        "",
+        protocol::world::ChatChannel::System,
+        text,
+    );
+}
+
 pub fn fan_out_chat_message(
     server: &mut RenetServer,
     recipients: &[ClientId],

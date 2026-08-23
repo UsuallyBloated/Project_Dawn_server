@@ -3495,6 +3495,26 @@ pub async fn run(
                         spell = %intent.spell_name,
                         "unknown spell name — server-side cast dropped"
                     );
+                    // The client spends mana, starts the cooldown and applies
+                    // local buffs BEFORE it sends the cast, so a spell the server
+                    // has never heard of drains the bar and does nothing at all.
+                    // Roughly 32 spells exist client-side but not in spells.toml,
+                    // so this fires in ordinary play and reads as the spell being
+                    // broken rather than missing.
+                    //
+                    // The server never deducted anything here, so its own mana is
+                    // still correct: sending it back corrects the client's
+                    // optimistic spend. Same principle as correcting a rejected
+                    // MoveItem's slots — answer with the truth.
+                    if let Some(conn) = connections.get(&caster_cid) {
+                        let (id, mp, max_mp) = (conn.char_id as u64, conn.mp, conn.max_mp);
+                        handlers::fan_out_mana_update(&mut server, &[caster_cid], id, mp, max_mp);
+                    }
+                    handlers::send_refusal(
+                        &mut server,
+                        caster_cid,
+                        "That spell fizzles — it isn't known here yet.",
+                    );
                     continue;
                 };
                 // Phase 1 exploit gate — class/level eligibility. Any cast that
@@ -4434,6 +4454,14 @@ pub async fn run(
                             _ => false,
                         };
                         if !in_range {
+                            // Mana came off at the top of this handler, so an
+                            // out-of-range nuke costs full price for silence.
+                            // Melee already tells you (an out-of-range Attack fans
+                            // a Miss), so players have been trained to expect a
+                            // reply and read the silence as the spell being broken.
+                            handlers::send_refusal(
+                                &mut server, caster_cid, "That target is too far away.",
+                            );
                             continue;
                         }
                         // Pet PvP gate, mirroring the melee/ranged path.
@@ -4769,11 +4797,21 @@ pub async fn run(
                         // Mana already deducted; the client-local
                         // handler covers the rest until a later
                         // track lifts that authority.
-                        tracing::debug!(
+                        tracing::info!(
                             caster = intent.caster,
                             spell = %spell.name,
                             target_type = %spell.target_type,
                             "spell target_type not yet processed server-side; mana deducted only"
+                        );
+                        // The ~9 PORT / gate / evac spells land here. Mana is gone
+                        // and nothing happens, which is indistinguishable from a
+                        // bug. Say so until the target types are implemented.
+                        // Raised to info! as well: a player-visible failure should
+                        // not be invisible at the default log level.
+                        handlers::send_refusal(
+                            &mut server,
+                            caster_cid,
+                            "That magic has no effect here yet.",
                         );
                     }
                 }
@@ -6124,6 +6162,9 @@ pub async fn run(
                         item_name = %intent.item_name,
                         "BuyItem rejected — unknown item name"
                     );
+                    handlers::send_refusal(
+                        &mut server, owner_cid, "The merchant doesn't stock that.",
+                    );
                     continue;
                 };
                 let unit_price = item.vendor_price as i64;
@@ -6132,6 +6173,9 @@ pub async fn run(
                         owner = intent.owner,
                         item_name = %intent.item_name,
                         "BuyItem rejected — item has no vendor_price"
+                    );
+                    handlers::send_refusal(
+                        &mut server, owner_cid, "That isn't for sale.",
                     );
                     continue;
                 }
@@ -6143,6 +6187,9 @@ pub async fn run(
                         coins = conn.coins.total_copper(),
                         cost = total_cost,
                         "BuyItem rejected — insufficient coins"
+                    );
+                    handlers::send_refusal(
+                        &mut server, owner_cid, "You can't afford that.",
                     );
                     continue;
                 }
@@ -6157,6 +6204,9 @@ pub async fn run(
                                 error = %e,
                                 "BuyItem rejected — add_item_locating error"
                             );
+                            handlers::send_refusal(
+                                &mut server, owner_cid, "You can't carry that.",
+                            );
                             continue;
                         }
                     };
@@ -6166,6 +6216,12 @@ pub async fn run(
                         owner = intent.owner,
                         item_name = %intent.item_name,
                         "BuyItem rejected — inventory full, no stack placed"
+                    );
+                    // The case a tester hit on 2026-08-21: the client had already
+                    // said "Ordered", so with no reply the item looked like it
+                    // vanished. Nothing was charged.
+                    handlers::send_refusal(
+                        &mut server, owner_cid, "Your bags are full.",
                     );
                     continue;
                 }
@@ -6206,6 +6262,14 @@ pub async fn run(
                         leftover,
                         "BuyItem partially filled — inventory ran out of room"
                     );
+                    // Billing is already correct — only `placed` is charged — but
+                    // asking for ten and receiving six with no word said reads as
+                    // the game losing four of them.
+                    handlers::send_refusal(
+                        &mut server,
+                        owner_cid,
+                        &format!("Only {placed} fit in your bags."),
+                    );
                 }
                 tracing::info!(
                     owner = intent.owner,
@@ -6245,6 +6309,7 @@ pub async fn run(
                                 owner = intent.owner,
                                 "SellItem rejected — base slot empty"
                             );
+                            handlers::send_refusal(&mut server, owner_cid, "There's nothing in that slot to sell.");
                             continue;
                         };
                         (
@@ -6260,6 +6325,7 @@ pub async fn run(
                                 owner = intent.owner,
                                 "SellItem rejected — bag slot has no bag at base"
                             );
+                            handlers::send_refusal(&mut server, owner_cid, "There's nothing in that slot to sell.");
                             continue;
                         };
                         let Some(entry) = arr.get(slot as usize).and_then(|s| s.as_ref())
@@ -6268,6 +6334,7 @@ pub async fn run(
                                 owner = intent.owner,
                                 "SellItem rejected — bag slot empty"
                             );
+                            handlers::send_refusal(&mut server, owner_cid, "There's nothing in that slot to sell.");
                             continue;
                         };
                         (
@@ -6282,6 +6349,7 @@ pub async fn run(
                             owner = intent.owner,
                             "SellItem rejected — equip slot sells not supported"
                         );
+                        handlers::send_refusal(&mut server, owner_cid, "Take it off before selling it.");
                         continue;
                     }
                 };
@@ -6291,6 +6359,7 @@ pub async fn run(
                         item_path = %item_path,
                         "SellItem rejected — unknown item path"
                     );
+                    handlers::send_refusal(&mut server, owner_cid, "The merchant won't take that.");
                     continue;
                 };
                 let unit_price = (item.vendor_price as i64) / 2;
@@ -6300,6 +6369,7 @@ pub async fn run(
                         item_path = %item_path,
                         "SellItem rejected — item has no sell value"
                     );
+                    handlers::send_refusal(&mut server, owner_cid, "The merchant won't take that.");
                     continue;
                 }
                 let qty = intent.qty.min(available_count);
@@ -6313,6 +6383,7 @@ pub async fn run(
                             owner = intent.owner,
                             "SellItem rejected — bag has contents"
                         );
+                        handlers::send_refusal(&mut server, owner_cid, "Empty the bag before selling it.");
                         continue;
                     }
                 }

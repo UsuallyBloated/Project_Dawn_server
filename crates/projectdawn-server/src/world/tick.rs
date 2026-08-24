@@ -7558,21 +7558,53 @@ pub async fn run(
         //      (persisted) so it can't be re-rezzed for free xp.
         for (responder, corpse_id, accept) in resurrect_accept_intents.drain(..) {
             let responder_cid = responder as ClientId;
-            // Read + consume the pending offer recorded at cast time.
-            let offer = connections.get(&responder_cid).and_then(|c| c.pending_res_offer);
-            if let Some(c) = connections.get_mut(&responder_cid) {
-                c.pending_res_offer = None;
-            }
-            let Some((offered_corpse, xp_percent)) = offer else {
-                continue;
+            // Read the pending offer, but do NOT consume it yet. It used to be
+            // cleared unconditionally right here, before any validation, so a
+            // stale or mismatched accept burned a perfectly good offer and a
+            // transient DB failure below ate an accepted resurrection outright —
+            // the old comment conceded as much ("the offer was already consumed
+            // above"). Consume it only once the outcome is decided.
+            let Some((offered_corpse, xp_percent)) =
+                connections.get(&responder_cid).and_then(|c| c.pending_res_offer)
+            else {
+                continue; // nothing pending; nothing to lose
             };
-            if !accept || offered_corpse != corpse_id {
-                continue; // declined, or doesn't match the recorded offer
+            if !accept {
+                // A decline is decisive: clear it.
+                if let Some(c) = connections.get_mut(&responder_cid) {
+                    c.pending_res_offer = None;
+                }
+                continue;
+            }
+            if offered_corpse != corpse_id {
+                // Doesn't match what was offered. Leave the real offer standing
+                // so the player can still accept it.
+                tracing::info!(
+                    char_id = responder,
+                    corpse_id,
+                    offered_corpse,
+                    "resurrection accept ignored — corpse does not match the offer"
+                );
+                continue;
             }
             // Re-validate the corpse: still exists, owned by the responder, unrezzed.
             let (corpse_pos, lost_xp) = match corpses.get(&corpse_id) {
                 Some(c) if c.owner_char == responder as i64 && !c.resurrected => (c.pos, c.lost_xp),
-                _ => continue,
+                _ => {
+                    // Corpse gone, not theirs, or already rezzed: decisive, so
+                    // the offer is spent and the player is told why.
+                    if let Some(c) = connections.get_mut(&responder_cid) {
+                        c.pending_res_offer = None;
+                    }
+                    tracing::info!(
+                        char_id = responder, corpse_id,
+                        "resurrection failed — corpse missing, not owned, or already resurrected"
+                    );
+                    handlers::send_refusal(
+                        &mut server, responder_cid, "That corpse can't be resurrected.",
+                    );
+                    continue;
+                }
             };
             // Persist the rezzed flag FIRST — only grant the res once it's durable,
             // so a write failure can't hand out a refund that a restart would let
@@ -7580,7 +7612,19 @@ pub async fn run(
             // cast can retry); the offer was already consumed above.
             if let Err(e) = db::set_corpse_resurrected(&pool, corpse_id as i64).await {
                 tracing::error!(corpse_id, error = %e, "set_corpse_resurrected failed — res not granted");
+                // Transient, and NOT decisive: the offer stays live so the player
+                // can simply accept again, rather than needing the cleric to
+                // notice and re-cast. Previously this ate the resurrection.
+                handlers::send_refusal(
+                    &mut server,
+                    responder_cid,
+                    "The resurrection failed. Try accepting again.",
+                );
                 continue;
+            }
+            // Durable now, so the offer is finally spent.
+            if let Some(c) = connections.get_mut(&responder_cid) {
+                c.pending_res_offer = None;
             }
             if let Some(c) = corpses.get_mut(&corpse_id) {
                 c.resurrected = true;
@@ -8109,6 +8153,28 @@ pub async fn run(
                             );
                             continue;
                         }
+                    }
+                }
+                // Validate the slot BEFORE paying any coin. This check used to
+                // sit after the payout, so a bad slot index still zeroed the
+                // bag's coin and credited it, then bailed with nothing said: the
+                // player saw coin arrive and no item. Not a dupe (the coin is
+                // credited once either way), but mutate-then-validate is the
+                // opposite of the rule the store transactions follow.
+                if let Some(idx) = intent.slot {
+                    if idx as usize >= bag.items.len() {
+                        tracing::info!(
+                            looter = intent.looter,
+                            bag_id = intent.bag_id,
+                            slot = idx,
+                            "loot rejected: no such slot in the bag"
+                        );
+                        handlers::send_loot_rejected(
+                            &mut server,
+                            intent.looter as ClientId,
+                            "That isn't there any more.".to_string(),
+                        );
+                        continue;
                     }
                 }
                 // Coin: credited on the first loot action against the bag,

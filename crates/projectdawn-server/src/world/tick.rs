@@ -4439,7 +4439,11 @@ pub async fn run(
                             Some(e) if e.is_alive() => {
                                 let dist = e.pos.distance_to(caster_pos);
                                 if dist > RANGED_ATTACK_RANGE {
-                                    tracing::debug!(
+                                    // info!, not debug!: a player-visible failure
+                                    // should not be invisible at the default log
+                                    // level. A 2026-08-24 playtest saw the chat
+                                    // line with no matching server.log entry.
+                                    tracing::info!(
                                         caster = intent.caster,
                                         target = target_id,
                                         spell = %spell.name,
@@ -4455,10 +4459,20 @@ pub async fn run(
                         };
                         if !in_range {
                             // Mana came off at the top of this handler, so an
-                            // out-of-range nuke costs full price for silence.
-                            // Melee already tells you (an out-of-range Attack fans
-                            // a Miss), so players have been trained to expect a
-                            // reply and read the silence as the spell being broken.
+                            // out-of-range nuke charged full price. Melee already
+                            // tells you (an out-of-range Attack fans a Miss), so
+                            // players expect a reply and read silence as the spell
+                            // being broken. Reporting it was only half the fix:
+                            // give the cost back too.
+                            refund_spell_cost(
+                                &mut server,
+                                &mut connections,
+                                &in_world_recipients_now,
+                                caster_cid,
+                                intent.caster,
+                                mana_cost,
+                                hp_cost,
+                            );
                             handlers::send_refusal(
                                 &mut server, caster_cid, "That target is too far away.",
                             );
@@ -4803,11 +4817,21 @@ pub async fn run(
                             target_type = %spell.target_type,
                             "spell target_type not yet processed server-side; mana deducted only"
                         );
-                        // The ~9 PORT / gate / evac spells land here. Mana is gone
-                        // and nothing happens, which is indistinguishable from a
-                        // bug. Say so until the target types are implemented.
-                        // Raised to info! as well: a player-visible failure should
-                        // not be invisible at the default log level.
+                        // The ~9 PORT / gate / evac spells land here, plus BIND.
+                        // Mana is gone and nothing happens, which is
+                        // indistinguishable from a bug. Say so, and give the cost
+                        // back, until the target types are implemented. Raised to
+                        // info! as well: a player-visible failure should not be
+                        // invisible at the default log level.
+                        refund_spell_cost(
+                            &mut server,
+                            &mut connections,
+                            &in_world_recipients_now,
+                            caster_cid,
+                            intent.caster,
+                            mana_cost,
+                            hp_cost,
+                        );
                         handlers::send_refusal(
                             &mut server,
                             caster_cid,
@@ -9097,6 +9121,42 @@ pub async fn run(
 /// proportional: at most two small messages per bad request the client made, so
 /// it cannot be used to amplify traffic, and it converges because every wrong
 /// belief is corrected the moment the client acts on it.
+/// Give back a spell's cost after a cast is rejected downstream of the
+/// deduction.
+///
+/// Mana (and any hp cost) comes off near the top of the CastSpell handler,
+/// before the target-type match, so every rejection below that point used to
+/// charge full price for nothing. Reporting the failure was only half the fix:
+/// a 2026-08-24 playtest confirmed the player got "That target is too far away."
+/// and stayed down the mana.
+///
+/// The unknown-spell arm higher up does NOT use this — the server never
+/// deducted there, so it hands back its own untouched value instead.
+#[allow(clippy::too_many_arguments)]
+fn refund_spell_cost(
+    server: &mut RenetServer,
+    connections: &mut HashMap<ClientId, PerConnection>,
+    recipients: &[ClientId],
+    caster_cid: ClientId,
+    caster_id: u64,
+    mana_cost: f32,
+    hp_cost: f32,
+) {
+    let Some(cc) = connections.get_mut(&caster_cid) else {
+        return;
+    };
+    cc.mp = (cc.mp + mana_cost).min(cc.max_mp);
+    if hp_cost > 0.0 {
+        cc.hp = (cc.hp + hp_cost).min(cc.max_hp);
+    }
+    regen::mark_dirty(cc);
+    let (mp, max_mp, hp, max_hp) = (cc.mp, cc.max_mp, cc.hp, cc.max_hp);
+    handlers::fan_out_mana_update(server, recipients, caster_id, mp, max_mp);
+    if hp_cost > 0.0 {
+        handlers::fan_out_health_update(server, recipients, caster_id, hp, max_hp);
+    }
+}
+
 fn correct_client_slots(
     server: &mut RenetServer,
     cid: ClientId,

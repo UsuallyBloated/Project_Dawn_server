@@ -871,6 +871,20 @@ pub fn handle_message(
             // Gated on being alive and in-world so a corpse can't bind where it
             // fell, which would rebuild the death loop this feature exists to fix.
             if !conn.in_world || conn.death_processed || conn.hp <= 0.0 {
+                // Highest consequence of any refusal on the list. The client
+                // prints "Your soul is bound to this place." unconditionally, so
+                // a player who binds as a corpse believes they have a bind point
+                // and does not — quietly rebuilding the death loop this whole
+                // feature exists to close.
+                tracing::info!(
+                    char_id = conn.char_id,
+                    "BindAtCurrentLocation refused — cannot bind while dead"
+                );
+                send_refusal(
+                    server,
+                    client_id,
+                    "You can't bind your soul while dead.",
+                );
                 return Outcome::Continue;
             }
             let pos = conn.pos.into_tuple();
@@ -880,6 +894,9 @@ pub fn handle_message(
                 x = pos.0, y = pos.1, z = pos.2,
                 "bind point set"
             );
+            // Confirm the success too. There was no bind confirmation message at
+            // all, which is exactly why the client had to guess on both branches.
+            send_refusal(server, client_id, "Your soul is bound to this place.");
             Outcome::BindIntent {
                 char_id: conn.char_id,
                 zone: conn.zone.clone(),

@@ -4875,6 +4875,14 @@ pub async fn run(
                     target = %intent.target_name,
                     "GroupInvite — target offline or unknown"
                 );
+                // The client already printed "Invited X to your group." A
+                // misspelled or offline name otherwise produces nothing at all,
+                // on either side.
+                handlers::send_refusal(
+                    &mut server,
+                    intent.inviter as ClientId,
+                    &format!("{} isn't online.", intent.target_name),
+                );
                 continue;
             };
             if target_cid as u64 == intent.inviter {
@@ -4958,10 +4966,18 @@ pub async fn run(
         for intent in group_kick_intents.drain(..) {
             let leader_cid = intent.leader as ClientId;
             let Some(group) = group_manager.group_of(leader_cid) else {
+                // Previously no log AND no reply, so a failed /kick was
+                // invisible on both sides and untriageable from server.log.
+                tracing::debug!(leader = intent.leader, "GroupKick — not in a group");
+                handlers::send_refusal(&mut server, leader_cid, "You aren't in a group.");
                 continue;
             };
             if group.leader != leader_cid {
-                continue; // only leader can kick
+                // Only a forged client reaches this (the UI hides kick for
+                // non-leaders), so log for triage but say nothing: a reply is an
+                // oracle with no honest beneficiary.
+                tracing::debug!(leader = intent.leader, "GroupKick — not the leader");
+                continue;
             }
             let gid = group.id;
             // Resolve target name within the group's roster.
@@ -4972,10 +4988,27 @@ pub async fn run(
                         .unwrap_or(false)
                 });
             let Some(target_cid) = target_cid else {
+                // Had neither log nor reply: a misspelled /kick simply did
+                // nothing, visibly or in server.log.
+                tracing::debug!(
+                    leader = intent.leader,
+                    target = %intent.target_name,
+                    "GroupKick — no such member in the group"
+                );
+                handlers::send_refusal(
+                    &mut server,
+                    leader_cid,
+                    &format!("{} isn't in your group.", intent.target_name),
+                );
                 continue;
             };
             if target_cid == leader_cid {
-                continue; // leader can't kick self (use /leave)
+                // Reachable from the UI by typing your own name, unlike the
+                // non-leader case, so it earns a reply.
+                handlers::send_refusal(
+                    &mut server, leader_cid, "Use /leave to leave your own group.",
+                );
+                continue;
             }
             if let Some((_gid, remaining, dissolved)) = group_manager.leave(target_cid) {
                 tracing::info!(
@@ -5421,6 +5454,11 @@ pub async fn run(
                         dst_loc = %intent.dst_location,
                         "SplitStack rejected — non-base locations not yet supported"
                     );
+                    handlers::send_refusal(
+                        &mut server,
+                        intent.owner as ClientId,
+                        "You can't split a stack there yet.",
+                    );
                     continue;
                 }
                 let owner_cid = intent.owner as ClientId;
@@ -5440,6 +5478,7 @@ pub async fn run(
                             error = %e,
                             "SplitStack rejected"
                         );
+                        handlers::send_refusal(&mut server, owner_cid, "That stack won't split like that.");
                         continue;
                     }
                 };
@@ -5510,6 +5549,7 @@ pub async fn run(
                         }
                     };
                 } else {
+                    handlers::send_refusal(&mut server, owner_cid, "You can't drop that.");
                     continue;
                 }
                 let Some((item_path, count)) = dropped else {
@@ -5623,6 +5663,7 @@ pub async fn run(
                             error = %e,
                             "EquipItem rejected"
                         );
+                        handlers::send_refusal(&mut server, owner_cid, "You can't equip that there.");
                         continue;
                     }
                 };
@@ -5703,6 +5744,11 @@ pub async fn run(
                         dst_loc = %intent.dst_location,
                         "UnequipItem rejected — only 'base' dst supported in Track 13.3"
                     );
+                    handlers::send_refusal(
+                        &mut server,
+                        intent.owner as ClientId,
+                        "There's nowhere to put that.",
+                    );
                     continue;
                 }
                 let owner_cid = intent.owner as ClientId;
@@ -5723,6 +5769,7 @@ pub async fn run(
                             error = %e,
                             "UnequipItem rejected"
                         );
+                        handlers::send_refusal(&mut server, owner_cid, "You can't take that off right now.");
                         continue;
                     }
                 };
@@ -5806,6 +5853,7 @@ pub async fn run(
                             error = %e,
                             "DestroyItem rejected"
                         );
+                        handlers::send_refusal(&mut server, owner_cid, "You can't destroy that.");
                         continue;
                     }
                 };
@@ -5895,6 +5943,7 @@ pub async fn run(
                         slot = intent.slot,
                         "UseConsumable rejected — slot empty"
                     );
+                    handlers::send_refusal(&mut server, owner_cid, "There's nothing there to use.");
                     continue;
                 };
                 let Some(item) = items::lookup(&item_path) else {
@@ -5903,6 +5952,7 @@ pub async fn run(
                         %item_path,
                         "UseConsumable rejected — unknown item path"
                     );
+                    handlers::send_refusal(&mut server, owner_cid, "You can't use that.");
                     continue;
                 };
                 let is_heal_potion = item.heal_on_use > 0.0 || item.mp_on_use > 0.0;
@@ -5912,6 +5962,7 @@ pub async fn run(
                         %item_path,
                         "UseConsumable rejected — item is not consumable"
                     );
+                    handlers::send_refusal(&mut server, owner_cid, "You can't use that.");
                     continue;
                 }
                 // Track 15.2 — match the client's "already eating /
@@ -5924,6 +5975,7 @@ pub async fn run(
                         .any(|b| b.name.starts_with("Food: "))
                 {
                     tracing::debug!(owner = intent.owner, "UseConsumable rejected — already eating");
+                    handlers::send_refusal(&mut server, owner_cid, "You're already eating something.");
                     continue;
                 }
                 if item.is_drink
@@ -5933,6 +5985,7 @@ pub async fn run(
                         .any(|b| b.name.starts_with("Drink: "))
                 {
                     tracing::debug!(owner = intent.owner, "UseConsumable rejected — already drinking");
+                    handlers::send_refusal(&mut server, owner_cid, "You're already drinking something.");
                     continue;
                 }
                 // Decrement-and-fan first so the UI loses the slot
@@ -5958,6 +6011,7 @@ pub async fn run(
                             error = %e,
                             "UseConsumable rejected — decrement failed"
                         );
+                        handlers::send_refusal(&mut server, owner_cid, "You can't use that right now.");
                         continue;
                     }
                 };

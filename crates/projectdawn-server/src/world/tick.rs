@@ -3601,9 +3601,17 @@ pub async fn run(
                     // Track 17.2 — movement-during-cast gate. Compare
                     // current caster pos to the snapshot taken at
                     // CastStart. >MAX_CAST_MOVE_DISTANCE cancels the
-                    // cast (client cancels its own cast on movement
-                    // already; this catches forged clients that omit
-                    // the cancel and keep the cast alive while running).
+                    // cast.
+                    //
+                    // CORRECTED 2026-08-25: an earlier version of this
+                    // comment claimed "the client cancels its own cast on
+                    // movement already". It does not — the 08-24 audit
+                    // found no client-side movement cancel at all (the
+                    // interrupt path early-returns in launcher mode, and no
+                    // keybind/ESC/cancel-button exists). This gate is the
+                    // ONLY line of defence, for honest and forged clients
+                    // alike, so do not weaken it on the assumption there is
+                    // a client backstop.
                     //
                     // Threshold is generous (5 m, vs ~4 m max coast
                     // from STALE_MOVE_THRESHOLD) so a player who

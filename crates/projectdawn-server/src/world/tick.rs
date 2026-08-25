@@ -6234,6 +6234,21 @@ pub async fn run(
                 let Some(conn) = connections.get_mut(&owner_cid) else {
                     continue;
                 };
+                // Proximity gate (dead-intents audit, 2026-08-24): a merchant
+                // transaction requires an actual merchant nearby. Without this,
+                // a modified client could trade from anywhere; the honest
+                // client has always had a 6 m UI gate, so only remote abuse is
+                // refused here. `vendor_id` remains informational until the
+                // client sends real ids (per-vendor stocking is a later step).
+                if super::npcs::any_within_range("vendor", conn.pos).is_none() {
+                    tracing::info!(
+                        owner = intent.owner,
+                        pos = ?conn.pos,
+                        "BuyItem rejected — no vendor within range"
+                    );
+                    handlers::send_refusal(&mut server, owner_cid, "There is no merchant near you.");
+                    continue;
+                }
                 let Some(item) = items::lookup_by_name(&intent.item_name) else {
                     tracing::info!(
                         owner = intent.owner,
@@ -6372,6 +6387,16 @@ pub async fn run(
                 let Some(conn) = connections.get_mut(&owner_cid) else {
                     continue;
                 };
+                // Same proximity gate as BuyItem above.
+                if super::npcs::any_within_range("vendor", conn.pos).is_none() {
+                    tracing::info!(
+                        owner = intent.owner,
+                        pos = ?conn.pos,
+                        "SellItem rejected — no vendor within range"
+                    );
+                    handlers::send_refusal(&mut server, owner_cid, "There is no merchant near you.");
+                    continue;
+                }
                 // Resolve the slot reference + read the held item
                 // path/count without mutating yet so we can compute
                 // the price first.
@@ -6527,6 +6552,15 @@ pub async fn run(
         for intent in bank_deposit_intents.drain(..) {
             let cid = intent.owner as ClientId;
             let Some(conn) = connections.get_mut(&cid) else { continue };
+            // Proximity gate (dead-intents audit, 2026-08-24): banking requires
+            // the banker. This is the arm that voided the death penalty — a
+            // modified client could BankStoreItem its whole inventory from a
+            // dungeon one second before dying, leaving the corpse empty.
+            if super::npcs::any_within_range("banker", conn.pos).is_none() {
+                tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
+                handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
+                continue;
+            }
             if intent.coins.has_negative() || intent.coins == protocol::world::Coins::ZERO {
                 handlers::send_bank_rejected(&mut server, cid, "Nothing to deposit.".to_string());
                 continue;
@@ -6561,6 +6595,12 @@ pub async fn run(
         for intent in bank_withdraw_intents.drain(..) {
             let cid = intent.owner as ClientId;
             let Some(conn) = connections.get_mut(&cid) else { continue };
+            // Same banker proximity gate as the deposit loop above.
+            if super::npcs::any_within_range("banker", conn.pos).is_none() {
+                tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
+                handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
+                continue;
+            }
             if intent.coins.has_negative() || intent.coins == protocol::world::Coins::ZERO {
                 handlers::send_bank_rejected(&mut server, cid, "Nothing to withdraw.".to_string());
                 continue;
@@ -6591,6 +6631,12 @@ pub async fn run(
         for intent in bank_exchange_intents.drain(..) {
             let cid = intent.owner as ClientId;
             let Some(conn) = connections.get_mut(&cid) else { continue };
+            // Same banker proximity gate as the deposit loop above.
+            if super::npcs::any_within_range("banker", conn.pos).is_none() {
+                tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
+                handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
+                continue;
+            }
             match conn.coins.exchange(intent.from_tier, intent.to_tier, intent.qty) {
                 Ok(()) => {
                     conn.coins_dirty = true;
@@ -6621,6 +6667,12 @@ pub async fn run(
         for intent in bank_store_item_intents.drain(..) {
             let cid = intent.owner as ClientId;
             let Some(conn) = connections.get_mut(&cid) else { continue };
+            // Same banker proximity gate as the deposit loop above.
+            if super::npcs::any_within_range("banker", conn.pos).is_none() {
+                tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
+                handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
+                continue;
+            }
             let Some((path, avail)) =
                 conn.inventory.peek_at(&intent.src_location, intent.src_slot)
             else {
@@ -6684,6 +6736,12 @@ pub async fn run(
         for intent in bank_withdraw_item_intents.drain(..) {
             let cid = intent.owner as ClientId;
             let Some(conn) = connections.get_mut(&cid) else { continue };
+            // Same banker proximity gate as the deposit loop above.
+            if super::npcs::any_within_range("banker", conn.pos).is_none() {
+                tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
+                handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
+                continue;
+            }
             let slot = intent.vault_slot as usize;
             let present = if intent.shared {
                 conn.account_bank_items.peek(slot).cloned()
@@ -7693,6 +7751,25 @@ pub async fn run(
             let Some(conn_ro) = connections.get(&responder_cid) else {
                 continue; // disconnected mid-tick — nothing to award
             };
+            // Proximity gate (dead-intents audit, 2026-08-24): a turn-in
+            // requires standing near the quest's own NPC, when one is named.
+            // Dev quests (test_q1) name none and stay ungated — the dev tools
+            // are deliberate. This is what stops a modified client collecting
+            // real rewards + XP without ever walking back.
+            if let Some(npc_id) = quest.turn_in_npc.as_deref() {
+                if !super::npcs::id_within_range(npc_id, conn_ro.pos) {
+                    let npc_name = super::npcs::lookup(npc_id).map(|n| n.name.as_str()).unwrap_or(npc_id);
+                    tracing::info!(char_id = responder, quest_id = %quest_id, npc = npc_id, "quest turn-in rejected — too far from the turn-in NPC");
+                    handlers::send_quest_rejected(
+                        &mut server,
+                        responder_cid,
+                        &quest_id,
+                        &format!("You must return to {npc_name}."),
+                        false,
+                    );
+                    continue;
+                }
+            }
             // A legit client can only HOLD a quest it met level_req for, so this
             // costs a real player nothing — it only shrinks a forged burst
             // (send-every-known-id-at-login) to the quests a fresh char could

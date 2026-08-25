@@ -47,6 +47,12 @@ pub struct Quest {
     /// in lockstep with the client's `QuestDefinitions.item_rewards`.
     #[serde(default)]
     pub item_rewards: Vec<String>,
+    /// NPC id (in `npcs.toml`) the player must be near to turn this quest in.
+    /// Optional so existing quests parse unchanged; when set, `CompleteQuest`
+    /// range-checks against that NPC's position. Left unset means no proximity
+    /// gate — fine for dev quests like `test_q1`.
+    #[serde(default)]
+    pub turn_in_npc: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

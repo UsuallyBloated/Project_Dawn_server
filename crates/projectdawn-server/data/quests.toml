@@ -29,20 +29,20 @@ level_req = 1
 reward_tier = "standard"
 objectives = [ { kind = "kill", target = "Wolf", count = 5 } ]
 item_rewards = [ "res://data/loot/items/tarnished_silver_ring.tres" ]
-
+turn_in_npc = "aldric"
 [[quest]]
 id = "rat_infestation"
 level_req = 1
 reward_tier = "trivial"
 objectives = [ { kind = "kill", target = "Rat", count = 8 } ]
-
+turn_in_npc = "brom"
 [[quest]]
 id = "gnoll_raiders"
 level_req = 3
 reward_tier = "standard"
 objectives = [ { kind = "kill", target = "Gnoll", count = 8 } ]
 item_rewards = [ "res://data/loot/items/scouts_leather_boots.tres" ]
-
+turn_in_npc = "brom"
 [[quest]]
 id = "rotfang_hunt"
 level_req = 5
@@ -54,6 +54,7 @@ item_rewards = [ "res://data/loot/items/hunters_medal.tres" ]
 # exist here or its turn-in pays nothing in launcher mode. Its client journal
 # also shows a "Report back to Captain Aldren" flavor line; server-side the
 # five wolf kills are the whole requirement.
+turn_in_npc = "aldric"
 [[quest]]
 id = "test_q1"
 level_req = 1

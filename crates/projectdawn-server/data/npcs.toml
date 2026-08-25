@@ -1,0 +1,47 @@
+# Server-side NPC position table — the authority for "you must actually be
+# standing near the NPC" checks on vendor, bank, quest turn-in and soul-bind
+# operations. Mirror of the NPC placements in the client's `scenes/world.tscn`;
+# when an NPC moves or a new one is placed there, mirror it here in the same
+# commit (the items.toml / quests.toml lockstep discipline).
+#
+# Why this exists: the server had no NPC concept at all, so nothing checked
+# WHERE the player was standing. Combat, spells, resurrection and loot all
+# range-check; vendor, bank and quest turn-in did not. A modified client could
+# bank its whole inventory from the bottom of a dungeon one second before
+# dying (voiding the gear-loss half of the death penalty), trade with no
+# vendor within a thousand metres, and turn in quests without walking back.
+# The honest client has always had a 6 m UI gate; this table is what lets the
+# server enforce one too.
+#
+# `kinds` is a list because one NPC can serve several roles (Brom is both the
+# vendor and a quest giver). Recognised kinds: "vendor", "banker", "quest",
+# "soul_binder".
+#
+# Zone note: the server currently simulates a single zone and `conn.zone` is
+# not populated by the client, so entries carry no zone field yet. When real
+# multi-zone lands, add one and gate on it — a position-only check can collide
+# across zones with overlapping coordinates.
+
+[[npc]]
+id = "brom"
+name = "Brom"
+kinds = ["vendor", "quest"]
+pos = [8.0, 0.0, 5.0]
+
+[[npc]]
+id = "aldric"
+name = "Aldric the Guard"
+kinds = ["quest"]
+pos = [2.0, 0.0, 5.0]
+
+[[npc]]
+id = "sister_maelis"
+name = "Sister Maelis"
+kinds = ["soul_binder"]
+pos = [-2.0, 0.0, 5.0]
+
+[[npc]]
+id = "thalia"
+name = "Thalia Mourne"
+kinds = ["banker"]
+pos = [11.0, 0.0, 5.0]

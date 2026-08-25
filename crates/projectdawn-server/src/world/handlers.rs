@@ -870,6 +870,22 @@ pub fn handle_message(
             // wire variant until now (declared in PD_W0019's enum, never handled).
             // Gated on being alive and in-world so a corpse can't bind where it
             // fell, which would rebuild the death loop this feature exists to fix.
+            // Proximity gate (dead-intents audit follow-through): binding
+            // requires a Soul Binder nearby. Without it, a modified client
+            // could bind at the bottom of a dungeon and respawn there — the
+            // same death-loop the bind system exists to prevent, self-built.
+            // When Bind Affinity gets a real server arm (the bind/PORT
+            // sprint), the caster-class spell path will bind anywhere by
+            // design; THIS arm is the NPC service and stays gated.
+            if super::npcs::any_within_range("soul_binder", conn.pos).is_none() {
+                tracing::info!(
+                    char_id = conn.char_id,
+                    pos = ?conn.pos,
+                    "BindAtCurrentLocation refused — no soul binder within range"
+                );
+                send_refusal(server, client_id, "There is no soul binder here.");
+                return Outcome::Continue;
+            }
             if !conn.in_world || conn.death_processed || conn.hp <= 0.0 {
                 // Highest consequence of any refusal on the list. The client
                 // prints "Your soul is bound to this place." unconditionally, so

@@ -1554,6 +1554,8 @@ pub async fn run(
         // Verbatim queue; sub-task 4 is FFA loot so order matters for
         // contested bags (first arrival wins the slot).
         let mut loot_intents: Vec<LootIntent> = Vec::new();
+        // PD_W0027 — ground pickups to the cursor slot: (looter, bag_id).
+        let mut loot_to_cursor_intents: Vec<(u64, u64)> = Vec::new();
         // Corpse / resurrection Slice 3 — (responder, corpse_id, accept) responses
         // to a res offer, applied after dispatch where the corpses map is in scope.
         let mut resurrect_accept_intents: Vec<(u64, protocol::world::EntityId, bool)> = Vec::new();
@@ -1975,6 +1977,9 @@ pub async fn run(
                                 bag_id,
                                 slot: None,
                             });
+                        }
+                        Outcome::LootToCursorIntent { looter, bag_id } => {
+                            loot_to_cursor_intents.push((looter, bag_id));
                         }
                         Outcome::ResurrectAcceptIntent { responder, corpse_id, accept } => {
                             resurrect_accept_intents.push((responder, corpse_id, accept));
@@ -5424,30 +5429,12 @@ pub async fn run(
                 conn.inventory_dirty = true;
                 // Snapshot the touched slot contents so we can fan
                 // Deltas without holding a mutable borrow on conn.
+                // peek_at speaks every location move_across can touch
+                // (base, bag_<i>, and PD_W0027's cursor), so the fan
+                // reads through it rather than re-deriving each address.
                 let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
                     .iter()
-                    .map(|(loc, slot)| {
-                        let payload = if loc == "base" {
-                            conn.inventory
-                                .base
-                                .get(*slot as usize)
-                                .and_then(|s| s.as_ref())
-                                .map(|e| (e.item_path.clone(), e.count))
-                        } else if let Some(base_idx) = loc
-                            .strip_prefix("bag_")
-                            .and_then(|s| s.parse::<u8>().ok())
-                        {
-                            conn.inventory
-                                .bags
-                                .get(&base_idx)
-                                .and_then(|arr| arr.get(*slot as usize))
-                                .and_then(|s| s.as_ref())
-                                .map(|e| (e.item_path.clone(), e.count))
-                        } else {
-                            None
-                        };
-                        (loc.clone(), *slot, payload)
-                    })
+                    .map(|(loc, slot)| (loc.clone(), *slot, conn.inventory.peek_at(loc, *slot)))
                     .collect();
                 for (loc, slot, payload) in deltas {
                     let (item_path, count) = match payload {
@@ -8472,6 +8459,141 @@ pub async fn run(
                         bag,
                     );
                 }
+            }
+        }
+
+        // 4jc. PD_W0027 — ground pickup to the cursor. Same gates as the
+        //      loot window (range, loot rights, round-robin turn), plus the
+        //      cursor rules: only a bag holding exactly one item stack and
+        //      zero coin qualifies, and the hand must be empty. The take is
+        //      atomic within this block — stack out, cursor in, bag gone,
+        //      deltas fanned — so no error path leaves a half-state.
+        if !loot_to_cursor_intents.is_empty() {
+            for (looter, bag_id) in loot_to_cursor_intents.drain(..) {
+                let looter_cid = looter as ClientId;
+                let Some(looter_pos) = connections.get(&looter_cid).map(|c| c.pos) else {
+                    continue;
+                };
+                let stack = {
+                    let Some(bag) = loot_bags.get_mut(&bag_id) else {
+                        handlers::send_refusal(
+                            &mut server,
+                            looter_cid,
+                            "That isn't there any more.",
+                        );
+                        continue;
+                    };
+                    if bag.pos.distance_to(looter_pos) > LOOT_PICKUP_RANGE {
+                        continue;
+                    }
+                    if !bag.can_loot(looter_cid, &group_manager) {
+                        tracing::info!(
+                            looter,
+                            bag_id,
+                            "pickup rejected: not the owner or owner's group"
+                        );
+                        handlers::send_loot_rejected(
+                            &mut server,
+                            looter_cid,
+                            "That isn't your loot.".to_string(),
+                        );
+                        continue;
+                    }
+                    // Round Robin claims the turn exactly as the loot-window
+                    // path does — a left-click pickup must not dodge the
+                    // group's rotation.
+                    if let Some(owner_cid) = bag.owner_killer {
+                        if bag.assigned_looter.is_none() {
+                            let bag_pos = bag.pos;
+                            bag.assigned_looter =
+                                group_manager.next_loot_turn(owner_cid, |cand| {
+                                    connections
+                                        .get(&cand)
+                                        .map(|c| {
+                                            c.pos.distance_to(bag_pos)
+                                                <= GROUP_COIN_SHARE_RANGE
+                                        })
+                                        .unwrap_or(false)
+                                });
+                        }
+                        if let Some(turn) = bag.assigned_looter {
+                            if looter_cid != turn {
+                                tracing::info!(
+                                    looter,
+                                    bag_id,
+                                    assigned = turn,
+                                    "pickup rejected: not your turn (round robin)"
+                                );
+                                handlers::send_loot_rejected(
+                                    &mut server,
+                                    looter_cid,
+                                    "Not your turn to loot.".to_string(),
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                    if bag.items.len() != 1 || bag.coins != protocol::world::Coins::ZERO {
+                        handlers::send_refusal(
+                            &mut server,
+                            looter_cid,
+                            "There's more than one thing there. Right-click to loot.",
+                        );
+                        continue;
+                    }
+                    bag.items[0].clone()
+                };
+                let Some(conn) = connections.get_mut(&looter_cid) else {
+                    continue;
+                };
+                if conn.inventory.cursor.is_some() {
+                    handlers::send_refusal(
+                        &mut server,
+                        looter_cid,
+                        "You're already holding something.",
+                    );
+                    continue;
+                }
+                // Commit: cursor in, bag out, world told. All in this tick.
+                conn.inventory.cursor = Some(super::inventory::InventoryEntry {
+                    item_path: stack.item_path.clone(),
+                    count: stack.count,
+                });
+                conn.inventory_dirty = true;
+                handlers::send_inventory_delta(
+                    &mut server,
+                    looter_cid,
+                    "cursor".to_string(),
+                    0,
+                    Some(stack.item_path.clone()),
+                    stack.count,
+                );
+                let item_name = items::lookup(&stack.item_path)
+                    .map(|i| i.name.clone())
+                    .unwrap_or_else(|| "the item".to_string());
+                handlers::send_system_line(
+                    &mut server,
+                    looter_cid,
+                    &format!("You pick up {}.", item_name),
+                );
+                let bag = loot_bags
+                    .remove(&bag_id)
+                    .expect("bag existed under the borrow above");
+                let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
+                let bag_visible = aoi.entities_visible_from(bag_cell);
+                aoi.remove(bag_id, bag_cell);
+                for &recipient in &in_world_recipients_now {
+                    if bag_visible.contains(&recipient) {
+                        handlers::send_entity_despawn(&mut server, recipient, bag_id);
+                    }
+                }
+                tracing::info!(
+                    looter,
+                    bag_id,
+                    item = %stack.item_path,
+                    count = stack.count,
+                    "ground item picked up to cursor"
+                );
             }
         }
 

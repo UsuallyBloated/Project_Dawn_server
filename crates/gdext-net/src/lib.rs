@@ -1100,6 +1100,17 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// PD_W0027 — ground pickup: take the bag's only item stack onto the
+    /// cursor slot. The server refuses multi-stack / coined bags, occupied
+    /// cursors, and everything the loot window would refuse.
+    #[func]
+    fn send_loot_to_cursor(&mut self, bag_id: i64) -> bool {
+        let msg = ClientWorldMsg::LootToCursor {
+            bag_id: bag_id as u64,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
     /// PD_W0022 — the dead player's response to a resurrection offer on their
     /// corpse. `accept = false` declines.
     #[func]

@@ -115,7 +115,12 @@ use serde::{Deserialize, Serialize};
 ///
 /// PD_W0026: `ConnectOk` gains `is_gm`, so the client learns its GM status from
 /// the world handshake instead of caching it from the auth `LoginOk`.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3236; // "PD_W0026"
+/// PD_W0027: the cursor slot. `LootToCursor` joins the client intents, and
+/// `"cursor"` becomes a valid location string on `MoveItem` / `EquipItem` /
+/// `DropItem` / `UseConsumable` / `InventoryDelta` (strings, so no shape
+/// change — the bump exists because an old server would drop the new intent
+/// and an old client would not understand a cursor delta).
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3237; // "PD_W0027"
 
 pub type EntityId = u64;
 
@@ -514,6 +519,14 @@ pub enum ClientWorldMsg {
         slot: u32,
     },
     LootAll {
+        bag_id: EntityId,
+    },
+    /// PD_W0027 — ground pickup: take the ONLY item stack in a loot bag
+    /// onto the cursor slot (the item rides the mouse until placed).
+    /// The server refuses unless the bag holds exactly one stack and
+    /// zero coin, the looter's cursor is empty, and the same range /
+    /// loot-rights / round-robin gates as `LootItem` pass.
+    LootToCursor {
         bag_id: EntityId,
     },
 

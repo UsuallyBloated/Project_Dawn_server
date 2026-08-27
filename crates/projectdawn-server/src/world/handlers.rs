@@ -323,6 +323,13 @@ pub enum Outcome {
         looter: u64,
         bag_id: protocol::world::EntityId,
     },
+    /// PD_W0027 — ground pickup to the cursor slot. Resolved with the
+    /// full loot-window gate set plus the cursor rules (single stack,
+    /// zero coin, empty hand).
+    LootToCursorIntent {
+        looter: u64,
+        bag_id: protocol::world::EntityId,
+    },
     /// PD_W0022 — corpse / resurrection Slice 3. The dead player accepted (or
     /// declined) a resurrection offer on their corpse. The tick loop reads the
     /// owner's recorded pending offer, and on accept summons the player to the
@@ -1176,6 +1183,16 @@ pub fn handle_message(
             }
         }
 
+        ClientWorldMsg::LootToCursor { bag_id } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::LootToCursorIntent {
+                looter: conn.char_id as u64,
+                bag_id,
+            }
+        }
+
         ClientWorldMsg::ResurrectAccept { corpse_id, accept } => {
             if !conn.in_world {
                 return Outcome::Continue;
@@ -1919,6 +1936,12 @@ pub fn send_refusal(server: &mut RenetServer, recipient: ClientId, text: &str) {
         protocol::world::ChatChannel::System,
         text,
     );
+}
+
+/// PD_W0027 — a positive one-liner on the System channel. Same transport as
+/// `send_refusal`; the separate name keeps success paths reading honestly.
+pub fn send_system_line(server: &mut RenetServer, recipient: ClientId, text: &str) {
+    send_refusal(server, recipient, text);
 }
 
 pub fn fan_out_chat_message(

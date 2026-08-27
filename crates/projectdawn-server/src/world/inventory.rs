@@ -34,9 +34,12 @@ fn is_bag_item(path: &str) -> bool {
 }
 
 /// Track 14.3 — typed view of a wire `(location, slot)` pair.
+/// The cursor slot (PD_W0027) is a location with no slot index —
+/// the wire still carries a slot number for it, which is ignored.
 enum SlotRefInt {
     Base(usize),
     Bag(u8, usize),
+    Cursor,
 }
 
 fn parse_slot_ref(loc: &str, slot: u32) -> Result<SlotRefInt, &'static str> {
@@ -46,6 +49,9 @@ fn parse_slot_ref(loc: &str, slot: u32) -> Result<SlotRefInt, &'static str> {
             return Err("base slot out of range");
         }
         return Ok(SlotRefInt::Base(idx));
+    }
+    if loc == "cursor" {
+        return Ok(SlotRefInt::Cursor);
     }
     if let Some(base_idx) = parse_bag_location(loc) {
         return Ok(SlotRefInt::Bag(base_idx, slot as usize));
@@ -387,6 +393,12 @@ pub struct PlayerInventory {
     /// corresponding Vec to be all-`None`; rejection happens in
     /// `move_across` / `move_base` before any mutation lands.
     pub bags: HashMap<u8, Vec<Option<InventoryEntry>>>,
+    /// PD_W0027 — the EQ-style cursor slot: at most one stack "in
+    /// hand", riding the mouse until placed. A real location
+    /// (`"cursor"`) so it persists, weighs, and dies with you like
+    /// any other slot. Filled by ground pickup (`LootToCursor`) and
+    /// by `move_across` lifts; never by `add_item` auto-placement.
+    pub cursor: Option<InventoryEntry>,
 }
 
 impl Default for PlayerInventory {
@@ -395,6 +407,7 @@ impl Default for PlayerInventory {
             base: vec![None; BASE_SLOT_COUNT],
             equipment: HashMap::new(),
             bags: HashMap::new(),
+            cursor: None,
         }
     }
 }
@@ -442,6 +455,15 @@ impl PlayerInventory {
                             count: row.count as u32,
                         },
                     );
+                }
+                "cursor" => {
+                    // PD_W0027 — the held stack. Slot index ignored
+                    // (there is only one cursor); a duplicate row wins
+                    // last, which cannot happen from our own writer.
+                    inv.cursor = Some(InventoryEntry {
+                        item_path: row.item_path.clone(),
+                        count: row.count as u32,
+                    });
                 }
                 _ => {} // bag_<i> rows handled below
             }
@@ -506,6 +528,14 @@ impl PlayerInventory {
                 }
             }
         }
+        if let Some(entry) = &self.cursor {
+            out.push(InventoryRow {
+                location: "cursor".to_string(),
+                slot: 0,
+                item_path: entry.item_path.clone(),
+                count: entry.count as i32,
+            });
+        }
         out
     }
 
@@ -545,13 +575,19 @@ impl PlayerInventory {
                 }
             }
         }
+        if let Some(entry) = &self.cursor {
+            out.push(("cursor".to_string(), 0, entry.item_path.clone(), entry.count));
+        }
         out
     }
 
     /// Corpse / resurrection Slice 1 — every item stack the player carries
-    /// (equipped + base + inside bags), flattened to (item_path, count) pairs to
-    /// move onto a corpse on death. Slot identity isn't preserved: looted corpse
-    /// gear goes into bags in EQ, not back to its original slot.
+    /// (equipped + base + inside bags + the cursor), flattened to (item_path,
+    /// count) pairs to move onto a corpse on death. Slot identity isn't
+    /// preserved: looted corpse gear goes into bags in EQ, not back to its
+    /// original slot. The cursor is included deliberately (PD_W0027): dying
+    /// with an item in hand must strip it to the corpse like everything else,
+    /// or holding an item would shelter it from the death penalty.
     pub fn all_stacks(&self) -> Vec<(String, u32)> {
         let mut out = Vec::new();
         for entry in self.base.iter().flatten() {
@@ -564,6 +600,9 @@ impl PlayerInventory {
             for entry in arr.iter().flatten() {
                 out.push((entry.item_path.clone(), entry.count));
             }
+        }
+        if let Some(entry) = &self.cursor {
+            out.push((entry.item_path.clone(), entry.count));
         }
         out
     }
@@ -735,10 +774,15 @@ impl PlayerInventory {
     }
 
     /// Banker slice 2 — read `(item_path, count)` at `(loc, slot)` without
-    /// removing it. Supports `base` and `bag_<i>` (equip is not a banking
-    /// source). `None` if the location is unsupported or the slot is empty.
+    /// removing it. Supports `base`, `bag_<i>`, and (PD_W0027) `cursor`
+    /// (equip is not a banking source). `None` if the location is
+    /// unsupported or the slot is empty.
     pub fn peek_at(&self, loc: &str, slot: u32) -> Option<(String, u32)> {
         match parse_slot_ref(loc, slot).ok()? {
+            SlotRefInt::Cursor => self
+                .cursor
+                .as_ref()
+                .map(|e| (e.item_path.clone(), e.count)),
             SlotRefInt::Base(s) => self
                 .base
                 .get(s)
@@ -897,6 +941,13 @@ impl PlayerInventory {
                     None => return Err("source slot empty"),
                 }
             }
+            // PD_W0027 — equip straight from the hand (EQ's
+            // click-the-paperdoll-while-holding). Swap pops the
+            // previously-worn item onto the cursor.
+            SlotRefInt::Cursor => match self.cursor.as_ref() {
+                Some(e) => e.item_path.clone(),
+                None => return Err("source slot empty"),
+            },
         };
         if !items::is_equippable_in_slot(&src_path, equip_slot) {
             return Err("item not equippable in this slot");
@@ -910,6 +961,7 @@ impl PlayerInventory {
                 .expect("checked above")[s]
                 .take()
                 .expect("checked above"),
+            SlotRefInt::Cursor => self.cursor.take().expect("checked above"),
         };
         let prev_equip = self.equipment.remove(&equip_slot);
         self.equipment.insert(equip_slot, src_entry);
@@ -919,6 +971,7 @@ impl PlayerInventory {
                 SlotRefInt::Bag(b, s) => {
                     self.bags.get_mut(&b).expect("checked above")[s] = Some(prev);
                 }
+                SlotRefInt::Cursor => self.cursor = Some(prev),
             }
         }
         if let SlotRefInt::Base(s) = src {
@@ -927,6 +980,7 @@ impl PlayerInventory {
         let touched_src = match src {
             SlotRefInt::Base(s) => ("base".to_string(), s as u32),
             SlotRefInt::Bag(b, s) => (format!("bag_{b}"), s as u32),
+            SlotRefInt::Cursor => ("cursor".to_string(), 0),
         };
         Ok(vec![touched_src, ("equip".to_string(), equip_slot as u32)])
     }
@@ -986,6 +1040,25 @@ impl PlayerInventory {
                 }
                 Ok((path, to_remove))
             }
+            // PD_W0027 — destroy / drop from the hand. This is the
+            // escape hatch the design requires: a full-bags player can
+            // always put a held item DOWN (DropItem shares this path).
+            // A held bag is always empty (non-empty bags can't be
+            // lifted), so no bag-contents check is needed.
+            SlotRefInt::Cursor => {
+                let entry = self.cursor.as_mut().ok_or("source slot empty")?;
+                let path = entry.item_path.clone();
+                let to_remove = if count == 0 || count >= entry.count {
+                    entry.count
+                } else {
+                    count
+                };
+                entry.count -= to_remove;
+                if entry.count == 0 {
+                    self.cursor = None;
+                }
+                Ok((path, to_remove))
+            }
         }
     }
 
@@ -1026,6 +1099,16 @@ impl PlayerInventory {
                 entry.count -= 1;
                 if entry.count == 0 {
                     arr[s] = None;
+                }
+                Ok(path)
+            }
+            // PD_W0027 — eat / drink straight from the hand.
+            SlotRefInt::Cursor => {
+                let entry = self.cursor.as_mut().ok_or("source slot empty")?;
+                let path = entry.item_path.clone();
+                entry.count -= 1;
+                if entry.count == 0 {
+                    self.cursor = None;
                 }
                 Ok(path)
             }
@@ -1165,7 +1248,188 @@ impl PlayerInventory {
             (SlotRefInt::Bag(base_idx, s), SlotRefInt::Base(d)) => {
                 self.move_bag_to_base(base_idx, s, d)
             }
+            // PD_W0027 — the cursor slot. Same move / merge-capped /
+            // swap law as every other pair of slots.
+            (SlotRefInt::Cursor, SlotRefInt::Cursor) => Ok(Vec::new()),
+            (SlotRefInt::Base(s), SlotRefInt::Cursor) => self.move_base_to_cursor(s),
+            (SlotRefInt::Cursor, SlotRefInt::Base(d)) => self.move_cursor_to_base(d),
+            (SlotRefInt::Bag(base_idx, s), SlotRefInt::Cursor) => {
+                self.move_bag_to_cursor(base_idx, s)
+            }
+            (SlotRefInt::Cursor, SlotRefInt::Bag(base_idx, d)) => {
+                self.move_cursor_to_bag(base_idx, d)
+            }
         }
+    }
+
+    /// PD_W0027 — lift a base slot onto the cursor. A non-empty bag
+    /// cannot be lifted (same rule as `move_base`); a swap drops the
+    /// cursor's held item into the vacated base slot, which is always
+    /// legal (any item type may sit in base).
+    fn move_base_to_cursor(&mut self, src: usize) -> Result<Vec<(String, u32)>, &'static str> {
+        if src >= BASE_SLOT_COUNT {
+            return Err("base slot out of range");
+        }
+        if self.bag_at_base_is_nonempty(src) {
+            return Err("bag must be emptied before moving");
+        }
+        let src_entry = self.base[src].take().ok_or("source slot empty")?;
+        match self.cursor.take() {
+            None => {
+                self.cursor = Some(src_entry);
+            }
+            Some(held) if held.item_path == src_entry.item_path => {
+                let (merged, leftover) = merge_capped(held, src_entry);
+                self.cursor = Some(merged);
+                self.base[src] = leftover;
+            }
+            Some(held) => {
+                // Swap — the held item lands where the lifted one was.
+                self.base[src] = Some(held);
+                self.cursor = Some(src_entry);
+            }
+        }
+        self.ensure_bag_init(src);
+        Ok(vec![
+            ("base".to_string(), src as u32),
+            ("cursor".to_string(), 0),
+        ])
+    }
+
+    /// PD_W0027 — place the held item into a base slot. Mirrors
+    /// `move_base`: merge caps at `max_stack` (overflow stays in
+    /// hand), a different item swaps onto the cursor, and a dst slot
+    /// holding a non-empty bag refuses the swap (the bag would end
+    /// up in hand, and non-empty bags do not move).
+    fn move_cursor_to_base(&mut self, dst: usize) -> Result<Vec<(String, u32)>, &'static str> {
+        if dst >= BASE_SLOT_COUNT {
+            return Err("base slot out of range");
+        }
+        if self.cursor.is_none() {
+            return Err("source slot empty");
+        }
+        if self.bag_at_base_is_nonempty(dst) {
+            return Err("destination bag must be emptied before swapping");
+        }
+        let held = self.cursor.take().expect("checked above");
+        match self.base[dst].take() {
+            None => {
+                self.base[dst] = Some(held);
+            }
+            Some(existing) if existing.item_path == held.item_path => {
+                let (merged, leftover) = merge_capped(existing, held);
+                self.base[dst] = Some(merged);
+                self.cursor = leftover;
+            }
+            Some(existing) => {
+                self.base[dst] = Some(held);
+                self.cursor = Some(existing);
+            }
+        }
+        self.ensure_bag_init(dst);
+        Ok(vec![
+            ("cursor".to_string(), 0),
+            ("base".to_string(), dst as u32),
+        ])
+    }
+
+    /// PD_W0027 — lift a bag inner slot onto the cursor. The one ban:
+    /// a swap that would push a held BAG into the inner slot
+    /// (bag-in-bag).
+    fn move_bag_to_cursor(
+        &mut self,
+        base_idx: u8,
+        src: usize,
+    ) -> Result<Vec<(String, u32)>, &'static str> {
+        if let Some(held) = &self.cursor {
+            // Only a swap or merge can follow; pre-check the swap ban
+            // before mutating anything.
+            let arr = self.bags.get(&base_idx).ok_or("source bag does not exist")?;
+            let src_entry = arr
+                .get(src)
+                .and_then(|s| s.as_ref())
+                .ok_or("source slot empty")?;
+            if held.item_path != src_entry.item_path && is_bag_item(&held.item_path) {
+                return Err("cannot place a bag inside a bag");
+            }
+        }
+        let arr = self
+            .bags
+            .get_mut(&base_idx)
+            .ok_or("source bag does not exist")?;
+        if src >= arr.len() {
+            return Err("bag slot out of range");
+        }
+        let src_entry = arr[src].take().ok_or("source slot empty")?;
+        match self.cursor.take() {
+            None => {
+                self.cursor = Some(src_entry);
+            }
+            Some(held) if held.item_path == src_entry.item_path => {
+                let (merged, leftover) = merge_capped(held, src_entry);
+                self.cursor = Some(merged);
+                let arr = self
+                    .bags
+                    .get_mut(&base_idx)
+                    .expect("bag existed at start of fn");
+                arr[src] = leftover;
+            }
+            Some(held) => {
+                let arr = self
+                    .bags
+                    .get_mut(&base_idx)
+                    .expect("bag existed at start of fn");
+                arr[src] = Some(held);
+                self.cursor = Some(src_entry);
+            }
+        }
+        Ok(vec![
+            (format!("bag_{base_idx}"), src as u32),
+            ("cursor".to_string(), 0),
+        ])
+    }
+
+    /// PD_W0027 — place the held item into a bag inner slot. A held
+    /// bag never goes inside a bag; swaps are safe in the other
+    /// direction because inner items are never bags.
+    fn move_cursor_to_bag(
+        &mut self,
+        base_idx: u8,
+        dst: usize,
+    ) -> Result<Vec<(String, u32)>, &'static str> {
+        let held_path = match &self.cursor {
+            Some(e) => e.item_path.clone(),
+            None => return Err("source slot empty"),
+        };
+        if is_bag_item(&held_path) {
+            return Err("cannot place a bag inside a bag");
+        }
+        let arr = self
+            .bags
+            .get_mut(&base_idx)
+            .ok_or("destination bag does not exist")?;
+        if dst >= arr.len() {
+            return Err("bag slot out of range");
+        }
+        let held = self.cursor.take().expect("checked above");
+        match arr[dst].take() {
+            None => {
+                arr[dst] = Some(held);
+            }
+            Some(existing) if existing.item_path == held.item_path => {
+                let (merged, leftover) = merge_capped(existing, held);
+                arr[dst] = Some(merged);
+                self.cursor = leftover;
+            }
+            Some(existing) => {
+                arr[dst] = Some(held);
+                self.cursor = Some(existing);
+            }
+        }
+        Ok(vec![
+            ("cursor".to_string(), 0),
+            (format!("bag_{base_idx}"), dst as u32),
+        ])
     }
 
     /// Track 14.3 — base → bag inner. Rejects bag-in-bag attempts
@@ -2246,6 +2510,138 @@ mod tests {
             inv.bags.get(&0u8).unwrap()[2].as_ref().unwrap().item_path,
             POTION
         );
+    }
+
+    // ── PD_W0027: the cursor slot ──
+
+    #[test]
+    fn cursor_lift_and_place_roundtrip() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item_locating(POUCH, 1).unwrap(); // base[0] = pouch
+        inv.base[1] = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 5,
+        });
+        let touched = inv.move_across("base", 1, "cursor", 0).expect("lift");
+        assert_eq!(touched.len(), 2);
+        assert!(inv.base[1].is_none(), "source cleared");
+        assert_eq!(inv.cursor.as_ref().unwrap().item_path, POTION);
+        let touched = inv.move_across("cursor", 0, "bag_0", 2).expect("place");
+        assert_eq!(touched.len(), 2);
+        assert!(inv.cursor.is_none(), "cursor cleared after place");
+        assert_eq!(
+            inv.bags.get(&0u8).unwrap()[2].as_ref().unwrap().count,
+            5
+        );
+    }
+
+    #[test]
+    fn cursor_lift_merges_capped_leftover_stays_in_slot() {
+        // POTION stacks to 10. Cursor holds 6; lifting 7 more tops the
+        // cursor at 10 and leaves 3 behind — never a silent overcap.
+        let mut inv = PlayerInventory::new();
+        inv.cursor = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 6,
+        });
+        inv.base[0] = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 7,
+        });
+        inv.move_across("base", 0, "cursor", 0).expect("merge lift");
+        assert_eq!(inv.cursor.as_ref().unwrap().count, 10);
+        assert_eq!(inv.base[0].as_ref().unwrap().count, 3);
+    }
+
+    #[test]
+    fn cursor_place_swaps_different_item_into_hand() {
+        let mut inv = PlayerInventory::new();
+        inv.cursor = Some(InventoryEntry {
+            item_path: SWORD.into(),
+            count: 1,
+        });
+        inv.base[3] = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 4,
+        });
+        inv.move_across("cursor", 0, "base", 3).expect("swap place");
+        assert_eq!(inv.base[3].as_ref().unwrap().item_path, SWORD);
+        assert_eq!(inv.cursor.as_ref().unwrap().item_path, POTION);
+        assert_eq!(inv.cursor.as_ref().unwrap().count, 4);
+    }
+
+    #[test]
+    fn cursor_refuses_lifting_a_nonempty_bag() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item_locating(POUCH, 1).unwrap();
+        inv.move_across("cursor", 0, "bag_0", 0).err(); // ensure bag vec exists
+        inv.bags.get_mut(&0u8).unwrap()[0] = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 1,
+        });
+        let err = inv.move_across("base", 0, "cursor", 0).unwrap_err();
+        assert_eq!(err, "bag must be emptied before moving");
+    }
+
+    #[test]
+    fn cursor_held_bag_never_enters_a_bag() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item_locating(POUCH, 1).unwrap(); // base[0] = pouch (empty)
+        inv.cursor = Some(InventoryEntry {
+            item_path: POUCH.into(),
+            count: 1,
+        });
+        // Direct place into an inner slot.
+        let err = inv.move_across("cursor", 0, "bag_0", 0).unwrap_err();
+        assert_eq!(err, "cannot place a bag inside a bag");
+        // Swap variant: lifting an inner item while holding a bag
+        // would push the bag into the inner slot.
+        inv.bags.get_mut(&0u8).unwrap()[1] = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 2,
+        });
+        let err = inv.move_across("bag_0", 1, "cursor", 0).unwrap_err();
+        assert_eq!(err, "cannot place a bag inside a bag");
+    }
+
+    #[test]
+    fn cursor_survives_a_rows_roundtrip() {
+        let mut inv = PlayerInventory::new();
+        inv.cursor = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 8,
+        });
+        let rows = inv.to_rows();
+        assert!(rows.iter().any(|r| r.location == "cursor" && r.count == 8));
+        let back = PlayerInventory::from_rows(&rows);
+        assert_eq!(back.cursor.as_ref().unwrap().item_path, POTION);
+        assert_eq!(back.cursor.as_ref().unwrap().count, 8);
+    }
+
+    #[test]
+    fn cursor_is_stripped_to_the_corpse_with_everything_else() {
+        let mut inv = PlayerInventory::new();
+        inv.cursor = Some(InventoryEntry {
+            item_path: SWORD.into(),
+            count: 1,
+        });
+        let stacks = inv.all_stacks();
+        assert!(
+            stacks.iter().any(|(p, c)| p == SWORD && *c == 1),
+            "held item must die with you, not shelter from the penalty"
+        );
+    }
+
+    #[test]
+    fn cursor_to_cursor_is_a_noop() {
+        let mut inv = PlayerInventory::new();
+        inv.cursor = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 1,
+        });
+        let touched = inv.move_across("cursor", 0, "cursor", 0).expect("noop");
+        assert!(touched.is_empty());
+        assert_eq!(inv.cursor.as_ref().unwrap().count, 1);
     }
 
     #[test]

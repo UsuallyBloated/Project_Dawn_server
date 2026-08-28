@@ -617,6 +617,13 @@ impl PlayerInventory {
         }
         self.equipment.clear();
         self.bags.clear();
+        // PD_W0027 — the cursor strips with everything else. Missing this
+        // line was a real item-dupe (playtest 2026-08-28): the death path
+        // copies all_stacks() (cursor included) onto the corpse, then
+        // cleared everything EXCEPT the hand — so the held item existed on
+        // the corpse AND in the post-death snapshot, and the next
+        // checkpoint made the copy durable.
+        self.cursor = None;
     }
 
     /// Track 14.3 — sync `bags[base_idx]` against whatever sits in
@@ -2630,6 +2637,29 @@ mod tests {
             stacks.iter().any(|(p, c)| p == SWORD && *c == 1),
             "held item must die with you, not shelter from the penalty"
         );
+    }
+
+    #[test]
+    fn clear_all_strips_the_cursor_too() {
+        // The death-dupe regression (2026-08-28): the corpse takes
+        // all_stacks() and the owner is then cleared — if the hand
+        // survives the clear, the held item exists twice.
+        let mut inv = PlayerInventory::new();
+        inv.base[0] = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 3,
+        });
+        inv.cursor = Some(InventoryEntry {
+            item_path: SWORD.into(),
+            count: 1,
+        });
+        inv.clear_all();
+        assert!(inv.base[0].is_none());
+        assert!(
+            inv.cursor.is_none(),
+            "a held item must die with the rest — anything less is a dupe"
+        );
+        assert!(inv.all_stacks().is_empty());
     }
 
     #[test]

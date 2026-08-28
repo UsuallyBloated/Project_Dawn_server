@@ -5757,11 +5757,11 @@ pub async fn run(
         //      the mutation lands.
         if !unequip_item_intents.is_empty() {
             for intent in unequip_item_intents.drain(..) {
-                if intent.dst_location != "base" {
+                if intent.dst_location != "base" && intent.dst_location != "cursor" {
                     tracing::debug!(
                         owner = intent.owner,
                         dst_loc = %intent.dst_location,
-                        "UnequipItem rejected — only 'base' dst supported in Track 13.3"
+                        "UnequipItem rejected — dst must be 'base' or 'cursor'"
                     );
                     handlers::send_refusal(
                         &mut server,
@@ -5775,20 +5775,30 @@ pub async fn run(
                     continue;
                 };
                 let dst = intent.dst_slot as usize;
-                let touched = match conn
-                    .inventory
-                    .unequip_to_base(intent.equip_slot, dst)
-                {
+                // PD_W0027 slice 1.5 — "cursor" lifts the worn item into the
+                // hand; "base" is the classic unequip-to-slot.
+                let result = if intent.dst_location == "cursor" {
+                    conn.inventory.unequip_to_cursor(intent.equip_slot)
+                } else {
+                    conn.inventory.unequip_to_base(intent.equip_slot, dst)
+                };
+                let touched = match result {
                     Ok(t) => t,
                     Err(e) => {
                         tracing::info!(
                             owner = intent.owner,
                             equip_slot = intent.equip_slot,
+                            dst_loc = %intent.dst_location,
                             dst,
                             error = %e,
                             "UnequipItem rejected"
                         );
-                        handlers::send_refusal(&mut server, owner_cid, "You can't take that off right now.");
+                        let text = if e == "cursor occupied" {
+                            "You're already holding something."
+                        } else {
+                            "You can't take that off right now."
+                        };
+                        handlers::send_refusal(&mut server, owner_cid, text);
                         continue;
                     }
                 };
@@ -5808,6 +5818,11 @@ pub async fn run(
                                 .inventory
                                 .equipment
                                 .get(&(slot as u8))
+                                .map(|e| (e.item_path.clone(), e.count)),
+                            "cursor" => conn
+                                .inventory
+                                .cursor
+                                .as_ref()
                                 .map(|e| (e.item_path.clone(), e.count)),
                             _ => None,
                         };

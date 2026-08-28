@@ -916,6 +916,27 @@ impl PlayerInventory {
         Ok(vec![("base", dst as u32), ("equip", equip_slot as u32)])
     }
 
+    /// PD_W0027 slice 1.5 — lift a worn item straight onto the cursor
+    /// (EQ's click-the-doll-with-an-empty-hand). No swap variant on
+    /// purpose: a full hand routes through `equip_from_location("cursor")`
+    /// instead, so an occupied cursor refuses here rather than guessing.
+    pub fn unequip_to_cursor(
+        &mut self,
+        equip_slot: u8,
+    ) -> Result<Vec<(&'static str, u32)>, &'static str> {
+        if equip_slot >= EQUIP_SLOT_COUNT {
+            return Err("equip slot out of range");
+        }
+        if self.cursor.is_some() {
+            return Err("cursor occupied");
+        }
+        let Some(equip_entry) = self.equipment.remove(&equip_slot) else {
+            return Err("equip slot empty");
+        };
+        self.cursor = Some(equip_entry);
+        Ok(vec![("cursor", 0), ("equip", equip_slot as u32)])
+    }
+
     /// Track 15.1 — equip from any inventory location (base or bag
     /// inner). Generalisation of `equip_from_base`: the wire's
     /// `(src_location, src_slot)` can now address bag inner slots so
@@ -2660,6 +2681,41 @@ mod tests {
             "a held item must die with the rest — anything less is a dupe"
         );
         assert!(inv.all_stacks().is_empty());
+    }
+
+    #[test]
+    fn unequip_to_cursor_lifts_the_worn_item() {
+        let mut inv = PlayerInventory::new();
+        inv.equipment.insert(
+            0,
+            InventoryEntry {
+                item_path: SWORD.into(),
+                count: 1,
+            },
+        );
+        let touched = inv.unequip_to_cursor(0).expect("lift off the doll");
+        assert_eq!(touched.len(), 2);
+        assert!(inv.equipment.get(&0).is_none(), "slot emptied");
+        assert_eq!(inv.cursor.as_ref().unwrap().item_path, SWORD);
+    }
+
+    #[test]
+    fn unequip_to_cursor_refuses_a_full_hand() {
+        let mut inv = PlayerInventory::new();
+        inv.equipment.insert(
+            0,
+            InventoryEntry {
+                item_path: SWORD.into(),
+                count: 1,
+            },
+        );
+        inv.cursor = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 1,
+        });
+        let err = inv.unequip_to_cursor(0).unwrap_err();
+        assert_eq!(err, "cursor occupied");
+        assert!(inv.equipment.get(&0).is_some(), "nothing moved on refusal");
     }
 
     #[test]

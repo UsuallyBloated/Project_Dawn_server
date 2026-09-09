@@ -5575,32 +5575,12 @@ pub async fn run(
                     continue;
                 };
                 // InventoryDelta for the source slot — reflect the new
-                // state (residual count or empty). Reads base or bag_<i>
-                // exactly like the DestroyItem apply path.
-                let post = if intent.location == "base" {
-                    connections.get(&owner_cid).and_then(|c| {
-                        c.inventory
-                            .base
-                            .get(intent.slot as usize)
-                            .and_then(|s| s.as_ref())
-                            .map(|e| (e.item_path.clone(), e.count))
-                    })
-                } else if let Some(base_idx) = intent
-                    .location
-                    .strip_prefix("bag_")
-                    .and_then(|s| s.parse::<u8>().ok())
-                {
-                    connections.get(&owner_cid).and_then(|c| {
-                        c.inventory
-                            .bags
-                            .get(&base_idx)
-                            .and_then(|arr| arr.get(intent.slot as usize))
-                            .and_then(|s| s.as_ref())
-                            .map(|e| (e.item_path.clone(), e.count))
-                    })
-                } else {
-                    None
-                };
+                // state (residual count or empty). peek_at speaks every
+                // droppable location: base, bag_<i>, and the cursor,
+                // whose residual a partial drop must not zero out.
+                let post = connections
+                    .get(&owner_cid)
+                    .and_then(|c| c.inventory.peek_at(&intent.location, intent.slot));
                 let (delta_path, delta_count) = match post {
                     Some((p, c)) => (Some(p), c),
                     None => (None, 0),
@@ -5691,28 +5671,20 @@ pub async fn run(
                 let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
                     .iter()
                     .map(|(loc, slot)| {
-                        let payload = if loc == "base" {
-                            conn.inventory
-                                .base
-                                .get(*slot as usize)
-                                .and_then(|s| s.as_ref())
-                                .map(|e| (e.item_path.clone(), e.count))
-                        } else if loc == "equip" {
+                        // peek_at speaks base / bag_<i> / cursor; only the
+                        // paperdoll needs its own read here. The old
+                        // hand-rolled chain fanned an EMPTY cursor delta on
+                        // an equip-from-hand SWAP (playtest 2026-09-09): the
+                        // client's hand went blank while the server still
+                        // held the swapped-out item, and only a lift-click
+                        // swap recovered it.
+                        let payload = if loc == "equip" {
                             conn.inventory
                                 .equipment
                                 .get(&(*slot as u8))
                                 .map(|e| (e.item_path.clone(), e.count))
-                        } else if let Some(base_idx) =
-                            loc.strip_prefix("bag_").and_then(|s| s.parse::<u8>().ok())
-                        {
-                            conn.inventory
-                                .bags
-                                .get(&base_idx)
-                                .and_then(|arr| arr.get(*slot as usize))
-                                .and_then(|s| s.as_ref())
-                                .map(|e| (e.item_path.clone(), e.count))
                         } else {
-                            None
+                            conn.inventory.peek_at(loc, *slot)
                         };
                         (loc.clone(), *slot, payload)
                     })
@@ -5893,26 +5865,7 @@ pub async fn run(
                 };
                 conn.inventory_dirty = true;
                 let (item_path, count) = destroyed;
-                let payload = if intent.location == "base" {
-                    conn.inventory
-                        .base
-                        .get(intent.slot as usize)
-                        .and_then(|s| s.as_ref())
-                        .map(|e| (e.item_path.clone(), e.count))
-                } else if let Some(base_idx) = intent
-                    .location
-                    .strip_prefix("bag_")
-                    .and_then(|s| s.parse::<u8>().ok())
-                {
-                    conn.inventory
-                        .bags
-                        .get(&base_idx)
-                        .and_then(|arr| arr.get(intent.slot as usize))
-                        .and_then(|s| s.as_ref())
-                        .map(|e| (e.item_path.clone(), e.count))
-                } else {
-                    None
-                };
+                let payload = conn.inventory.peek_at(&intent.location, intent.slot);
                 let (delta_path, delta_count) = match payload {
                     Some((p, c)) => (Some(p), c),
                     None => (None, 0),
@@ -5950,26 +5903,10 @@ pub async fn run(
                 };
                 // Peek the item so we know what effect to apply
                 // BEFORE the decrement removes it from the slot.
-                let peek_path: Option<String> = if intent.location == "base" {
-                    conn.inventory
-                        .base
-                        .get(intent.slot as usize)
-                        .and_then(|s| s.as_ref())
-                        .map(|e| e.item_path.clone())
-                } else if let Some(base_idx) = intent
-                    .location
-                    .strip_prefix("bag_")
-                    .and_then(|s| s.parse::<u8>().ok())
-                {
-                    conn.inventory
-                        .bags
-                        .get(&base_idx)
-                        .and_then(|arr| arr.get(intent.slot as usize))
-                        .and_then(|s| s.as_ref())
-                        .map(|e| e.item_path.clone())
-                } else {
-                    None
-                };
+                let peek_path: Option<String> = conn
+                    .inventory
+                    .peek_at(&intent.location, intent.slot)
+                    .map(|(p, _)| p);
                 let Some(item_path) = peek_path else {
                     tracing::debug!(
                         owner = intent.owner,
@@ -6051,26 +5988,7 @@ pub async fn run(
                 };
                 conn.inventory_dirty = true;
                 // Inventory Delta for the touched slot.
-                let payload = if intent.location == "base" {
-                    conn.inventory
-                        .base
-                        .get(intent.slot as usize)
-                        .and_then(|s| s.as_ref())
-                        .map(|e| (e.item_path.clone(), e.count))
-                } else if let Some(base_idx) = intent
-                    .location
-                    .strip_prefix("bag_")
-                    .and_then(|s| s.parse::<u8>().ok())
-                {
-                    conn.inventory
-                        .bags
-                        .get(&base_idx)
-                        .and_then(|arr| arr.get(intent.slot as usize))
-                        .and_then(|s| s.as_ref())
-                        .map(|e| (e.item_path.clone(), e.count))
-                } else {
-                    None
-                };
+                let payload = conn.inventory.peek_at(&intent.location, intent.slot);
                 let (delta_path, delta_count) = match payload {
                     Some((p, c)) => (Some(p), c),
                     None => (None, 0),

@@ -670,9 +670,16 @@ impl PlayerInventory {
     /// * First tops up any existing same-item stacks up to `max_stack`.
     /// * Then claims empty slots, each starting a fresh stack capped
     ///   at `max_stack`.
-    /// * Returns `(touched_slots, leftover)` where `leftover` is the
-    ///   amount that didn't fit. Empty `touched_slots` + nonzero
-    ///   `leftover` means nothing was placed (inventory full).
+    /// * Returns `(touched, leftover)` where `touched` is
+    ///   `(location, slot)` pairs — `"base"` or `"bag_<i>"` — and
+    ///   `leftover` is the amount that didn't fit. Empty `touched` +
+    ///   nonzero `leftover` means nothing was placed (inventory full).
+    ///
+    /// Bags count (2026-09-09, playtest finding "Your bags are full"
+    /// with two empty pouches carried): after the base slots, the same
+    /// two passes run over every carried bag's inner slots, in bag-slot
+    /// order for determinism. One standing ban: a BAG item never lands
+    /// inside a bag, so bag-typed grants stop at the base slots.
     ///
     /// The leftover gives loot a refund path — the caller can push
     /// the remainder back into the loot bag rather than losing it.
@@ -683,7 +690,7 @@ impl PlayerInventory {
         &mut self,
         item_path: &str,
         count: u32,
-    ) -> Result<(Vec<usize>, u32), &'static str> {
+    ) -> Result<(Vec<(String, u32)>, u32), &'static str> {
         if count == 0 {
             return Err("zero count");
         }
@@ -692,8 +699,12 @@ impl PlayerInventory {
         }
         let cap = items::max_stack(item_path);
         let mut remaining = count;
-        let mut touched: Vec<usize> = Vec::new();
-        // Pass 1 — top up existing stacks with the same item.
+        let mut touched: Vec<(String, u32)> = Vec::new();
+        // Snapshot the bag keys sorted — HashMap iteration order is
+        // random, and grants must land deterministically.
+        let mut bag_keys: Vec<u8> = self.bags.keys().copied().collect();
+        bag_keys.sort_unstable();
+        // Pass 1 — top up existing stacks: base first, then bag inners.
         for i in 0..BASE_SLOT_COUNT {
             if remaining == 0 {
                 break;
@@ -704,11 +715,31 @@ impl PlayerInventory {
                     let put = remaining.min(space);
                     entry.count = entry.count.saturating_add(put);
                     remaining -= put;
-                    touched.push(i);
+                    touched.push(("base".to_string(), i as u32));
                 }
             }
         }
-        // Pass 2 — claim empty slots, each capped at max_stack.
+        for b in &bag_keys {
+            if remaining == 0 {
+                break;
+            }
+            let arr = self.bags.get_mut(b).expect("key from keys()");
+            for si in 0..arr.len() {
+                if remaining == 0 {
+                    break;
+                }
+                if let Some(entry) = arr[si].as_mut() {
+                    if entry.item_path == item_path && entry.count < cap {
+                        let space = cap - entry.count;
+                        let put = remaining.min(space);
+                        entry.count = entry.count.saturating_add(put);
+                        remaining -= put;
+                        touched.push((format!("bag_{b}"), si as u32));
+                    }
+                }
+            }
+        }
+        // Pass 2 — claim empty slots: base first...
         for i in 0..BASE_SLOT_COUNT {
             if remaining == 0 {
                 break;
@@ -720,11 +751,35 @@ impl PlayerInventory {
                     count: put,
                 });
                 remaining -= put;
-                touched.push(i);
+                touched.push(("base".to_string(), i as u32));
                 // Track 14.3 — bag-typed loot needs its inner Vec
                 // allocated so subsequent bag_<i> deltas have
                 // somewhere to land.
                 self.ensure_bag_init(i);
+            }
+        }
+        // ...then empty bag inners. A held-nowhere bag item stops here:
+        // bag-in-bag stays banned on every path.
+        if remaining > 0 && !is_bag_item(item_path) {
+            for b in &bag_keys {
+                if remaining == 0 {
+                    break;
+                }
+                let arr = self.bags.get_mut(b).expect("key from keys()");
+                for si in 0..arr.len() {
+                    if remaining == 0 {
+                        break;
+                    }
+                    if arr[si].is_none() {
+                        let put = remaining.min(cap);
+                        arr[si] = Some(InventoryEntry {
+                            item_path: item_path.to_string(),
+                            count: put,
+                        });
+                        remaining -= put;
+                        touched.push((format!("bag_{b}"), si as u32));
+                    }
+                }
             }
         }
         Ok((touched, remaining))
@@ -740,41 +795,17 @@ impl PlayerInventory {
     /// the turn-in (keep the quest, "make room and try again") rather than
     /// burning the completion with no item.
     pub fn can_accept(&self, grants: &[(String, u32)]) -> bool {
-        // Working copy of just the base-slot occupancy (path, count).
-        let mut base: Vec<Option<(String, u32)>> = self
-            .base
-            .iter()
-            .map(|s| s.as_ref().map(|e| (e.item_path.clone(), e.count)))
-            .collect();
+        // Clone-and-try against the REAL placer (2026-09-09, user call:
+        // "have them both use the same system"). The old hand-rolled
+        // base-only simulation here was a second implementation of
+        // placement, and it drifted the moment the placer learned bags —
+        // a quest turn-in would have kept refusing with pouch space free.
+        // One implementation, one answer.
+        let mut probe = self.clone();
         for (path, count) in grants {
-            let cap = items::max_stack(path);
-            let mut remaining = *count;
-            // Pass 1 — top up existing stacks of the same item.
-            for slot in base.iter_mut() {
-                if remaining == 0 {
-                    break;
-                }
-                if let Some((p, c)) = slot {
-                    if p == path && *c < cap {
-                        let put = remaining.min(cap - *c);
-                        *c += put;
-                        remaining -= put;
-                    }
-                }
-            }
-            // Pass 2 — claim empty slots, each capped at max_stack.
-            for slot in base.iter_mut() {
-                if remaining == 0 {
-                    break;
-                }
-                if slot.is_none() {
-                    let put = remaining.min(cap);
-                    *slot = Some((path.clone(), put));
-                    remaining -= put;
-                }
-            }
-            if remaining > 0 {
-                return false;
+            match probe.add_item_locating(path, *count) {
+                Ok((_, 0)) => {}
+                _ => return false,
             }
         }
         true
@@ -2039,7 +2070,7 @@ mod tests {
             .add_item_locating(POTION, 15)
             .expect("add 15 potions");
         assert_eq!(leftover, 0);
-        assert_eq!(touched, vec![0, 1]);
+        assert_eq!(touched, vec![("base".to_string(), 0u32), ("base".to_string(), 1u32)]);
         assert_eq!(inv.base[0].as_ref().unwrap().count, 10);
         assert_eq!(inv.base[1].as_ref().unwrap().count, 5);
     }
@@ -2351,7 +2382,7 @@ mod tests {
         let mut inv = PlayerInventory::new();
         let (touched, leftover) = inv.add_item_locating(POUCH, 1).unwrap();
         assert_eq!(leftover, 0);
-        assert_eq!(touched, vec![0]);
+        assert_eq!(touched, vec![("base".to_string(), 0u32)]);
         assert!(
             inv.bags.contains_key(&0u8),
             "looted bag must allocate its inner Vec"
@@ -2538,6 +2569,80 @@ mod tests {
             inv.bags.get(&0u8).unwrap()[2].as_ref().unwrap().item_path,
             POTION
         );
+    }
+
+    // ── 2026-09-09: grants spill into bags ──
+
+    #[test]
+    fn grant_spills_into_bag_inners_when_base_is_full() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item_locating(POUCH, 1).unwrap(); // base[0] = pouch
+        for i in 1..BASE_SLOT_COUNT {
+            inv.base[i] = Some(InventoryEntry {
+                item_path: SWORD.into(),
+                count: 1,
+            });
+        }
+        let (touched, leftover) = inv.add_item_locating(POTION, 5).unwrap();
+        assert_eq!(leftover, 0, "the pouch had room");
+        assert_eq!(touched, vec![("bag_0".to_string(), 0u32)]);
+        assert_eq!(inv.bags.get(&0u8).unwrap()[0].as_ref().unwrap().count, 5);
+    }
+
+    #[test]
+    fn grant_tops_up_a_bag_stack_before_claiming_base_empties() {
+        // Pass order: base top-ups, bag top-ups, base empties, bag
+        // empties. With 5 potions already in the pouch (cap 10) and base
+        // slots free, granting 7 fills the bag stack to 10 first and only
+        // then claims a base slot for the remaining 2.
+        let mut inv = PlayerInventory::new();
+        inv.add_item_locating(POUCH, 1).unwrap();
+        inv.bags.get_mut(&0u8).unwrap()[0] = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 5,
+        });
+        let (touched, leftover) = inv.add_item_locating(POTION, 7).unwrap();
+        assert_eq!(leftover, 0);
+        assert_eq!(
+            touched,
+            vec![("bag_0".to_string(), 0u32), ("base".to_string(), 1u32)]
+        );
+        assert_eq!(inv.bags.get(&0u8).unwrap()[0].as_ref().unwrap().count, 10);
+        assert_eq!(inv.base[1].as_ref().unwrap().count, 2);
+    }
+
+    #[test]
+    fn a_granted_bag_never_lands_inside_a_bag() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item_locating(POUCH, 1).unwrap(); // base[0] = pouch, inners empty
+        for i in 1..BASE_SLOT_COUNT {
+            inv.base[i] = Some(InventoryEntry {
+                item_path: SWORD.into(),
+                count: 1,
+            });
+        }
+        let (touched, leftover) = inv.add_item_locating(POUCH, 1).unwrap();
+        assert!(touched.is_empty(), "bag-in-bag stays banned on the grant path");
+        assert_eq!(leftover, 1);
+    }
+
+    #[test]
+    fn can_accept_counts_bag_space_because_it_probes_the_real_placer() {
+        let mut inv = PlayerInventory::new();
+        inv.add_item_locating(POUCH, 1).unwrap();
+        for i in 1..BASE_SLOT_COUNT {
+            inv.base[i] = Some(InventoryEntry {
+                item_path: SWORD.into(),
+                count: 1,
+            });
+        }
+        assert!(inv.can_accept(&[(POTION.to_string(), 5)]), "pouch space counts");
+        assert!(
+            !inv.can_accept(&[(POUCH.to_string(), 1)]),
+            "a bag can only go to base, and base is full"
+        );
+        // The probe must not mutate the real inventory.
+        assert!(inv.bags.get(&0u8).unwrap()[0].is_none());
     }
 
     // ── PD_W0027: the cursor slot ──

@@ -6120,24 +6120,16 @@ pub async fn run(
                     continue;
                 }
                 conn.inventory_dirty = true;
-                let deltas: Vec<(u32, String, u32)> = touched
+                let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
                     .iter()
-                    .map(|&slot_idx| {
-                        let entry = conn.inventory.base[slot_idx]
-                            .as_ref()
-                            .expect("just inserted");
-                        (slot_idx as u32, entry.item_path.clone(), entry.count)
-                    })
+                    .map(|(loc, slot)| (loc.clone(), *slot, conn.inventory.peek_at(loc, *slot)))
                     .collect();
-                for (slot_idx, path, count) in deltas {
-                    handlers::send_inventory_delta(
-                        &mut server,
-                        owner_cid,
-                        "base".to_string(),
-                        slot_idx,
-                        Some(path),
-                        count,
-                    );
+                for (loc, slot, payload) in deltas {
+                    let (dp, dc) = match payload {
+                        Some((p, c)) => (Some(p), c),
+                        None => (None, 0),
+                    };
+                    handlers::send_inventory_delta(&mut server, owner_cid, loc, slot, dp, dc);
                 }
                 tracing::info!(
                     owner = intent.owner,
@@ -6254,24 +6246,16 @@ pub async fn run(
                 conn.coins_dirty = true;
                 conn.inventory_dirty = true;
                 let coins_after = conn.coins;
-                let deltas: Vec<(u32, String, u32)> = touched
+                let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
                     .iter()
-                    .map(|&slot_idx| {
-                        let entry = conn.inventory.base[slot_idx]
-                            .as_ref()
-                            .expect("just inserted");
-                        (slot_idx as u32, entry.item_path.clone(), entry.count)
-                    })
+                    .map(|(loc, slot)| (loc.clone(), *slot, conn.inventory.peek_at(loc, *slot)))
                     .collect();
-                for (slot_idx, path, count) in deltas {
-                    handlers::send_inventory_delta(
-                        &mut server,
-                        owner_cid,
-                        "base".to_string(),
-                        slot_idx,
-                        Some(path),
-                        count,
-                    );
+                for (loc, slot, payload) in deltas {
+                    let (dp, dc) = match payload {
+                        Some((p, c)) => (Some(p), c),
+                        None => (None, 0),
+                    };
+                    handlers::send_inventory_delta(&mut server, owner_cid, loc, slot, dp, dc);
                 }
                 handlers::send_coins_update(&mut server, owner_cid, coins_after);
                 if leftover > 0 {
@@ -6714,18 +6698,12 @@ pub async fn run(
             if !touched.is_empty() {
                 conn.inventory_dirty = true;
             }
-            for s in &touched {
-                let post = conn
-                    .inventory
-                    .base
-                    .get(*s)
-                    .and_then(|x| x.as_ref())
-                    .map(|e| (e.item_path.clone(), e.count));
-                let (dp, dc) = match post {
+            for (loc, slot) in &touched {
+                let (dp, dc) = match conn.inventory.peek_at(loc, *slot) {
                     Some((p, c)) => (Some(p), c),
                     None => (None, 0),
                 };
-                handlers::send_inventory_delta(&mut server, cid, "base".to_string(), *s as u32, dp, dc);
+                handlers::send_inventory_delta(&mut server, cid, loc.clone(), *slot, dp, dc);
             }
             let entries = if intent.shared {
                 conn.account_bank_items.to_snapshot_entries()
@@ -7771,12 +7749,12 @@ pub async fn run(
                             if leftover > 0 {
                                 tracing::error!(char_id = responder, quest_id = %quest_id, %path, leftover, "quest reward partially placed despite capacity pre-check");
                             }
-                            for slot in &touched {
-                                let (dpath, dcount) = match &conn.inventory.base[*slot] {
-                                    Some(e) => (Some(e.item_path.clone()), e.count),
+                            for (loc, slot) in &touched {
+                                let (dpath, dcount) = match conn.inventory.peek_at(loc, *slot) {
+                                    Some((p, c)) => (Some(p), c),
                                     None => (None, 0),
                                 };
-                                handlers::send_inventory_delta(&mut server, responder_cid, "base".to_string(), *slot as u32, dpath, dcount);
+                                handlers::send_inventory_delta(&mut server, responder_cid, loc.clone(), *slot, dpath, dcount);
                             }
                             handlers::send_loot_granted(&mut server, responder_cid, path.clone(), count.saturating_sub(leftover));
                         }
@@ -7978,7 +7956,7 @@ pub async fn run(
                     // Move each stack into the looter's bags (same add_item_locating
                     // path the bag loot uses); a full inventory refunds the unplaced
                     // portion to the corpse. Collect the client deltas — don't send.
-                    let mut inv_deltas: Vec<(u32, String, u32)> = Vec::new();
+                    let mut inv_deltas: Vec<(String, u32, String, u32)> = Vec::new();
                     let mut granted_lines: Vec<(String, u32)> = Vec::new();
                     for (path, count) in granted {
                         let mut placed_count: u32 = 0;
@@ -7987,15 +7965,10 @@ pub async fn run(
                             if let Ok((touched, leftover)) =
                                 conn.inventory.add_item_locating(&path, count)
                             {
-                                for slot_idx in &touched {
-                                    let entry = conn.inventory.base[*slot_idx]
-                                        .as_ref()
-                                        .expect("just inserted");
-                                    inv_deltas.push((
-                                        *slot_idx as u32,
-                                        entry.item_path.clone(),
-                                        entry.count,
-                                    ));
+                                for (loc, slot) in &touched {
+                                    if let Some((p, c)) = conn.inventory.peek_at(loc, *slot) {
+                                        inv_deltas.push((loc.clone(), *slot, p, c));
+                                    }
                                 }
                                 placed_count = count - leftover;
                                 leftover_count = leftover;
@@ -8067,12 +8040,12 @@ pub async fn run(
                         if let Some(coins) = coin_update {
                             handlers::send_coins_update(&mut server, looter_cid, coins);
                         }
-                        for (slot_idx, item_path, total_count) in inv_deltas {
+                        for (loc, slot, item_path, total_count) in inv_deltas {
                             handlers::send_inventory_delta(
                                 &mut server,
                                 looter_cid,
-                                "base".to_string(),
-                                slot_idx,
+                                loc,
+                                slot,
                                 Some(item_path),
                                 total_count,
                             );
@@ -8299,7 +8272,7 @@ pub async fn run(
                     // `leftover`, which we refund to the loot bag so
                     // the player can pick it up later.
                     let looter_cid = intent.looter as ClientId;
-                    let mut touched_deltas: Vec<(u32, String, u32)> = Vec::new();
+                    let mut touched_deltas: Vec<(String, u32, String, u32)> = Vec::new();
                     let mut placed_count: u32 = 0;
                     let mut leftover_count: u32 = 0;
                     if let Some(conn) = connections.get_mut(&looter_cid) {
@@ -8308,15 +8281,10 @@ pub async fn run(
                                 if !touched.is_empty() {
                                     conn.inventory_dirty = true;
                                 }
-                                for slot_idx in &touched {
-                                    let entry = conn.inventory.base[*slot_idx]
-                                        .as_ref()
-                                        .expect("just inserted");
-                                    touched_deltas.push((
-                                        *slot_idx as u32,
-                                        entry.item_path.clone(),
-                                        entry.count,
-                                    ));
+                                for (loc, slot) in &touched {
+                                    if let Some((p, c)) = conn.inventory.peek_at(loc, *slot) {
+                                        touched_deltas.push((loc.clone(), *slot, p, c));
+                                    }
                                 }
                                 placed_count = count - leftover;
                                 leftover_count = leftover;
@@ -8333,12 +8301,12 @@ pub async fn run(
                             }
                         }
                     }
-                    for (slot_idx, item_path, total_count) in touched_deltas {
+                    for (loc, slot, item_path, total_count) in touched_deltas {
                         handlers::send_inventory_delta(
                             &mut server,
                             looter_cid,
-                            "base".to_string(),
-                            slot_idx,
+                            loc,
+                            slot,
                             Some(item_path),
                             total_count,
                         );

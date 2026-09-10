@@ -2185,6 +2185,84 @@ async fn buy_item_charges_coins_and_grants_stack() {
     let _ = coins;
 }
 
+/// Dead-intents audit (2026-08-24): a merchant transaction requires a merchant
+/// nearby. A client positioned far from any vendor — e.g. a modified client at
+/// the bottom of a dungeon — must be refused, with no coin or item change. The
+/// honest client is gated in UI at 6 m; this is the server backstop against a
+/// forged position.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buy_item_rejected_when_no_vendor_in_range() {
+    const POTION_NAME: &str = "Minor Healing Potion";
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "farbuy", "Wanderer", "Human", "Warrior").await;
+    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    // Plenty of coin, but stranded 200 m out — well beyond the 15 m service range.
+    sqlx::query("UPDATE characters SET copper = 1000, pos_x = 200.0, pos_z = 200.0 WHERE id = ?1")
+        .bind(a_char_id)
+        .execute(&pool)
+        .await
+        .expect("seed coins + far position");
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let _ = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+        })
+        .await
+        .expect("snapshot");
+    let _ = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::CoinsUpdate { .. })
+        })
+        .await;
+
+    a.send_buy_item(0, POTION_NAME, 1);
+    for _ in 0..6 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // No coin change: the far buy is refused before charging.
+    let coins = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
+            matches!(m, ServerWorldMsg::CoinsUpdate { .. })
+        })
+        .await;
+    assert!(coins.is_none(), "a buy with no vendor in range must not charge coin");
+}
+
+/// The same character, moved to the town spawn (origin, in range of Brom the
+/// vendor), buys normally. Proves the gate is a proximity check, not a block.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buy_item_succeeds_at_the_town_vendor() {
+    const POTION_NAME: &str = "Minor Healing Potion";
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "nearbuy", "Townie", "Human", "Warrior").await;
+    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    // At spawn (0,0,0), ~8 m from Brom — inside service range.
+    sqlx::query("UPDATE characters SET copper = 1000, pos_x = 0.0, pos_z = 0.0 WHERE id = ?1")
+        .bind(a_char_id)
+        .execute(&pool)
+        .await
+        .expect("seed");
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let _ = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+        })
+        .await
+        .expect("snapshot");
+
+    a.send_buy_item(0, POTION_NAME, 1);
+    let delta = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { .. })
+        })
+        .await;
+    assert!(delta.is_some(), "a buy at the town vendor must succeed");
+}
+
 /// Track 14 follow-up — BuyItem rejects when the player can't
 /// afford the purchase; no Delta / CoinsUpdate lands.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

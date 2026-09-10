@@ -948,6 +948,13 @@ async fn reap_connection(
                 members_with_names,
                 g.loot_mode.to_u8(),
             );
+            // Same panel-row seed as the intent-path roster fan: the
+            // survivors' rosters just changed shape, so refill every row.
+            for m in &g.members {
+                if let Some(c) = connections.get(m) {
+                    handlers::fan_out_resources(server, &recipients, c);
+                }
+            }
         }
     }
 
@@ -4885,6 +4892,18 @@ pub async fn run(
                         members_with_names,
                         g.loot_mode.to_u8(),
                     );
+                    // Seed the group panel rows (playtest 2026-08-27: rows
+                    // build zeroed client-side and resources otherwise fan
+                    // only on CHANGE, so a full-HP idle member showed blank
+                    // bars until something moved). One shot of the ordinary
+                    // resource updates per member, sent to the group, fills
+                    // every row the moment the roster lands. Existing
+                    // message types; no protocol change.
+                    for m in &g.members {
+                        if let Some(c) = conns.get(m) {
+                            handlers::fan_out_resources(srv, &recipients, c);
+                        }
+                    }
                 } else if let Some(last) = also_notify_dissolved {
                     // Group dissolved — send an empty roster to the
                     // last member as a "your group dissolved" signal.

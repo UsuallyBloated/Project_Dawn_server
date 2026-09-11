@@ -60,3 +60,50 @@ id = "test_q1"
 level_req = 1
 reward_tier = "standard"
 objectives = [ { kind = "kill", target = "Wolf", count = 5 } ]
+
+# ── Phase 4 second tier (2026-09-10, docs/design/phase4_content_plan.md) ──
+# Two chains through the existing givers: Aldric carries the undead line
+# (restless_bones → champions_crypt → the_undying), Brom the road line
+# (road_toll → silk_harvest). Targets are chosen against the phase 4
+# zone_camps.toml: "Skeleton" ticks on all three skeleton camps, the two
+# named finales match the spawned mob's full display name.
+
+[[quest]]
+id = "restless_bones"
+level_req = 2
+reward_tier = "standard"
+objectives = [ { kind = "kill", target = "Skeleton", count = 8 } ]
+item_rewards = [ "res://data/loot/items/leather_cap.tres" ]
+turn_in_npc = "aldric"
+
+[[quest]]
+id = "road_toll"
+level_req = 5
+reward_tier = "standard"
+objectives = [ { kind = "kill", target = "Bandit", count = 6 } ]
+item_rewards = [ "res://data/loot/items/copper_chain_coif.tres" ]
+turn_in_npc = "brom"
+
+[[quest]]
+id = "silk_harvest"
+level_req = 7
+reward_tier = "hard"
+objectives = [ { kind = "kill", target = "Spider", count = 10 } ]
+item_rewards = [ "res://data/loot/items/leather_vest.tres" ]
+turn_in_npc = "brom"
+
+[[quest]]
+id = "champions_crypt"
+level_req = 9
+reward_tier = "hard"
+objectives = [ { kind = "kill", target = "Skeleton Champion", count = 6 } ]
+item_rewards = [ "res://data/loot/items/iron_chain_leggings.tres" ]
+turn_in_npc = "aldric"
+
+[[quest]]
+id = "the_undying"
+level_req = 12
+reward_tier = "named"
+objectives = [ { kind = "kill", target = "The Undying", count = 1 } ]
+item_rewards = [ "res://data/loot/items/flamebrand.tres" ]
+turn_in_npc = "aldric"

@@ -111,7 +111,7 @@ mod tests {
     #[test]
     fn starter_spawn_reaches_every_town_npc() {
         let spawn = Vec3f::ZERO;
-        for id in ["brom", "aldric", "sister_maelis", "thalia"] {
+        for id in ["brom", "aldric", "sister_maelis", "thalia", "elara", "hadrik"] {
             let n = lookup(id).unwrap();
             assert!(
                 n.position().distance_to(spawn) <= NPC_SERVICE_RANGE,

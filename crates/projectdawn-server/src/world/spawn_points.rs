@@ -110,8 +110,9 @@ mod tests {
         let now = Instant::now();
         let mut sp = Spawner::new(now);
         let spawned = sp.tick(now);
-        // 27 spawn points in the starter zone TOML → first tick fires all.
-        assert_eq!(spawned.len(), 27);
+        // 54 spawn points in the starter zone TOML (phase 4 layout,
+        // 2026-09-10) → first tick fires all.
+        assert_eq!(spawned.len(), 54);
         for p in &sp.points {
             assert!(p.respawn_at.is_none(), "live points must clear respawn_at");
         }

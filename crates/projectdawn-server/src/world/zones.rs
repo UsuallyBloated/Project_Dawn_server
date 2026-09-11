@@ -118,14 +118,36 @@ mod tests {
 
     #[test]
     fn starter_camps_match_expected_shape() {
-        // The starter zone has 9 camps with 27 spawn positions total.
-        // If this changes, port the new shape from `zone_data.gd`
-        // intentionally — silent drift means the server and client
-        // disagree on what should be where.
+        // The phase 4 layout (2026-09-10): 21 camps (16 ordinary + 5 named
+        // dens) with 54 spawn positions and 16 distinct mob names (each den
+        // reuses its escort camp's template name, so a missing named_id
+        // degrades to an ordinary mob). If this changes, change it
+        // intentionally — the design doc is the client repo's
+        // docs/design/phase4_content_plan.md.
         let camps = load_camps();
-        assert_eq!(camps.len(), 27, "starter zone spawn-point count drifted");
+        assert_eq!(camps.len(), 54, "starter zone spawn-point count drifted");
         let names: std::collections::HashSet<&str> =
             camps.iter().map(|c| c.mob.name.as_str()).collect();
-        assert_eq!(names.len(), 9, "starter zone mob-type count drifted");
+        assert_eq!(names.len(), 16, "starter zone mob-type count drifted");
+    }
+
+    #[test]
+    fn every_named_mob_is_placed_exactly_once() {
+        // The five authored named mobs each get one single-spawn den. A
+        // named_id here that named_mobs.toml doesn't know would silently
+        // spawn an ordinary mob, so pin the linkage from this side too.
+        let camps = load_camps();
+        let placed: Vec<&str> = camps
+            .iter()
+            .filter_map(|c| c.mob.named_id.as_deref())
+            .collect();
+        for id in ["sable", "rotfang", "ancient_crawler", "greth", "the_undying"] {
+            assert_eq!(
+                placed.iter().filter(|p| **p == id).count(),
+                1,
+                "named mob {id:?} should be placed exactly once"
+            );
+        }
+        assert_eq!(placed.len(), 5, "unexpected extra named placements");
     }
 }

@@ -40,6 +40,14 @@ struct Harness {
 }
 
 async fn start_both() -> Harness {
+    // Opt-in server tracing for triage: RUST_LOG=info cargo test ... --nocapture
+    // makes the in-process server's tracing lines visible. try_init so the
+    // second test in the process doesn't panic on double-init.
+    if std::env::var("RUST_LOG").is_ok() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .try_init();
+    }
     let tmp = TempDir::new().expect("tempdir");
     let db_path = tmp.path().join("two_clients_test.db");
     let url = format!("sqlite://{}?mode=rwc", db_path.display());
@@ -306,6 +314,25 @@ impl WorldClient {
         );
     }
 
+    /// Dev-gated world-mob spawn (the Test Panel path). The server places the
+    /// mob exactly 3 m behind the requester. Requires the connection to be
+    /// dev or GM — grant `is_gm` via `db::set_account_gm` and mint a FRESH
+    /// token, as `is_gm_gates_dev_commands` does.
+    fn send_dev_spawn(&mut self, name: &str, level: u32, hp: f32, dmg: i32, speed: f32, aggro: f32) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::DevSpawnMob {
+                name: name.to_string(),
+                level,
+                hp,
+                dmg,
+                speed,
+                aggro,
+            },
+        );
+    }
+
     fn send_pet_command(&mut self, command: u8, target_id: Option<u64>) {
         let msg = ClientWorldMsg::PetCommand { command, target_id };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
@@ -386,6 +413,23 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
+    /// Sleep for `d` while continuing to service the transport at TICK_DT
+    /// cadence. Use instead of a bare tokio sleep for any wait longer than
+    /// a tick or two (cast bars especially): with the phase 4 world
+    /// population, an unserviced client socket overflows during a
+    /// multi-second sleep and datagrams — including ones carrying RELIABLE
+    /// channel slices — are lost faster than the 150 ms resend lands
+    /// between ticks, so a message the server provably sent (e.g.
+    /// PetSpawn) can miss a 3 s wait entirely. A real client services the
+    /// socket every frame; the harness must too.
+    async fn pump_for(&mut self, d: Duration) {
+        let end = Instant::now() + d;
+        while Instant::now() < end {
+            tick_one(&mut self.client, &mut self.transport);
+            tokio::time::sleep(TICK_DT).await;
+        }
+    }
+
     async fn wait_for(
         &mut self,
         channel: u8,
@@ -395,6 +439,17 @@ impl WorldClient {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             tick_one(&mut self.client, &mut self.transport);
+            // A transport-level disconnect (e.g. a reliable channel blowing
+            // its max_memory_usage_bytes) otherwise presents as a silent
+            // timeout here, which reads like a missing server message.
+            // Surface it loudly instead.
+            if self.client.is_disconnected() {
+                eprintln!(
+                    "wait_for: client DISCONNECTED mid-wait (reason: {:?})",
+                    self.client.disconnect_reason()
+                );
+                return None;
+            }
             while let Some(bytes) = self.client.receive_message(channel) {
                 if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(
                     &bytes,
@@ -742,7 +797,7 @@ async fn two_clients_buff_snapshot_fanout() {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    a.pump_for(Duration::from_millis(1100)).await;
     a.send_cast_spell("Healing Wave", None);
     for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);
@@ -764,10 +819,9 @@ async fn two_clients_buff_snapshot_fanout() {
 /// Track 5 sub-task 1C: AI state machine drives Idle → Chase → Attack
 /// for a server-spawned enemy when a player enters aggro range.
 ///
-/// The player walks toward camp 0's first spawn at [20, 0, 5] for ~2 s
-/// (covering ~15 m at MAX_MOVE_SPEED = 7.5 m/s, landing well inside
-/// the Decrepit Skeleton's 8 m aggro radius even with the ±3 m XZ
-/// spawn jitter), then stops. The test asserts:
+/// The player walks toward the Bonepile's isolated [-16, 0, -14] spawn
+/// long enough to land well inside the Decrepit Skeleton's 8 m aggro
+/// radius even with the ±3 m XZ spawn jitter, then stops. The test asserts:
 ///
 ///   * an `EntityTarget` broadcast lands targeting the player (Idle →
 ///     Chase transition fired server-side);
@@ -786,8 +840,14 @@ async fn enemy_aggros_chases_and_attacks_player() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     // Unit vector toward camp 0's [20, 0, 5] spawn.
-    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
-    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
+    // Phase 4 layout note: every camp-walking test aims at the Bonepile's
+    // isolated [-16, 0, -14] spawn — the one ring 1 spawn whose aggro circle
+    // overlaps no other, so exactly ONE slow (1.8 m/s, 2.5 s swing) level 1
+    // Decrepit Skeleton pulls, the same single-puller semantics these tests
+    // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
+    // pack, and standing in it turns every cast into interrupt rolls.
+    let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
+    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
 
     // Walk for ~2 s at 50 ms cadence. Each Move refreshes the server-side
     // stale-move clock so integration continues until we stop sending.
@@ -873,9 +933,15 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
-    // Walk toward camp 0's [20, 0, 5] for ~2 s.
-    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
-    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
+    // Walk toward the Wolf Run's [24, 0, -16] spawn (level 1 Grey Wolf).
+    // Phase 4 layout note: every camp-walking test aims at the Bonepile's
+    // isolated [-16, 0, -14] spawn — the one ring 1 spawn whose aggro circle
+    // overlaps no other, so exactly ONE slow (1.8 m/s, 2.5 s swing) level 1
+    // Decrepit Skeleton pulls, the same single-puller semantics these tests
+    // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
+    // pack, and standing in it turns every cast into interrupt rolls.
+    let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
+    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
     // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
     // whether an enemy locks on before the wait expires depended on where it
     // happened to be wandering. Walking fully in makes the pull deterministic.
@@ -1123,68 +1189,74 @@ async fn aoi_approaching_client_triggers_entity_spawn() {
     .expect("B receives EntitySpawn for A when it crosses into A's neighbourhood");
 }
 
-/// Track 9 — server-side AOE damage. A Magician walks into camp 0's
-/// aggro radius until an enemy chases into melee, then casts Inferno
-/// (5 m radius, 45 base damage, FIRE). The server's AOE arm searches
-/// the caster's AOI neighbourhood, filters by radius, and fans a Hit
-/// per victim. Asserts at least one enemy receives a Fire Hit
-/// authored by the caster.
+/// Track 9 — server-side AOE damage. A Magician casts Inferno (5 m
+/// radius, 45 base damage, FIRE) with an enemy standing 3 m away. The
+/// server's AOE arm searches the caster's AOI neighbourhood, filters by
+/// radius, and fans a Hit per victim. Asserts at least one enemy
+/// receives a Fire Hit authored by the caster.
+///
+/// The victim is DEV-SPAWNED after the cast bar has already run, not
+/// pulled from a world camp. The old walk-into-a-camp version was
+/// flaky for two structural reasons: an enemy in melee during the
+/// 2.5 s cast rolls a real interrupt (70% per hit at channeling 0),
+/// and the "first hit" it keyed on could be a stale drive-by swing
+/// from an enemy that had already leashed home, leaving nothing in
+/// radius at resolution. A mob that appears 3 m away AFTER the bar
+/// completes can do neither. Dev spawning needs a GM connection:
+/// same provision, flip `is_gm`, re-mint token flow as
+/// `is_gm_gates_dev_commands`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn aoe_spell_damages_nearby_enemies() {
     let h = start_both().await;
 
-    let (a_session, a_char_id, a_token) =
+    let (a_session, a_char_id, _stale_token) =
         provision_client(&h.auth_url, "ino", "Inora", "Human", "Magician").await;
     // Inferno requires level 12; provisioned characters start at 1.
     set_char_level(&h.db_url, a_char_id, 12).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "ino", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
-    // Walk toward camp 0's [20, 0, 5] for ~2 s — same pattern as
-    // player_attack_kills_enemy_and_corpse_despawns.
-    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
-    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
-    // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
-    // whether an enemy locks on before the wait expires depended on where it
-    // happened to be wandering. Walking fully in makes the pull deterministic.
-    let walk_end = Instant::now() + Duration::from_millis(3_500);
-    let mut seq: u32 = 1;
-    while Instant::now() < walk_end {
-        a.send_move(seq, dir);
-        seq += 1;
+    // Let enter-world settle so the connection is fully in_world.
+    for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
 
-    // Wait for an enemy hit on us — proves an enemy chased into
-    // melee range, which puts it well within Inferno's 5 m radius.
-    let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
-            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
-        })
-        .await
-        .expect("an enemy locks on and swings");
-    let enemy_id: u64 = match hit_evt {
-        ServerWorldMsg::Hit { attacker, .. } => attacker,
-        _ => unreachable!(),
-    };
-    assert!(
-        enemy_id >= ENEMY_ID_BASE,
-        "attacker id must be an enemy id (got {enemy_id}, base {ENEMY_ID_BASE})"
-    );
-
-    // Cast Inferno. `target_id: None` because AOE doesn't take a
-    // single target — the server searches the caster's AOI for
-    // anything in radius. Inferno has cast_time 2.5s; Track 10's
-    // gate rejects CastSpell without a matching CastStart that ran
-    // long enough, so pump CastStart out first (sleeping doesn't
-    // advance the transport), wait the cast time, then fire CastSpell.
+    // Run the cast bar first. `target_id: None` because AOE doesn't take
+    // a single target — the server searches the caster's AOI for anything
+    // in radius at resolution time. Track 10's gate rejects CastSpell
+    // without a matching CastStart that ran long enough, so pump
+    // CastStart out first (sleeping doesn't advance the transport).
     a.send_cast_start("Inferno", 2.5);
     for _ in 0..3 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
-    tokio::time::sleep(Duration::from_millis(2600)).await;
+    a.pump_for(Duration::from_millis(2600)).await;
+
+    // Bar has run; NOW conjure the victim 3 m away. Unique name so the
+    // EntitySpawn predicate can't match a world camp mob fanned at
+    // connect time.
+    a.send_dev_spawn("Inferno Target Dummy", 1, 25.0, 3, 1.8, 8.0);
+    let spawn_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. }
+                if mob_name == "Inferno Target Dummy")
+        })
+        .await
+        .expect("the dev-spawned victim fans an EnemySpawn");
+    let enemy_id: u64 = match spawn_evt {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    assert!(
+        enemy_id >= ENEMY_ID_BASE,
+        "victim id must be an enemy id (got {enemy_id}, base {ENEMY_ID_BASE})"
+    );
+
     a.send_cast_spell("Inferno", None);
     for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);
@@ -1200,12 +1272,12 @@ async fn aoe_spell_damages_nearby_enemies() {
                 m,
                 ServerWorldMsg::Hit { attacker, target, dmg_type, .. }
                     if *attacker == a_char_id as u64
-                    && *target >= ENEMY_ID_BASE
+                    && *target == enemy_id
                     && matches!(dmg_type, DamageType::Fire)
             )
         })
         .await
-        .expect("Inferno fans a Fire Hit to at least one enemy in range");
+        .expect("Inferno fans a Fire Hit to the enemy standing 3 m away");
     if let ServerWorldMsg::Hit { amount, .. } = aoe_hit {
         assert_eq!(amount, 45, "Inferno authored base_damage is 45");
     }
@@ -1298,7 +1370,7 @@ async fn cast_spell_accepted_after_cast_time() {
     }
     // Now wait past the cast time (1.0 s) on the server's wall clock.
     // 1100 ms includes a 100 ms cushion above the gate's tolerance.
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    a.pump_for(Duration::from_millis(1100)).await;
     a.send_cast_spell("Healing Wave", None);
     for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);
@@ -1364,7 +1436,7 @@ async fn pet_summon_visible_to_peer() {
         tick_one(&mut b.client, &mut b.transport);
         tokio::time::sleep(TICK_DT).await;
     }
-    tokio::time::sleep(Duration::from_millis(3100)).await;
+    a.pump_for(Duration::from_millis(3100)).await;
     a.send_cast_spell("Summon Skeleton", None);
     for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);
@@ -1422,7 +1494,7 @@ async fn pet_follows_owner() {
         tick_one(&mut b.client, &mut b.transport);
         tokio::time::sleep(TICK_DT).await;
     }
-    tokio::time::sleep(Duration::from_millis(3100)).await;
+    a.pump_for(Duration::from_millis(3100)).await;
     a.send_cast_spell("Summon Skeleton", None);
     for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);
@@ -1499,12 +1571,50 @@ async fn pet_attacks_owners_target() {
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
-    // Walk toward camp 0's [20, 0, 5]. 3.5 s, not 2 s: at 2 s the player only
-    // just clips the aggro radius, so whether an enemy locks on before the
-    // 35 s wait expires depended on where it happened to be wandering. Walking
-    // fully into the camp makes the pull deterministic.
-    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
-    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
+    // Summon FIRST, in peace, before walking into aggro range — the same
+    // reorder pet_command_attack_locks_onto_target got: casting the 3 s
+    // summon while an enemy swings at you rolls a ~70% interrupt per hit
+    // taken (channeling 0), which is why this test spent months on the
+    // flaky list. Summoning before the pull does not weaken the test: the
+    // point below is that the pet inherits the owner's target from ONE
+    // seeding attack, which is unchanged.
+    a.send_cast_start("Summon Skeleton", 3.0);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    a.pump_for(Duration::from_millis(3100)).await;
+    a.send_cast_spell("Summon Skeleton", None);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Latch the pet id from the PetSpawn the server fans to A as
+    // well (caster receives own PetSpawn — caller's AOI cell
+    // includes themselves).
+    let pet_id: u64 = match a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+                || matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64)
+        })
+        .await
+        .expect("A receives own PetSpawn (or a CastFail explaining why not)")
+    {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        ServerWorldMsg::CastFail { reason, .. } => {
+            panic!("Summon Skeleton failed with CastFail: {reason:?}")
+        }
+        _ => unreachable!(),
+    };
+
+    // Pet in hand; NOW walk into the camp and take a hit to learn an
+    // enemy id. Phase 4 layout note: aim at the Bonepile's isolated
+    // [-16, 0, -14] spawn — the one ring 1 spawn whose aggro circle
+    // overlaps no other, so exactly ONE slow level 1 Decrepit Skeleton
+    // pulls, the single-puller semantics this test was written against.
+    let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
+    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
     let walk_end = Instant::now() + Duration::from_millis(3_500);
     let mut seq: u32 = 1;
     while Instant::now() < walk_end {
@@ -1524,33 +1634,6 @@ async fn pet_attacks_owners_target() {
         .expect("an enemy locks on and swings");
     let enemy_id: u64 = match hit_evt {
         ServerWorldMsg::Hit { attacker, .. } => attacker,
-        _ => unreachable!(),
-    };
-
-    // Summon Skeleton (cast_time 3.0s).
-    a.send_cast_start("Summon Skeleton", 3.0);
-    for _ in 0..3 {
-        tick_one(&mut a.client, &mut a.transport);
-        tokio::time::sleep(TICK_DT).await;
-    }
-    tokio::time::sleep(Duration::from_millis(3100)).await;
-    a.send_cast_spell("Summon Skeleton", None);
-    for _ in 0..3 {
-        tick_one(&mut a.client, &mut a.transport);
-        tokio::time::sleep(TICK_DT).await;
-    }
-
-    // Latch the pet id from the PetSpawn the server fans to A as
-    // well (caster receives own PetSpawn — caller's AOI cell
-    // includes themselves).
-    let pet_id: u64 = match a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
-        .await
-        .expect("A receives own PetSpawn")
-    {
-        ServerWorldMsg::PetSpawn { id, .. } => id,
         _ => unreachable!(),
     };
 
@@ -1612,7 +1695,7 @@ async fn pet_command_attack_locks_onto_target() {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
-    tokio::time::sleep(Duration::from_millis(3100)).await;
+    a.pump_for(Duration::from_millis(3100)).await;
     a.send_cast_spell("Summon Skeleton", None);
     for _ in 0..3 {
         tick_one(&mut a.client, &mut a.transport);
@@ -1621,18 +1704,28 @@ async fn pet_command_attack_locks_onto_target() {
     let pet_id: u64 = match a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+                || matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64)
         })
         .await
-        .expect("A receives own PetSpawn")
+        .expect("A receives own PetSpawn (or a CastFail explaining why not)")
     {
         ServerWorldMsg::PetSpawn { id, .. } => id,
+        ServerWorldMsg::CastFail { reason, .. } => {
+            panic!("Summon Skeleton failed with CastFail: {reason:?}")
+        }
         _ => unreachable!(),
     };
 
     // Now walk into camp 0; wait until at least one enemy aggros and
     // hits the player so we have an enemy id to command on.
-    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
-    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
+    // Phase 4 layout note: every camp-walking test aims at the Bonepile's
+    // isolated [-16, 0, -14] spawn — the one ring 1 spawn whose aggro circle
+    // overlaps no other, so exactly ONE slow (1.8 m/s, 2.5 s swing) level 1
+    // Decrepit Skeleton pulls, the same single-puller semantics these tests
+    // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
+    // pack, and standing in it turns every cast into interrupt rolls.
+    let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
+    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
     // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
     // whether an enemy locks on before the wait expires depended on where it
     // happened to be wandering. Walking fully in makes the pull deterministic.
@@ -1693,8 +1786,14 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     // Walk into camp 0.
-    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
-    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
+    // Phase 4 layout note: every camp-walking test aims at the Bonepile's
+    // isolated [-16, 0, -14] spawn — the one ring 1 spawn whose aggro circle
+    // overlaps no other, so exactly ONE slow (1.8 m/s, 2.5 s swing) level 1
+    // Decrepit Skeleton pulls, the same single-puller semantics these tests
+    // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
+    // pack, and standing in it turns every cast into interrupt rolls.
+    let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
+    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
     // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
     // whether an enemy locks on before the wait expires depended on where it
     // happened to be wandering. Walking fully in makes the pull deterministic.
@@ -1727,7 +1826,7 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
-    tokio::time::sleep(Duration::from_millis(3100)).await;
+    a.pump_for(Duration::from_millis(3100)).await;
     a.send_cast_spell("Summon Skeleton", None);
     for _ in 0..3 {
         tick_one(&mut a.client, &mut a.transport);
@@ -1796,8 +1895,14 @@ async fn charm_converts_enemy_to_pet() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     // Walk into camp 0 to aggro an enemy (gives us a target id).
-    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
-    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
+    // Phase 4 layout note: every camp-walking test aims at the Bonepile's
+    // isolated [-16, 0, -14] spawn — the one ring 1 spawn whose aggro circle
+    // overlaps no other, so exactly ONE slow (1.8 m/s, 2.5 s swing) level 1
+    // Decrepit Skeleton pulls, the same single-puller semantics these tests
+    // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
+    // pack, and standing in it turns every cast into interrupt rolls.
+    let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
+    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
     // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
     // whether an enemy locks on before the wait expires depended on where it
     // happened to be wandering. Walking fully in makes the pull deterministic.
@@ -1826,7 +1931,7 @@ async fn charm_converts_enemy_to_pet() {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
-    tokio::time::sleep(Duration::from_millis(2100)).await;
+    a.pump_for(Duration::from_millis(2100)).await;
     a.send_cast_spell("Charm", Some(enemy_id));
     for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);
@@ -2401,8 +2506,14 @@ async fn lifesteal_spell_heals_caster() {
 
     // Walk toward camp 0's enemy spawn — same pattern as the AOE
     // and aggro tests.
-    let len: f32 = (20.0_f32 * 20.0 + 5.0_f32 * 5.0).sqrt();
-    let dir = Vec3 { x: 20.0 / len, y: 0.0, z: 5.0 / len };
+    // Phase 4 layout note: every camp-walking test aims at the Bonepile's
+    // isolated [-16, 0, -14] spawn — the one ring 1 spawn whose aggro circle
+    // overlaps no other, so exactly ONE slow (1.8 m/s, 2.5 s swing) level 1
+    // Decrepit Skeleton pulls, the same single-puller semantics these tests
+    // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
+    // pack, and standing in it turns every cast into interrupt rolls.
+    let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
+    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
     // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
     // whether an enemy locks on before the wait expires depended on where it
     // happened to be wandering. Walking fully in makes the pull deterministic.
@@ -2780,7 +2891,7 @@ async fn cast_spell_rejected_during_cooldown() {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    a.pump_for(Duration::from_millis(1100)).await;
     a.send_cast_spell("Healing Wave", None);
     for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);
@@ -2804,7 +2915,7 @@ async fn cast_spell_rejected_during_cooldown() {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    a.pump_for(Duration::from_millis(1100)).await;
     a.send_cast_spell("Healing Wave", None);
     for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);

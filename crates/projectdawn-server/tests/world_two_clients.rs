@@ -1785,18 +1785,40 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
-    // Walk into camp 0.
-    // Phase 4 layout note: every camp-walking test aims at the Bonepile's
-    // isolated [-16, 0, -14] spawn — the one ring 1 spawn whose aggro circle
-    // overlaps no other, so exactly ONE slow (1.8 m/s, 2.5 s swing) level 1
-    // Decrepit Skeleton pulls, the same single-puller semantics these tests
-    // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
-    // pack, and standing in it turns every cast into interrupt rolls.
+    // Summon FIRST, in peace, before walking into aggro range — the same
+    // reorder its two sibling pet tests got: casting the 3 s summon while
+    // an enemy swings at you rolls a ~70% interrupt per hit taken
+    // (channeling 0). The test's substance (threat re-aggro between owner
+    // and pet) starts after the pull and is unchanged.
+    a.send_cast_start("Summon Skeleton", 3.0);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    a.pump_for(Duration::from_millis(3100)).await;
+    a.send_cast_spell("Summon Skeleton", None);
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    let pet_id: u64 = match a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+        })
+        .await
+        .expect("PetSpawn for own pet")
+    {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    // Pet in hand; NOW walk into the camp. Phase 4 layout note: aim at
+    // the Bonepile's isolated [-16, 0, -14] spawn — the one ring 1 spawn
+    // whose aggro circle overlaps no other, so exactly ONE slow level 1
+    // Decrepit Skeleton pulls, the single-puller semantics this test was
+    // written against.
     let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
     let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
-    // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
-    // whether an enemy locks on before the wait expires depended on where it
-    // happened to be wandering. Walking fully in makes the pull deterministic.
     let walk_end = Instant::now() + Duration::from_millis(3_500);
     let mut seq: u32 = 1;
     while Instant::now() < walk_end {
@@ -1820,28 +1842,7 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
         _ => unreachable!(),
     };
 
-    // Summon Skeleton and lock it onto the enemy via /pet attack.
-    a.send_cast_start("Summon Skeleton", 3.0);
-    for _ in 0..3 {
-        tick_one(&mut a.client, &mut a.transport);
-        tokio::time::sleep(TICK_DT).await;
-    }
-    a.pump_for(Duration::from_millis(3100)).await;
-    a.send_cast_spell("Summon Skeleton", None);
-    for _ in 0..3 {
-        tick_one(&mut a.client, &mut a.transport);
-        tokio::time::sleep(TICK_DT).await;
-    }
-    let pet_id: u64 = match a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
-        .await
-        .expect("PetSpawn for own pet")
-    {
-        ServerWorldMsg::PetSpawn { id, .. } => id,
-        _ => unreachable!(),
-    };
+    // Lock the pet onto the enemy via /pet attack.
     a.send_pet_command(protocol::world::pet_command::ATTACK, Some(enemy_id));
     for _ in 0..3 {
         tick_one(&mut a.client, &mut a.transport);

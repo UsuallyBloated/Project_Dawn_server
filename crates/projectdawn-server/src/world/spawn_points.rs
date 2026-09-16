@@ -23,23 +23,27 @@ use std::time::{Duration, Instant};
 #[derive(Debug)]
 pub struct SpawnPoint {
     pub camp: CampSpawn,
-    /// `None` while a live enemy occupies this point; reset to
-    /// `Some(now)` when the resident dies. The next `tick` call after
-    /// `respawn_secs` elapse will mint a new entity.
-    pub respawn_at: Option<Instant>,
+    /// `None` while a live enemy occupies this point; `Some(t)` when the
+    /// point is vacant and should mint a fresh entity once `now >= t`.
+    pub due_at: Option<Instant>,
 }
 
 impl SpawnPoint {
     fn from_camp(camp: CampSpawn, now: Instant) -> Self {
         // First spawn fires on the very next tick — no initial wait, mirror
         // the GDScript `EnemySpawner._ready -> call_deferred("_spawn")`
-        // behaviour. We backdate `respawn_at` by `respawn_secs` so the
-        // due-check below treats this spawn point as already-elapsed.
-        let backdated =
-            now.checked_sub(Duration::from_secs_f32(camp.respawn_secs)).unwrap_or(now);
+        // behaviour. The due time is stored DIRECTLY rather than backdating
+        // a death timestamp by `respawn_secs`: `now - respawn_secs` can
+        // underflow the Instant epoch on a freshly booted machine (Instant
+        // counts from boot on Windows and from an arbitrary recent epoch
+        // elsewhere), and the old backdating's fallback silently delayed a
+        // long-respawn camp by its full timer — a 600 s named den would
+        // take ten minutes to appear after every boot-time server start,
+        // which is exactly how the R720 starts (systemd, seconds after
+        // boot).
         Self {
             camp,
-            respawn_at: Some(backdated),
+            due_at: Some(now),
         }
     }
 }
@@ -67,10 +71,9 @@ impl Spawner {
         let mut out = Vec::new();
         let mut rng = rand::thread_rng();
         for (idx, point) in self.points.iter_mut().enumerate() {
-            let Some(respawn_at) = point.respawn_at else {
+            let Some(due_at) = point.due_at else {
                 continue;
             };
-            let due_at = respawn_at + Duration::from_secs_f32(point.camp.respawn_secs);
             if now < due_at {
                 continue;
             }
@@ -86,7 +89,7 @@ impl Spawner {
                 z: point.camp.pos[2] + jitter_z,
             };
             let entity = Entity::from_spawn(idx, spawn_pos, point.camp.mob.clone(), now);
-            point.respawn_at = None;
+            point.due_at = None;
             out.push(entity);
         }
         out
@@ -96,7 +99,7 @@ impl Spawner {
     /// died — start its respawn timer.
     pub fn on_enemy_died(&mut self, spawn_point_idx: usize, now: Instant) {
         if let Some(point) = self.points.get_mut(spawn_point_idx) {
-            point.respawn_at = Some(now);
+            point.due_at = Some(now + Duration::from_secs_f32(point.camp.respawn_secs));
         }
     }
 }
@@ -111,10 +114,12 @@ mod tests {
         let mut sp = Spawner::new(now);
         let spawned = sp.tick(now);
         // 54 spawn points in the starter zone TOML (phase 4 layout,
-        // 2026-09-10) → first tick fires all.
+        // 2026-09-10) → first tick fires all. This must hold regardless of
+        // machine uptime: the old backdating implementation failed here for
+        // any camp whose respawn_secs exceeded the time since boot.
         assert_eq!(spawned.len(), 54);
         for p in &sp.points {
-            assert!(p.respawn_at.is_none(), "live points must clear respawn_at");
+            assert!(p.due_at.is_none(), "live points must clear due_at");
         }
     }
 

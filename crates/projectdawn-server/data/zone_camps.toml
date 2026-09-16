@@ -27,14 +27,19 @@
 default_radius = 3.0
 default_respawn = 35.0
 
-# ── Ring 1 · 18-30 units · lvl 1-2 ───────────────────────────────────────
+# ── Ring 1 · 18-32 units · lvl 1-2 ───────────────────────────────────────
+# Ring 1 placement rule: the integration harness walks test characters
+# along the +X and -X axes and aims its camp-pull tests at the Bonepile's
+# [-16, -14] spawn, so every ring 1 spawn keeps (aggro + 3 m jitter) clear
+# of the z = 0 line, and [-16, -14] is the one spawn whose aggro circle
+# overlaps no other (the tests' single-puller).
 [[camp]]
 desc = "Bonepile — decrepit skeletons lurking west of the safe area"
 mob = { name = "Decrepit Skeleton", level = 1, hp = 25.0, dmg = 3, xp = 10, speed = 1.8, aggro = 8.0 }
 spawns = [
     [-18.0, 0.0, 12.0],
-    [-22.0, 0.0, 4.0],
-    [-16.0, 0.0, -8.0],
+    [-24.0, 0.0, 14.0],
+    [-16.0, 0.0, -14.0],
     [-12.0, 0.0, 20.0],
 ]
 
@@ -42,20 +47,20 @@ spawns = [
 desc = "Wolf Run — the pack that hunts south of the eastern road (wolf_threat)"
 mob = { name = "Grey Wolf", level = 1, hp = 24.0, dmg = 3, xp = 10, speed = 4.0, aggro = 12.0 }
 spawns = [
-    [24.0, 0.0, -8.0],
-    [30.0, 0.0, -14.0],
-    [22.0, 0.0, -18.0],
-    [28.0, 0.0, -4.0],
+    [24.0, 0.0, -16.0],
+    [30.0, 0.0, -20.0],
+    [22.0, 0.0, -24.0],
+    [28.0, 0.0, -18.0],
 ]
 
 [[camp]]
 desc = "Rat Warrens — plague rats out the back of Brom's cellar (rat_infestation)"
 mob = { name = "Plague Rat", level = 2, hp = 38.0, dmg = 5, xp = 18, speed = 4.2, aggro = 14.0 }
 spawns = [
-    [24.0, 0.0, 16.0],
-    [29.0, 0.0, 12.0],
-    [26.0, 0.0, 20.0],
-    [31.0, 0.0, 17.0],
+    [24.0, 0.0, 18.0],
+    [29.0, 0.0, 18.0],
+    [26.0, 0.0, 22.0],
+    [31.0, 0.0, 19.0],
 ]
 
 # ── Ring 2 · 35-55 units · lvl 3-4 ───────────────────────────────────────

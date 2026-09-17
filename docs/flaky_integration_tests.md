@@ -1,8 +1,53 @@
 # Flaky integration tests — `tests/world_two_clients.rs`
 
-**Status: largely fixed 2026-08-11 (commit `6a1a92e`); a small genuinely-flaky
-residue remains.** Read the update below before the original 2026-06-15 notes,
-which are kept for history but no longer describe the main problem.
+**Status: RESOLVED 2026-09-16 (commits `ebb161f` + `96c6036`). The suite runs
+fully green, 44/44, verified three consecutive times — the first in its
+history.** The sections below are kept as the record of how the understanding
+evolved; only this update describes the current state.
+
+---
+
+## Update 2026-09-16 — the residue was never load sensitivity
+
+The phase 4 camp-layout replacement broke seven tests at once, and the triage
+that followed found the real mechanisms behind the long-standing "flaky
+residue". Three, none of them CPU contention:
+
+1. **One hardcoded walk, shared by eight tests.** Every camp-walking test aimed
+   at the old camp 0's `[20, 0, 5]` spawn, so any layout or AI drift moved all
+   of them at once. They now aim at a spawn the camp data *designates* for the
+   harness: the Bonepile's `[-16, -14]`, the one ring 1 spawn whose aggro circle
+   overlaps no other (exactly ONE slow skeleton pulls), and ring 1 placement
+   keeps clear of the harness's +X/-X walking corridors (rule recorded in
+   `zone_camps.toml`).
+2. **Casting under fire is a coin flip by construction.** Track 19A rolls ~70%
+   interrupt per hit taken at channeling 0. The 2026-06-15 notes below had
+   *already identified this* for `pet_command…` (and it got a summon-first
+   reorder), but `pet_attacks…` and `pet_pulls…` still summoned while a skeleton
+   swung at them, and the AOE test stood through a 2.5 s cast in melee. Fixes:
+   the two remaining summon-first reorders, and the AOE test now **dev-spawns
+   its victim after the cast bar has already run** (new `send_dev_spawn` helper
+   + the `is_gm` DB-grant flow from `is_gm_gates_dev_commands`), so an interrupt
+   is impossible rather than unlikely.
+3. **Bare multi-second sleeps starved the client socket.** During a
+   `tokio::time::sleep(3100)` the harness client services nothing while the
+   world fans 20 Hz enemy positions at it; the OS buffer overflows and datagrams
+   carrying RELIABLE channel slices drop faster than renet's 150 ms resend can
+   land between 50 ms ticks. The server log proved a `PetSpawn` was sent that
+   the client never saw inside a 3 s wait. All eleven cast-bar sleeps are now
+   `pump_for` (sleep while ticking the transport), and `wait_for` loudly reports
+   a mid-wait renet disconnect instead of presenting it as a silent timeout.
+
+Also fixed in the same pass, *production* code: `spawn_points.rs` backdated
+`now - respawn_secs` to make first spawns immediately due, which underflows the
+Instant epoch on a freshly booted machine and silently delayed a camp's FIRST
+spawn by its full timer (a 600 s named den = ten minutes after every boot-time
+systemd start). The spawner stores the due time directly now.
+
+**Practical rule, final form: there is no known-flaky list anymore.** Any
+failure is a real failure. The harness has opt-in server tracing for triage:
+`RUST_LOG=info cargo test ... -- --nocapture` (a `try_init` subscriber in
+`start_both`).
 
 ---
 

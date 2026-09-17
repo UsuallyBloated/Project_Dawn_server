@@ -933,7 +933,8 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
-    // Walk toward the Wolf Run's [24, 0, -16] spawn (level 1 Grey Wolf).
+    // Walk toward the Bonepile's isolated [-16, -14] spawn (one level 1
+    // Decrepit Skeleton — see the shared phase 4 layout note above).
     // Phase 4 layout note: every camp-walking test aims at the Bonepile's
     // isolated [-16, 0, -14] spawn — the one ring 1 spawn whose aggro circle
     // overlaps no other, so exactly ONE slow (1.8 m/s, 2.5 s swing) level 1

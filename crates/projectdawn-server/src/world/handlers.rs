@@ -427,6 +427,43 @@ pub fn handle_message(
     now: Instant,
 ) -> Outcome {
     conn.touch(now);
+    // ── The dead-state gate (playtest 2026-09-23) ────────────────────────
+    // A dead player looted their own corpse before respawning and kept all
+    // the gear, voiding the corpse run. The death lock only covered Move,
+    // bind, and the respawn handshake; everything else — loot, inventory,
+    // vendor, bank, quests, combat — was open to a dead player. Whitelist
+    // what the dead may do (talk, respawn, accept a res, manage the group,
+    // leave; plus lifecycle traffic and the dev tools that un-stick test
+    // sessions) and refuse the rest with one honest line. Move stays
+    // whitelisted because its own silent gate already drops it — it arrives
+    // at 20 Hz, and a chat refusal per packet would flood an old client.
+    if conn.death_processed {
+        let allowed_while_dead = matches!(
+            msg,
+            ClientWorldMsg::Connect { .. }
+                | ClientWorldMsg::EnterWorld
+                | ClientWorldMsg::Disconnect
+                | ClientWorldMsg::Heartbeat
+                | ClientWorldMsg::Move { .. }
+                | ClientWorldMsg::Respawn
+                | ClientWorldMsg::DeathBroadcast
+                | ClientWorldMsg::ResurrectAccept { .. }
+                | ClientWorldMsg::Chat { .. }
+                | ClientWorldMsg::BuffSnapshotBroadcast { .. }
+                | ClientWorldMsg::GmCommand { .. }
+                | ClientWorldMsg::HealSelf { .. }
+                | ClientWorldMsg::GroupInvite { .. }
+                | ClientWorldMsg::GroupAcceptInvite { .. }
+                | ClientWorldMsg::GroupLeave
+                | ClientWorldMsg::GroupKick { .. }
+                | ClientWorldMsg::SetGroupLootMode { .. }
+                | ClientWorldMsg::PassLeadership { .. }
+        );
+        if !allowed_while_dead {
+            send_refusal(server, client_id, "You cannot do that while dead.");
+            return Outcome::Continue;
+        }
+    }
     match msg {
         ClientWorldMsg::Connect {
             session_token: _,

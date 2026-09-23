@@ -285,6 +285,10 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Respawn);
     }
 
+    fn send_loot_all(&mut self, bag_id: u64) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::LootAll { bag_id });
+    }
+
     fn send_heartbeat(&mut self) {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Heartbeat);
     }
@@ -3349,4 +3353,63 @@ async fn respawn_requires_being_dead() {
         respawned.is_some(),
         "a dead player's Respawn should still restore HP to ~25%"
     );
+}
+
+
+/// Playtest 2026-09-23 — the dead-state gate. A dead player could loot
+/// their own corpse before respawning and keep all the gear, voiding the
+/// corpse-run penalty. Now any economy/combat intent from a dead player is
+/// refused with a chat line, Respawn still works, and normal handling
+/// resumes after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dead_players_cannot_loot_or_touch_inventory() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "dedguy", "Deddy", "Human", "Warrior").await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    a.send_death();
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // Inventory intent while dead: refused with the line.
+    a.send_move_item("base", 0, "base", 1);
+    let refusal = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+                if text.contains("while dead"))
+        })
+        .await;
+    assert!(refusal.is_some(), "dead MoveItem must be refused with a chat line");
+
+    // Loot intent while dead: refused BEFORE any bag lookup (id need not exist).
+    a.send_loot_all(999_999);
+    let refusal2 = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+                if text.contains("while dead"))
+        })
+        .await;
+    assert!(refusal2.is_some(), "dead LootAll must be refused with a chat line");
+
+    // Respawn is still allowed and clears the gate: the bind/spawn Teleport
+    // arrives, and a subsequent inventory intent is no longer dead-refused.
+    a.send_respawn();
+    let tp = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::Teleport { .. })
+        })
+        .await;
+    assert!(tp.is_some(), "Respawn must still work for the dead");
+
+    a.send_move_item("base", 0, "base", 1);
+    let post = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(1500), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+                if text.contains("while dead"))
+        })
+        .await;
+    assert!(post.is_none(), "after respawn the dead-gate must be lifted");
 }

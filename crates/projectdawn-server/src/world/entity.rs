@@ -766,6 +766,36 @@ impl Entity {
         if let Some((id, _)) = nearest_target_within(self.pos, targets, self.mob.aggro) {
             self.target = Some(id);
             self.transition(EnemyState::Chase, now);
+            return;
+        }
+        // Being attacked IS aggro (playtest 2026-09-22): every damage path
+        // already writes the attacker into `threat`, but idle mobs never read
+        // it, so a ranged attacker outside the aggro radius could farm a mob
+        // that stood still taking it — exploit-shaped, not just wrong-feeling.
+        // Acquire the highest-threat attacker still present, but only within
+        // leash range: tick_chase drops any target past leash_range() on its
+        // first tick, so acquiring beyond it would flap Idle -> Chase -> Leash
+        // forever instead of fighting.
+        let mut best: Option<(EntityId, f32)> = None;
+        for (&id, &threat) in &self.threat {
+            if threat <= 0.0 {
+                continue;
+            }
+            let Some((_, pos)) = targets.iter().find(|(t, _)| *t == id) else {
+                continue;
+            };
+            if self.pos.distance_to(*pos) > self.leash_range() {
+                continue;
+            }
+            match best {
+                None => best = Some((id, threat)),
+                Some((_, b)) if threat > b => best = Some((id, threat)),
+                _ => {}
+            }
+        }
+        if let Some((id, _)) = best {
+            self.target = Some(id);
+            self.transition(EnemyState::Chase, now);
         }
     }
 
@@ -1107,5 +1137,42 @@ mod tests {
         let _events = e.tick_ai(&targets, &enemy_targets, 0.05, now);
         assert_eq!(e.target, Some(pet_id), "enemy should aggro on nearest target regardless of id partition");
         assert!(matches!(e.state, EnemyState::Chase), "transitioning Idle → Chase on acquisition");
+    }
+
+    /// Playtest 2026-09-22 — being attacked IS aggro. An idle mob whose
+    /// threat table names an attacker outside the aggro radius (a ranged
+    /// attacker) must acquire them, as long as they are within leash range.
+    #[test]
+    fn idle_enemy_acquires_ranged_attacker_via_threat() {
+        let now = Instant::now();
+        let mut e = Entity::from_spawn(0, Vec3f::ZERO, template(), now);
+        let attacker: EntityId = 1;
+        // Just past the aggro radius (template aggro is well under this),
+        // inside leash (aggro * 2 by default).
+        let pos = Vec3f { x: e.mob.aggro + 2.0, y: 0.0, z: 0.0 };
+        assert!(pos.x <= e.leash_range(), "test setup: inside leash");
+        e.threat.insert(attacker, 12.0);
+        let targets = vec![(attacker, pos)];
+        let enemy_targets: Vec<(EntityId, Vec3f, bool)> = vec![];
+        let _ = e.tick_ai(&targets, &enemy_targets, 0.05, now);
+        assert_eq!(e.target, Some(attacker), "damage must provoke the mob");
+        assert!(matches!(e.state, EnemyState::Chase));
+    }
+
+    /// The other half of the same fix: an attacker beyond leash range is NOT
+    /// acquired from idle — tick_chase would drop them on its first tick, so
+    /// acquiring would only flap Idle -> Chase -> Leash forever.
+    #[test]
+    fn idle_enemy_ignores_threat_beyond_leash() {
+        let now = Instant::now();
+        let mut e = Entity::from_spawn(0, Vec3f::ZERO, template(), now);
+        let attacker: EntityId = 1;
+        let pos = Vec3f { x: e.leash_range() + 5.0, y: 0.0, z: 0.0 };
+        e.threat.insert(attacker, 12.0);
+        let targets = vec![(attacker, pos)];
+        let enemy_targets: Vec<(EntityId, Vec3f, bool)> = vec![];
+        let _ = e.tick_ai(&targets, &enemy_targets, 0.05, now);
+        assert_eq!(e.target, None, "beyond leash: stand and wait, don't flap");
+        assert!(matches!(e.state, EnemyState::Idle));
     }
 }

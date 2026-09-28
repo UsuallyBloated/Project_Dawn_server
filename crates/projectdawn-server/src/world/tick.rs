@@ -9426,6 +9426,27 @@ fn correct_client_slots(
             None => (None, 0),
         };
         handlers::send_inventory_delta(server, cid, loc.to_string(), slot, item_path, count);
+        // Full-bags-move: when the corrected slot is a base slot holding a
+        // bag, a different-bag correction makes the client re-init that
+        // bag's contents vec and wait for inner rows — so re-fan the
+        // occupied inners, or the recovery path itself would render the
+        // bag empty (the 08-18 vanished-items symptom, on the fix path).
+        if loc == "base" {
+            if let Some(arr) = conn.inventory.bags.get(&(slot as u8)) {
+                for (i, entry) in arr.iter().enumerate() {
+                    if let Some(e) = entry {
+                        handlers::send_inventory_delta(
+                            server,
+                            cid,
+                            format!("bag_{slot}"),
+                            i as u32,
+                            Some(e.item_path.clone()),
+                            e.count,
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 

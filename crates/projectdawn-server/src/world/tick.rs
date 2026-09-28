@@ -6468,6 +6468,11 @@ pub async fn run(
                         )
                     }
                     protocol::world::SlotRef::BagSlot { base, slot } => {
+                        // A held bag's contents (bag_255) are not sellable —
+                        // no window is open on it, so the intent is forged.
+                        if base == inventory::CURSOR_BAG_KEY {
+                            continue;
+                        }
                         let Some(arr) = conn.inventory.bags.get(&base) else {
                             tracing::info!(
                                 owner = intent.owner,

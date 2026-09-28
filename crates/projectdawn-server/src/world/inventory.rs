@@ -20,7 +20,11 @@ use std::collections::HashMap;
 fn parse_bag_location(loc: &str) -> Option<u8> {
     let suffix = loc.strip_prefix("bag_")?;
     let idx: u32 = suffix.parse().ok()?;
-    if idx >= BASE_SLOT_COUNT as u32 {
+    // Real bags key by their base slot; `bag_255` is the held bag's
+    // contents (CURSOR_BAG_KEY) — parseable so persistence and peeks
+    // reach it, while every mutating entry point rejects it via
+    // `reject_held_bag_slot`.
+    if idx >= BASE_SLOT_COUNT as u32 && idx != CURSOR_BAG_KEY as u32 {
         return None;
     }
     Some(idx as u8)
@@ -31,6 +35,26 @@ fn parse_bag_location(loc: &str) -> Option<u8> {
 /// only places bags in base slots).
 fn is_bag_item(path: &str) -> bool {
     items::bag_num_slots(path).is_some()
+}
+
+/// Full-bags-move (scope settled 2026-09-17): the contents of a bag riding
+/// the CURSOR live in the same `bags` map under this sentinel key, so
+/// persistence (`bag_255` rows), weight, the death strip (`all_stacks` /
+/// `clear_all` iterate the map) and snapshots all cover them for free.
+/// The key can never collide with a real base slot (BASE_SLOT_COUNT is 8).
+pub const CURSOR_BAG_KEY: u8 = 255;
+
+/// The held bag's contents are not addressable from the wire — no window
+/// is open on a bag riding the cursor, so any intent naming `bag_255` is
+/// forged or stale. Applied by every mutating entry point; `peek_at`
+/// stays permissive so the delta fan can still read re-keyed inners.
+fn reject_held_bag_slot(parsed: &SlotRefInt) -> Result<(), &'static str> {
+    if let SlotRefInt::Bag(b, _) = parsed {
+        if *b == CURSOR_BAG_KEY {
+            return Err("that bag is in your hand");
+        }
+    }
+    Ok(())
 }
 
 /// Track 14.3 — typed view of a wire `(location, slot)` pair.
@@ -460,6 +484,14 @@ impl PlayerInventory {
                     // PD_W0027 — the held stack. Slot index ignored
                     // (there is only one cursor); a duplicate row wins
                     // last, which cannot happen from our own writer.
+                    // A bag-typed held item allocates its contents Vec
+                    // so pass 2's bag_255 rows have somewhere to land
+                    // (full bags ride the cursor since 2026-09-27).
+                    if let Some(n) = items::bag_num_slots(&row.item_path) {
+                        inv.bags
+                            .entry(CURSOR_BAG_KEY)
+                            .or_insert_with(|| vec![None; n as usize]);
+                    }
                     inv.cursor = Some(InventoryEntry {
                         item_path: row.item_path.clone(),
                         count: row.count as u32,
@@ -651,15 +683,49 @@ impl PlayerInventory {
         }
     }
 
-    /// Returns `true` when `base[idx]` holds a bag and the bag has
-    /// at least one occupied inner slot. Used by `move_base` /
-    /// `move_across` to enforce the "empty bag required to move
-    /// out" rule.
-    fn bag_at_base_is_nonempty(&self, base_idx: usize) -> bool {
-        let key = base_idx as u8;
+    /// Returns `true` when the bag Vec under `key` has at least one
+    /// occupied inner slot. Since full bags move with their contents
+    /// (2026-09-27), the only remaining "must be empty" rules are
+    /// selling a bag (tick.rs) and destroying/dropping one from the
+    /// hand (`destroy_at`'s cursor arm).
+    pub fn bag_key_is_nonempty(&self, key: u8) -> bool {
         match self.bags.get(&key) {
             Some(arr) => arr.iter().any(|s| s.is_some()),
             None => false,
+        }
+    }
+
+    /// Occupied inner-slot indices of `bags[key]`. Used to emit delta
+    /// coordinates for both sides of a bag re-key, so clients clear the
+    /// old `bag_<k>` rows and learn the new ones.
+    fn occupied_inner_slots(&self, key: u8) -> Vec<u32> {
+        self.bags
+            .get(&key)
+            .map(|arr| {
+                arr.iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.is_some())
+                    .map(|(i, _)| i as u32)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Append `bag_<key>` delta coordinates for the union of `pre` (the
+    /// key's occupied inners BEFORE a move) and its occupied inners now.
+    /// The union covers both spellings of a re-key: rows to clear and
+    /// rows to fill. Callers append these AFTER the host (base/cursor)
+    /// coordinates — the client re-inits a bag's contents Vec from the
+    /// host delta, so inner deltas must land second.
+    fn push_inner_union(&self, key: u8, pre: &[u32], touched: &mut Vec<(String, u32)>) {
+        let mut set: Vec<u32> = pre.to_vec();
+        for i in self.occupied_inner_slots(key) {
+            if !set.contains(&i) {
+                set.push(i);
+            }
+        }
+        for i in set {
+            touched.push((format!("bag_{key}"), i));
         }
     }
 
@@ -701,8 +767,10 @@ impl PlayerInventory {
         let mut remaining = count;
         let mut touched: Vec<(String, u32)> = Vec::new();
         // Snapshot the bag keys sorted — HashMap iteration order is
-        // random, and grants must land deterministically.
+        // random, and grants must land deterministically. A bag riding
+        // the cursor is excluded: nothing lands inside a held bag.
         let mut bag_keys: Vec<u8> = self.bags.keys().copied().collect();
+        bag_keys.retain(|k| *k != CURSOR_BAG_KEY);
         bag_keys.sort_unstable();
         // Pass 1 — top up existing stacks: base first, then bag inners.
         for i in 0..BASE_SLOT_COUNT {
@@ -984,6 +1052,7 @@ impl PlayerInventory {
             return Err("equip slot out of range");
         }
         let src = parse_slot_ref(src_loc, src_slot)?;
+        reject_held_bag_slot(&src)?;
         // Peek the src item to validate equippability before any mutation.
         let src_path = match src {
             SlotRefInt::Base(s) => match self.base.get(s).and_then(|e| e.as_ref()) {
@@ -1058,9 +1127,10 @@ impl PlayerInventory {
         count: u32,
     ) -> Result<(String, u32), &'static str> {
         let parsed = parse_slot_ref(loc, slot)?;
+        reject_held_bag_slot(&parsed)?;
         match parsed {
             SlotRefInt::Base(s) => {
-                if self.bag_at_base_is_nonempty(s) {
+                if self.bag_key_is_nonempty(s as u8) {
                     return Err("bag must be emptied before destroying");
                 }
                 let entry = self
@@ -1102,9 +1172,13 @@ impl PlayerInventory {
             // PD_W0027 — destroy / drop from the hand. This is the
             // escape hatch the design requires: a full-bags player can
             // always put a held item DOWN (DropItem shares this path).
-            // A held bag is always empty (non-empty bags can't be
-            // lifted), so no bag-contents check is needed.
+            // Since full bags can ride the cursor (2026-09-27), a held
+            // bag with contents refuses here — destroying it would
+            // orphan the contents and dropping it would strand them.
             SlotRefInt::Cursor => {
+                if self.bag_key_is_nonempty(CURSOR_BAG_KEY) {
+                    return Err("bag must be emptied first");
+                }
                 let entry = self.cursor.as_mut().ok_or("source slot empty")?;
                 let path = entry.item_path.clone();
                 let to_remove = if count == 0 || count >= entry.count {
@@ -1133,6 +1207,7 @@ impl PlayerInventory {
         slot: u32,
     ) -> Result<String, &'static str> {
         let parsed = parse_slot_ref(loc, slot)?;
+        reject_held_bag_slot(&parsed)?;
         match parsed {
             SlotRefInt::Base(s) => {
                 let entry = self
@@ -1176,56 +1251,77 @@ impl PlayerInventory {
 
     /// Track 13.2 / 14.3 — atomic move/swap between base slots.
     /// Move-to-empty is a clean transfer; move-to-occupied with the
-    /// same item_path merges counts (caps at u32::MAX); move-to-
-    /// occupied with a different item_path is a swap.
+    /// same item_path merges counts (capped); move-to-occupied with
+    /// a different item_path is a swap.
     ///
-    /// Track 14.3 — moving a bag in or out of a base slot requires
-    /// the bag to be empty. A non-empty bag at `src` rejects the
-    /// move (`bag must be emptied before moving`); a non-empty bag
-    /// at `dst` (during a same-path merge attempt the bag is the
-    /// src item, so this only triggers on swap) also rejects.
-    /// `ensure_bag_init` is called for both indices after the
-    /// mutation lands so the bags map stays consistent with the
-    /// new base content.
-    pub fn move_base(&mut self, src: usize, dst: usize) -> Result<Vec<usize>, &'static str> {
+    /// Full bags move WITH their contents (scope settled 2026-09-17):
+    /// each bags-map entry follows its bag to wherever it lands, and a
+    /// swap of two bags swaps their content Vecs. Bags never merge —
+    /// they do not stack — so a same-path pair of bags swaps like any
+    /// different pair. The returned deltas include both sides' occupied
+    /// inner slots so clients clear the old `bag_<k>` rows and learn
+    /// the new ones.
+    pub fn move_base(
+        &mut self,
+        src: usize,
+        dst: usize,
+    ) -> Result<Vec<(String, u32)>, &'static str> {
         if src >= BASE_SLOT_COUNT || dst >= BASE_SLOT_COUNT {
             return Err("slot out of range");
         }
         if src == dst {
             return Ok(Vec::new());
         }
-        // Bag-empty validation runs before any take/insert so a
-        // rejected move leaves the inventory untouched.
-        if self.bag_at_base_is_nonempty(src) {
-            return Err("bag must be emptied before moving");
-        }
-        if self.bag_at_base_is_nonempty(dst) {
-            return Err("destination bag must be emptied before swapping");
-        }
-        let src_entry = self.base[src].take();
-        let Some(src_entry) = src_entry else {
+        if self.base[src].is_none() {
             return Err("source slot empty");
-        };
-        let dst_entry = self.base[dst].take();
-        match dst_entry {
+        }
+        let src_key = src as u8;
+        let dst_key = dst as u8;
+        let mut touched: Vec<(String, u32)> = vec![
+            ("base".to_string(), src as u32),
+            ("base".to_string(), dst as u32),
+        ];
+        let pre_src = self.occupied_inner_slots(src_key);
+        let pre_dst = self.occupied_inner_slots(dst_key);
+        // Pull both content Vecs out; they re-attach wherever their bag
+        // lands below.
+        let src_vec = self.bags.remove(&src_key);
+        let dst_vec = self.bags.remove(&dst_key);
+        let src_entry = self.base[src].take().expect("checked above");
+        let src_is_bag = is_bag_item(&src_entry.item_path);
+        match self.base[dst].take() {
             None => {
                 self.base[dst] = Some(src_entry);
+                if let Some(v) = src_vec {
+                    self.bags.insert(dst_key, v);
+                }
             }
-            Some(existing) if existing.item_path == src_entry.item_path => {
+            Some(existing) if existing.item_path == src_entry.item_path && !src_is_bag => {
                 let (merged, leftover) = merge_capped(existing, src_entry);
                 self.base[dst] = Some(merged);
                 // Anything over the stack cap stays where it came from.
                 self.base[src] = leftover;
+                // Non-bags never carry content Vecs; nothing to re-attach.
             }
             Some(existing) => {
-                // Different item — swap. Src now holds what was in dst.
+                // Different item (or a pair of bags) — swap, contents
+                // riding along on both sides.
                 self.base[src] = Some(existing);
                 self.base[dst] = Some(src_entry);
+                if let Some(v) = src_vec {
+                    self.bags.insert(dst_key, v);
+                }
+                if let Some(v) = dst_vec {
+                    self.bags.insert(src_key, v);
+                }
             }
         }
         self.ensure_bag_init(src);
         self.ensure_bag_init(dst);
-        Ok(vec![src, dst])
+        // Inner deltas after the hosts (see push_inner_union).
+        self.push_inner_union(src_key, &pre_src, &mut touched);
+        self.push_inner_union(dst_key, &pre_dst, &mut touched);
+        Ok(touched)
     }
 
     /// Track 14.3 — move/swap/merge between two inner slots of the
@@ -1287,14 +1383,10 @@ impl PlayerInventory {
     ) -> Result<Vec<(String, u32)>, &'static str> {
         let src = parse_slot_ref(src_loc, src_slot)?;
         let dst = parse_slot_ref(dst_loc, dst_slot)?;
+        reject_held_bag_slot(&src)?;
+        reject_held_bag_slot(&dst)?;
         match (src, dst) {
-            (SlotRefInt::Base(s), SlotRefInt::Base(d)) => {
-                let touched = self.move_base(s, d)?;
-                Ok(touched
-                    .into_iter()
-                    .map(|i| ("base".to_string(), i as u32))
-                    .collect())
-            }
+            (SlotRefInt::Base(s), SlotRefInt::Base(d)) => self.move_base(s, d),
             (SlotRefInt::Bag(b1, s), SlotRefInt::Bag(b2, d)) if b1 == b2 => {
                 self.move_bag(b1 as usize, s, d)
             }
@@ -1321,45 +1413,67 @@ impl PlayerInventory {
         }
     }
 
-    /// PD_W0027 — lift a base slot onto the cursor. A non-empty bag
-    /// cannot be lifted (same rule as `move_base`); a swap drops the
-    /// cursor's held item into the vacated base slot, which is always
-    /// legal (any item type may sit in base).
+    /// PD_W0027 — lift a base slot onto the cursor. Full bags lift
+    /// WITH their contents (2026-09-17 scope): the bags-map entry
+    /// re-keys to `CURSOR_BAG_KEY` while held. A swap drops the held
+    /// item into the vacated base slot (its own contents re-keying
+    /// back the other way); bags never merge, so a same-path pair of
+    /// bags swaps.
     fn move_base_to_cursor(&mut self, src: usize) -> Result<Vec<(String, u32)>, &'static str> {
         if src >= BASE_SLOT_COUNT {
             return Err("base slot out of range");
         }
-        if self.bag_at_base_is_nonempty(src) {
-            return Err("bag must be emptied before moving");
+        if self.base[src].is_none() {
+            return Err("source slot empty");
         }
-        let src_entry = self.base[src].take().ok_or("source slot empty")?;
+        let src_key = src as u8;
+        let mut touched: Vec<(String, u32)> = vec![
+            ("base".to_string(), src as u32),
+            ("cursor".to_string(), 0),
+        ];
+        let pre_src = self.occupied_inner_slots(src_key);
+        let pre_held = self.occupied_inner_slots(CURSOR_BAG_KEY);
+        let src_vec = self.bags.remove(&src_key);
+        let held_vec = self.bags.remove(&CURSOR_BAG_KEY);
+        let src_entry = self.base[src].take().expect("checked above");
+        let src_is_bag = is_bag_item(&src_entry.item_path);
         match self.cursor.take() {
             None => {
                 self.cursor = Some(src_entry);
+                if let Some(v) = src_vec {
+                    self.bags.insert(CURSOR_BAG_KEY, v);
+                }
             }
-            Some(held) if held.item_path == src_entry.item_path => {
+            Some(held) if held.item_path == src_entry.item_path && !src_is_bag => {
                 let (merged, leftover) = merge_capped(held, src_entry);
                 self.cursor = Some(merged);
                 self.base[src] = leftover;
             }
             Some(held) => {
-                // Swap — the held item lands where the lifted one was.
+                // Swap — the held item lands where the lifted one was,
+                // each side's contents riding along.
                 self.base[src] = Some(held);
                 self.cursor = Some(src_entry);
+                if let Some(v) = src_vec {
+                    self.bags.insert(CURSOR_BAG_KEY, v);
+                }
+                if let Some(v) = held_vec {
+                    self.bags.insert(src_key, v);
+                }
             }
         }
         self.ensure_bag_init(src);
-        Ok(vec![
-            ("base".to_string(), src as u32),
-            ("cursor".to_string(), 0),
-        ])
+        // Inner deltas after the hosts (see push_inner_union).
+        self.push_inner_union(src_key, &pre_src, &mut touched);
+        self.push_inner_union(CURSOR_BAG_KEY, &pre_held, &mut touched);
+        Ok(touched)
     }
 
     /// PD_W0027 — place the held item into a base slot. Mirrors
     /// `move_base`: merge caps at `max_stack` (overflow stays in
-    /// hand), a different item swaps onto the cursor, and a dst slot
-    /// holding a non-empty bag refuses the swap (the bag would end
-    /// up in hand, and non-empty bags do not move).
+    /// hand), a different item swaps onto the cursor. Full bags place
+    /// and swap WITH their contents (2026-09-17 scope), re-keying
+    /// between `CURSOR_BAG_KEY` and the base slot; bags never merge.
     fn move_cursor_to_base(&mut self, dst: usize) -> Result<Vec<(String, u32)>, &'static str> {
         if dst >= BASE_SLOT_COUNT {
             return Err("base slot out of range");
@@ -1367,15 +1481,25 @@ impl PlayerInventory {
         if self.cursor.is_none() {
             return Err("source slot empty");
         }
-        if self.bag_at_base_is_nonempty(dst) {
-            return Err("destination bag must be emptied before swapping");
-        }
+        let dst_key = dst as u8;
+        let mut touched: Vec<(String, u32)> = vec![
+            ("cursor".to_string(), 0),
+            ("base".to_string(), dst as u32),
+        ];
+        let pre_held = self.occupied_inner_slots(CURSOR_BAG_KEY);
+        let pre_dst = self.occupied_inner_slots(dst_key);
+        let held_vec = self.bags.remove(&CURSOR_BAG_KEY);
+        let dst_vec = self.bags.remove(&dst_key);
         let held = self.cursor.take().expect("checked above");
+        let held_is_bag = is_bag_item(&held.item_path);
         match self.base[dst].take() {
             None => {
                 self.base[dst] = Some(held);
+                if let Some(v) = held_vec {
+                    self.bags.insert(dst_key, v);
+                }
             }
-            Some(existing) if existing.item_path == held.item_path => {
+            Some(existing) if existing.item_path == held.item_path && !held_is_bag => {
                 let (merged, leftover) = merge_capped(existing, held);
                 self.base[dst] = Some(merged);
                 self.cursor = leftover;
@@ -1383,13 +1507,19 @@ impl PlayerInventory {
             Some(existing) => {
                 self.base[dst] = Some(held);
                 self.cursor = Some(existing);
+                if let Some(v) = held_vec {
+                    self.bags.insert(dst_key, v);
+                }
+                if let Some(v) = dst_vec {
+                    self.bags.insert(CURSOR_BAG_KEY, v);
+                }
             }
         }
         self.ensure_bag_init(dst);
-        Ok(vec![
-            ("cursor".to_string(), 0),
-            ("base".to_string(), dst as u32),
-        ])
+        // Inner deltas after the hosts (see push_inner_union).
+        self.push_inner_union(dst_key, &pre_dst, &mut touched);
+        self.push_inner_union(CURSOR_BAG_KEY, &pre_held, &mut touched);
+        Ok(touched)
     }
 
     /// PD_W0027 — lift a bag inner slot onto the cursor. The one ban:
@@ -2410,7 +2540,9 @@ mod tests {
     }
 
     #[test]
-    fn move_base_rejects_non_empty_bag() {
+    fn move_base_moves_a_full_bag_with_its_contents() {
+        // Full-bags-move (2026-09-17 scope): the contents Vec follows the
+        // bag to its destination and the deltas name both keys' inners.
         let mut inv = PlayerInventory::new();
         inv.base[0] = Some(InventoryEntry {
             item_path: POUCH.into(),
@@ -2421,10 +2553,37 @@ mod tests {
             item_path: POTION.into(),
             count: 2,
         });
-        let err = inv.move_base(0, 4);
-        assert!(err.is_err(), "non-empty bag must reject move");
-        assert!(inv.base[4].is_none(), "destination untouched");
-        assert!(inv.base[0].is_some(), "source untouched");
+        let touched = inv.move_base(0, 4).expect("full bag moves now");
+        assert!(inv.base[0].is_none(), "source vacated");
+        assert_eq!(inv.base[4].as_ref().unwrap().item_path, POUCH);
+        assert!(!inv.bags.contains_key(&0u8), "old key gone");
+        let arr = inv.bags.get(&4u8).expect("contents re-keyed to dst");
+        assert_eq!(arr[0].as_ref().unwrap().item_path, POTION);
+        assert_eq!(arr[0].as_ref().unwrap().count, 2);
+        assert!(touched.contains(&("bag_0".to_string(), 0)), "old inner cleared");
+        assert!(touched.contains(&("bag_4".to_string(), 0)), "new inner fanned");
+    }
+
+    #[test]
+    fn move_base_swaps_two_full_bags_contents_intact() {
+        let mut inv = PlayerInventory::new();
+        for (idx, inner) in [(0usize, POTION), (4usize, BREAD)] {
+            inv.base[idx] = Some(InventoryEntry {
+                item_path: POUCH.into(),
+                count: 1,
+            });
+            inv.ensure_bag_init(idx);
+            inv.bags.get_mut(&(idx as u8)).unwrap()[0] = Some(InventoryEntry {
+                item_path: inner.into(),
+                count: 1,
+            });
+        }
+        // Same item_path on both sides — bags never merge, so this swaps.
+        inv.move_base(0, 4).expect("two full bags swap");
+        assert_eq!(inv.bags.get(&0u8).unwrap()[0].as_ref().unwrap().item_path, BREAD);
+        assert_eq!(inv.bags.get(&4u8).unwrap()[0].as_ref().unwrap().item_path, POTION);
+        assert_eq!(inv.base[0].as_ref().unwrap().count, 1, "no phantom merge");
+        assert_eq!(inv.base[4].as_ref().unwrap().count, 1);
     }
 
     #[test]
@@ -2704,16 +2863,94 @@ mod tests {
     }
 
     #[test]
-    fn cursor_refuses_lifting_a_nonempty_bag() {
+    fn cursor_lifts_a_nonempty_bag_and_places_it_back() {
+        // Full-bags-move: lifting re-keys contents to CURSOR_BAG_KEY, the
+        // placer never fills a held bag, and placing re-keys them back.
         let mut inv = PlayerInventory::new();
         inv.add_item_locating(POUCH, 1).unwrap();
-        inv.move_across("cursor", 0, "bag_0", 0).err(); // ensure bag vec exists
         inv.bags.get_mut(&0u8).unwrap()[0] = Some(InventoryEntry {
             item_path: POTION.into(),
             count: 1,
         });
-        let err = inv.move_across("base", 0, "cursor", 0).unwrap_err();
-        assert_eq!(err, "bag must be emptied before moving");
+        inv.move_across("base", 0, "cursor", 0).expect("full bag lifts now");
+        assert_eq!(inv.cursor.as_ref().unwrap().item_path, POUCH);
+        assert!(!inv.bags.contains_key(&0u8), "old key gone while held");
+        assert_eq!(
+            inv.bags.get(&CURSOR_BAG_KEY).unwrap()[0].as_ref().unwrap().item_path,
+            POTION,
+            "contents ride the cursor"
+        );
+        // Nothing lands inside the held bag: fill base, then grant more.
+        for i in 0..BASE_SLOT_COUNT {
+            if inv.base[i].is_none() {
+                inv.base[i] = Some(InventoryEntry {
+                    item_path: SWORD.into(),
+                    count: 1,
+                });
+            }
+        }
+        let (placed, leftover) = inv.add_item_locating(POTION, 1).unwrap();
+        assert!(placed.is_empty(), "held bag must not receive grants");
+        assert_eq!(leftover, 1);
+        // Held-bag inners are not addressable from the wire.
+        assert_eq!(
+            inv.move_across(&format!("bag_{CURSOR_BAG_KEY}"), 0, "base", 1).unwrap_err(),
+            "that bag is in your hand"
+        );
+        // Destroy/drop of the held non-empty bag refuses (contents would
+        // orphan or strand).
+        assert_eq!(inv.destroy_at("cursor", 0, 0).unwrap_err(), "bag must be emptied first");
+        // Place it back down (swap with the sword now in base 0).
+        inv.move_across("cursor", 0, "base", 0).expect("swap-place the full bag");
+        assert_eq!(inv.base[0].as_ref().unwrap().item_path, POUCH);
+        assert_eq!(inv.cursor.as_ref().unwrap().item_path, SWORD);
+        assert!(!inv.bags.contains_key(&CURSOR_BAG_KEY), "cursor key vacated");
+        assert_eq!(
+            inv.bags.get(&0u8).unwrap()[0].as_ref().unwrap().item_path,
+            POTION,
+            "contents re-keyed home"
+        );
+    }
+
+    #[test]
+    fn death_strips_a_held_bag_and_its_contents() {
+        // The plan's death-path requirement: a cursor holding a non-empty
+        // bag strips bag AND contents to the corpse.
+        let mut inv = PlayerInventory::new();
+        inv.add_item_locating(POUCH, 1).unwrap();
+        inv.bags.get_mut(&0u8).unwrap()[0] = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 3,
+        });
+        inv.move_across("base", 0, "cursor", 0).expect("lift the full bag");
+        let stacks = inv.all_stacks();
+        assert!(stacks.contains(&(POUCH.to_string(), 1)), "bag reaches the corpse");
+        assert!(stacks.contains(&(POTION.to_string(), 3)), "contents reach the corpse");
+        inv.clear_all();
+        assert!(inv.cursor.is_none());
+        assert!(inv.bags.is_empty(), "no orphaned held-bag contents after death");
+        assert!(inv.all_stacks().is_empty());
+    }
+
+    #[test]
+    fn held_bag_round_trips_through_persistence() {
+        // to_rows emits bag_255 rows for a held bag's contents and
+        // from_rows reconstructs them — logging out mid-hold loses nothing.
+        let mut inv = PlayerInventory::new();
+        inv.add_item_locating(POUCH, 1).unwrap();
+        inv.bags.get_mut(&0u8).unwrap()[0] = Some(InventoryEntry {
+            item_path: POTION.into(),
+            count: 2,
+        });
+        inv.move_across("base", 0, "cursor", 0).expect("lift");
+        let rows = inv.to_rows();
+        let reloaded = PlayerInventory::from_rows(&rows);
+        assert_eq!(reloaded.cursor.as_ref().unwrap().item_path, POUCH);
+        assert_eq!(
+            reloaded.bags.get(&CURSOR_BAG_KEY).unwrap()[0].as_ref().unwrap().count,
+            2,
+            "held-bag contents survive the round trip"
+        );
     }
 
     #[test]

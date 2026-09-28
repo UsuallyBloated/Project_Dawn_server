@@ -135,7 +135,9 @@ pub const LOOT_BAG_LINGER_SECS: f32 = 120.0;
 pub const LOOT_PICKUP_RANGE: f32 = 6.0;
 
 /// How close (metres from the corpse) a group member must be to share in
-/// an auto-split coin drop. Members further out (e.g. back in town) are
+/// an auto-split coin drop — and, since the dead-XP decision (2026-09-19),
+/// in a kill's XP/quest-credit split too (which adds an alive filter on
+/// top; see `award_kill`). Members further out (e.g. back in town) are
 /// excluded. See docs/design/group_loot_and_coin.md.
 pub const GROUP_COIN_SHARE_RANGE: f32 = 30.0;
 

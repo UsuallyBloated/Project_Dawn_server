@@ -289,6 +289,22 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::LootAll { bag_id });
     }
 
+    fn send_group_invite(&mut self, name: &str) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::GroupInvite { name: name.to_string() },
+        );
+    }
+
+    fn send_group_accept(&mut self, from: u64) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::GroupAcceptInvite { from },
+        );
+    }
+
     fn send_heartbeat(&mut self) {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Heartbeat);
     }
@@ -3474,4 +3490,123 @@ async fn nan_move_direction_is_dropped() {
             pos
         );
     }
+}
+
+// Dead-XP gate (decided 2026-09-19): a group member lying dead beside the
+// mob collects NOTHING — no XP share, no quest tick, and no dilution of the
+// pool. B groups with A and dies at A's feet; A then solo-kills a
+// dev-spawned mob. A's XpGained must be the FULL solo amount (263 for a
+// level-1 mob — not the 157 a two-way group split would pay), and B must
+// see no positive XpGained at all. The range half of the eligibility rule
+// rides the same `eligible` closure in `award_kill`, so this test covers
+// the mechanism for both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dead_group_member_gets_no_xp_share() {
+    let h = start_both().await;
+
+    // A needs is_gm for the dev-spawn; re-mint the token after the grant so
+    // the flag rides it (same pattern as the AOE test).
+    let (a_session, a_char_id, _stale_token) =
+        provision_client(&h.auth_url, "xpsolo", "Xpsolo", "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "xpsolo", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "xpdead", "Xpdead", "Elf", "Cleric").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    let _ = b_char_id;
+
+    // Group up: A invites by name, B accepts by A's id, A sees the roster.
+    a.send_group_invite("Xpdead");
+    for _ in 0..3 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::GroupInvited { from_id, .. }
+            if *from_id == a_char_id as u64)
+    })
+    .await
+    .expect("B receives the group invite");
+    b.send_group_accept(a_char_id as u64);
+    // Pump B so the accept actually reaches the wire (wait_for only ticks
+    // the client it is called on).
+    for _ in 0..4 {
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::GroupRoster { members, .. } if members.len() == 2)
+    })
+    .await
+    .expect("A sees the two-member roster");
+
+    // B dies right here at the spawn — a corpse beside the coming kill,
+    // the exact scenario the pure-proximity rule would have paid.
+    b.send_death();
+    for _ in 0..6 {
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // A conjures a level-1 dummy that walks to A on its own (aggro 12,
+    // 1 dmg so its swings are harmless), then kills it with paced swings
+    // (the swing-rate limiter drops anything faster than the 0.65 s
+    // bare-hand floor). 10 HP vs ~5-8 per swing = 2-3 landed hits. Same
+    // shape as player_attack_kills_enemy_and_corpse_despawns: waiting for
+    // ITS hit on us proves it closed into melee range first.
+    a.send_dev_spawn("XP Filter Dummy", 1, 10.0, 1, 1.8, 12.0);
+    let spawn_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. }
+                if mob_name == "XP Filter Dummy")
+        })
+        .await
+        .expect("the dev-spawned dummy fans an EnemySpawn");
+    let enemy_id: u64 = match spawn_evt {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
+        matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == enemy_id)
+    })
+    .await
+    .expect("the dummy walks into melee and swings");
+
+    const SWING_GAP: Duration = Duration::from_millis(1000);
+    for _ in 0..6 {
+        a.send_attack(enemy_id, "", false, DamageType::Physical);
+        let until = Instant::now() + SWING_GAP;
+        while Instant::now() < until {
+            tick_one(&mut a.client, &mut a.transport);
+            tick_one(&mut b.client, &mut b.transport);
+            tokio::time::sleep(TICK_DT).await;
+        }
+    }
+
+    // A collects the FULL solo amount: the dead member neither shares nor
+    // dilutes (263 = kill_xp(1); a leaked two-way split would pay 157).
+    let xp_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
+        })
+        .await
+        .expect("the living killer still collects");
+    if let ServerWorldMsg::XpGained { amount, .. } = xp_evt {
+        assert_eq!(
+            amount, 263,
+            "dead member must not dilute the pool: solo 263, not a 157 split"
+        );
+    }
+
+    // B (dead, still connected under the death lock) gets nothing. The
+    // connect-time bar seed is amount 0, so filter on positive amounts.
+    let leak = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
+        })
+        .await;
+    assert!(leak.is_none(), "a dead group member must receive no XP share");
 }

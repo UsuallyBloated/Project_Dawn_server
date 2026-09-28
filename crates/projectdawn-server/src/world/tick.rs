@@ -476,6 +476,17 @@ fn fan_out_pet_buff_snapshot(
 /// charmed mobs) award nothing — no XP and no quest credit (the warder is
 /// literally named "Wolf"). Non-player or fully-disconnected creditors award
 /// nothing.
+///
+/// Eligibility (decided 2026-09-19): a share goes only to members who are
+/// online, ALIVE, and within `GROUP_COIN_SHARE_RANGE` of the dying enemy —
+/// the coin split's range rule, plus the alive filter, because a corpse
+/// lying beside the mob would otherwise still collect under pure proximity,
+/// and classic EQ pays a corpse nothing. The kill-creditor is exempt from
+/// the RANGE half only (a pet owner may legitimately direct a kill from
+/// afar, and the coin analogue — the looter — always collects), never from
+/// the alive half. The pool divides among eligible members only, and quest
+/// kill-credit follows the same list: a member two zones away gets no
+/// journal tick either.
 fn award_kill(
     server: &mut RenetServer,
     connections: &mut HashMap<ClientId, PerConnection>,
@@ -484,6 +495,7 @@ fn award_kill(
     base_xp: i32,
     mob_name: &str,
     victim_owned: bool,
+    victim_pos: Vec3f,
 ) {
     if base_xp <= 0 || credit_id >= protocol::world::ENEMY_ID_BASE {
         return; // no reward, or the top damager wasn't a player
@@ -496,30 +508,44 @@ fn award_kill(
         return;
     }
     let credit_cid = credit_id as ClientId;
-    let online_members: Vec<ClientId> = match group_manager.group_of(credit_cid) {
+    // Online + alive + in range (creditor exempt from the range half only) —
+    // see the eligibility note in the doc comment above.
+    let eligible = |cid: ClientId, c: &PerConnection| -> bool {
+        !c.death_processed
+            && (cid == credit_cid
+                || c.pos.distance_to(victim_pos) <= GROUP_COIN_SHARE_RANGE)
+    };
+    let eligible_members: Vec<ClientId> = match group_manager.group_of(credit_cid) {
         Some(g) => g
             .members
             .iter()
-            .filter(|m| connections.contains_key(m))
+            .filter(|&&m| connections.get(&m).map(|c| eligible(m, c)).unwrap_or(false))
             .copied()
             .collect(),
         // Liveness check on the solo killer too: they may have disconnected
-        // between dealing top damage and the mob dying.
-        None if connections.contains_key(&credit_cid) => vec![credit_cid],
+        // (or died to a last exchange of blows) between dealing top damage
+        // and the mob dying.
+        None if connections
+            .get(&credit_cid)
+            .map(|c| eligible(credit_cid, c))
+            .unwrap_or(false) =>
+        {
+            vec![credit_cid]
+        }
         None => Vec::new(),
     };
-    // Everyone eligible may be offline — nothing to award (and the division
-    // below must not see len 0).
-    if online_members.is_empty() {
+    // Everyone may be offline, dead, or out of range — nothing to award
+    // (and the division below must not see len 0).
+    if eligible_members.is_empty() {
         return;
     }
-    let pool = if online_members.len() > 1 {
+    let pool = if eligible_members.len() > 1 {
         ((base_xp as f32) * (1.0 + groups::GROUP_XP_BONUS)) as i32
     } else {
         base_xp
     };
-    let per_member = (pool / online_members.len() as i32).max(1);
-    for m in &online_members {
+    let per_member = (pool / eligible_members.len() as i32).max(1);
+    for m in &eligible_members {
         if let Some(conn) = connections.get_mut(m) {
             // Server-authoritative xp/leveling (Slice 0): every member's share
             // runs through award_xp so leveling stays authoritative.
@@ -555,7 +581,7 @@ fn award_kill(
         base_xp,
         pool,
         per_member,
-        members = online_members.len(),
+        members = eligible_members.len(),
         "kill credit granted"
     );
 }
@@ -724,6 +750,7 @@ fn apply_spell_damage_to_enemy(
                 mob_xp,
                 &mob_name,
                 victim_owned,
+                death_pos,
             );
         }
         let loot_items = loot::roll_for_mob(&mob_name).unwrap_or_default();
@@ -3420,6 +3447,7 @@ pub async fn run(
                         // Owned victims (pets / charmed mobs) grant no quest
                         // credit — the warder is literally named "Wolf".
                         let victim_owned = entity.owner.is_some();
+                        let victim_pos = entity.pos;
                         award_kill(
                             &mut server,
                             &mut connections,
@@ -3428,6 +3456,7 @@ pub async fn run(
                             base_xp,
                             &mob_name,
                             victim_owned,
+                            victim_pos,
                         );
                     }
                     // Roll loot from the mob's archetype table; spawn
@@ -7225,6 +7254,7 @@ pub async fn run(
                                         mob_xp,
                                         name,
                                         victim_owned,
+                                        death_pos,
                                     );
                                 }
                             }

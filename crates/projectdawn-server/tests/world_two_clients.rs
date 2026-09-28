@@ -3602,11 +3602,31 @@ async fn dead_group_member_gets_no_xp_share() {
         ServerWorldMsg::EnemySpawn { id, .. } => id,
         _ => unreachable!(),
     };
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
-        matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == enemy_id)
-    })
-    .await
-    .expect("the dummy walks into melee and swings");
+    // Wait for the dummy's swing on us (proves melee adjacency) while
+    // pumping BOTH transports — a one-sided wait leaves B's socket
+    // unserviced under the 20 Hz position fan (the 2026-09-16 starvation
+    // class), and a B disconnect would make the no-leak assertion below
+    // vacuous (an offline B was already excluded before this change).
+    let deadline = Instant::now() + Duration::from_secs(35);
+    let mut adjacent = false;
+    'adjacency: while Instant::now() < deadline {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
+            if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(
+                &bytes,
+                bincode_cfg(),
+            ) {
+                if matches!(msg, ServerWorldMsg::Hit { attacker, .. } if attacker == enemy_id)
+                {
+                    adjacent = true;
+                    break 'adjacency;
+                }
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    assert!(adjacent, "the dummy walks into melee and swings");
 
     const SWING_GAP: Duration = Duration::from_millis(1000);
     for _ in 0..6 {

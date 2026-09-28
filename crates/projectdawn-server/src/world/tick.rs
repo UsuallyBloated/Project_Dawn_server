@@ -477,16 +477,23 @@ fn fan_out_pet_buff_snapshot(
 /// literally named "Wolf"). Non-player or fully-disconnected creditors award
 /// nothing.
 ///
-/// Eligibility (decided 2026-09-19): a share goes only to members who are
-/// online, ALIVE, and within `GROUP_COIN_SHARE_RANGE` of the dying enemy —
-/// the coin split's range rule, plus the alive filter, because a corpse
-/// lying beside the mob would otherwise still collect under pure proximity,
-/// and classic EQ pays a corpse nothing. The kill-creditor is exempt from
-/// the RANGE half only (a pet owner may legitimately direct a kill from
-/// afar, and the coin analogue — the looter — always collects), never from
-/// the alive half. The pool divides among eligible members only, and quest
-/// kill-credit follows the same list: a member two zones away gets no
-/// journal tick either.
+/// Eligibility (decided 2026-09-19): an XP share goes only to members who
+/// are online, ALIVE, and within `GROUP_COIN_SHARE_RANGE` of the dying
+/// enemy — the coin split's range rule, plus the alive filter, because a
+/// corpse lying beside the mob would otherwise still collect under pure
+/// proximity, and classic EQ pays a corpse nothing. Alive means
+/// `!death_processed && hp > 0.0`: the death sweep runs at end of tick, so
+/// a member dropped by the mob's last swing in the SAME tick as the kill
+/// is a corpse by hp before the flag catches up. The kill-creditor is
+/// exempt from the RANGE half only (a pet owner may legitimately direct a
+/// kill from afar, and the coin analogue — the looter — always collects),
+/// never from the alive half. The pool divides among eligible members only.
+///
+/// Quest kill-credit takes the ALIVE filter but deliberately NOT the range
+/// gate: the decided item covered XP shares, and range-gating journal
+/// ticks would silently change quest play (a member chasing a runner 31 m
+/// out would lose credit they always had). If that gate is ever wanted, it
+/// is a design call, not a default.
 fn award_kill(
     server: &mut RenetServer,
     connections: &mut HashMap<ClientId, PerConnection>,
@@ -508,54 +515,61 @@ fn award_kill(
         return;
     }
     let credit_cid = credit_id as ClientId;
-    // Online + alive + in range (creditor exempt from the range half only) —
-    // see the eligibility note in the doc comment above.
-    let eligible = |cid: ClientId, c: &PerConnection| -> bool {
-        !c.death_processed
+    // Alive = neither flagged dead NOR at 0 hp — the flag alone misses a
+    // member the mob dropped in this same tick (death sweep runs at end
+    // of tick).
+    let alive = |c: &PerConnection| !c.death_processed && c.hp > 0.0;
+    // XP share: alive + in range (creditor exempt from the range half only).
+    let xp_eligible = |cid: ClientId, c: &PerConnection| -> bool {
+        alive(c)
             && (cid == credit_cid
                 || c.pos.distance_to(victim_pos) <= GROUP_COIN_SHARE_RANGE)
     };
-    let eligible_members: Vec<ClientId> = match group_manager.group_of(credit_cid) {
-        Some(g) => g
-            .members
-            .iter()
-            .filter(|&&m| connections.get(&m).map(|c| eligible(m, c)).unwrap_or(false))
-            .copied()
-            .collect(),
-        // Liveness check on the solo killer too: they may have disconnected
-        // (or died to a last exchange of blows) between dealing top damage
-        // and the mob dying.
-        None if connections
-            .get(&credit_cid)
-            .map(|c| eligible(credit_cid, c))
-            .unwrap_or(false) =>
-        {
-            vec![credit_cid]
-        }
-        None => Vec::new(),
+    // The candidate set: the group, or the solo creditor. Liveness check on
+    // the solo killer too — they may have disconnected (or died to a last
+    // exchange of blows) between dealing top damage and the mob dying.
+    let group_members: Vec<ClientId> = match group_manager.group_of(credit_cid) {
+        Some(g) => g.members.iter().copied().collect(),
+        None => vec![credit_cid],
     };
-    // Everyone may be offline, dead, or out of range — nothing to award
-    // (and the division below must not see len 0).
-    if eligible_members.is_empty() {
+    let xp_members: Vec<ClientId> = group_members
+        .iter()
+        .filter(|&&m| connections.get(&m).map(|c| xp_eligible(m, c)).unwrap_or(false))
+        .copied()
+        .collect();
+    // Quest kill-credit: alive filter only, no range gate (see doc comment).
+    let quest_members: Vec<ClientId> = group_members
+        .iter()
+        .filter(|&&m| connections.get(&m).map(|c| alive(c)).unwrap_or(false))
+        .copied()
+        .collect();
+    if xp_members.is_empty() && quest_members.is_empty() {
         return;
     }
-    let pool = if eligible_members.len() > 1 {
-        ((base_xp as f32) * (1.0 + groups::GROUP_XP_BONUS)) as i32
+    // Server-authoritative xp/leveling (Slice 0): every member's share runs
+    // through award_xp so leveling stays authoritative.
+    let (pool, per_member) = if xp_members.is_empty() {
+        (0, 0)
     } else {
-        base_xp
+        let pool = if xp_members.len() > 1 {
+            ((base_xp as f32) * (1.0 + groups::GROUP_XP_BONUS)) as i32
+        } else {
+            base_xp
+        };
+        (pool, (pool / xp_members.len() as i32).max(1))
     };
-    let per_member = (pool / eligible_members.len() as i32).max(1);
-    for m in &eligible_members {
+    for m in &xp_members {
         if let Some(conn) = connections.get_mut(m) {
-            // Server-authoritative xp/leveling (Slice 0): every member's share
-            // runs through award_xp so leveling stays authoritative.
             super::progression::award_xp(server, conn, per_member);
-            // PD_W0024 — count the kill against this member's active quest
-            // objectives (private, alongside the XP share, inside the liveness
-            // guard by construction — witnesses outside the group get none).
-            // Counts clamp at the requirement, mirroring the client's old
-            // notify_kill; each increment fans a private QuestProgress and
-            // marks the quest for the end-of-tick persist flush.
+        }
+    }
+    // PD_W0024 — count the kill against each alive member's active quest
+    // objectives (private; witnesses outside the group get none). Counts
+    // clamp at the requirement, mirroring the client's old notify_kill;
+    // each increment fans a private QuestProgress and marks the quest for
+    // the end-of-tick persist flush.
+    for m in &quest_members {
+        if let Some(conn) = connections.get_mut(m) {
             let mut updates: Vec<(String, u32, i32)> = Vec::new();
             for (quest_id, progress) in conn.active_quests.iter_mut() {
                 let Some(quest) = super::quests::lookup(quest_id) else {
@@ -581,7 +595,7 @@ fn award_kill(
         base_xp,
         pool,
         per_member,
-        members = eligible_members.len(),
+        members = xp_members.len(),
         "kill credit granted"
     );
 }
@@ -793,6 +807,50 @@ fn apply_spell_damage_to_enemy(
 /// is 1.0 for fresh summons and 0.3 for the warder return.
 /// Returns the new pet's id.
 #[allow(clippy::too_many_arguments)]
+/// Owner-derived summon wrapper (pet interim A): resolves the scaled
+/// template for `pet_type` at the owner's level, applies the standard
+/// +1.5 m east spawn offset, and delegates to `summon_pet_for_owner`.
+/// Returns `(pet_id, pet_level)`, or `None` for an unknown `pet_type`.
+/// The auto-summon, retreat-respawn and manual-summon paths all route
+/// through here, so the next pet rule change happens ONCE instead of in
+/// three near-identical blocks.
+#[allow(clippy::too_many_arguments)]
+fn summon_scaled_pet(
+    server: &mut RenetServer,
+    in_world_recipients: &[ClientId],
+    enemies: &mut HashMap<EntityId, Entity>,
+    aoi: &mut AoiGrid,
+    owner_id: EntityId,
+    owner_level: u32,
+    owner_pos: Vec3f,
+    pet_type: &str,
+    variance: u32,
+    hp_fraction: f32,
+    now: Instant,
+) -> Option<(EntityId, u32)> {
+    let template = pet_templates::scaled(pet_type, owner_level, variance)?;
+    let pet_level = template.level;
+    // Spawn at the owner's pos + 1.5 m east so the pet doesn't clip the
+    // player capsule.
+    let spawn_pos = Vec3f {
+        x: owner_pos.x + 1.5,
+        y: owner_pos.y,
+        z: owner_pos.z,
+    };
+    let pet_id = summon_pet_for_owner(
+        server,
+        in_world_recipients,
+        enemies,
+        aoi,
+        owner_id,
+        spawn_pos,
+        template,
+        hp_fraction,
+        now,
+    );
+    Some((pet_id, pet_level))
+}
+
 fn summon_pet_for_owner(
     server: &mut RenetServer,
     in_world_recipients: &[ClientId],
@@ -2718,26 +2776,21 @@ pub async fn run(
             for (owner_id, caster_pos, owner_level) in beast_master_summons {
                 // Owner-derived warder (pet interim A): deterministic
                 // owner - 1, no variance on a free auto-summon.
-                let Some(template) = pet_templates::scaled("warder", owner_level, 0) else {
-                    continue;
-                };
-                let pet_level = template.level;
-                let spawn_pos = Vec3f {
-                    x: caster_pos.x + 1.5,
-                    y: caster_pos.y,
-                    z: caster_pos.z,
-                };
-                let pet_id = summon_pet_for_owner(
+                let Some((pet_id, pet_level)) = summon_scaled_pet(
                     &mut server,
                     &in_world_recipients_now,
                     &mut enemies,
                     &mut aoi,
                     owner_id,
-                    spawn_pos,
-                    template,
+                    owner_level,
+                    caster_pos,
+                    "warder",
+                    0,
                     1.0,
                     now,
-                );
+                ) else {
+                    continue;
+                };
                 tracing::info!(
                     owner = owner_id,
                     pet_id,
@@ -2773,26 +2826,21 @@ pub async fn run(
         for (owner_id, caster_pos, owner_level) in due_warder_respawns {
             // Same deterministic owner - 1 as the auto-summon: the respawn
             // is the same free ritual, so no variance here either.
-            let Some(template) = pet_templates::scaled("warder", owner_level, 0) else {
-                continue;
-            };
-            let pet_level = template.level;
-            let spawn_pos = Vec3f {
-                x: caster_pos.x + 1.5,
-                y: caster_pos.y,
-                z: caster_pos.z,
-            };
-            let pet_id = summon_pet_for_owner(
+            let Some((pet_id, pet_level)) = summon_scaled_pet(
                 &mut server,
                 &in_world_recipients_now,
                 &mut enemies,
                 &mut aoi,
                 owner_id,
-                spawn_pos,
-                template,
+                owner_level,
+                caster_pos,
+                "warder",
+                0,
                 0.3,
                 now,
-            );
+            ) else {
+                continue;
+            };
             if let Some(conn) = connections.get_mut(&(owner_id as ClientId)) {
                 conn.warder_respawn_at = None;
             }
@@ -4759,14 +4807,38 @@ pub async fn run(
                         // roll off owner - 1 — so paying mana again can
                         // land a better pet. The skeleton's tier cap
                         // lives in `pet_templates::scaled`.
-                        let owner_level = connections
+                        let Some(owner_level) = connections
                             .get(&(intent.caster as ClientId))
                             .map(|c| c.level.max(1) as u32)
-                            .unwrap_or(1);
-                        let variance = rand::thread_rng().gen_range(0..=2u32);
-                        let Some(template) =
-                            pet_templates::scaled(&pet_type, owner_level, variance)
                         else {
+                            // Caster vanished between queueing the intent and
+                            // resolution — skip, like the other resolver arms,
+                            // rather than spawning an ownerless level-1 pet.
+                            tracing::debug!(
+                                caster = intent.caster,
+                                spell = %spell.name,
+                                "PET_SUMMON dropped — caster no longer connected"
+                            );
+                            continue;
+                        };
+                        let variance = rand::thread_rng().gen_range(0..=2u32);
+                        let owner_id = intent.caster;
+                        // Helper handles the scaled template, spawn offset,
+                        // despawn-existing, AOI insert, fan-out, and map
+                        // insert. None = unknown pet_type.
+                        let Some((pet_id, pet_level)) = summon_scaled_pet(
+                            &mut server,
+                            &in_world_recipients_now,
+                            &mut enemies,
+                            &mut aoi,
+                            owner_id,
+                            owner_level,
+                            caster_pos,
+                            &pet_type,
+                            variance,
+                            1.0,
+                            now,
+                        ) else {
                             tracing::info!(
                                 caster = intent.caster,
                                 spell = %spell.name,
@@ -4775,28 +4847,6 @@ pub async fn run(
                             );
                             continue;
                         };
-                        let pet_level = template.level;
-                        let owner_id = intent.caster;
-                        // Spawn at the caster's pos + 1.5 m east
-                        // offset so the pet doesn't clip the player
-                        // capsule. Helper handles despawn-existing,
-                        // AOI insert, fan-out, and map insert.
-                        let spawn_pos = Vec3f {
-                            x: caster_pos.x + 1.5,
-                            y: caster_pos.y,
-                            z: caster_pos.z,
-                        };
-                        let pet_id = summon_pet_for_owner(
-                            &mut server,
-                            &in_world_recipients_now,
-                            &mut enemies,
-                            &mut aoi,
-                            owner_id,
-                            spawn_pos,
-                            template,
-                            1.0,
-                            now,
-                        );
                         tracing::info!(
                             owner = owner_id,
                             pet_id,

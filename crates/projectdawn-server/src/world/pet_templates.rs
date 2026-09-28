@@ -11,6 +11,12 @@ use super::zones::MobTemplate;
 /// Look up a pet template by its `pet_type` string (matches the
 /// GDScript `SpellData.pet_type` field). Returns `None` for unknown
 /// types — caller logs and drops the cast.
+///
+/// NOTE: since pet interim A (2026-09-27) every spawn path routes through
+/// `scaled`, which OVERWRITES `level` / `hp` / `dmg` from the owner-derived
+/// curve — editing those three numbers here changes nothing in game. Only
+/// the identity fields (name, speed, melee_range, attack_interval) are
+/// authored truth.
 pub fn lookup(pet_type: &str) -> Option<MobTemplate> {
     match pet_type {
         "skeleton" => Some(MobTemplate {
@@ -202,6 +208,41 @@ mod tests {
         assert!(t.hp < 88.0, "pet hp {} must sit below even-con 88", t.hp);
         assert!(t.dmg < 10, "pet dmg {} must sit below even-con 10", t.dmg);
         assert_eq!(t.hp, 90.0 * PET_STAT_SCALAR);
+    }
+
+    #[test]
+    fn curve_anchors_stay_in_lockstep_with_the_camp_data() {
+        // CURVE hand-copies zone_camps.toml's ladder, which is exactly the
+        // client-vs-server drift pattern this project keeps finding. This
+        // test re-reads the parsed camp data: every anchor's hp/dmg must sit
+        // within the min..max of the authored mobs at that level (same-level
+        // archetypes were averaged; the Ancient Wraith's low-hp speedster
+        // archetype is excluded by design). A camp balance pass that moves
+        // the toml fails here until CURVE moves with it.
+        let camps = super::super::zones::load_camps();
+        for &(level, hp, dmg) in CURVE {
+            let at_level: Vec<&MobTemplate> = camps
+                .iter()
+                .map(|c| &c.mob)
+                .filter(|m| m.level == level && m.name != "Ancient Wraith")
+                .collect();
+            assert!(
+                !at_level.is_empty(),
+                "CURVE anchor level {level} no longer exists in zone_camps.toml"
+            );
+            let hp_min = at_level.iter().map(|m| m.hp).fold(f32::MAX, f32::min);
+            let hp_max = at_level.iter().map(|m| m.hp).fold(f32::MIN, f32::max);
+            let dmg_min = at_level.iter().map(|m| m.dmg).min().unwrap();
+            let dmg_max = at_level.iter().map(|m| m.dmg).max().unwrap();
+            assert!(
+                (hp_min..=hp_max).contains(&hp),
+                "CURVE hp {hp} at level {level} drifted from the camp data ({hp_min}..{hp_max})"
+            );
+            assert!(
+                (dmg_min as f32..=dmg_max as f32).contains(&dmg),
+                "CURVE dmg {dmg} at level {level} drifted from the camp data ({dmg_min}..{dmg_max})"
+            );
+        }
     }
 
     #[test]

@@ -2704,19 +2704,24 @@ pub async fn run(
         //      same tick the client's EntitySpawn fan-out happens;
         //      AOI is already populated by the spawn loop above.
         if !newly_in_world.is_empty() {
-            let beast_master_summons: Vec<(EntityId, Vec3f)> = newly_in_world
+            let beast_master_summons: Vec<(EntityId, Vec3f, u32)> = newly_in_world
                 .iter()
                 .filter_map(|cid| {
                     let conn = connections.get(cid)?;
                     if conn.class.eq_ignore_ascii_case("Beast Master") && conn.in_world {
-                        Some((conn.char_id as u64, conn.pos))
+                        Some((conn.char_id as u64, conn.pos, conn.level.max(1) as u32))
                     } else {
                         None
                     }
                 })
                 .collect();
-            for (owner_id, caster_pos) in beast_master_summons {
-                let Some(template) = pet_templates::lookup("warder") else { continue };
+            for (owner_id, caster_pos, owner_level) in beast_master_summons {
+                // Owner-derived warder (pet interim A): deterministic
+                // owner - 1, no variance on a free auto-summon.
+                let Some(template) = pet_templates::scaled("warder", owner_level, 0) else {
+                    continue;
+                };
+                let pet_level = template.level;
                 let spawn_pos = Vec3f {
                     x: caster_pos.x + 1.5,
                     y: caster_pos.y,
@@ -2733,7 +2738,12 @@ pub async fn run(
                     1.0,
                     now,
                 );
-                tracing::info!(owner = owner_id, pet_id, "Beast Master warder auto-summoned");
+                tracing::info!(
+                    owner = owner_id,
+                    pet_id,
+                    level = pet_level,
+                    "Beast Master warder auto-summoned"
+                );
             }
         }
 
@@ -2743,7 +2753,7 @@ pub async fn run(
         //      Collected then drained so we don't overlap a
         //      `connections` borrow with the `enemies` mutation in
         //      the helper.
-        let due_warder_respawns: Vec<(EntityId, Vec3f)> = connections
+        let due_warder_respawns: Vec<(EntityId, Vec3f, u32)> = connections
             .iter()
             .filter_map(|(_, c)| {
                 if !c.in_world { return None; }
@@ -2754,14 +2764,19 @@ pub async fn run(
                 // respawned on the next tick instead of after the
                 // WARDER_RETREAT_SECS retreat.
                 if now >= due {
-                    Some((c.char_id as u64, c.pos))
+                    Some((c.char_id as u64, c.pos, c.level.max(1) as u32))
                 } else {
                     None
                 }
             })
             .collect();
-        for (owner_id, caster_pos) in due_warder_respawns {
-            let Some(template) = pet_templates::lookup("warder") else { continue };
+        for (owner_id, caster_pos, owner_level) in due_warder_respawns {
+            // Same deterministic owner - 1 as the auto-summon: the respawn
+            // is the same free ritual, so no variance here either.
+            let Some(template) = pet_templates::scaled("warder", owner_level, 0) else {
+                continue;
+            };
+            let pet_level = template.level;
             let spawn_pos = Vec3f {
                 x: caster_pos.x + 1.5,
                 y: caster_pos.y,
@@ -2781,7 +2796,12 @@ pub async fn run(
             if let Some(conn) = connections.get_mut(&(owner_id as ClientId)) {
                 conn.warder_respawn_at = None;
             }
-            tracing::info!(owner = owner_id, pet_id, "warder respawned after retreat");
+            tracing::info!(
+                owner = owner_id,
+                pet_id,
+                level = pet_level,
+                "warder respawned after retreat"
+            );
         }
 
         // 4g4. Track 12 Piece C — charm decay sweep. Pets whose
@@ -4734,7 +4754,19 @@ pub async fn run(
                             );
                             continue;
                         }
-                        let Some(template) = pet_templates::lookup(&pet_type) else {
+                        // Owner-derived level (pet interim A): manual
+                        // summons take the EQ re-summon gamble — a 0..=2
+                        // roll off owner - 1 — so paying mana again can
+                        // land a better pet. The skeleton's tier cap
+                        // lives in `pet_templates::scaled`.
+                        let owner_level = connections
+                            .get(&(intent.caster as ClientId))
+                            .map(|c| c.level.max(1) as u32)
+                            .unwrap_or(1);
+                        let variance = rand::thread_rng().gen_range(0..=2u32);
+                        let Some(template) =
+                            pet_templates::scaled(&pet_type, owner_level, variance)
+                        else {
                             tracing::info!(
                                 caster = intent.caster,
                                 spell = %spell.name,
@@ -4743,6 +4775,7 @@ pub async fn run(
                             );
                             continue;
                         };
+                        let pet_level = template.level;
                         let owner_id = intent.caster;
                         // Spawn at the caster's pos + 1.5 m east
                         // offset so the pet doesn't clip the player
@@ -4769,6 +4802,8 @@ pub async fn run(
                             pet_id,
                             spell = %spell.name,
                             pet_type = %pet_type,
+                            level = pet_level,
+                            owner_level,
                             "pet summoned"
                         );
                     }

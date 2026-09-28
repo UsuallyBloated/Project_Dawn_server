@@ -1478,9 +1478,24 @@ async fn pet_summon_visible_to_peer() {
         );
         assert_eq!(owner, a_char_id as u64);
         assert_eq!(pet_name, "Skeletal Warrior");
-        assert_eq!(level, 6);
-        assert!((max_hp - 80.0).abs() < 0.01, "skeleton template authored hp is 80");
-        assert!((hp - 80.0).abs() < 0.01, "fresh pet spawns at full hp");
+        // Owner-derived level (pet interim A): owner 6 -> base 5, minus
+        // the 0..=2 manual-summon variance roll.
+        assert!(
+            (3..=5).contains(&level),
+            "owner-6 skeleton rolls level 3-5 (got {level})"
+        );
+        // Stats ride the camp curve at PET_STAT_SCALAR (70%).
+        let expected_hp = match level {
+            3 => 39.9,
+            4 => 49.0,
+            5 => 63.0,
+            _ => unreachable!(),
+        };
+        assert!(
+            (max_hp - expected_hp).abs() < 0.1,
+            "level-{level} pet hp follows the 70% camp curve (expected {expected_hp}, got {max_hp})"
+        );
+        assert!((hp - max_hp).abs() < 0.01, "fresh pet spawns at full hp");
     }
 }
 
@@ -1679,7 +1694,12 @@ async fn pet_attacks_owners_target() {
         .await
         .expect("skeleton inherits target and lands a Hit on the enemy");
     if let ServerWorldMsg::Hit { amount, .. } = pet_hit {
-        assert_eq!(amount, 8, "skeleton template authored dmg is 8");
+        // Owner-derived stats: owner 6 -> level 3-5 -> dmg 5-7 (70% of
+        // the camp curve's 7/9/10, rounded).
+        assert!(
+            (5..=7).contains(&amount),
+            "owner-6 skeleton swings for 5-7 (got {amount})"
+        );
     }
 }
 
@@ -1786,7 +1806,11 @@ async fn pet_command_attack_locks_onto_target() {
         .await
         .expect("pet attacks the commanded target");
     if let ServerWorldMsg::Hit { amount, .. } = pet_hit {
-        assert_eq!(amount, 8);
+        // Owner-derived stats: owner 6 -> level 3-5 -> dmg 5-7.
+        assert!(
+            (5..=7).contains(&amount),
+            "owner-6 skeleton swings for 5-7 (got {amount})"
+        );
     }
 }
 
@@ -1993,6 +2017,9 @@ async fn beast_master_auto_summons_warder() {
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "bms", "Beastly", "Human", "Beast Master").await;
 
+    // The exact scenario that opened the To-Do item: a level 22 Beast
+    // Master whose warder was stuck at the static level 5.
+    set_char_level(&h.db_url, a_char_id, 22).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     let pet_spawn = a
@@ -2003,9 +2030,15 @@ async fn beast_master_auto_summons_warder() {
         .expect("Beast Master receives an auto-summoned warder on EnterWorld");
     if let ServerWorldMsg::PetSpawn { pet_name, level, max_hp, hp, .. } = pet_spawn {
         assert_eq!(pet_name, "Wolf", "Beast Master's auto-summon is a Wolf warder");
-        assert_eq!(level, 5);
-        assert!((max_hp - 60.0).abs() < 0.01, "warder template hp is 60");
-        assert!((hp - 60.0).abs() < 0.01, "auto-summon spawns at full HP");
+        // Deterministic owner - 1: the free auto-summon takes no variance
+        // roll (pet interim A).
+        assert_eq!(level, 21, "warder tracks its owner: 22 - 1");
+        // 70% of the extrapolated camp curve at 21: (365 + 50*7) * 0.7.
+        assert!(
+            (max_hp - 500.5).abs() < 0.1,
+            "level-21 warder hp rides the 70% curve (got {max_hp})"
+        );
+        assert!((hp - max_hp).abs() < 0.01, "auto-summon spawns at full HP");
     }
 }
 

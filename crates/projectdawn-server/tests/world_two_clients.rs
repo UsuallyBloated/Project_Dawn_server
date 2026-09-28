@@ -3413,3 +3413,65 @@ async fn dead_players_cannot_loot_or_touch_inventory() {
         .await;
     assert!(post.is_none(), "after respawn the dead-gate must be lifted");
 }
+
+// A forged Move carrying NaN/Infinity direction components must be dropped
+// whole: `clamp_length` passes NaN through (`len > max` is false for NaN),
+// after which conn.pos goes permanently NaN and every `dist > RANGE` refusal
+// gate silently passes. The handler guard drops the packet before ANY state
+// is touched — including the sequence bookkeeping, so a later honest move
+// re-using that sequence number still applies.
+#[tokio::test]
+async fn nan_move_direction_is_dropped() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "nanmover", "Nanmover", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "nanwatch", "Nanwatch", "Elf", "Cleric").await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    let _ = b_char_id;
+
+    // Baseline: an honest move fans a finite Position for A at B.
+    a.send_move(1, Vec3 { x: 1.0, y: 0.0, z: 0.0 });
+    let baseline = b
+        .wait_for(CHANNEL_POSITION, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::Position { id, .. } if *id == a_char_id as u64)
+        })
+        .await
+        .expect("B sees A's baseline Position");
+    if let ServerWorldMsg::Position { pos, .. } = &baseline {
+        assert!(
+            pos.x.is_finite() && pos.y.is_finite() && pos.z.is_finite(),
+            "baseline position is finite"
+        );
+    }
+
+    // Stop, then send the forgery: NaN x, Infinity z. If the guard is
+    // missing, the tick integrates this into conn.pos and every Position
+    // broadcast for A goes NaN from here on.
+    a.send_move(2, Vec3 { x: 0.0, y: 0.0, z: 0.0 });
+    a.send_move(3, Vec3 { x: f32::NAN, y: 0.0, z: f32::INFINITY });
+    for _ in 0..8 {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // The forged packet must not have consumed its sequence number (it was
+    // dropped before bookkeeping), so an honest move re-using seq 3 applies —
+    // and the Position it produces is still finite.
+    a.send_move(3, Vec3 { x: 0.0, y: 0.0, z: 1.0 });
+    let after = b
+        .wait_for(CHANNEL_POSITION, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::Position { id, .. } if *id == a_char_id as u64)
+        })
+        .await
+        .expect("A still moves after the forged packet");
+    if let ServerWorldMsg::Position { pos, .. } = &after {
+        assert!(
+            pos.x.is_finite() && pos.y.is_finite() && pos.z.is_finite(),
+            "position stayed finite after a NaN/Inf Move: {:?}",
+            pos
+        );
+    }
+}

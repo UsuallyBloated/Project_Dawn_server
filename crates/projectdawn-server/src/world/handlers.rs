@@ -543,6 +543,20 @@ pub fn handle_message(
                 // handshake — drop silently.
                 return Outcome::Continue;
             }
+            // A forged non-finite direction (NaN/Inf) would slip through
+            // clamp_length below (`len > max` is false for NaN) and poison
+            // conn.pos — after which every `dist > RANGE` gate passes, since
+            // comparisons against NaN are false: corpse loot, loot bags, res,
+            // attack and spell range would all accept from anywhere. An honest
+            // client can never send one, so drop it before it touches any
+            // state (same shape as DevSpawnMob's payload guard). Deliberately
+            // silent: only a forged client can reach this arm.
+            if !direction.x.is_finite()
+                || !direction.y.is_finite()
+                || !direction.z.is_finite()
+            {
+                return Outcome::Continue;
+            }
             // Drop out-of-order Move packets (unreliable channel can reorder).
             // Also handles wraparound: u32 holds ~2.4 years at 20 Hz.
             if sequence <= conn.last_move_seq && conn.last_move_seq != 0 {

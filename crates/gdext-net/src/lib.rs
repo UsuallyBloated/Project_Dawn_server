@@ -164,6 +164,30 @@ impl NetClient {
         dmg_type: i64,
     );
 
+    // ── PD_W0028 — the trade window (docs/design/trade_window.md). ──
+    #[signal]
+    fn trade_opened(partner_id: i64, partner_name: GString);
+
+    /// Full state of ONE side's offer after any edit. `mine` = my side vs
+    /// the partner's. `item_paths` / `counts` are TRADE_SLOTS long; an
+    /// empty path means an empty window slot.
+    #[signal]
+    fn trade_offer_update(
+        mine: bool,
+        item_paths: PackedStringArray,
+        counts: PackedInt32Array,
+        platinum: i64,
+        gold: i64,
+        silver: i64,
+        copper: i64,
+    );
+
+    #[signal]
+    fn trade_accept_state(you: bool, them: bool);
+
+    #[signal]
+    fn trade_closed(committed: bool, reason: GString);
+
     #[signal]
     fn miss(attacker: i64, target: i64);
 
@@ -722,6 +746,76 @@ impl NetClient {
             CHANNEL_SYSTEM,
             &ClientWorldMsg::CompleteQuest { quest_id: quest_id.to_string() },
         )
+    }
+
+    // ── PD_W0028 — the trade window (docs/design/trade_window.md). ──
+    /// Open a trade with the player `target_id` (a char id). The holding-
+    /// click path sends this; the server opens instantly for both parties.
+    #[func]
+    fn send_trade_request(&mut self, target_id: i64) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeRequest { target_id: target_id.max(0) as u64 },
+        )
+    }
+
+    /// Place the stack at `(from_location, from_slot)` into my `window_slot`
+    /// (0..8). `from_location = "cursor"` parks the held stack first.
+    #[func]
+    fn send_trade_offer_item(
+        &mut self,
+        window_slot: i64,
+        from_location: GString,
+        from_slot: i64,
+    ) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeOfferItem {
+                window_slot: window_slot.clamp(0, 255) as u8,
+                from_location: from_location.to_string(),
+                from_slot: from_slot.max(0) as u32,
+            },
+        )
+    }
+
+    /// Clear my side's `window_slot` (unlocks the referenced inventory slot).
+    #[func]
+    fn send_trade_retrieve_item(&mut self, window_slot: i64) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeRetrieveItem {
+                window_slot: window_slot.clamp(0, 255) as u8,
+            },
+        )
+    }
+
+    /// Absolute per-tier coin offer.
+    #[func]
+    fn send_trade_offer_coins(
+        &mut self,
+        platinum: i64,
+        gold: i64,
+        silver: i64,
+        copper: i64,
+    ) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeOfferCoins {
+                coins: protocol::world::Coins { platinum, gold, silver, copper },
+            },
+        )
+    }
+
+    /// Press Trade. Both sides accepted commits in the same server tick.
+    #[func]
+    fn send_trade_accept(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::TradeAccept)
+    }
+
+    /// Close the window (also implied by range/death/zone/disconnect).
+    #[func]
+    fn send_trade_cancel(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::TradeCancel)
     }
 
     /// PD_W0024 — accept a quest so the server starts counting its objectives.
@@ -1433,6 +1527,27 @@ enum Incoming {
         crit: bool,
         dmg_type: u8,
     },
+    // ── PD_W0028 — the trade window. ──
+    TradeOpened {
+        partner_id: i64,
+        partner_name: String,
+    },
+    TradeOfferUpdate {
+        mine: bool,
+        slots: Vec<(String, u32)>,
+        platinum: i64,
+        gold: i64,
+        silver: i64,
+        copper: i64,
+    },
+    TradeAcceptState {
+        you: bool,
+        them: bool,
+    },
+    TradeClosed {
+        committed: bool,
+        reason: String,
+    },
     Miss {
         attacker: i64,
         target: i64,
@@ -1855,6 +1970,54 @@ impl NetClient {
                             crit.to_variant(),
                             (dmg_type as i64).to_variant(),
                         ],
+                    );
+                }
+                Incoming::TradeOpened { partner_id, partner_name } => {
+                    self.base_mut().emit_signal(
+                        "trade_opened",
+                        &[
+                            partner_id.to_variant(),
+                            GString::from(partner_name.as_str()).to_variant(),
+                        ],
+                    );
+                }
+                Incoming::TradeOfferUpdate {
+                    mine,
+                    slots,
+                    platinum,
+                    gold,
+                    silver,
+                    copper,
+                } => {
+                    let mut item_paths = PackedStringArray::new();
+                    let mut counts = PackedInt32Array::new();
+                    for (path, count) in slots {
+                        item_paths.push(&GString::from(path.as_str()));
+                        counts.push(count as i32);
+                    }
+                    self.base_mut().emit_signal(
+                        "trade_offer_update",
+                        &[
+                            mine.to_variant(),
+                            item_paths.to_variant(),
+                            counts.to_variant(),
+                            platinum.to_variant(),
+                            gold.to_variant(),
+                            silver.to_variant(),
+                            copper.to_variant(),
+                        ],
+                    );
+                }
+                Incoming::TradeAcceptState { you, them } => {
+                    self.base_mut().emit_signal(
+                        "trade_accept_state",
+                        &[you.to_variant(), them.to_variant()],
+                    );
+                }
+                Incoming::TradeClosed { committed, reason } => {
+                    self.base_mut().emit_signal(
+                        "trade_closed",
+                        &[committed.to_variant(), GString::from(reason.as_str()).to_variant()],
                     );
                 }
                 Incoming::ProcTriggered {
@@ -2490,6 +2653,23 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             crit,
             dmg_type: damage_type_to_u8(dmg_type),
         },
+        // ── PD_W0028 — the trade window. ──
+        ServerWorldMsg::TradeOpened { partner_id, partner_name } => Incoming::TradeOpened {
+            partner_id: partner_id as i64,
+            partner_name,
+        },
+        ServerWorldMsg::TradeOfferUpdate { mine, slots, coins } => Incoming::TradeOfferUpdate {
+            mine,
+            slots,
+            platinum: coins.platinum,
+            gold: coins.gold,
+            silver: coins.silver,
+            copper: coins.copper,
+        },
+        ServerWorldMsg::TradeAcceptState { you, them } => Incoming::TradeAcceptState { you, them },
+        ServerWorldMsg::TradeClosed { committed, reason } => {
+            Incoming::TradeClosed { committed, reason }
+        }
         ServerWorldMsg::Miss { attacker, target } => Incoming::Miss {
             attacker: attacker as i64,
             target: target as i64,

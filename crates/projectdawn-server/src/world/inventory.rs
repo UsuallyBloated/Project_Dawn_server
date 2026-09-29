@@ -1249,6 +1249,46 @@ impl PlayerInventory {
         }
     }
 
+    /// PD_W0028 — park the held stack into the first EMPTY slot, without
+    /// merging: an offered trade stack must stay one discrete stack the
+    /// session can reference, so stack top-ups are deliberately skipped.
+    /// Bags park to base only (bag-in-bag ban); a full bag's contents
+    /// re-key with it via `move_cursor_to_base`. Returns the landing
+    /// `(location, slot)` plus the touched-slot list for the delta fan.
+    pub fn park_cursor_stack(
+        &mut self,
+    ) -> Result<((String, u32), Vec<(String, u32)>), &'static str> {
+        let held = self.cursor.as_ref().ok_or("source slot empty")?;
+        let held_is_bag = is_bag_item(&held.item_path);
+        for i in 0..BASE_SLOT_COUNT {
+            if self.base[i].is_none() {
+                let touched = self.move_cursor_to_base(i)?;
+                return Ok((("base".to_string(), i as u32), touched));
+            }
+        }
+        if !held_is_bag {
+            let mut keys: Vec<u8> = self.bags.keys().copied().collect();
+            keys.retain(|k| *k != CURSOR_BAG_KEY);
+            keys.sort_unstable();
+            for b in keys {
+                let len = self.bags.get(&b).map(|a| a.len()).unwrap_or(0);
+                for s in 0..len {
+                    let empty = self
+                        .bags
+                        .get(&b)
+                        .and_then(|a| a.get(s))
+                        .map(|x| x.is_none())
+                        .unwrap_or(false);
+                    if empty {
+                        let touched = self.move_cursor_to_bag(b, s)?;
+                        return Ok(((format!("bag_{b}"), s as u32), touched));
+                    }
+                }
+            }
+        }
+        Err("your bags are full")
+    }
+
     /// Track 13.2 / 14.3 — atomic move/swap between base slots.
     /// Move-to-empty is a clean transfer; move-to-occupied with the
     /// same item_path merges counts (capped); move-to-occupied with

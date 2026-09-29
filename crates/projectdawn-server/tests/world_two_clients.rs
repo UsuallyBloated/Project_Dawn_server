@@ -289,6 +289,47 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::LootAll { bag_id });
     }
 
+    fn send_gm_command(&mut self, line: &str) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::GmCommand { line: line.to_string() },
+        );
+    }
+
+    // ── PD_W0028 — trade window intents. ──
+    fn send_trade_request(&mut self, target: u64) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeRequest { target_id: target },
+        );
+    }
+
+    fn send_trade_offer_item(&mut self, window_slot: u8, loc: &str, slot: u32) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeOfferItem {
+                window_slot,
+                from_location: loc.to_string(),
+                from_slot: slot,
+            },
+        );
+    }
+
+    fn send_trade_offer_coins(&mut self, coins: protocol::world::Coins) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeOfferCoins { coins },
+        );
+    }
+
+    fn send_trade_accept(&mut self) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::TradeAccept);
+    }
+
     fn send_group_invite(&mut self, name: &str) {
         send_msg(
             &mut self.client,
@@ -3662,4 +3703,245 @@ async fn dead_group_member_gets_no_xp_share() {
         })
         .await;
     assert!(leak.is_none(), "a dead group member must receive no XP share");
+}
+
+// ── PD_W0028 — the trade window (docs/design/trade_window.md). The tests
+// below are the exploit ledger made executable: atomic two-sided commit,
+// the every-edit-clears-both-accepts law, the escrow lock, self-trade and
+// coin-overdraft refusals. ──
+
+/// Shared setup: A (GM, so it can conjure goods/coins) and B connected at
+/// the spawn, with A holding 3 Bread Loaf at a known slot and 25 copper.
+async fn trade_pair(
+    h: &Harness,
+    a_user: &str,
+    a_name: &str,
+    b_user: &str,
+    b_name: &str,
+) -> (WorldClient, i64, WorldClient, i64, String, u32) {
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, a_user, a_name, "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, a_user, true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, b_user, b_name, "Elf", "Cleric").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let b = WorldClient::start(b_token, &b_session, b_char_id).await;
+
+    // The wire line carries no slash: the client's /give strips it before
+    // sending (`give <item name> [qty]`, handlers.rs).
+    a.send_gm_command("give Bread Loaf 3");
+    send_msg(
+        &mut a.client,
+        CHANNEL_SYSTEM,
+        &ClientWorldMsg::GiveCoins { platinum: 0, gold: 0, silver: 0, copper: 25 },
+    );
+    let bread = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. }
+                if p.contains("bread"))
+        })
+        .await
+        .expect("the bread lands");
+    let (bread_loc, bread_slot) = match bread {
+        ServerWorldMsg::InventoryDelta { location, slot, .. } => (location, slot),
+        _ => unreachable!(),
+    };
+    (a, a_char_id, b, b_char_id, bread_loc, bread_slot)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trade_commits_atomically_and_pays_both_sides() {
+    let h = start_both().await;
+    let (mut a, _a_char_id, mut b, b_char_id, bread_loc, bread_slot) =
+        trade_pair(&h, "tradea", "Tradealy", "tradeb", "Tradebel").await;
+
+    // Flush A's outbound intents before waiting on the peer: wait_for only
+    // pumps the client it is called on, so A's packets otherwise sit in A's
+    // transport buffer.
+    macro_rules! pump_a {
+        () => {{
+            for _ in 0..4 {
+                tick_one(&mut a.client, &mut a.transport);
+                tokio::time::sleep(TICK_DT).await;
+            }
+        }};
+    }
+
+    a.send_trade_request(b_char_id as u64);
+    pump_a!();
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { partner_id, .. }
+            if *partner_id == b_char_id as u64)
+    })
+    .await
+    .expect("A's window opens");
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { .. })
+    })
+    .await
+    .expect("B's window opens instantly (no accept prompt)");
+
+    // A offers the bread and the copper; B offers nothing (a gift).
+    a.send_trade_offer_item(0, &bread_loc, bread_slot);
+    pump_a!();
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOfferUpdate { mine: false, slots, .. }
+            if slots.first().map(|(p, c)| p.contains("bread") && *c == 3).unwrap_or(false))
+    })
+    .await
+    .expect("B sees A's offered stack, path and count");
+    a.send_trade_offer_coins(protocol::world::Coins {
+        platinum: 0,
+        gold: 0,
+        silver: 0,
+        copper: 25,
+    });
+    pump_a!();
+
+    a.send_trade_accept();
+    pump_a!();
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeAcceptState { you: false, them: true })
+    })
+    .await
+    .expect("B sees A standing accepted");
+    b.send_trade_accept();
+
+    // B receives the goods, then the committed close. (wait_for drops
+    // non-matching messages, so assert in fan order: delta, coins, close.)
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), count: 3, .. }
+            if p.contains("bread"))
+    })
+    .await
+    .expect("B receives the bread stack");
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.copper >= 25)
+    })
+    .await
+    .expect("B receives the copper");
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeClosed { committed: true, .. })
+    })
+    .await
+    .expect("B's close says committed");
+
+    // A's side: the offered slot cleared and the close says committed.
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, slot, item_path: None, .. }
+            if *location == bread_loc && *slot == bread_slot)
+    })
+    .await
+    .expect("A's offered slot empties");
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeClosed { committed: true, .. })
+    })
+    .await
+    .expect("A's close says committed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trade_edits_clear_accepts_and_locks_hold() {
+    let h = start_both().await;
+    let (mut a, _a_char_id, mut b, b_char_id, bread_loc, bread_slot) =
+        trade_pair(&h, "tradec", "Tradecyn", "traded", "Tradedor").await;
+
+    a.send_trade_request(b_char_id as u64);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { .. })
+    })
+    .await
+    .expect("A's window opens");
+    a.send_trade_offer_item(0, &bread_loc, bread_slot);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOfferUpdate { mine: true, .. })
+    })
+    .await
+    .expect("A sees its own offer");
+
+    // Ledger 2 — the escrow: the offered slot refuses a MoveItem with the
+    // lock's chat line, and the stack stays put.
+    a.send_move_item(&bread_loc, bread_slot, "base", 7);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+            if text.contains("offered in a trade"))
+    })
+    .await
+    .expect("locked slot refuses the move, with the line");
+
+    // Ledger 1 — bait-and-switch: A accepts, then B edits; BOTH accepts
+    // clear, and B's later lone accept commits nothing.
+    a.send_trade_accept();
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeAcceptState { them: true, .. })
+    })
+    .await
+    .expect("B sees A accepted");
+    b.send_trade_offer_coins(protocol::world::Coins::ZERO);
+    for _ in 0..4 {
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeAcceptState { you: false, them: false })
+    })
+    .await
+    .expect("the edit cleared BOTH accepts on A's display");
+    b.send_trade_accept();
+    let premature = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::TradeClosed { committed: true, .. })
+        })
+        .await;
+    assert!(
+        premature.is_none(),
+        "one accept after the edit must not commit — A's stale accept is dead"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trade_refuses_self_and_coin_overdraft() {
+    let h = start_both().await;
+    let (mut a, a_char_id, mut b, b_char_id, _bread_loc, _bread_slot) =
+        trade_pair(&h, "tradee", "Tradeeva", "tradef", "Tradefin").await;
+
+    // Ledger 8 — self-trade.
+    a.send_trade_request(a_char_id as u64);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+            if text.contains("yourself"))
+    })
+    .await
+    .expect("self-trade refuses");
+
+    // Ledger 4 — overdraft: B offers coin it cannot cover.
+    a.send_trade_request(b_char_id as u64);
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { .. })
+    })
+    .await
+    .expect("window opens");
+    b.send_trade_offer_coins(protocol::world::Coins {
+        platinum: 999,
+        gold: 0,
+        silver: 0,
+        copper: 0,
+    });
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+            if text.contains("that much coin"))
+    })
+    .await
+    .expect("the overdraft refuses with the line");
 }

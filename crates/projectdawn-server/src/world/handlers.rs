@@ -170,6 +170,35 @@ pub enum Outcome {
         dst_slot: u32,
     },
 
+    // ── PD_W0028 — trade window intents. All validation happens in the
+    //    tick apply phase, which owns the TradeManager and both parties'
+    //    inventories; the handler only gates in_world (and the dead-state
+    //    whitelist upstream refuses every one of these while dead). ──
+    TradeRequestIntent {
+        requester: u64,
+        target: u64,
+    },
+    TradeOfferItemIntent {
+        owner: u64,
+        window_slot: u8,
+        from_location: String,
+        from_slot: u32,
+    },
+    TradeRetrieveItemIntent {
+        owner: u64,
+        window_slot: u8,
+    },
+    TradeOfferCoinsIntent {
+        owner: u64,
+        coins: protocol::world::Coins,
+    },
+    TradeAcceptIntent {
+        owner: u64,
+    },
+    TradeCancelIntent {
+        owner: u64,
+    },
+
     /// Track 13.2.b — split `count` items off src into dst. Both
     /// locations are 'base' for now; bag locations defer to 13.2.c.
     SplitStackIntent {
@@ -701,6 +730,69 @@ pub fn handle_message(
             Outcome::CompleteQuestIntent {
                 responder: conn.char_id as u64,
                 quest_id,
+            }
+        }
+
+        // ── PD_W0028 — trade window. Thin conversions to intents; the
+        //    tick apply phase owns the TradeManager and both inventories,
+        //    so every real check lives there. The dead-state whitelist
+        //    above already refuses all of these while dead. ──
+        ClientWorldMsg::TradeRequest { target_id } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::TradeRequestIntent {
+                requester: conn.char_id as u64,
+                target: target_id,
+            }
+        }
+        ClientWorldMsg::TradeOfferItem {
+            window_slot,
+            from_location,
+            from_slot,
+        } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::TradeOfferItemIntent {
+                owner: conn.char_id as u64,
+                window_slot,
+                from_location,
+                from_slot,
+            }
+        }
+        ClientWorldMsg::TradeRetrieveItem { window_slot } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::TradeRetrieveItemIntent {
+                owner: conn.char_id as u64,
+                window_slot,
+            }
+        }
+        ClientWorldMsg::TradeOfferCoins { coins } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::TradeOfferCoinsIntent {
+                owner: conn.char_id as u64,
+                coins,
+            }
+        }
+        ClientWorldMsg::TradeAccept => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::TradeAcceptIntent {
+                owner: conn.char_id as u64,
+            }
+        }
+        ClientWorldMsg::TradeCancel => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::TradeCancelIntent {
+                owner: conn.char_id as u64,
             }
         }
 
@@ -2358,6 +2450,56 @@ pub fn fan_out_buff_snapshot(
     let Some(bytes) = encode(&msg) else { return };
     for recipient in recipients {
         server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+// ── PD_W0028 — trade window fans, all private per-party. ──
+pub fn send_trade_opened(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    partner_id: u64,
+    partner_name: String,
+) {
+    let msg = ServerWorldMsg::TradeOpened { partner_id, partner_name };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+pub fn send_trade_offer_update(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    mine: bool,
+    slots: Vec<(String, u32)>,
+    coins: Coins,
+) {
+    let msg = ServerWorldMsg::TradeOfferUpdate { mine, slots, coins };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+pub fn send_trade_accept_state(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    you: bool,
+    them: bool,
+) {
+    let msg = ServerWorldMsg::TradeAcceptState { you, them };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+pub fn send_trade_closed(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    committed: bool,
+    reason: &str,
+) {
+    let msg = ServerWorldMsg::TradeClosed { committed, reason: reason.to_string() };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
     }
 }
 

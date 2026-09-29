@@ -37,6 +37,7 @@ pub mod skills;
 mod spawn_points;
 mod spells;
 mod tick;
+mod trade;
 mod zones;
 
 use crate::Config;

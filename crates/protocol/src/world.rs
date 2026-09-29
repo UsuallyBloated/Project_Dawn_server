@@ -120,7 +120,17 @@ use serde::{Deserialize, Serialize};
 /// `DropItem` / `UseConsumable` / `InventoryDelta` (strings, so no shape
 /// change — the bump exists because an old server would drop the new intent
 /// and an old client would not understand a cursor delta).
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3237; // "PD_W0027"
+///
+/// PD_W0028: the trade window, slice 1 (player to player;
+/// docs/design/trade_window.md). Appends the trade intents
+/// (`TradeRequest` / `TradeOfferItem` / `TradeRetrieveItem` /
+/// `TradeOfferCoins` / `TradeAccept` / `TradeCancel`) at the END of
+/// `ClientWorldMsg`, and the trade messages (`TradeOpened` /
+/// `TradeOfferUpdate` / `TradeAcceptState` / `TradeClosed`) at the END of
+/// `ServerWorldMsg`. Escrow is by LOCKING: offered items never leave the
+/// owner's inventory until the single-transaction commit, and every offer
+/// edit clears both accepts server-side. Both sides deploy together.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3238; // "PD_W0028"
 
 pub type EntityId = u64;
 
@@ -929,6 +939,40 @@ pub enum ClientWorldMsg {
     CompleteQuest {
         quest_id: String,
     },
+
+    // ── PD_W0028 — the trade window (docs/design/trade_window.md) ──
+    /// Open a trade with `target_id` (a player char id). Sent by the
+    /// holding-click path; the server validates target is a connected,
+    /// alive, in-range PLAYER with no session of their own, then opens
+    /// instantly for both (decided: EQ-style, no accept prompt).
+    TradeRequest {
+        target_id: EntityId,
+    },
+    /// Place the stack at `(from_location, from_slot)` into my side's
+    /// `window_slot` (0..8). The server re-reads the slot from ITS
+    /// inventory (the client never names an item path) and LOCKS it in
+    /// place; `"cursor"` as the source first parks the held stack into an
+    /// empty inventory slot so the hand frees for the next pickup.
+    TradeOfferItem {
+        window_slot: u8,
+        from_location: String,
+        from_slot: u32,
+    },
+    /// Clear my side's `window_slot`: the referenced inventory slot
+    /// unlocks where it sits (escrow-by-locking means nothing moves).
+    TradeRetrieveItem {
+        window_slot: u8,
+    },
+    /// Absolute per-tier coin offer (the four independent stacks).
+    /// Validated against the live wallet at offer time and again at
+    /// commit inside the tick.
+    TradeOfferCoins {
+        coins: Coins,
+    },
+    /// Press Trade. Both sides accepted -> commit (one db transaction).
+    TradeAccept,
+    /// Close the window. Also implied by range, death, zone, disconnect.
+    TradeCancel,
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────
@@ -1465,6 +1509,33 @@ pub enum ServerWorldMsg {
         amount: i32,
         crit: bool,
         dmg_type: DamageType,
+    },
+
+    // ── PD_W0028 — the trade window (docs/design/trade_window.md) ──
+    /// A trade session opened; sent to both parties (instant open).
+    TradeOpened {
+        partner_id: EntityId,
+        partner_name: String,
+    },
+    /// Full state of ONE side's offer after any edit — full-state per
+    /// update, not deltas: a tiny payload with no desync class. `mine`
+    /// tells the recipient whether this is their own side or the
+    /// partner's. Slots are `(item_path, count)`, empty string = empty.
+    TradeOfferUpdate {
+        mine: bool,
+        slots: Vec<(String, u32)>,
+        coins: Coins,
+    },
+    /// Accept flags after any change (every offer edit clears both).
+    TradeAcceptState {
+        you: bool,
+        them: bool,
+    },
+    /// The session ended. `committed` distinguishes a successful trade
+    /// from a cancel; `reason` is the human-readable why for chat.
+    TradeClosed {
+        committed: bool,
+        reason: String,
     },
 }
 

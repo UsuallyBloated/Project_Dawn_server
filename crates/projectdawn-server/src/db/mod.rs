@@ -1476,6 +1476,60 @@ pub async fn save_skills(
     Ok(())
 }
 
+/// PD_W0028 — the trade commit: BOTH characters' inventories and wallets in
+/// ONE transaction. A trade is the sharpest two-connection transfer in the
+/// game: writing the parties separately (or leaving them to their own
+/// periodic checkpoints) opens the classic split-brain dupe — one side's
+/// post-trade state persisted, the other's rolled back, and the traded items
+/// exist twice. Same single-tx doctrine as `apply_corpse_loot` and
+/// `save_stores_atomic`, spanning two characters instead of two stores.
+pub async fn commit_trade(
+    pool: &SqlitePool,
+    a_char_id: i64,
+    a_inventory: &[InventoryRow],
+    a_coins: Coins,
+    b_char_id: i64,
+    b_inventory: &[InventoryRow],
+    b_coins: Coins,
+) -> AuthResult<()> {
+    let mut tx = pool.begin().await?;
+    for (char_id, rows, coins) in [
+        (a_char_id, a_inventory, a_coins),
+        (b_char_id, b_inventory, b_coins),
+    ] {
+        sqlx::query("DELETE FROM character_items WHERE char_id = ?1")
+            .bind(char_id)
+            .execute(&mut *tx)
+            .await?;
+        for row in rows {
+            sqlx::query(
+                "INSERT INTO character_items (char_id, location, slot, item_path, count)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .bind(char_id)
+            .bind(&row.location)
+            .bind(row.slot)
+            .bind(&row.item_path)
+            .bind(row.count)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query(
+            "UPDATE characters SET platinum = ?1, gold = ?2, silver = ?3, copper = ?4
+             WHERE id = ?5",
+        )
+        .bind(coins.platinum)
+        .bind(coins.gold)
+        .bind(coins.silver)
+        .bind(coins.copper)
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod corpse_loot_tests {
     //! Corpse / resurrection Slice 2 — the atomic corpse-loot persist. Locks the

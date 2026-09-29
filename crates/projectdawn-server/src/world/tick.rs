@@ -5834,6 +5834,12 @@ pub async fn run(
                             .unwrap_or(false);
                         if !covered {
                             handlers::send_refusal(&mut server, cid, "You don't have that much coin.");
+                            // Re-fan the APPLIED state so the client's coin
+                            // fields snap back to what the server holds
+                            // instead of displaying the refused amount.
+                            if let Some(session) = trade_manager.session_of(cid) {
+                                fan_trade_state(&mut server, &connections, session);
+                            }
                             continue;
                         }
                         match trade_manager.offer_coins(cid, coins) {

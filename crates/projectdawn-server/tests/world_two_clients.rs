@@ -3705,6 +3705,66 @@ async fn dead_group_member_gets_no_xp_share() {
     assert!(leak.is_none(), "a dead group member must receive no XP share");
 }
 
+// Silent-refusals closeout (2026-09-30): the cast resolver deducts mana at
+// the top of the handler, so an arm that rejected afterwards and returned
+// silently charged full price for nothing. The headline case is the one a
+// player hits by accident: firing a nuke with no target selected. Assert
+// BOTH halves of the fix — the refusal line, and the mana coming back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enemy_spell_without_a_target_refunds_and_reports() {
+    let h = start_both().await;
+    // Fireball is Magician-only in spells.toml, and the class/level gate runs
+    // BEFORE the target arm — roll the class that can actually cast it, or
+    // this tests the wrong refusal.
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "notarget", "Notarg", "Human", "Magician").await;
+    set_char_level(&h.db_url, a_char_id, 12).await;
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Let enter-world settle, then latch the starting mana from the seed.
+    a.pump_for(Duration::from_millis(400)).await;
+
+    // Run the cast bar, then send the cast with NO target id.
+    a.send_cast_start("Fireball", 1.5);
+    a.pump_for(Duration::from_millis(1700)).await;
+    a.send_cast_spell("Fireball", None);
+
+    // The refusal arrives as a System chat line.
+    let refusal = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+                if text.contains("need a target"))
+        })
+        .await;
+    assert!(
+        refusal.is_some(),
+        "a targetless ENEMY cast must answer instead of failing silently"
+    );
+
+    // And the mana is given back: the LAST ManaUpdate for this caster must
+    // report full mana, not the post-deduct value.
+    let mut last_mp: Option<(f32, f32)> = None;
+    a.pump_for(Duration::from_millis(600)).await;
+    while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
+        if let Ok((msg, _)) =
+            bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+        {
+            if let ServerWorldMsg::ManaUpdate { id, mp, max_mp } = msg {
+                if id == a_char_id as u64 {
+                    last_mp = Some((mp, max_mp));
+                }
+            }
+        }
+    }
+    if let Some((mp, max_mp)) = last_mp {
+        assert!(
+            (mp - max_mp).abs() < 0.01,
+            "mana must be refunded after a refused cast (got {mp} of {max_mp})"
+        );
+    }
+}
+
 // ── PD_W0028 — the trade window (docs/design/trade_window.md). The tests
 // below are the exploit ledger made executable: atomic two-sided commit,
 // the every-edit-clears-both-accepts law, the escrow lock, self-trade and

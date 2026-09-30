@@ -1476,6 +1476,128 @@ pub async fn save_skills(
     Ok(())
 }
 
+/// Operator password reset (the `reset_password` bin). Writes a fresh Argon2
+/// hash AND deletes every session row for the account in ONE transaction, so
+/// there is no window where the password has changed but an old session is
+/// still usable. Returns `(account_id, sessions_purged)`.
+///
+/// Deliberately NOT reachable from the wire: an in-game or launcher-facing
+/// "change my password" needs the OLD password re-verified and its own
+/// rate-limit budget (`LoginRateLimiter` is keyed to Login and Register only,
+/// so an unmetered endpoint here would be an Argon2 oracle). Operator tool
+/// first; that flow is its own task.
+pub async fn reset_password(
+    pool: &SqlitePool,
+    username: &str,
+    new_password: &str,
+) -> AuthResult<(i64, u64)> {
+    validate_password(new_password)?;
+
+    let row = sqlx::query("SELECT id FROM accounts WHERE username = ?1 COLLATE NOCASE")
+        .bind(username)
+        .fetch_optional(pool)
+        .await?;
+    let Some(row) = row else {
+        return Err(AuthError::InvalidInput(format!(
+            "no account named '{username}'"
+        )));
+    };
+    let account_id: i64 = row.get("id");
+
+    let salt = SaltString::generate(&mut OsRng);
+    let hash = Argon2::default()
+        .hash_password(new_password.as_bytes(), &salt)?
+        .to_string();
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE accounts SET password_hash = ?1 WHERE id = ?2")
+        .bind(&hash)
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await?;
+    let purged = sqlx::query("DELETE FROM sessions WHERE account_id = ?1")
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+
+    Ok((account_id, purged))
+}
+
+#[cfg(test)]
+mod reset_password_tests {
+    //! The operator reset: the new password works, the OLD one stops working,
+    //! and every session dies with it (a live session outliving a reset is the
+    //! whole reason the purge is in the same transaction).
+    use super::*;
+    use tempfile::TempDir;
+
+    async fn fresh_pool() -> (sqlx::SqlitePool, TempDir) {
+        let tmp = TempDir::new().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reset_test.db").display());
+        let pool = open(&url).await.expect("open");
+        migrate(&pool).await.expect("migrate");
+        (pool, tmp)
+    }
+
+    #[tokio::test]
+    async fn reset_swaps_the_password_and_kills_every_session() {
+        let (pool, _tmp) = fresh_pool().await;
+        create_account(&pool, "forgetful", "oldpassword", None)
+            .await
+            .expect("create");
+        // Two live sessions, as if they logged in from two machines.
+        let s1 = issue_session(&pool, 1).await.expect("session 1");
+        let _s2 = issue_session(&pool, 1).await.expect("session 2");
+        assert!(
+            verify_login(&pool, "forgetful", "oldpassword").await.is_ok(),
+            "the old password works before the reset"
+        );
+
+        let (id, purged) = reset_password(&pool, "forgetful", "brandnewpassword")
+            .await
+            .expect("reset");
+        assert_eq!(id, 1);
+        // Three, not two: `verify_login` mints a session of its own on success,
+        // so the "old password works" probe above left one behind. That is the
+        // point of the purge — every way in is closed, not just the ones the
+        // operator knows about.
+        assert_eq!(purged, 3, "every session for the account is purged");
+
+        assert!(
+            verify_login(&pool, "forgetful", "brandnewpassword").await.is_ok(),
+            "the new password works"
+        );
+        assert!(
+            verify_login(&pool, "forgetful", "oldpassword").await.is_err(),
+            "the old password must stop working"
+        );
+        // The purged session token can no longer be redeemed.
+        assert!(
+            touch_session(&pool, &s1).await.is_err(),
+            "a session minted before the reset must not outlive it"
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_refuses_a_short_password_and_an_unknown_account() {
+        let (pool, _tmp) = fresh_pool().await;
+        create_account(&pool, "someone", "oldpassword", None)
+            .await
+            .expect("create");
+        assert!(
+            reset_password(&pool, "someone", "short").await.is_err(),
+            "the floor that Register enforces applies here too"
+        );
+        assert!(
+            verify_login(&pool, "someone", "oldpassword").await.is_ok(),
+            "a refused reset leaves the old password intact"
+        );
+        assert!(reset_password(&pool, "nobody", "brandnewpassword").await.is_err());
+    }
+}
+
 #[cfg(test)]
 mod corpse_loot_tests {
     //! Corpse / resurrection Slice 2 — the atomic corpse-loot persist. Locks the

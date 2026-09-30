@@ -1,4 +1,4 @@
-//! Two-client end-to-end test for Track 3 multi-player replication.
+﻿//! Two-client end-to-end test for Track 3 multi-player replication.
 //!
 //! Brings up auth + world in-process, drives two independent renet
 //! clients through the full handshake, and asserts the multi-player
@@ -154,7 +154,7 @@ async fn provision_client(
 /// Mana matters too: the character loader recomputes `max_mp` from the stored
 /// level, but carries current `mp` over as `row.mp.min(computed.max_mp)`. A
 /// bumped character would otherwise still hold its level-1 mana and fail on cost
-/// instead of on the gate — swapping one confusing failure for another. Setting
+/// instead of on the gate â€” swapping one confusing failure for another. Setting
 /// mp high lets the loader clamp it to the new maximum, i.e. "full mana at the
 /// new level".
 async fn set_char_level(db_url: &str, char_id: i64, level: i32) {
@@ -218,7 +218,7 @@ impl WorldClient {
         // Track 4 follow-up E: EntitySpawn / Position fan-out is gated on
         // EnterWorld. Tests are post-lobby by design, so flip the gate
         // immediately after ConnectOk. Pump the transport for a few ticks
-        // so the message actually goes out before start() returns —
+        // so the message actually goes out before start() returns â€”
         // otherwise the bytes sit in the outgoing buffer until the next
         // wait_for ticks the client, which may be after the test has
         // moved on to another client's setup.
@@ -336,7 +336,7 @@ impl WorldClient {
 
     /// Dev-gated world-mob spawn (the Test Panel path). The server places the
     /// mob exactly 3 m behind the requester. Requires the connection to be
-    /// dev or GM — grant `is_gm` via `db::set_account_gm` and mint a FRESH
+    /// dev or GM â€” grant `is_gm` via `db::set_account_gm` and mint a FRESH
     /// token, as `is_gm_gates_dev_commands` does.
     fn send_dev_spawn(&mut self, name: &str, level: u32, hp: f32, dmg: i32, speed: f32, aggro: f32) {
         send_msg(
@@ -437,8 +437,8 @@ impl WorldClient {
     /// cadence. Use instead of a bare tokio sleep for any wait longer than
     /// a tick or two (cast bars especially): with the phase 4 world
     /// population, an unserviced client socket overflows during a
-    /// multi-second sleep and datagrams — including ones carrying RELIABLE
-    /// channel slices — are lost faster than the 150 ms resend lands
+    /// multi-second sleep and datagrams â€” including ones carrying RELIABLE
+    /// channel slices â€” are lost faster than the 150 ms resend lands
     /// between ticks, so a message the server provably sent (e.g.
     /// PetSpawn) can miss a 3 s wait entirely. A real client services the
     /// socket every frame; the harness must too.
@@ -498,9 +498,9 @@ async fn two_clients_see_each_other() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
 
-    // ── 1. EntitySpawn fan-out ──
+    // â”€â”€ 1. EntitySpawn fan-out â”€â”€
     // B was newly-connected; the server should have sent A an EntitySpawn for B.
-    // A also gets EntitySpawn for itself? No — fan-out skips the subject;
+    // A also gets EntitySpawn for itself? No â€” fan-out skips the subject;
     // A's own ConnectOk is the own-self signal. So only spawn(B) at A.
     let spawn_b_at_a = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
@@ -527,7 +527,7 @@ async fn two_clients_see_each_other() {
         assert_eq!(class, "Warrior");
     }
 
-    // ── 2. Position fan-out ──
+    // â”€â”€ 2. Position fan-out â”€â”€
     // Each client moves; both should see Positions for both ids.
     a.send_move(1, Vec3 { x: 1.0, y: 0.0, z: 0.0 });
     b.send_move(1, Vec3 { x: 0.0, y: 0.0, z: 1.0 });
@@ -546,7 +546,7 @@ async fn two_clients_see_each_other() {
         .await
         .expect("B sees a Position broadcast for A");
 
-    // ── 3. EntityDespawn on disconnect ──
+    // â”€â”€ 3. EntityDespawn on disconnect â”€â”€
     // B leaves. A should see EntityDespawn(B.char_id) within a tick or two.
     b.send_disconnect();
     // Pump B's transport so the Disconnect message reaches the wire before
@@ -599,7 +599,7 @@ async fn two_clients_server_authoritative_resources() {
         tokio::time::sleep(TICK_DT).await;
     }
 
-    // Track 6 sub-task 2 — A is Human Warrior, so char_data::compute
+    // Track 6 sub-task 2 â€” A is Human Warrior, so char_data::compute
     // gives max_hp=200 (BASE_HP 100 + Warrior 50 + CON-bonus 50),
     // max_mp=100 (BASE_MP 100 + 0), max_stamina=120 (BASE_ST 100 +
     // Warrior 20). `create_character` seeds current = max.
@@ -805,8 +805,8 @@ async fn two_clients_buff_snapshot_fanout() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
 
-    // A casts Healing Wave (ALLY, 15 immediate heal + 4 hps × 18s HoT,
-    // cast_time 1.0s). Track 10 — the cast-time gate now rejects
+    // A casts Healing Wave (ALLY, 15 immediate heal + 4 hps Ã— 18s HoT,
+    // cast_time 1.0s). Track 10 â€” the cast-time gate now rejects
     // CastSpell unless a matching CastStart ran long enough, so we
     // pump CastStart out first (transport doesn't advance during a
     // bare tokio sleep), then wait the cast time, then send CastSpell.
@@ -836,14 +836,14 @@ async fn two_clients_buff_snapshot_fanout() {
         .expect("B receives server-driven BuffSnapshot containing Healing Wave");
 }
 
-/// Track 5 sub-task 1C: AI state machine drives Idle → Chase → Attack
+/// Track 5 sub-task 1C: AI state machine drives Idle â†’ Chase â†’ Attack
 /// for a server-spawned enemy when a player enters aggro range.
 ///
 /// The player walks toward the Bonepile's isolated [-16, 0, -14] spawn
 /// long enough to land well inside the Decrepit Skeleton's 8 m aggro
-/// radius even with the ±3 m XZ spawn jitter, then stops. The test asserts:
+/// radius even with the Â±3 m XZ spawn jitter, then stops. The test asserts:
 ///
-///   * an `EntityTarget` broadcast lands targeting the player (Idle →
+///   * an `EntityTarget` broadcast lands targeting the player (Idle â†’
 ///     Chase transition fired server-side);
 ///   * a `Hit` broadcast lands targeting the player from an enemy id
 ///     (Attack state fired its melee swing).
@@ -861,7 +861,7 @@ async fn enemy_aggros_chases_and_attacks_player() {
 
     // Unit vector toward camp 0's [20, 0, 5] spawn.
     // Phase 4 layout note: every camp-walking test aims at the Bonepile's
-    // isolated [-16, 0, -14] spawn — the one ring 1 spawn whose aggro circle
+    // isolated [-16, 0, -14] spawn â€” the one ring 1 spawn whose aggro circle
     // overlaps no other, so exactly ONE slow (1.8 m/s, 2.5 s swing) level 1
     // Decrepit Skeleton pulls, the same single-puller semantics these tests
     // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
@@ -886,7 +886,7 @@ async fn enemy_aggros_chases_and_attacks_player() {
     // player at its current pos within ~10 ticks.
 
     // Generous timeouts because `cargo test --release` runs the whole
-    // world_two_clients.rs file's tests in parallel by default — under
+    // world_two_clients.rs file's tests in parallel by default â€” under
     // CPU contention the AI tick + position fan-out can fall behind by
     // several seconds while still being functionally correct. Run this
     // test in isolation (`cargo test ... enemy_aggros...`) and it
@@ -926,12 +926,12 @@ async fn enemy_aggros_chases_and_attacks_player() {
     }
 }
 
-/// Track 5 sub-task 3: player → server Attack intent, enemy HP authority,
+/// Track 5 sub-task 3: player â†’ server Attack intent, enemy HP authority,
 /// death lifecycle.
 ///
 /// The player walks into camp 0's aggro radius so the AI engages, waits
 /// for an enemy-originated Hit broadcast (confirming the player and one
-/// enemy are now within 1.2 × melee_range of each other), then sends an
+/// enemy are now within 1.2 Ã— melee_range of each other), then sends an
 /// `Attack` with enough damage to one-shot the Decrepit Skeleton
 /// (25 HP). Asserts:
 ///
@@ -954,9 +954,9 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     // Walk toward the Bonepile's isolated [-16, -14] spawn (one level 1
-    // Decrepit Skeleton — see the shared phase 4 layout note above).
+    // Decrepit Skeleton â€” see the shared phase 4 layout note above).
     // Phase 4 layout note: every camp-walking test aims at the Bonepile's
-    // isolated [-16, 0, -14] spawn — the one ring 1 spawn whose aggro circle
+    // isolated [-16, 0, -14] spawn â€” the one ring 1 spawn whose aggro circle
     // overlaps no other, so exactly ONE slow (1.8 m/s, 2.5 s swing) level 1
     // Decrepit Skeleton pulls, the same single-puller semantics these tests
     // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
@@ -975,7 +975,7 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
         tokio::time::sleep(TICK_DT).await;
     }
 
-    // Wait for an enemy hit on the player — proves the AI walked an
+    // Wait for an enemy hit on the player â€” proves the AI walked an
     // enemy into melee with us. The Hit carries the attacker id (in
     // the enemy partition). Generous timeout because parallel tests
     // in this file contend for CPU; isolated runtime is ~5 s.
@@ -994,7 +994,7 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
         "attacker id must be an enemy id (got {enemy_id}, base {ENEMY_ID_BASE})"
     );
 
-    // Track 6 sub-task 2: server runs the damage formula now — the
+    // Track 6 sub-task 2: server runs the damage formula now â€” the
     // client can't claim 999 anymore. A bare-handed Human Warrior
     // lands ~5-8/swing (1-4 + STR/5 with STR 22). Decrepit Skeleton has
     // 25 HP, so ~5 landed swings cover the worst case.
@@ -1002,7 +1002,7 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     // Swings must be PACED. This used to burst 10 Attacks in a single
     // frame, which the melee swing-rate limit (added 2026-07-29) now
     // correctly treats as forgery: it enforces a per-hand minimum
-    // interval derived from the weapon's delay — 0.65 s bare-handed —
+    // interval derived from the weapon's delay â€” 0.65 s bare-handed â€”
     // and silently drops anything faster. All but the first swing
     // vanished and the skeleton survived. Sleeping past the floor
     // between swings is what an honest client does anyway.
@@ -1010,7 +1010,7 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     // pace left only 50 ms of margin and timing jitter pushed swings under the
     // floor, where they are silently dropped and the skeleton survives. Widening
     // the margin makes it much more reliable, though this test still has residual
-    // enemy-AI timing sensitivity (see docs/flaky_integration_tests.md) — it
+    // enemy-AI timing sensitivity (see docs/flaky_integration_tests.md) â€” it
     // depends on an enemy wandering into range, locking on, and STAYING in melee.
     const SWING_GAP: Duration = Duration::from_millis(1000);
     for _ in 0..8 {
@@ -1041,10 +1041,10 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     .await
     .expect("EntityDied arrives for the killed enemy");
 
-    // Track 5 sub-task 5 — kill credit. Per-kill XP is the EQ quadratic
+    // Track 5 sub-task 5 â€” kill credit. Per-kill XP is the EQ quadratic
     // (mob_level^2 * ZEM * 3.5, see progression::kill_xp): a level-1
-    // Decrepit Skeleton pays round(1 * 75 * 3.5) = 263. Sole attacker →
-    // sole top damager → private XpGained.
+    // Decrepit Skeleton pays round(1 * 75 * 3.5) = 263. Sole attacker â†’
+    // sole top damager â†’ private XpGained.
     let xp_evt = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
             matches!(m, ServerWorldMsg::XpGained { .. })
@@ -1100,12 +1100,12 @@ async fn enemies_visible_after_enter_world() {
     }
 }
 
-/// Track 7 AOI — far-apart clients do not see each other.
+/// Track 7 AOI â€” far-apart clients do not see each other.
 ///
-/// CELL_SIZE = 120 m; cell boundaries at x = 120, 240, 360 …
+/// CELL_SIZE = 120 m; cell boundaries at x = 120, 240, 360 â€¦
 /// B is placed at x = 300 (cell (2, 0)) before connecting. A spawns at
-/// the origin (cell (0, 0)). |2 − 0| = 2 > 1, so they fall outside
-/// each other's 3×3 neighbourhood: neither should receive EntitySpawn
+/// the origin (cell (0, 0)). |2 âˆ’ 0| = 2 > 1, so they fall outside
+/// each other's 3Ã—3 neighbourhood: neither should receive EntitySpawn
 /// for the other. Previously (broadcast-to-all) both would appear.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn aoi_far_apart_clients_dont_see_each_other() {
@@ -1149,11 +1149,11 @@ async fn aoi_far_apart_clients_dont_see_each_other() {
     );
 }
 
-/// Track 7 AOI — approaching client triggers mutual EntitySpawn on cell
+/// Track 7 AOI â€” approaching client triggers mutual EntitySpawn on cell
 /// boundary crossing.
 ///
 /// A sits at the origin (cell (0, 0)). B starts at x = 300 (cell (2, 0))
-/// and walks in the −X direction at MAX_MOVE_SPEED = 7.5 m/s. After
+/// and walks in the âˆ’X direction at MAX_MOVE_SPEED = 7.5 m/s. After
 /// ~8 s B crosses x = 240 (cell (1, 0)), which is adjacent to A's cell.
 /// The tick loop's step-5b fan-out must fire mutual EntitySpawn at that
 /// moment. We budget 12 s of walking to absorb test-parallelism jitter.
@@ -1174,7 +1174,7 @@ async fn aoi_approaching_client_triggers_entity_spawn() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
 
-    // Walk B toward A. 300 → 240 = 60 m ÷ 7.5 m/s = 8 s; 12 s covers
+    // Walk B toward A. 300 â†’ 240 = 60 m Ã· 7.5 m/s = 8 s; 12 s covers
     // the full crossing with margin. Both transports are pumped each tick:
     // without pumping A's transport for ~12 s the server's 15 s netcode
     // timeout would fire and disconnect A before we can assert.
@@ -1201,7 +1201,7 @@ async fn aoi_approaching_client_triggers_entity_spawn() {
         matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == b_char_id as u64)
     })
     .await
-    .expect("A receives EntitySpawn for B once B enters A's 3×3 neighbourhood");
+    .expect("A receives EntitySpawn for B once B enters A's 3Ã—3 neighbourhood");
 
     b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
         matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == a_char_id as u64)
@@ -1210,7 +1210,7 @@ async fn aoi_approaching_client_triggers_entity_spawn() {
     .expect("B receives EntitySpawn for A when it crosses into A's neighbourhood");
 }
 
-/// Track 9 — server-side AOE damage. A Magician casts Inferno (5 m
+/// Track 9 â€” server-side AOE damage. A Magician casts Inferno (5 m
 /// radius, 45 base damage, FIRE) with an enemy standing 3 m away. The
 /// server's AOE arm searches the caster's AOI neighbourhood, filters by
 /// radius, and fans a Hit per victim. Asserts at least one enemy
@@ -1247,7 +1247,7 @@ async fn aoe_spell_damages_nearby_enemies() {
     }
 
     // Run the cast bar first. `target_id: None` because AOE doesn't take
-    // a single target — the server searches the caster's AOI for anything
+    // a single target â€” the server searches the caster's AOI for anything
     // in radius at resolution time. Track 10's gate rejects CastSpell
     // without a matching CastStart that ran long enough, so pump
     // CastStart out first (sleeping doesn't advance the transport).
@@ -1285,7 +1285,7 @@ async fn aoe_spell_damages_nearby_enemies() {
     }
 
     // Inferno must fan at least one Hit with attacker=a, target=enemy,
-    // dmg_type=Fire. The amount is the authored base_damage (45) —
+    // dmg_type=Fire. The amount is the authored base_damage (45) â€”
     // server doesn't apply INT scale yet, matching single-target.
     let aoe_hit = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
@@ -1304,7 +1304,7 @@ async fn aoe_spell_damages_nearby_enemies() {
     }
 }
 
-/// Track 10 — cast-time gate rejects a CastSpell that arrives before
+/// Track 10 â€” cast-time gate rejects a CastSpell that arrives before
 /// the cast bar had time to run. Send CastStart for Fireball (1.5 s
 /// cast), then *immediately* send CastSpell. Assert: a CastFail
 /// arrives with reason "cast not ready", and no Hit fires for the
@@ -1318,7 +1318,7 @@ async fn cast_spell_rejected_before_cast_time() {
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
-    // Skip walking — we don't need an enemy in range; the gate fails
+    // Skip walking â€” we don't need an enemy in range; the gate fails
     // long before target resolution. Sit at spawn.
     for _ in 0..4 {
         tick_one(&mut a.client, &mut a.transport);
@@ -1344,7 +1344,7 @@ async fn cast_spell_rejected_before_cast_time() {
         assert_eq!(reason, "cast not ready");
     }
 
-    // No Hit should fire — gate ran before mana deduction and spell
+    // No Hit should fire â€” gate ran before mana deduction and spell
     // application. (Target id was a stub anyway; we want to confirm
     // no side effects, not target resolution.)
     let stray = a
@@ -1355,9 +1355,9 @@ async fn cast_spell_rejected_before_cast_time() {
     assert!(stray.is_none(), "rejected cast must not fan a Hit");
 }
 
-/// Track 10 — cast-time gate passes once the cast bar has actually
+/// Track 10 â€” cast-time gate passes once the cast bar has actually
 /// run. Send CastStart for Healing Wave (1.0 s cast, ALLY target_type
-/// — self-heal when target_id is None), wait the cast time + jitter,
+/// â€” self-heal when target_id is None), wait the cast time + jitter,
 /// then send CastSpell. Assert: a HealthUpdate arrives for the caster
 /// (proof the cast went through the helper that fans on heal apply).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1381,7 +1381,7 @@ async fn cast_spell_accepted_after_cast_time() {
 
     // Queue CastStart and pump immediately so the packet reaches the
     // server's `cast_set_at` clock before we start counting wait time.
-    // tokio::time::sleep alone doesn't advance the transport — we'd
+    // tokio::time::sleep alone doesn't advance the transport â€” we'd
     // otherwise be measuring "time until the test got around to
     // ticking" not "time the cast bar ran on the server".
     a.send_cast_start("Healing Wave", 1.0);
@@ -1398,7 +1398,7 @@ async fn cast_spell_accepted_after_cast_time() {
         tokio::time::sleep(TICK_DT).await;
     }
 
-    // Healing Wave applies a 4 hps × 18 s HoT; the server fans a
+    // Healing Wave applies a 4 hps Ã— 18 s HoT; the server fans a
     // BuffSnapshot containing "Healing Wave" once the cast lands.
     // That's the cleanest "cast actually applied server-side" signal
     // and doesn't race against regen ticks like HealthUpdate would.
@@ -1421,7 +1421,7 @@ async fn cast_spell_accepted_after_cast_time() {
     assert!(fail.is_none(), "well-timed cast must not produce a CastFail");
 }
 
-/// Track 11 — server-side pet summon. Necromancer A casts Summon
+/// Track 11 â€” server-side pet summon. Necromancer A casts Summon
 /// Skeleton; the server spawns a player-owned pet entity, fans
 /// `PetSpawn` to AOI peers, and B (in the same cell) receives the
 /// broadcast carrying A's char_id as owner and a pet id in the
@@ -1450,7 +1450,7 @@ async fn pet_summon_visible_to_peer() {
 
     // Summon Skeleton: cast_time 3.0s. Pump the start packet out
     // before sleeping (tokio::sleep doesn't advance the renet
-    // transport — same gotcha as Track 10's gate tests).
+    // transport â€” same gotcha as Track 10's gate tests).
     a.send_cast_start("Summon Skeleton", 3.0);
     for _ in 0..3 {
         tick_one(&mut a.client, &mut a.transport);
@@ -1499,7 +1499,7 @@ async fn pet_summon_visible_to_peer() {
     }
 }
 
-/// Track 11.2 — pet follows its owner across the world. Necromancer
+/// Track 11.2 â€” pet follows its owner across the world. Necromancer
 /// summons the skeleton at spawn, then walks away. The peer sees
 /// Position updates for the pet id closing the gap to the owner.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1583,7 +1583,7 @@ async fn pet_follows_owner() {
 
     // Pet spawned at ~(owner_pos.x + 1.5, _, _). Owner walked ~5 m
     // east; the pet should have moved well past its spawn x to keep
-    // up. Use 3.0 as the threshold — generous to absorb tick jitter
+    // up. Use 3.0 as the threshold â€” generous to absorb tick jitter
     // and the FOLLOW_DISTANCE hysteresis at the boundary.
     assert!(
         max_pet_x > 3.0,
@@ -1591,7 +1591,7 @@ async fn pet_follows_owner() {
     );
 }
 
-/// Track 11.3 — pet inherits owner's attack target and damages the
+/// Track 11.3 â€” pet inherits owner's attack target and damages the
 /// enemy. Walk Necromancer A into camp 0 until an enemy is in melee,
 /// summon the skeleton, A swings on the enemy once to seed
 /// last_attacked_enemy, then the skeleton's swings produce Hit
@@ -1607,7 +1607,7 @@ async fn pet_attacks_owners_target() {
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
-    // Summon FIRST, in peace, before walking into aggro range — the same
+    // Summon FIRST, in peace, before walking into aggro range â€” the same
     // reorder pet_command_attack_locks_onto_target got: casting the 3 s
     // summon while an enemy swings at you rolls a ~70% interrupt per hit
     // taken (channeling 0), which is why this test spent months on the
@@ -1627,7 +1627,7 @@ async fn pet_attacks_owners_target() {
     }
 
     // Latch the pet id from the PetSpawn the server fans to A as
-    // well (caster receives own PetSpawn — caller's AOI cell
+    // well (caster receives own PetSpawn â€” caller's AOI cell
     // includes themselves).
     let pet_id: u64 = match a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
@@ -1646,7 +1646,7 @@ async fn pet_attacks_owners_target() {
 
     // Pet in hand; NOW walk into the camp and take a hit to learn an
     // enemy id. Phase 4 layout note: aim at the Bonepile's isolated
-    // [-16, 0, -14] spawn — the one ring 1 spawn whose aggro circle
+    // [-16, 0, -14] spawn â€” the one ring 1 spawn whose aggro circle
     // overlaps no other, so exactly ONE slow level 1 Decrepit Skeleton
     // pulls, the single-puller semantics this test was written against.
     let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
@@ -1660,7 +1660,7 @@ async fn pet_attacks_owners_target() {
         tokio::time::sleep(TICK_DT).await;
     }
 
-    // Wait for an enemy hit on us — proves the AI walked an enemy into
+    // Wait for an enemy hit on us â€” proves the AI walked an enemy into
     // melee with us.
     let hit_evt = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
@@ -1703,7 +1703,7 @@ async fn pet_attacks_owners_target() {
     }
 }
 
-/// Track 12 Piece A — explicit `/pet attack` command locks the pet
+/// Track 12 Piece A â€” explicit `/pet attack` command locks the pet
 /// onto a specific enemy id, bypassing the `last_attacked_enemy`
 /// inheritance pipeline. Necromancer summons, then commands the
 /// pet to attack an enemy WITHOUT first hitting it themselves;
@@ -1722,7 +1722,7 @@ async fn pet_command_attack_locks_onto_target() {
     // Summon FIRST, in peace, before walking into aggro range.
     //
     // Ordering matters: this used to walk in, wait to be hit, and only then
-    // start the 3 s Summon Skeleton cast — i.e. it cast while an enemy was
+    // start the 3 s Summon Skeleton cast â€” i.e. it cast while an enemy was
     // actively swinging at it. Track 19A's on-hit cast interrupt
     // (`roll_cast_interrupt`) then cleared the cast, so the pet never spawned.
     // That is not a fixable-by-tuning race: the interrupt chance is
@@ -1760,7 +1760,7 @@ async fn pet_command_attack_locks_onto_target() {
     // Now walk into camp 0; wait until at least one enemy aggros and
     // hits the player so we have an enemy id to command on.
     // Phase 4 layout note: every camp-walking test aims at the Bonepile's
-    // isolated [-16, 0, -14] spawn — the one ring 1 spawn whose aggro circle
+    // isolated [-16, 0, -14] spawn â€” the one ring 1 spawn whose aggro circle
     // overlaps no other, so exactly ONE slow (1.8 m/s, 2.5 s swing) level 1
     // Decrepit Skeleton pulls, the same single-puller semantics these tests
     // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
@@ -1814,9 +1814,9 @@ async fn pet_command_attack_locks_onto_target() {
     }
 }
 
-/// Track 12 Piece A2 — pet pulls aggro via threat re-eval. Walk
+/// Track 12 Piece A2 â€” pet pulls aggro via threat re-eval. Walk
 /// player into camp, get aggro'd, summon skeleton, command attack;
-/// pet's accumulated threat eventually clears the 1.3× current-
+/// pet's accumulated threat eventually clears the 1.3Ã— current-
 /// target multiplier and the enemy re-targets onto the pet,
 /// broadcasting an EntityTarget switch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1830,7 +1830,7 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
-    // Summon FIRST, in peace, before walking into aggro range — the same
+    // Summon FIRST, in peace, before walking into aggro range â€” the same
     // reorder its two sibling pet tests got: casting the 3 s summon while
     // an enemy swings at you rolls a ~70% interrupt per hit taken
     // (channeling 0). The test's substance (threat re-aggro between owner
@@ -1858,7 +1858,7 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
     };
 
     // Pet in hand; NOW walk into the camp. Phase 4 layout note: aim at
-    // the Bonepile's isolated [-16, 0, -14] spawn — the one ring 1 spawn
+    // the Bonepile's isolated [-16, 0, -14] spawn â€” the one ring 1 spawn
     // whose aggro circle overlaps no other, so exactly ONE slow level 1
     // Decrepit Skeleton pulls, the single-puller semantics this test was
     // written against.
@@ -1897,7 +1897,7 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
     // Skeleton dmg is 8/swing on 2.2 s interval; bare-handed human
     // Necromancer is doing single-digit damage / 2-3 s. After ~3-4
     // pet swings (each adding +8 threat against pet_id) plus the
-    // player's accumulated threat, the pet's threat passes 1.3× the
+    // player's accumulated threat, the pet's threat passes 1.3Ã— the
     // player's and the enemy switches. Generous timeout because
     // the player keeps adding threat too via auto-attacks... wait,
     // the test doesn't send player attacks. Player threat only
@@ -1908,7 +1908,7 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
     //
     // To make this deterministic, send one player Attack so the
     // player has > 0 threat; pet's accumulated swings then have
-    // to surpass it by 1.3×.
+    // to surpass it by 1.3Ã—.
     a.send_attack(enemy_id, "", false, DamageType::Physical);
     for _ in 0..3 {
         tick_one(&mut a.client, &mut a.transport);
@@ -1921,11 +1921,11 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
                 if *id == enemy_id && *t == pet_id)
         })
         .await
-        .expect("enemy re-targets onto the pet once threat passes 1.3× the player's");
+        .expect("enemy re-targets onto the pet once threat passes 1.3Ã— the player's");
     let _ = switch_evt;
 }
 
-/// Track 12 Piece C — Enchanter's Charm converts a targeted enemy
+/// Track 12 Piece C â€” Enchanter's Charm converts a targeted enemy
 /// into a player-owned pet. Server fan-outs: EntityDespawn for the
 /// old enemy id, PetSpawn for a fresh pet id at the same pos with
 /// owner == caster.
@@ -1942,7 +1942,7 @@ async fn charm_converts_enemy_to_pet() {
 
     // Walk into camp 0 to aggro an enemy (gives us a target id).
     // Phase 4 layout note: every camp-walking test aims at the Bonepile's
-    // isolated [-16, 0, -14] spawn — the one ring 1 spawn whose aggro circle
+    // isolated [-16, 0, -14] spawn â€” the one ring 1 spawn whose aggro circle
     // overlaps no other, so exactly ONE slow (1.8 m/s, 2.5 s swing) level 1
     // Decrepit Skeleton pulls, the same single-puller semantics these tests
     // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
@@ -2000,13 +2000,13 @@ async fn charm_converts_enemy_to_pet() {
         .expect("a fresh pet id spawns for the caster");
     if let ServerWorldMsg::PetSpawn { id, pet_name, .. } = pet_spawn {
         assert!(id >= PET_ID_BASE, "charmed pet id must be in pet partition");
-        // Mob name preserved — charmed Decrepit Skeleton stays
+        // Mob name preserved â€” charmed Decrepit Skeleton stays
         // named "Decrepit Skeleton" on the pet entity.
         assert_eq!(pet_name, "Decrepit Skeleton");
     }
 }
 
-/// Track 12 Piece B — Beast Masters auto-summon a Wolf warder when
+/// Track 12 Piece B â€” Beast Masters auto-summon a Wolf warder when
 /// they enter the world. No PET_SUMMON cast required; the server
 /// detects the class on first EnterWorld and spawns the warder
 /// alongside the EntitySpawn fan-out.
@@ -2042,7 +2042,7 @@ async fn beast_master_auto_summons_warder() {
     }
 }
 
-/// Track 12 Piece B — non-Beast-Master classes do NOT get an
+/// Track 12 Piece B â€” non-Beast-Master classes do NOT get an
 /// auto-summoned warder. Counter-test to make sure the class check
 /// is wired correctly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2062,10 +2062,10 @@ async fn non_beast_master_gets_no_auto_warder() {
     assert!(stray.is_none(), "Warrior must not receive an auto-summoned pet");
 }
 
-/// Track 13.2 — on EnterWorld the server seeds the client with a
+/// Track 13.2 â€” on EnterWorld the server seeds the client with a
 /// full inventory snapshot. New character has zero items, so the
 /// snapshot's entries list is empty. Just asserts the message
-/// arrives — proves the seed loop is wired.
+/// arrives â€” proves the seed loop is wired.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inventory_snapshot_arrives_on_enter_world() {
     let h = start_both().await;
@@ -2084,10 +2084,10 @@ async fn inventory_snapshot_arrives_on_enter_world() {
     }
 }
 
-/// Track 13.2.b — SplitStack carves part of a stack into another
+/// Track 13.2.b â€” SplitStack carves part of a stack into another
 /// slot. Seeds 10 of a known item into slot 0 via direct DB write
 /// before EnterWorld, asserts the Snapshot reflects it, sends
-/// SplitStack(slot 0 → slot 5, count 3), asserts two
+/// SplitStack(slot 0 â†’ slot 5, count 3), asserts two
 /// InventoryDeltas arrive (slot 0 with count 7, slot 5 with count
 /// 3).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2161,7 +2161,7 @@ async fn split_stack_carves_off_count() {
     assert!(saw_src && saw_dst, "expected both src and dst Deltas (src={saw_src}, dst={saw_dst})");
 }
 
-/// Track 13.2.b — DropItem removes from inventory and spawns a
+/// Track 13.2.b â€” DropItem removes from inventory and spawns a
 /// server-owned LootBag at the player's pos. Asserts:
 ///   - InventoryDelta clears the source slot.
 ///   - LootBagSpawn fans out with the dropped item.
@@ -2218,9 +2218,9 @@ async fn drop_item_creates_loot_bag_at_player_pos() {
     let _ = bag_spawn;
 }
 
-/// Track 13.3 / 14.1 — EquipItem moves a base entry into the
+/// Track 13.3 / 14.1 â€” EquipItem moves a base entry into the
 /// paperdoll. Seed a registered weapon in base slot 0, send
-/// EquipItem(0 → equip slot 0), assert two Deltas land: base slot
+/// EquipItem(0 â†’ equip slot 0), assert two Deltas land: base slot
 /// 0 cleared, equip slot 0 holds the weapon. The path has to be
 /// in items.toml or Track 14.1's `is_equippable_in_slot` check
 /// would reject the equip.
@@ -2287,7 +2287,7 @@ async fn equip_item_moves_base_to_paperdoll() {
     );
 }
 
-/// Track 14 follow-up — BuyItem charges coins and grants the item
+/// Track 14 follow-up â€” BuyItem charges coins and grants the item
 /// via InventoryDelta + CoinsUpdate. Seed the player with 100
 /// coins, buy 3 Minor Healing Potions (price 12 ea = 36 total),
 /// assert the player ends with 64 coins + a 3-stack in base[0].
@@ -2346,8 +2346,8 @@ async fn buy_item_charges_coins_and_grants_stack() {
 }
 
 /// Dead-intents audit (2026-08-24): a merchant transaction requires a merchant
-/// nearby. A client positioned far from any vendor — e.g. a modified client at
-/// the bottom of a dungeon — must be refused, with no coin or item change. The
+/// nearby. A client positioned far from any vendor â€” e.g. a modified client at
+/// the bottom of a dungeon â€” must be refused, with no coin or item change. The
 /// honest client is gated in UI at 6 m; this is the server backstop against a
 /// forged position.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2357,7 +2357,7 @@ async fn buy_item_rejected_when_no_vendor_in_range() {
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "farbuy", "Wanderer", "Human", "Warrior").await;
     let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
-    // Plenty of coin, but stranded 200 m out — well beyond the 15 m service range.
+    // Plenty of coin, but stranded 200 m out â€” well beyond the 15 m service range.
     sqlx::query("UPDATE characters SET copper = 1000, pos_x = 200.0, pos_z = 200.0 WHERE id = ?1")
         .bind(a_char_id)
         .execute(&pool)
@@ -2400,7 +2400,7 @@ async fn buy_item_succeeds_at_the_town_vendor() {
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "nearbuy", "Townie", "Human", "Warrior").await;
     let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
-    // At spawn (0,0,0), ~8 m from Brom — inside service range.
+    // At spawn (0,0,0), ~8 m from Brom â€” inside service range.
     sqlx::query("UPDATE characters SET copper = 1000, pos_x = 0.0, pos_z = 0.0 WHERE id = ?1")
         .bind(a_char_id)
         .execute(&pool)
@@ -2423,7 +2423,7 @@ async fn buy_item_succeeds_at_the_town_vendor() {
     assert!(delta.is_some(), "a buy at the town vendor must succeed");
 }
 
-/// Track 14 follow-up — BuyItem rejects when the player can't
+/// Track 14 follow-up â€” BuyItem rejects when the player can't
 /// afford the purchase; no Delta / CoinsUpdate lands.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn buy_item_rejects_insufficient_coins() {
@@ -2444,7 +2444,7 @@ async fn buy_item_rejects_insufficient_coins() {
         })
         .await
         .expect("snapshot");
-    // Track 15.1 — drain the initial CoinsUpdate seed fired on
+    // Track 15.1 â€” drain the initial CoinsUpdate seed fired on
     // EnterWorld so it doesn't contaminate the "rejected buy must
     // not fire CoinsUpdate" assertion below.
     let _ = a
@@ -2469,7 +2469,7 @@ async fn buy_item_rejects_insufficient_coins() {
     assert!(coins.is_none(), "rejected buy must not fire CoinsUpdate");
 }
 
-/// Track 14 follow-up — SellItem credits coins and fans an
+/// Track 14 follow-up â€” SellItem credits coins and fans an
 /// InventoryDelta that clears the slot. Seed a potion stack via DB,
 /// sell the whole stack, assert delta-cleared + coins = stack *
 /// (vendor_price / 2).
@@ -2535,7 +2535,7 @@ async fn sell_item_credits_coins_and_removes_stack() {
     let _ = coins;
 }
 
-/// Track 14 follow-up — lifesteal on an ENEMY-target spell heals
+/// Track 14 follow-up â€” lifesteal on an ENEMY-target spell heals
 /// the caster. Casts Lifetap Rk. II at an enemy in melee range
 /// and asserts a HealthUpdate for the caster arrives with hp
 /// strictly above the pre-cast baseline by more than natural
@@ -2559,10 +2559,10 @@ async fn lifesteal_spell_heals_caster() {
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
-    // Walk toward camp 0's enemy spawn — same pattern as the AOE
+    // Walk toward camp 0's enemy spawn â€” same pattern as the AOE
     // and aggro tests.
     // Phase 4 layout note: every camp-walking test aims at the Bonepile's
-    // isolated [-16, 0, -14] spawn — the one ring 1 spawn whose aggro circle
+    // isolated [-16, 0, -14] spawn â€” the one ring 1 spawn whose aggro circle
     // overlaps no other, so exactly ONE slow (1.8 m/s, 2.5 s swing) level 1
     // Decrepit Skeleton pulls, the same single-puller semantics these tests
     // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
@@ -2641,7 +2641,7 @@ async fn lifesteal_spell_heals_caster() {
     if let ServerWorldMsg::HealthUpdate { hp, .. } = post {
         assert!(
             hp >= baseline_hp + 20.0,
-            "expected hp >= {} (baseline {} + ≥20 lifesteal); got {}",
+            "expected hp >= {} (baseline {} + â‰¥20 lifesteal); got {}",
             baseline_hp + 20.0,
             baseline_hp,
             hp,
@@ -2649,7 +2649,7 @@ async fn lifesteal_spell_heals_caster() {
     }
 }
 
-/// Track 14.3 — a bag plus its contents persist across a
+/// Track 14.3 â€” a bag plus its contents persist across a
 /// reconnect. Seed `base[0] = Small Pouch` + `bag_0[2] = potions`
 /// via DB, EnterWorld, assert the InventorySnapshot includes both
 /// rows so the client can reconstruct the bag interior.
@@ -2702,12 +2702,12 @@ async fn bag_contents_persist_across_reconnect() {
     }
 }
 
-/// Track 14.2 — equipping an item with +max_hp bonus fans a
+/// Track 14.2 â€” equipping an item with +max_hp bonus fans a
 /// HealthUpdate carrying the new max. Iron Chain Vest in
 /// items.toml has `max_hp_bonus = 25.0`; a Human Warrior at
 /// level 1 has base max_hp = 200 (see char_data tests), so the
 /// post-equip max should land at 225. Asserts the post-equip
-/// fan-out hits the equipping player themselves — the initial
+/// fan-out hits the equipping player themselves â€” the initial
 /// EnterWorld snapshot only fans to peers, so without a peer
 /// the player wouldn't see their own max_hp until something
 /// changed it.
@@ -2765,7 +2765,7 @@ async fn equip_increases_max_hp() {
     }
 }
 
-/// Track 13.3 — EquipItem with no source rejects silently. The wire
+/// Track 13.3 â€” EquipItem with no source rejects silently. The wire
 /// round-trips, server returns no Delta. Mirrors the negative-path
 /// MoveItem test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2795,7 +2795,7 @@ async fn equip_item_empty_source_drops_silently() {
     assert!(stray.is_none(), "EquipItem on empty source must not fan a Delta");
 }
 
-/// Track 13.3 — InventorySnapshot on EnterWorld includes persisted
+/// Track 13.3 â€” InventorySnapshot on EnterWorld includes persisted
 /// equip rows. Seed an equipped sword + a base cloth via DB, assert
 /// the snapshot's entries list contains both with the right
 /// location strings.
@@ -2920,7 +2920,7 @@ async fn move_item_empty_source_corrects_client() {
     );
 }
 
-/// Track 17.2 — per-spell cooldown gate. Cast Healing Wave (6 s
+/// Track 17.2 â€” per-spell cooldown gate. Cast Healing Wave (6 s
 /// cooldown) once successfully, then immediately cast it again
 /// following the full cast-time flow. The second cast should land
 /// well after the cast-time gate but be rejected by the cooldown
@@ -2940,7 +2940,7 @@ async fn cast_spell_rejected_during_cooldown() {
         tokio::time::sleep(TICK_DT).await;
     }
 
-    // First cast — full gate flow (CastStart → wait → CastSpell).
+    // First cast â€” full gate flow (CastStart â†’ wait â†’ CastSpell).
     a.send_cast_start("Healing Wave", 1.0);
     for _ in 0..3 {
         tick_one(&mut a.client, &mut a.transport);
@@ -2963,7 +2963,7 @@ async fn cast_spell_rejected_during_cooldown() {
         .await
         .expect("first Healing Wave cast lands");
 
-    // Second cast — same full flow, fired well inside the 6 s
+    // Second cast â€” same full flow, fired well inside the 6 s
     // cooldown window. Should be rejected with the cooldown reason.
     a.send_cast_start("Healing Wave", 1.0);
     for _ in 0..3 {
@@ -2989,7 +2989,7 @@ async fn cast_spell_rejected_during_cooldown() {
     }
 }
 
-/// Track 17.2 — movement-during-cast gate. Send CastStart at the
+/// Track 17.2 â€” movement-during-cast gate. Send CastStart at the
 /// spawn position, then walk well past the 1 m gate threshold while
 /// the cast bar runs, then send CastSpell after the cast time elapsed.
 /// The cast-time gate passes (enough time elapsed); the movement gate
@@ -3014,8 +3014,8 @@ async fn cast_spell_rejected_when_caster_moved_during_cast() {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
-    // Walk forward for the full cast duration. MAX_MOVE_SPEED × 1.1 s
-    // ≈ 8 m on the server — well past the 1 m gate.
+    // Walk forward for the full cast duration. MAX_MOVE_SPEED Ã— 1.1 s
+    // â‰ˆ 8 m on the server â€” well past the 1 m gate.
     for seq in 1..=22u32 {
         a.send_move(seq, Vec3 { x: 0.0, y: 0.0, z: 1.0 });
         tick_one(&mut a.client, &mut a.transport);
@@ -3038,7 +3038,7 @@ async fn cast_spell_rejected_when_caster_moved_during_cast() {
         assert_eq!(reason, "interrupted (moved)");
     }
 
-    // Confirm the buff did NOT apply — there should be no BuffSnapshot
+    // Confirm the buff did NOT apply â€” there should be no BuffSnapshot
     // containing Healing Wave after the rejection.
     let snap = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
@@ -3050,9 +3050,9 @@ async fn cast_spell_rejected_when_caster_moved_during_cast() {
     assert!(snap.is_none(), "movement-interrupted cast must not apply the buff");
 }
 
-/// Track 19A — a hit on a casting player rolls the channeling-based
+/// Track 19A â€” a hit on a casting player rolls the channeling-based
 /// interrupt; for a non-caster (Warrior, channeling cap = 0) the
-/// chance is 1.0 → always interrupted. Using PvP path avoids the
+/// chance is 1.0 â†’ always interrupted. Using PvP path avoids the
 /// flaky AI-walks-into-melee timing. A: Warrior; B: Warrior (any
 /// attacker works). Both /pvp on, A "starts" a long cast via a
 /// CastStartBroadcast (server doesn't validate class on CastStart;
@@ -3083,7 +3083,7 @@ async fn cast_interrupted_by_incoming_pvp_hit() {
         tokio::time::sleep(TICK_DT).await;
     }
 
-    // A "starts" a 5-second cast — long enough to keep the cast
+    // A "starts" a 5-second cast â€” long enough to keep the cast
     // cache populated until B's attack lands. Warrior has channeling
     // cap = 0, so the on-hit interrupt chance is 1.0 (deterministic).
     a.send_cast_start("Fake Long Cast", 5.0);
@@ -3115,7 +3115,7 @@ async fn cast_interrupted_by_incoming_pvp_hit() {
     }
 }
 
-/// Track 18.1 — on EnterWorld the server fans a SkillProgressSnapshot
+/// Track 18.1 â€” on EnterWorld the server fans a SkillProgressSnapshot
 /// containing the player's three score maps. The lib unit tests verify
 /// the cap math; this test verifies the wire shape and that the seed
 /// matches WeaponSkills' starting values for the character's class.
@@ -3143,10 +3143,10 @@ async fn skill_progress_snapshot_seeded_on_enter_world() {
         assert_eq!(casting.len(), 7, "casting map has 7 keys");
 
         // Track 22.F rebalance: starting score is cap(L1) / 4 with
-        // a floor of 1. Warrior 1h_slashing L1 cap = 4 → 4/4 = 1.
+        // a floor of 1. Warrior 1h_slashing L1 cap = 4 â†’ 4/4 = 1.
         let weapon_map: std::collections::HashMap<String, u32> = weapon.into_iter().collect();
         assert_eq!(weapon_map.get("1h_slashing").copied(), Some(1));
-        // Warrior plate L1 cap = 4 → 4/4 = 1 (same floor).
+        // Warrior plate L1 cap = 4 â†’ 4/4 = 1 (same floor).
         let armor_map: std::collections::HashMap<String, u32> = armor.into_iter().collect();
         assert_eq!(armor_map.get("plate").copied(), Some(1));
         // Warrior has no casting; all six rows present at 0.
@@ -3157,7 +3157,7 @@ async fn skill_progress_snapshot_seeded_on_enter_world() {
     }
 }
 
-/// Track 18.1 — `character_skills` rows survive disconnect and are
+/// Track 18.1 â€” `character_skills` rows survive disconnect and are
 /// re-applied on reconnect. We pre-write a row directly to SQLite
 /// before EnterWorld so the load path overlays our value on top of
 /// the seed_starting_scores baseline; the snapshot must reflect the
@@ -3171,7 +3171,7 @@ async fn skill_progress_persists_load_path() {
 
     // Pre-seed a non-default casting score via direct SQL. Mimics what
     // the server's save path would write at checkpoint / disconnect
-    // after an in-flight advance — proves the load + snapshot path
+    // after an in-flight advance â€” proves the load + snapshot path
     // independently of the rng-driven try_advance roll.
     let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
     sqlx::query(
@@ -3264,7 +3264,7 @@ fn decode_token_bytes(hex_str: &str) -> [u8; 32] {
 
 /// Request a FRESH world ConnectToken for an existing session + char. Used when
 /// account state changed after the initial `provision_client` (e.g. `is_gm` was
-/// flipped), so the new token reflects it — the flag is packed at mint time.
+/// flipped), so the new token reflects it â€” the flag is packed at mint time.
 async fn request_world_token(auth_url: &str, session_token_hex: &str, char_id: i64) -> Vec<u8> {
     let (mut ws, _) = tokio_tungstenite::connect_async(auth_url)
         .await
@@ -3292,7 +3292,7 @@ async fn request_world_token(auth_url: &str, session_token_hex: &str, char_id: i
 /// NOT in process-wide dev mode. This exercises the whole real path: the account
 /// flag is packed into the signed connect token's `user_data`, read into
 /// `PerConnection.is_gm` at connect, and every dev command gates on
-/// `can_use_dev_cmds()` (`is_dev || is_gm`). `GrantQuestXp` is the probe — the
+/// `can_use_dev_cmds()` (`is_dev || is_gm`). `GrantQuestXp` is the probe â€” the
 /// GM sees an `XpGained`, the plain account sees nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn is_gm_gates_dev_commands() {
@@ -3328,7 +3328,7 @@ async fn is_gm_gates_dev_commands() {
     // not mistaken for a GrantQuestXp-caused gain.
     const PROBE_XP: i32 = 250;
 
-    // GM sends the dev command → the server applies it and fans the gain back.
+    // GM sends the dev command â†’ the server applies it and fans the gain back.
     gm.send_grant_quest_xp(PROBE_XP);
     let gm_xp = gm
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
@@ -3340,7 +3340,7 @@ async fn is_gm_gates_dev_commands() {
         "GM account: GrantQuestXp should apply and produce an XpGained(amount={PROBE_XP})"
     );
 
-    // Plain account sends the same → the server ignores it, so no gain arrives
+    // Plain account sends the same â†’ the server ignores it, so no gain arrives
     // (only the connect-time seed, which the amount filter excludes).
     plain.send_grant_quest_xp(PROBE_XP);
     let plain_xp = plain
@@ -3354,7 +3354,7 @@ async fn is_gm_gates_dev_commands() {
     );
 }
 
-/// Phase 1 finding 3 — the Respawn dead-check. A LIVING player's Respawn must be a
+/// Phase 1 finding 3 â€” the Respawn dead-check. A LIVING player's Respawn must be a
 /// no-op (the exploit spammed it to floor HP at 25% for near-invulnerability); a
 /// DEAD player's Respawn must still restore ~25% (the legit path). Drives the real
 /// flow: connect at full HP, Respawn (rejected), DeathBroadcast (kill), Respawn
@@ -3405,7 +3405,7 @@ async fn respawn_requires_being_dead() {
 }
 
 
-/// Playtest 2026-09-23 — the dead-state gate. A dead player could loot
+/// Playtest 2026-09-23 â€” the dead-state gate. A dead player could loot
 /// their own corpse before respawning and keep all the gear, voiding the
 /// corpse-run penalty. Now any economy/combat intent from a dead player is
 /// refused with a chat line, Respawn still works, and normal handling
@@ -3467,7 +3467,7 @@ async fn dead_players_cannot_loot_or_touch_inventory() {
 // whole: `clamp_length` passes NaN through (`len > max` is false for NaN),
 // after which conn.pos goes permanently NaN and every `dist > RANGE` refusal
 // gate silently passes. The handler guard drops the packet before ANY state
-// is touched — including the sequence bookkeeping, so a later honest move
+// is touched â€” including the sequence bookkeeping, so a later honest move
 // re-using that sequence number still applies.
 #[tokio::test]
 async fn nan_move_direction_is_dropped() {
@@ -3507,7 +3507,7 @@ async fn nan_move_direction_is_dropped() {
     }
 
     // The forged packet must not have consumed its sequence number (it was
-    // dropped before bookkeeping), so an honest move re-using seq 3 applies —
+    // dropped before bookkeeping), so an honest move re-using seq 3 applies â€”
     // and the Position it produces is still finite.
     a.send_move(3, Vec3 { x: 0.0, y: 0.0, z: 1.0 });
     let after = b
@@ -3526,10 +3526,10 @@ async fn nan_move_direction_is_dropped() {
 }
 
 // Dead-XP gate (decided 2026-09-19): a group member lying dead beside the
-// mob collects NOTHING — no XP share, no quest tick, and no dilution of the
+// mob collects NOTHING â€” no XP share, no quest tick, and no dilution of the
 // pool. B groups with A and dies at A's feet; A then solo-kills a
 // dev-spawned mob. A's XpGained must be the FULL solo amount (263 for a
-// level-1 mob — not the 157 a two-way group split would pay), and B must
+// level-1 mob â€” not the 157 a two-way group split would pay), and B must
 // see no positive XpGained at all. The range half of the eligibility rule
 // rides the same `eligible` closure in `award_kill`, so this test covers
 // the mechanism for both.
@@ -3576,7 +3576,7 @@ async fn dead_group_member_gets_no_xp_share() {
     .await
     .expect("A sees the two-member roster");
 
-    // B dies right here at the spawn — a corpse beside the coming kill,
+    // B dies right here at the spawn â€” a corpse beside the coming kill,
     // the exact scenario the pure-proximity rule would have paid.
     b.send_death();
     for _ in 0..6 {
@@ -3603,7 +3603,7 @@ async fn dead_group_member_gets_no_xp_share() {
         _ => unreachable!(),
     };
     // Wait for the dummy's swing on us (proves melee adjacency) while
-    // pumping BOTH transports — a one-sided wait leaves B's socket
+    // pumping BOTH transports â€” a one-sided wait leaves B's socket
     // unserviced under the 20 Hz position fan (the 2026-09-16 starvation
     // class), and a B disconnect would make the no-leak assertion below
     // vacuous (an offline B was already excluded before this change).
@@ -3662,4 +3662,64 @@ async fn dead_group_member_gets_no_xp_share() {
         })
         .await;
     assert!(leak.is_none(), "a dead group member must receive no XP share");
+}
+
+// Silent-refusals closeout (2026-09-30): the cast resolver deducts mana at
+// the top of the handler, so an arm that rejected afterwards and returned
+// silently charged full price for nothing. The headline case is the one a
+// player hits by accident: firing a nuke with no target selected. Assert
+// BOTH halves of the fix â€” the refusal line, and the mana coming back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enemy_spell_without_a_target_refunds_and_reports() {
+    let h = start_both().await;
+    // Fireball is Magician-only in spells.toml, and the class/level gate runs
+    // BEFORE the target arm â€” roll the class that can actually cast it, or
+    // this tests the wrong refusal.
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "notarget", "Notarg", "Human", "Magician").await;
+    set_char_level(&h.db_url, a_char_id, 12).await;
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Let enter-world settle, then latch the starting mana from the seed.
+    a.pump_for(Duration::from_millis(400)).await;
+
+    // Run the cast bar, then send the cast with NO target id.
+    a.send_cast_start("Fireball", 1.5);
+    a.pump_for(Duration::from_millis(1700)).await;
+    a.send_cast_spell("Fireball", None);
+
+    // The refusal arrives as a System chat line.
+    let refusal = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+                if text.contains("need a target"))
+        })
+        .await;
+    assert!(
+        refusal.is_some(),
+        "a targetless ENEMY cast must answer instead of failing silently"
+    );
+
+    // And the mana is given back: the LAST ManaUpdate for this caster must
+    // report full mana, not the post-deduct value.
+    let mut last_mp: Option<(f32, f32)> = None;
+    a.pump_for(Duration::from_millis(600)).await;
+    while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
+        if let Ok((msg, _)) =
+            bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+        {
+            if let ServerWorldMsg::ManaUpdate { id, mp, max_mp } = msg {
+                if id == a_char_id as u64 {
+                    last_mp = Some((mp, max_mp));
+                }
+            }
+        }
+    }
+    if let Some((mp, max_mp)) = last_mp {
+        assert!(
+            (mp - max_mp).abs() < 0.01,
+            "mana must be refunded after a refused cast (got {mp} of {max_mp})"
+        );
+    }
 }

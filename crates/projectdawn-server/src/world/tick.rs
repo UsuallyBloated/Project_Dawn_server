@@ -4183,6 +4183,22 @@ pub async fn run(
                             .get(&target_cid)
                             .map_or(false, |c| c.in_world && c.hp > 0.0);
                         if !target_ok {
+                            // Healing someone who just died or zoned out. Mana
+                            // came off at the top of the handler, so silence
+                            // here reads as the heal being broken — and in the
+                            // exact moment a healer is panicking. Refund and say so.
+                            refund_spell_cost(
+                                &mut server,
+                                &mut connections,
+                                &in_world_recipients_now,
+                                caster_cid,
+                                intent.caster,
+                                mana_cost,
+                                hp_cost,
+                            );
+                            handlers::send_refusal(
+                                &mut server, caster_cid, "That target is no longer here.",
+                            );
                             continue;
                         }
                         // PvP heal gate (player target). If caster and
@@ -4284,6 +4300,23 @@ pub async fn run(
                     }
                     "ENEMY" => {
                         let Some(target_id) = intent.target_id else {
+                            // Nuking with nothing targeted. The user reported
+                            // this UX in 2026-05-05 ("player can cast attack
+                            // spells when nothing is targeted... should receive
+                            // an error"); the server half is that it also ate
+                            // the mana.
+                            refund_spell_cost(
+                                &mut server,
+                                &mut connections,
+                                &in_world_recipients_now,
+                                caster_cid,
+                                intent.caster,
+                                mana_cost,
+                                hp_cost,
+                            );
+                            handlers::send_refusal(
+                                &mut server, caster_cid, "You need a target for that spell.",
+                            );
                             continue;
                         };
                         // Player target → PvP path (gate via can_attack
@@ -4291,6 +4324,20 @@ pub async fn run(
                         if target_id < protocol::world::ENEMY_ID_BASE {
                             let target_cid = target_id as ClientId;
                             if target_cid == caster_cid {
+                                refund_spell_cost(
+                                    &mut server,
+                                    &mut connections,
+                                    &in_world_recipients_now,
+                                    caster_cid,
+                                    intent.caster,
+                                    mana_cost,
+                                    hp_cost,
+                                );
+                                handlers::send_refusal(
+                                    &mut server,
+                                    caster_cid,
+                                    "You cannot cast that on yourself.",
+                                );
                                 continue;
                             }
                             let pvp_ok = match (
@@ -4328,14 +4375,32 @@ pub async fn run(
                             // damage shield apply on PvP spell hit
                             // too. Armor reduction is skipped for
                             // spells (matches GDScript wrapping).
+                            // Liveness checked BEFORE the mutable borrow so the
+                            // refusal path can refund (refund_spell_cost needs
+                            // `&mut connections` of its own).
+                            let pvp_target_alive = connections
+                                .get(&target_cid)
+                                .map_or(false, |t| t.hp > 0.0 && t.in_world);
+                            if !pvp_target_alive {
+                                refund_spell_cost(
+                                    &mut server,
+                                    &mut connections,
+                                    &in_world_recipients_now,
+                                    caster_cid,
+                                    intent.caster,
+                                    mana_cost,
+                                    hp_cost,
+                                );
+                                handlers::send_refusal(
+                                    &mut server, caster_cid, "That target is no longer here.",
+                                );
+                                continue;
+                            }
                             let shield_back: f32;
                             let shield_back_name: Option<String>;
                             let mut absorb_strip_idx: Option<usize> = None;
                             let (final_hp, max_hp, applied) = {
                                 let tc = connections.get_mut(&target_cid).expect("checked");
-                                if tc.hp <= 0.0 || !tc.in_world {
-                                    continue;
-                                }
                                 let mut dmg = spell.base_damage.max(0.0) as i32;
                                 let (after_absorb, exhausted) =
                                     buffs::consume_absorb(&mut tc.active_buffs, dmg);
@@ -4697,10 +4762,24 @@ pub async fn run(
                         // AOE spell radii top out around 6 m today, so
                         // this is a tiny working set in practice.
                         if spell.aoe_radius <= 0.0 {
-                            tracing::debug!(
+                            tracing::info!(
                                 caster = intent.caster,
                                 spell = %spell.name,
                                 "AOE spell with no radius; nothing to apply"
+                            );
+                            // Only reachable from a malformed spells.toml, but
+                            // the player paid for it either way.
+                            refund_spell_cost(
+                                &mut server,
+                                &mut connections,
+                                &in_world_recipients_now,
+                                caster_cid,
+                                intent.caster,
+                                mana_cost,
+                                hp_cost,
+                            );
+                            handlers::send_refusal(
+                                &mut server, caster_cid, "That magic has no effect here yet.",
                             );
                             continue;
                         }
@@ -4800,6 +4879,18 @@ pub async fn run(
                                 spell = %spell.name,
                                 "PET_SUMMON spell has no pet_type; ignored"
                             );
+                            refund_spell_cost(
+                                &mut server,
+                                &mut connections,
+                                &in_world_recipients_now,
+                                caster_cid,
+                                intent.caster,
+                                mana_cost,
+                                hp_cost,
+                            );
+                            handlers::send_refusal(
+                                &mut server, caster_cid, "That magic has no effect here yet.",
+                            );
                             continue;
                         }
                         // Owner-derived level (pet interim A): manual
@@ -4845,6 +4936,23 @@ pub async fn run(
                                 pet_type = %pet_type,
                                 "unknown pet_type — server-side summon dropped"
                             );
+                            // Reachable in ordinary play: the client-only spell
+                            // backlog includes pet spells whose pet_type the
+                            // server has never heard of (Warder's Mend's
+                            // sibling case). Same refund-and-say-so as the
+                            // unknown-spell arm above.
+                            refund_spell_cost(
+                                &mut server,
+                                &mut connections,
+                                &in_world_recipients_now,
+                                caster_cid,
+                                intent.caster,
+                                mana_cost,
+                                hp_cost,
+                            );
+                            handlers::send_refusal(
+                                &mut server, caster_cid, "That magic has no effect here yet.",
+                            );
                             continue;
                         };
                         tracing::info!(
@@ -4868,13 +4976,37 @@ pub async fn run(
                         // despawns the pet — "mob runs away"
                         // semantics matching the GDScript charm.
                         let Some(target_id) = intent.target_id else {
-                            tracing::debug!(caster = intent.caster, spell = %spell.name, "PET_CHARM dropped — no target");
+                            tracing::info!(caster = intent.caster, spell = %spell.name, "PET_CHARM dropped — no target");
+                            refund_spell_cost(
+                                &mut server,
+                                &mut connections,
+                                &in_world_recipients_now,
+                                caster_cid,
+                                intent.caster,
+                                mana_cost,
+                                hp_cost,
+                            );
+                            handlers::send_refusal(
+                                &mut server, caster_cid, "You need a target for that spell.",
+                            );
                             continue;
                         };
                         if target_id < protocol::world::ENEMY_ID_BASE
                             || target_id >= protocol::world::LOOT_BAG_ID_BASE
                         {
-                            tracing::debug!(caster = intent.caster, target = target_id, "PET_CHARM dropped — target id not in enemy partition");
+                            tracing::info!(caster = intent.caster, target = target_id, "PET_CHARM dropped — target id not in enemy partition");
+                            refund_spell_cost(
+                                &mut server,
+                                &mut connections,
+                                &in_world_recipients_now,
+                                caster_cid,
+                                intent.caster,
+                                mana_cost,
+                                hp_cost,
+                            );
+                            handlers::send_refusal(
+                                &mut server, caster_cid, "You cannot charm that.",
+                            );
                             continue;
                         }
                         let owner_id = intent.caster;
@@ -4885,7 +5017,19 @@ pub async fn run(
                             .filter(|e| e.is_alive() && !e.is_pet())
                             .map(|e| (e.mob.clone(), e.hp, e.max_hp, e.pos, e.yaw));
                         let Some((mob, hp, max_hp, pos, yaw)) = extracted else {
-                            tracing::debug!(caster = owner_id, target = target_id, "PET_CHARM dropped — target gone or not a live enemy");
+                            tracing::info!(caster = owner_id, target = target_id, "PET_CHARM dropped — target gone or not a live enemy");
+                            refund_spell_cost(
+                                &mut server,
+                                &mut connections,
+                                &in_world_recipients_now,
+                                caster_cid,
+                                intent.caster,
+                                mana_cost,
+                                hp_cost,
+                            );
+                            handlers::send_refusal(
+                                &mut server, caster_cid, "That target is no longer here.",
+                            );
                             continue;
                         };
                         // Despawn the old enemy id from AOI + fan.

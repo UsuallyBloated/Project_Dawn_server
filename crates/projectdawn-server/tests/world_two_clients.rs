@@ -3785,3 +3785,245 @@ async fn idle_enemy_position_fan_is_gated() {
         "an idle enemy should fan a first send plus ~500 ms keepalives over 2 s, got {count} (20 Hz would be ~40)"
     );
 }
+
+// ── AOI cell-crossing fan-out ─────────────────────────────────────────────
+//
+// Geometry shared by the tests below. STARTER_SPAWN is (0,0,0) = cell (0,0)
+// and CELL_SIZE is 120 m, so a character seeded at x=248 sits in cell (2,0):
+// two cells from spawn, outside its 3x3, invisible to anyone there. Walking
+// 15 m west (40 Moves at 7.5 m/s) crosses the x=240 line into cell (1,0),
+// which IS adjacent to (0,0). The server derives the AOI cell from the
+// position it loads at EnterWorld, so the DB seed is all it takes.
+
+/// Pre-seed a character's world position before it connects, the same slot
+/// `set_char_level` uses.
+async fn set_char_pos(db_url: &str, char_id: i64, x: f32, z: f32) {
+    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    sqlx::query("UPDATE characters SET pos_x = ?1, pos_y = 0.0, pos_z = ?2 WHERE id = ?3")
+        .bind(x as f64)
+        .bind(z as f64)
+        .bind(char_id)
+        .execute(&pool)
+        .await
+        .expect("seed character position");
+}
+
+/// Wait for a CHANNEL_SYSTEM message on `a` that satisfies `pred` while
+/// pumping BOTH transports and heart-beating both clients, so neither socket
+/// starves under the position fan and neither trips the app-layer idle
+/// timeout. `WorldClient::wait_for` only services the client it is called on.
+async fn wait_on_a_pumping_b(
+    a: &mut WorldClient,
+    b: &mut WorldClient,
+    timeout: Duration,
+    pred: impl Fn(&ServerWorldMsg) -> bool,
+) -> Option<ServerWorldMsg> {
+    let deadline = Instant::now() + timeout;
+    let mut ticks: u32 = 0;
+    while Instant::now() < deadline {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        ticks += 1;
+        if ticks % 80 == 0 {
+            a.send_heartbeat();
+            b.send_heartbeat();
+        }
+        while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
+            if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(
+                &bytes,
+                bincode_cfg(),
+            ) {
+                if pred(&msg) {
+                    return Some(msg);
+                }
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    None
+}
+
+/// Service both transports for `d` without sending anything.
+async fn pump_both_for(a: &mut WorldClient, b: &mut WorldClient, d: Duration) {
+    let end = Instant::now() + d;
+    while Instant::now() < end {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+}
+
+/// Send `ticks` Moves along `dir` from `who` while pumping `other`, then
+/// stop; the server parks the mover after STALE_MOVE_THRESHOLD.
+async fn walk_pumping(
+    who: &mut WorldClient,
+    other: &mut WorldClient,
+    seq: &mut u32,
+    dir: Vec3,
+    ticks: u32,
+) {
+    for _ in 0..ticks {
+        who.send_move(*seq, dir);
+        *seq += 1;
+        tick_one(&mut who.client, &mut who.transport);
+        tick_one(&mut other.client, &mut other.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+}
+
+/// B casts Summon Skeleton (3 s bar) and returns the pet id from B's own
+/// PetSpawn. Nothing is attacking B, so there is no interrupt roll.
+async fn summon_skeleton(b: &mut WorldClient, a: &mut WorldClient, b_char_id: i64) -> u64 {
+    b.send_cast_start("Summon Skeleton", 3.0);
+    pump_both_for(a, b, Duration::from_millis(150)).await;
+    pump_both_for(a, b, Duration::from_millis(3100)).await;
+    b.send_cast_spell("Summon Skeleton", None);
+    let evt = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == b_char_id as u64)
+        })
+        .await
+        .expect("B sees its own PetSpawn");
+    match evt {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        _ => unreachable!(),
+    }
+}
+
+/// Scale readiness: an enemy crossing an AOI cell boundary must fan an
+/// EnemySpawn to the players its new neighbourhood brings it into view of,
+/// and an EntityDespawn to the ones it leaves. Before this the crossing only
+/// updated the grid, so a mob chasing into view streamed Position for an id
+/// the client had never been given a spawn for and stayed invisible.
+#[tokio::test]
+async fn enemy_crossing_a_cell_boundary_spawns_and_despawns_for_players() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "aoiwatch", "Aoiwatch", "Human", "Warrior").await;
+    let (b_session, b_char_id, _stale_token) =
+        provision_client(&h.auth_url, "aoipull", "Aoipull", "Elf", "Cleric").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "aoipull", true).await.expect("set is_gm");
+    set_char_pos(&h.db_url, b_char_id, 248.0, 60.0).await;
+    let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    // The runner spawns ~3 m from B, inside aggro 12, so it closes on B at
+    // once and follows when B walks; 1 dmg swings are harmless. Chase leashes
+    // on distance to the TARGET (aggro x 2 = 24 m), and B outruns it by only
+    // ~12 m over the walk.
+    b.send_dev_spawn("Border Runner", 1, 10.0, 1, 3.0, 12.0);
+    let spawn_evt = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Border Runner")
+        })
+        .await
+        .expect("B, in the same cell, sees the dev spawn");
+    let runner_id: u64 = match spawn_evt {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    let early = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_millis(300), |m| {
+        matches!(m, ServerWorldMsg::EnemySpawn { id, .. } if *id == runner_id)
+    })
+    .await;
+    assert!(early.is_none(), "a mob two cells away must not be seeded to A");
+
+    let mut seq: u32 = 1;
+    walk_pumping(&mut b, &mut a, &mut seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 }, 40).await;
+    let spawned = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(15), |m| {
+        matches!(m, ServerWorldMsg::EnemySpawn { id, .. } if *id == runner_id)
+    })
+    .await;
+    assert!(
+        spawned.is_some(),
+        "A must get an EnemySpawn when the chasing mob crosses into a cell adjacent to A's"
+    );
+
+    walk_pumping(&mut b, &mut a, &mut seq, Vec3 { x: 1.0, y: 0.0, z: 0.0 }, 50).await;
+    let despawned = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(15), |m| {
+        matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == runner_id)
+    })
+    .await;
+    assert!(
+        despawned.is_some(),
+        "A must get an EntityDespawn when the mob follows B back out of view"
+    );
+}
+
+/// The pet arm of the same crossing: a pet following its owner across a cell
+/// boundary fans a PetSpawn to the players it comes into view of.
+#[tokio::test]
+async fn pet_following_its_owner_across_a_cell_spawns_for_players() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "petwatch", "Petwatch", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "petwalk", "Petwalk", "Human", "Necromancer").await;
+    set_char_level(&h.db_url, b_char_id, 6).await;
+    set_char_pos(&h.db_url, b_char_id, 248.0, 60.0).await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    let pet_id = summon_skeleton(&mut b, &mut a, b_char_id).await;
+    assert!(pet_id >= PET_ID_BASE);
+    let early = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_millis(300), |m| {
+        matches!(m, ServerWorldMsg::PetSpawn { id, .. } if *id == pet_id)
+    })
+    .await;
+    assert!(early.is_none(), "a pet two cells away must not be seeded to A");
+
+    let mut seq: u32 = 1;
+    walk_pumping(&mut b, &mut a, &mut seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 }, 40).await;
+    let spawned = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(15), |m| {
+        matches!(m, ServerWorldMsg::PetSpawn { id, owner, .. }
+            if *id == pet_id && *owner == b_char_id as u64)
+    })
+    .await;
+    assert!(
+        spawned.is_some(),
+        "A must get a PetSpawn when the pet follows its owner into a cell adjacent to A's"
+    );
+}
+
+/// The player side of the pet gap: a player walking into view of an EXISTING
+/// pet gets its PetSpawn. The id partitions stack (player < enemy < bag <
+/// pet), so the player cell-change handler's bag/corpse arm swallowed pets.
+#[tokio::test]
+async fn player_crossing_into_view_of_an_existing_pet_gets_pet_spawn() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "petcomer", "Petcomer", "Human", "Warrior").await;
+    set_char_pos(&h.db_url, a_char_id, 248.0, 60.0).await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "pethome", "Pethome", "Human", "Necromancer").await;
+    set_char_level(&h.db_url, b_char_id, 6).await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    let pet_id = summon_skeleton(&mut b, &mut a, b_char_id).await;
+    let early = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_millis(300), |m| {
+        matches!(m, ServerWorldMsg::PetSpawn { id, .. } if *id == pet_id)
+    })
+    .await;
+    assert!(early.is_none(), "A starts two cells from the pet and must not have it yet");
+
+    let mut seq: u32 = 1;
+    walk_pumping(&mut a, &mut b, &mut seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 }, 40).await;
+    let spawned = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(10), |m| {
+        matches!(m, ServerWorldMsg::PetSpawn { id, owner, .. }
+            if *id == pet_id && *owner == b_char_id as u64)
+    })
+    .await;
+    assert!(
+        spawned.is_some(),
+        "A must get the existing pet's PetSpawn on walking into its neighbourhood"
+    );
+}

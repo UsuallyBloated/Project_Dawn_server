@@ -550,7 +550,7 @@ CREATE TABLE server_config (
 4. **Resolve combat events**: damage, hit/miss/crit/evade, on-hit procs, buff applications.
 5. **Tick buffs / DoTs / HoTs / cooldowns**: decrement timers, apply periodic effects.
 6. **Tick TimeOfDay**: advance world clock, broadcast every 1 minute.
-7. **Build per-client snapshots**: delta-encoded against the last sequence each client acked. Includes only entities in their area-of-interest.
+7. **Build per-client snapshots**: delta-encoded against the last sequence each client acked. Includes only entities in their area-of-interest. Enemy and pet positions fan on change (moved or turned since the last send) plus a 500 ms keepalive (`ENEMY_POSITION_KEEPALIVE`), not every tick; the `enemy position fan` log line reports the stream once a minute while anyone is online.
 8. **Send snapshots** via renet's `send_message` per channel. renet handles retries / acks.
 
 **Client tick**:
@@ -561,7 +561,7 @@ CREATE TABLE server_config (
 
 **Combat is event-driven, not per-tick**. When the player presses Attack, the auto-attack timer resolves on the server-side timer; the server emits a `Hit` / `Miss` event whenever the swing lands. The 20 Hz tick polls timer state but doesn't introduce 50 ms of latency on top.
 
-**Area of interest (AOI)**: each player has a 100 m bubble (configurable). Server only sends entity updates for things inside the bubble. Saves bandwidth and CPU on large worlds.
+**Area of interest (AOI)**: a sparse grid of 120 m square cells (`world/aoi.rs`). A player sees, and receives updates for, every entity in the 3x3 neighbourhood of its own cell (~360 m square). Any entity crossing a cell boundary, player, enemy or pet, fans its spawn to the players it comes into view of and a despawn to the ones it leaves. Saves bandwidth and CPU on large worlds.
 
 ---
 

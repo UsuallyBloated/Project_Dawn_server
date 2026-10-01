@@ -921,6 +921,41 @@ enum CombatEvent {
     },
 }
 
+/// Fan what an enemy or pet crossing an AOI cell implies: in-world players in
+/// the cells its 3x3 neighbourhood gained get its spawn message, players in
+/// the cells it lost get an EntityDespawn. Mirror of the player cell-change
+/// fan-out in step 5b. Without it a mob chasing into view only ever streamed
+/// Position for an id the client was never given a spawn for, which the
+/// client drops (it has no name, level or hp to build a placeholder from), so
+/// the mob stayed invisible until a re-enter. Callers pass live entities:
+/// only alive ones take the AI pass that moves them between cells.
+fn fan_entity_cell_crossing(
+    server: &mut RenetServer,
+    aoi: &AoiGrid,
+    connections: &HashMap<ClientId, PerConnection>,
+    entity: &Entity,
+    gained_cells: &[aoi::Cell],
+    lost_cells: &[aoi::Cell],
+) {
+    let in_world_players = |cells: &[aoi::Cell]| -> Vec<ClientId> {
+        aoi.entities_in_cells(cells.iter())
+            .into_iter()
+            .filter(|id| *id < protocol::world::ENEMY_ID_BASE)
+            .map(|id| id as ClientId)
+            .filter(|cid| connections.get(cid).is_some_and(|c| c.in_world))
+            .collect()
+    };
+    let newly_visible = in_world_players(gained_cells);
+    if entity.is_pet() {
+        handlers::fan_out_pet_spawn(server, &newly_visible, entity);
+    } else {
+        handlers::fan_out_enemy_spawn(server, &newly_visible, entity);
+    }
+    for cid in in_world_players(lost_cells) {
+        handlers::send_entity_despawn(server, cid, entity.id);
+    }
+}
+
 /// Despawn the pet(s) owned by `owner_entity`: fan EntityDespawn to the AOI
 /// peers who could see each pet, then drop it from the grid and the enemies
 /// map. Idempotent — a second call after the pets are already gone is a no-op.
@@ -7156,9 +7191,10 @@ pub async fn run(
             }
             let mut target_changes: Vec<(EntityId, Option<EntityId>)> = Vec::new();
             let mut enemy_hits: Vec<(EntityId, HitIntent)> = Vec::new();
-            // Track 7: collect enemy cell changes so the aoi grid stays
-            // current. Player cell-change fan-outs read the grid to find
-            // which enemies are now visible.
+            // Collect enemy and pet cell changes so the aoi grid stays
+            // current (player cell-change fan-outs read it to find what is
+            // now visible) AND so each crossing can fan its own spawn /
+            // despawn to the players it brought into or out of view.
             let mut enemy_cell_changes: Vec<(EntityId, (i32, i32), (i32, i32))> = Vec::new();
             for entity in enemies.values_mut() {
                 if !entity.is_alive() {
@@ -7199,7 +7235,10 @@ pub async fn run(
                 }
             }
             for (id, old_cell, new_cell) in enemy_cell_changes {
-                aoi.update(id, old_cell, new_cell);
+                let (gained, lost) = aoi.update(id, old_cell, new_cell);
+                if let Some(entity) = enemies.get(&id) {
+                    fan_entity_cell_crossing(&mut server, &aoi, &connections, entity, &gained, &lost);
+                }
             }
             for (id, target) in target_changes {
                 handlers::fan_out_entity_target(
@@ -8918,7 +8957,23 @@ pub async fn run(
                 if peer_entity == mover_entity {
                     continue;
                 }
-                if peer_entity >= protocol::world::LOOT_BAG_ID_BASE {
+                if peer_entity >= protocol::world::PET_ID_BASE {
+                    // Pet. Tested first because the id partitions stack
+                    // (player < ENEMY_ID_BASE < bag/corpse < PET_ID_BASE), so a
+                    // pet also passes the bag test below. It used to fall in
+                    // there, match neither a bag nor a corpse, and be skipped:
+                    // a player walking into view of an existing pet never got
+                    // its PetSpawn.
+                    if let Some(pet) = enemies.get(&peer_entity) {
+                        if pet.is_alive() {
+                            handlers::fan_out_pet_spawn(
+                                &mut server,
+                                std::slice::from_ref(mover_id),
+                                pet,
+                            );
+                        }
+                    }
+                } else if peer_entity >= protocol::world::LOOT_BAG_ID_BASE {
                     // Loot bag OR corpse — they share the id partition (corpses
                     // mint from mint_bag_id). Seed the mover with whichever it is.
                     if let Some(bag) = loot_bags.get(&peer_entity) {
@@ -8995,7 +9050,7 @@ pub async fn run(
                     continue;
                 }
                 if peer_entity >= protocol::world::ENEMY_ID_BASE {
-                    // Enemy or bag — just tell the mover it's gone.
+                    // Enemy, pet or bag — just tell the mover it's gone.
                     handlers::send_entity_despawn(&mut server, *mover_id, peer_entity);
                 } else {
                     // Player — mutual despawn.

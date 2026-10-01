@@ -20,7 +20,8 @@ use super::{
     spawn_points::Spawner,
     spells,
     ATTACK_RANGE_TOLERANCE, CAMP_SECS, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL, ENEMY_FAN_REPORT_INTERVAL,
-    ENEMY_DESPAWN_LINGER_SECS, GROUP_COIN_SHARE_RANGE, LINKDEAD_SECS, LOOT_BAG_LINGER_SECS,
+    ENEMY_DESPAWN_LINGER_SECS, GROUP_COIN_SHARE_RANGE, INSPECT_RANGE, LINKDEAD_SECS,
+    LOOT_BAG_LINGER_SECS,
     LOOT_PICKUP_RANGE, MAX_MOVE_SPEED,
     RANGED_ATTACK_RANGE, STALE_MOVE_THRESHOLD, TICK_DT,
 };
@@ -2684,16 +2685,41 @@ pub async fn run(
         }
 
         // Inspect-player drain. Look up target by char_id, ensure they're
-        // in-world, pack their paperdoll slot map into `(slot, item_path)`
-        // pairs and send back to the inspector only. Empty result for
-        // unknown / offline targets — client renders "—" everywhere.
+        // in-world and within INSPECT_RANGE, pack their paperdoll slot map
+        // into `(slot, item_path)` pairs and send back to the inspector only.
+        // Empty result for unknown / offline targets — client renders "—"
+        // everywhere.
         for (inspector_id, target_char_id) in inspect_intents.drain(..) {
             if to_disconnect.contains(&inspector_id) {
                 continue;
             }
+            let Some(inspector_pos) = connections.get(&inspector_id).map(|c| c.pos) else {
+                continue;
+            };
             let target = connections
                 .iter()
                 .find(|(_, c)| c.char_id == target_char_id && c.in_world);
+            // Range gate (exploit audit finding 10): a paperdoll used to be
+            // readable from anywhere in the world. Written as "allow only
+            // when dist <= RANGE" so a non-finite distance refuses instead of
+            // slipping past a `dist > RANGE` test (the NaN Move lesson). The
+            // refusal answers in chat, and an empty result still goes out so
+            // an older client's window leaves its "waiting" state.
+            if let Some((_, c)) = target {
+                let dist = inspector_pos.distance_to(c.pos);
+                if !(dist <= INSPECT_RANGE) {
+                    let line = format!("You are too far away to inspect {}.", c.name);
+                    handlers::send_refusal(&mut server, inspector_id, &line);
+                    handlers::send_inspect_result(
+                        &mut server,
+                        inspector_id,
+                        target_char_id,
+                        String::new(),
+                        Vec::new(),
+                    );
+                    continue;
+                }
+            }
             let (target_name, slots) = match target {
                 Some((_, c)) => {
                     let mut slots: Vec<(u8, String)> = c

@@ -153,6 +153,14 @@ pub const LOOT_PICKUP_RANGE: f32 = 6.0;
 /// excluded. See docs/design/group_loot_and_coin.md.
 pub const GROUP_COIN_SHARE_RANGE: f32 = 30.0;
 
+/// How far apart (metres) two players may be for `InspectPlayer` to return a
+/// paperdoll. Paperdoll slots are public and bags are excluded, so reading
+/// one from across the world was only a minor disclosure (exploit audit
+/// finding 10), but there was no reason to allow it. Sized as a backstop,
+/// looser than the client's own 20 m check in `hud.gd`, so an honest player
+/// is never refused over interpolation drift. Tuning knob.
+pub const INSPECT_RANGE: f32 = 30.0;
+
 /// Channel ids — kept in lockstep with `protocol/src/world.rs`. Slice 1
 /// uses just two; the other two from `server_design.md` §3 (combat events,
 /// system shutdown) get added when their handlers land.

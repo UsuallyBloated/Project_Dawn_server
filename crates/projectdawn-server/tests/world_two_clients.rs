@@ -309,6 +309,14 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Heartbeat);
     }
 
+    fn send_inspect_player(&mut self, target_char_id: i64) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::InspectPlayer { target_char_id },
+        );
+    }
+
     fn send_attack(&mut self, target_id: u64, weapon_path: &str, is_offhand: bool, dmg_type: DamageType) {
         let msg = ClientWorldMsg::Attack {
             target_id,
@@ -1933,41 +1941,34 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
 async fn charm_converts_enemy_to_pet() {
     let h = start_both().await;
 
-    let (a_session, a_char_id, a_token) =
+    let (a_session, a_char_id, _stale_token) =
         provision_client(&h.auth_url, "ench", "Enchanted", "Human", "Enchanter").await;
     // Charm requires level 20; provisioned characters start at 1.
     set_char_level(&h.db_url, a_char_id, 20).await;
+    // GM for the dev spawn below; re-mint the token so the flag rides it.
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "ench", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
-    // Walk into camp 0 to aggro an enemy (gives us a target id).
-    // Phase 4 layout note: every camp-walking test aims at the Bonepile's
-    // isolated [-16, 0, -14] spawn â€” the one ring 1 spawn whose aggro circle
-    // overlaps no other, so exactly ONE slow (1.8 m/s, 2.5 s swing) level 1
-    // Decrepit Skeleton pulls, the same single-puller semantics these tests
-    // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
-    // pack, and standing in it turns every cast into interrupt rolls.
-    let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
-    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
-    // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
-    // whether an enemy locks on before the wait expires depended on where it
-    // happened to be wandering. Walking fully in makes the pull deterministic.
-    let walk_end = Instant::now() + Duration::from_millis(3_500);
-    let mut seq: u32 = 1;
-    while Instant::now() < walk_end {
-        a.send_move(seq, dir);
-        seq += 1;
-        tick_one(&mut a.client, &mut a.transport);
-        tokio::time::sleep(TICK_DT).await;
-    }
-    let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
-            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
+    // Charm a mob that is NOT attacking. This test used to walk into the
+    // Bonepile, wait for the skeleton's hit, then cast the 2.0 s Charm while
+    // that skeleton kept swinging every 2.5 s: the cast finished about 0.2 s
+    // before the next swing, so any stretch of the test loop landed a hit
+    // mid-cast and rolled the ~70% channeling-0 interrupt. That race was the
+    // whole of its "load sensitivity". A dev-spawned mob with aggro 0 and
+    // speed 0 never targets or swings, so an interrupt is impossible rather
+    // than unlikely (the same fix the AOE test got on 2026-09-16).
+    a.send_dev_spawn("Charm Dummy", 1, 30.0, 0, 0.0, 0.0);
+    let spawn_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
         })
         .await
-        .expect("enemy hits player");
-    let enemy_id: u64 = match hit_evt {
-        ServerWorldMsg::Hit { attacker, .. } => attacker,
+        .expect("the dev-spawned dummy fans an EnemySpawn");
+    let enemy_id: u64 = match spawn_evt {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
         _ => unreachable!(),
     };
 
@@ -2000,9 +2001,9 @@ async fn charm_converts_enemy_to_pet() {
         .expect("a fresh pet id spawns for the caster");
     if let ServerWorldMsg::PetSpawn { id, pet_name, .. } = pet_spawn {
         assert!(id >= PET_ID_BASE, "charmed pet id must be in pet partition");
-        // Mob name preserved â€” charmed Decrepit Skeleton stays
-        // named "Decrepit Skeleton" on the pet entity.
-        assert_eq!(pet_name, "Decrepit Skeleton");
+        // Mob name preserved: the charmed dummy keeps its name on the
+        // pet entity.
+        assert_eq!(pet_name, "Charm Dummy");
     }
 }
 
@@ -4050,4 +4051,71 @@ async fn player_crossing_into_view_of_an_existing_pet_gets_pet_spawn() {
         spawned.is_some(),
         "A must get the existing pet's PetSpawn on walking into its neighbourhood"
     );
+}
+
+// ── InspectPlayer range gate (exploit audit finding 10) ───────────────────
+
+/// A paperdoll used to be readable from anywhere in the world. B is seeded
+/// 200 m from A, far beyond INSPECT_RANGE: A's inspect must be refused with a
+/// chat line, and the result that follows must carry nothing.
+#[tokio::test]
+async fn inspect_player_refuses_beyond_range() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "inspfar", "Inspfar", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "insptgt", "Insptgt", "Elf", "Cleric").await;
+    set_char_pos(&h.db_url, b_char_id, 200.0, 0.0).await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    a.send_inspect_player(b_char_id);
+    let refusal = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+            if text.contains("too far away to inspect"))
+    })
+    .await;
+    assert!(refusal.is_some(), "an out-of-range inspect must answer with a refusal line");
+
+    // Ask again and read the result this time: it must be empty.
+    a.send_inspect_player(b_char_id);
+    let result = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InspectResult { target_char_id, .. }
+            if *target_char_id == b_char_id)
+    })
+    .await
+    .expect("the refused inspect still closes the client's waiting state");
+    if let ServerWorldMsg::InspectResult { target_name, slots, .. } = result {
+        assert!(target_name.is_empty(), "a refused inspect names nobody");
+        assert!(slots.is_empty(), "a refused inspect discloses no slots");
+    }
+}
+
+/// The honest path is untouched: 20 m apart, inside INSPECT_RANGE, the
+/// inspect returns the target's name.
+#[tokio::test]
+async fn inspect_player_answers_within_range() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "inspnear", "Inspnear", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "inspbud", "Inspbud", "Elf", "Cleric").await;
+    set_char_pos(&h.db_url, b_char_id, 20.0, 0.0).await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    a.send_inspect_player(b_char_id);
+    let result = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InspectResult { target_char_id, .. }
+            if *target_char_id == b_char_id)
+    })
+    .await
+    .expect("an in-range inspect answers");
+    if let ServerWorldMsg::InspectResult { target_name, .. } = result {
+        assert_eq!(target_name, "Inspbud");
+    }
 }

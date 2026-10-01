@@ -19,7 +19,7 @@ use super::{
     skills,
     spawn_points::Spawner,
     spells,
-    ATTACK_RANGE_TOLERANCE, CAMP_SECS, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL,
+    ATTACK_RANGE_TOLERANCE, CAMP_SECS, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL, ENEMY_FAN_REPORT_INTERVAL,
     ENEMY_DESPAWN_LINGER_SECS, GROUP_COIN_SHARE_RANGE, LINKDEAD_SECS, LOOT_BAG_LINGER_SECS,
     LOOT_PICKUP_RANGE, MAX_MOVE_SPEED,
     RANGED_ATTACK_RANGE, STALE_MOVE_THRESHOLD, TICK_DT,
@@ -1217,6 +1217,10 @@ pub async fn run(
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let mut last_checkpoint = Instant::now();
+    // Bandwidth counter for the enemy Position stream (step 6b): sends in the
+    // current report window, logged every ENEMY_FAN_REPORT_INTERVAL.
+    let mut enemy_pos_sent: u64 = 0;
+    let mut last_fan_report = Instant::now();
 
     // Track 5 sub-task 1B — server-authoritative enemies. The spawner owns
     // respawn timers per authored spawn point; `enemies` holds the live
@@ -9432,18 +9436,29 @@ pub async fn run(
             }
         }
 
-        // 6b. Enemy Position fan-out. Track 7: AOI-filtered by the
-        //     enemy's current XZ position. Only players whose cell is
-        //     in the 3×3 neighbourhood of the enemy's cell receive
-        //     the broadcast. Enemy entities are not yet in the AoiGrid
-        //     (that lands in Track 7 sub-task 5 with EnemySpawn
-        //     narrowing); the cell is computed inline from entity.pos.
-        if !in_world_ids.is_empty() {
+        // 6b. Enemy and pet Position fan-out, AOI-filtered: only players
+        //     whose cell is in the 3×3 neighbourhood of the entity's cell
+        //     receive it. Entities ARE in the AoiGrid (inserted on spawn,
+        //     moved by the AI pass, removed on cleanup); the cell is read
+        //     from entity.pos because that is what the grid was keyed on.
+        //     Gated on change-or-keepalive: an entity that has not moved or
+        //     turned since its last send fans only every
+        //     ENEMY_POSITION_KEEPALIVE, not every tick. The counter feeds
+        //     the "enemy position fan" log line so the stream is measured
+        //     rather than eyeballed.
+        if in_world_ids.is_empty() {
+            // Nobody to fan to: keep the report window anchored to the next
+            // stretch with players in it instead of spanning the idle time.
+            enemy_pos_sent = 0;
+            last_fan_report = now;
+        } else {
             for entity in enemies.values_mut() {
-                if !entity.is_alive() {
+                if !entity.is_alive() || !entity.position_broadcast_due(now) {
                     continue;
                 }
-                entity.seq = entity.seq.wrapping_add(1);
+                // Mark before building: the message carries the advanced
+                // sequence and the snapshotted pos / yaw.
+                entity.mark_position_broadcast(now);
                 let Some(bytes) = handlers::build_enemy_position_msg(entity) else {
                     continue;
                 };
@@ -9452,8 +9467,21 @@ pub async fn run(
                 for recipient_id in &in_world_ids {
                     if visible.contains(recipient_id) {
                         server.send_message(*recipient_id, CHANNEL_POSITION, bytes.clone());
+                        enemy_pos_sent += 1;
                     }
                 }
+            }
+            if now.duration_since(last_fan_report) >= ENEMY_FAN_REPORT_INTERVAL {
+                let enemies_alive = enemies.values().filter(|e| e.is_alive()).count();
+                tracing::info!(
+                    sent = enemy_pos_sent,
+                    window_secs = now.duration_since(last_fan_report).as_secs(),
+                    enemies_alive,
+                    players_in_world = in_world_ids.len(),
+                    "enemy position fan"
+                );
+                enemy_pos_sent = 0;
+                last_fan_report = now;
             }
         }
 

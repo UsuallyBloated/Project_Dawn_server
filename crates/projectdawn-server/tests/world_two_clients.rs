@@ -3723,3 +3723,65 @@ async fn enemy_spell_without_a_target_refunds_and_reports() {
         );
     }
 }
+
+/// Scale readiness: an idle enemy's Position must not fan at 20 Hz. The
+/// statue has aggro 0 and speed 0, so it never targets and never moves.
+/// Before the change-or-keepalive gate it still produced one Position per
+/// tick per visible player (~40 in 2 s); after, the first-tick send plus
+/// one keepalive per `ENEMY_POSITION_KEEPALIVE` gap, so 2..=8 with slack.
+#[tokio::test]
+async fn idle_enemy_position_fan_is_gated() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale_token) =
+        provision_client(&h.auth_url, "idlefan", "Idlefan", "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "idlefan", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    a.send_dev_spawn("Idle Statue", 1, 10.0, 0, 0.0, 0.0);
+    let spawn_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Idle Statue")
+        })
+        .await
+        .expect("the statue fans an EnemySpawn");
+    let statue_id: u64 = match spawn_evt {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    // Count the statue's Position messages over a 2 s window, servicing the
+    // transport every tick so nothing is lost in the socket buffer.
+    let end = Instant::now() + Duration::from_secs(2);
+    let mut count = 0u32;
+    let mut last_seq: Option<u32> = None;
+    while Instant::now() < end {
+        tick_one(&mut a.client, &mut a.transport);
+        while let Some(bytes) = a.client.receive_message(CHANNEL_POSITION) {
+            if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(
+                &bytes,
+                bincode_cfg(),
+            ) {
+                if let ServerWorldMsg::Position { id, sequence, .. } = msg {
+                    if id == statue_id {
+                        count += 1;
+                        if let Some(prev) = last_seq {
+                            assert!(
+                                sequence > prev,
+                                "statue Position sequence must be strictly increasing ({prev} then {sequence})"
+                            );
+                        }
+                        last_seq = Some(sequence);
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    eprintln!("idle statue Position messages in 2 s: {count}");
+    assert!(
+        (2..=8).contains(&count),
+        "an idle enemy should fan a first send plus ~500 ms keepalives over 2 s, got {count} (20 Hz would be ~40)"
+    );
+}

@@ -74,6 +74,18 @@ pub const CAMP_SECS: Duration = Duration::from_secs(30);
 /// Periodic position checkpoint cadence. Inventory/quest mutations write
 /// per-mutation; this is just for "where was I when the power went out".
 pub const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);
+/// Longest an enemy or pet goes without a Position fan-out while standing
+/// still. Positions fan on change (the entity moved or turned since its last
+/// send); this keepalive covers a dropped unreliable packet and bounds how
+/// stale a client's view can get. Same value as `regen::MAX_BROADCAST_GAP`
+/// (the resource fan-out's keepalive) but its own knob: an idle camp's whole
+/// Position stream is one send per mob per visible player per this interval,
+/// where it used to be one per 20 Hz tick.
+pub const ENEMY_POSITION_KEEPALIVE: Duration = Duration::from_millis(500);
+/// Cadence of the `enemy position fan` log line (sends in the window, alive
+/// enemies, players in world) that measures the stream above. Skipped while
+/// nobody is in world.
+pub const ENEMY_FAN_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 /// Server-side speed cap for movement intents (m/s). Anything faster
 /// than this gets clamped — server-authoritative, no exceptions.
 /// Where a character with no bind point respawns, and the position a freshly

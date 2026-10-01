@@ -16,6 +16,15 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+/// Below this much movement since the last Position send, a mob counts as
+/// standing still: `step_toward`'s epsilon snap can nudge a stationary entity
+/// by less, and a float compare would call that "moved" every tick.
+const MOVED_EPSILON: f32 = 0.005;
+/// Below this much turn since the last send, a mob counts as not having
+/// turned. `face_toward` recomputes yaw from the same atan2 while its target
+/// stands still, so this only has to absorb float noise.
+const YAW_EPSILON: f32 = 0.001;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CcKind {
     Mez,
@@ -125,6 +134,13 @@ pub struct Entity {
     /// `PerConnection.last_move_seq` — the client uses it to drop
     /// out-of-order updates on the unreliable channel.
     pub seq: u32,
+    /// What the last Position fan-out carried, and when. The tick's
+    /// `position_broadcast_due` compares against these so a mob standing
+    /// still fans only the `ENEMY_POSITION_KEEPALIVE`, not every tick.
+    /// `None` = never sent (the first tick after spawn always sends).
+    pub last_bcast_pos: Vec3f,
+    pub last_bcast_yaw: f32,
+    pub last_bcast_at: Option<Instant>,
 
     /// Active crowd-control effects. Ticked every AI frame; empty is the
     /// common case (no per-tick allocation cost when idle).
@@ -202,9 +218,6 @@ pub struct AiEvents {
     /// Filled when the entity's Attack state fired a melee swing this
     /// tick.
     pub hit: Option<HitIntent>,
-    /// True if the entity's position moved this tick — gates Position
-    /// fan-out so idle / attacking enemies don't waste bandwidth.
-    pub moved: bool,
 }
 
 /// A named mob's enrage, once it has fired.
@@ -254,6 +267,9 @@ impl Entity {
             state_entered_at: now,
             mob,
             seq: 0,
+            last_bcast_pos: spawn_pos,
+            last_bcast_yaw: 0.0,
+            last_bcast_at: None,
             active_cc: Vec::new(),
             owner: None,
             command_at: None,
@@ -316,6 +332,9 @@ impl Entity {
             state_entered_at: now,
             mob,
             seq: 0,
+            last_bcast_pos: pos,
+            last_bcast_yaw: 0.0,
+            last_bcast_at: None,
             active_cc: Vec::new(),
             owner: Some(owner),
             command_at: None,
@@ -611,9 +630,33 @@ impl Entity {
             .fold(0.0_f32, f32::max)
     }
 
+    /// Whether this tick should fan a Position for the entity: it moved or
+    /// turned since the last send, has never been sent, or the keepalive
+    /// gap has elapsed. The change-or-keepalive gate `regen.rs` uses for
+    /// resources, applied to position.
+    pub fn position_broadcast_due(&self, now: Instant) -> bool {
+        let Some(sent_at) = self.last_bcast_at else {
+            return true;
+        };
+        self.pos.sub(self.last_bcast_pos).length() > MOVED_EPSILON
+            || (self.yaw - self.last_bcast_yaw).abs() > YAW_EPSILON
+            || now.duration_since(sent_at) >= crate::world::ENEMY_POSITION_KEEPALIVE
+    }
+
+    /// Record a Position fan-out. Call BEFORE building the message: it
+    /// advances the sequence the client orders on and snapshots the pos /
+    /// yaw that go out, so the next `position_broadcast_due` compares
+    /// against what the client actually has.
+    pub fn mark_position_broadcast(&mut self, now: Instant) {
+        self.seq = self.seq.wrapping_add(1);
+        self.last_bcast_pos = self.pos;
+        self.last_bcast_yaw = self.yaw;
+        self.last_bcast_at = Some(now);
+    }
+
     /// Drive one AI tick. Mutates state / target / pos / last_attack_at;
     /// returns the events the tick loop should fan out (target switch,
-    /// melee swing, position broadcast trigger). The caller is responsible
+    /// melee swing). The caller is responsible
     /// for owning `targets` (a snapshot of aggro-able entity positions —
     /// players plus alive pets — for this tick; we don't borrow connections
     /// across the entity loop) and `enemy_targets` (pet targets — alive
@@ -632,7 +675,6 @@ impl Entity {
     ) -> AiEvents {
         self.tick_cc(dt);
         let prev_target = self.target;
-        let prev_pos = self.pos;
         let mut events = AiEvents::default();
         // Mez skips the entire state machine (mob stands frozen).
         if self.is_mezzed() {
@@ -655,11 +697,6 @@ impl Entity {
         }
         if self.target != prev_target {
             events.target_changed = Some(self.target);
-        }
-        // ~0.005m squared threshold — float comparison would falsely flag
-        // a stationary entity as "moved" due to step_toward's epsilon snap.
-        if self.pos.sub(prev_pos).length() > 0.005 {
-            events.moved = true;
         }
         events
     }
@@ -970,6 +1007,7 @@ pub fn mint_pet_id() -> EntityId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn template() -> MobTemplate {
         MobTemplate {
@@ -992,6 +1030,71 @@ mod tests {
             named_id: Some(id.into()),
             ..template()
         }
+    }
+
+    // ── Position broadcast gate ───────────────────────────────────────────
+
+    fn idle_entity() -> Entity {
+        Entity::from_spawn(0, Vec3f { x: 10.0, y: 0.0, z: 5.0 }, template(), Instant::now())
+    }
+
+    #[test]
+    fn position_broadcast_never_sent_is_due() {
+        assert!(idle_entity().position_broadcast_due(Instant::now()));
+    }
+
+    #[test]
+    fn position_broadcast_unchanged_inside_the_gap_is_not_due() {
+        let mut e = idle_entity();
+        let t0 = Instant::now();
+        e.mark_position_broadcast(t0);
+        assert!(!e.position_broadcast_due(t0 + Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn position_broadcast_after_moving_is_due() {
+        let mut e = idle_entity();
+        let t0 = Instant::now();
+        e.mark_position_broadcast(t0);
+        e.pos.x += 0.1;
+        assert!(e.position_broadcast_due(t0 + Duration::from_millis(50)));
+    }
+
+    #[test]
+    fn position_broadcast_after_turning_is_due() {
+        let mut e = idle_entity();
+        let t0 = Instant::now();
+        e.mark_position_broadcast(t0);
+        e.yaw += 0.5;
+        assert!(e.position_broadcast_due(t0 + Duration::from_millis(50)));
+    }
+
+    #[test]
+    fn position_broadcast_epsilon_nudge_is_not_a_move() {
+        let mut e = idle_entity();
+        let t0 = Instant::now();
+        e.mark_position_broadcast(t0);
+        e.pos.x += 0.001;
+        assert!(!e.position_broadcast_due(t0 + Duration::from_millis(50)));
+    }
+
+    #[test]
+    fn position_broadcast_keepalive_fires_after_the_gap() {
+        let mut e = idle_entity();
+        let t0 = Instant::now();
+        e.mark_position_broadcast(t0);
+        assert!(e.position_broadcast_due(t0 + crate::world::ENEMY_POSITION_KEEPALIVE));
+    }
+
+    #[test]
+    fn mark_position_broadcast_advances_the_sequence_and_resets_the_gate() {
+        let mut e = idle_entity();
+        let t0 = Instant::now();
+        e.pos.x += 1.0;
+        let before = e.seq;
+        e.mark_position_broadcast(t0);
+        assert_eq!(e.seq, before + 1);
+        assert!(!e.position_broadcast_due(t0 + Duration::from_millis(10)));
     }
 
     /// A tagged mob is scaled once, at the single spawn choke point, against

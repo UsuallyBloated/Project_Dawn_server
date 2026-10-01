@@ -945,12 +945,7 @@ fn fan_entity_cell_crossing(
             .filter(|cid| connections.get(cid).is_some_and(|c| c.in_world))
             .collect()
     };
-    let newly_visible = in_world_players(gained_cells);
-    if entity.is_pet() {
-        handlers::fan_out_pet_spawn(server, &newly_visible, entity);
-    } else {
-        handlers::fan_out_enemy_spawn(server, &newly_visible, entity);
-    }
+    handlers::fan_out_entity_spawn(server, &in_world_players(gained_cells), entity);
     for cid in in_world_players(lost_cells) {
         handlers::send_entity_despawn(server, cid, entity.id);
     }
@@ -2314,10 +2309,14 @@ pub async fn run(
                     continue;
                 }
                 let Some(owner_id) = entity.owner else { continue };
-                let owner_cid = owner_id as ClientId;
-                // Only seed pets whose owner is a peer the new client
-                // can see — matches the player EntitySpawn gate above.
-                if !peer_ids.contains(&owner_cid) {
+                // Keyed on the PET's own cell (`visible_to_new` is every id
+                // in the joiner's 3x3), the same key step 6b Positions and
+                // the cell-crossing fans use. Keying on the owner's cell
+                // instead left a joiner either holding a ghost pet it never
+                // got Positions for (owner near, pet far) or receiving
+                // Positions for a pet it had no spawn for (owner far, pet
+                // near).
+                if !visible_to_new.contains(entity_id) {
                     continue;
                 }
                 handlers::fan_out_pet_spawn(
@@ -2401,7 +2400,11 @@ pub async fn run(
             // so only nearby enemies are seeded on enter-world.
             let joiner_cell = connections.get(new_id).map(|c| c.aoi_cell).unwrap_or((0, 0));
             for entity in enemies.values() {
-                if !entity.is_alive() {
+                // Pets share this map and were seeded here as EnemySpawn on
+                // top of their PetSpawn above; the client's enemy manager
+                // has no partition guard, so a late joiner got a second,
+                // enemy-flavoured node riding the pet's Positions.
+                if !entity.is_alive() || entity.is_pet() {
                     continue;
                 }
                 let enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
@@ -8957,21 +8960,21 @@ pub async fn run(
                 if peer_entity == mover_entity {
                     continue;
                 }
-                if peer_entity >= protocol::world::PET_ID_BASE {
-                    // Pet. Tested first because the id partitions stack
-                    // (player < ENEMY_ID_BASE < bag/corpse < PET_ID_BASE), so a
-                    // pet also passes the bag test below. It used to fall in
-                    // there, match neither a bag nor a corpse, and be skipped:
-                    // a player walking into view of an existing pet never got
-                    // its PetSpawn.
-                    if let Some(pet) = enemies.get(&peer_entity) {
-                        if pet.is_alive() {
-                            handlers::fan_out_pet_spawn(
-                                &mut server,
-                                std::slice::from_ref(mover_id),
-                                pet,
-                            );
-                        }
+                // Enemies and pets are looked up first and dispatched by
+                // kind rather than by id partition: the partitions stack
+                // (player < ENEMY_ID_BASE < bag/corpse < PET_ID_BASE), and a
+                // partition test in the wrong order once sent pets into the
+                // bag arm, where they matched nothing and were skipped, so a
+                // player walking into view of an existing pet never saw it.
+                // An enemy or pet id with no live entry has already been
+                // cleaned up and matches no arm.
+                if let Some(entity) = enemies.get(&peer_entity) {
+                    if entity.is_alive() {
+                        handlers::fan_out_entity_spawn(
+                            &mut server,
+                            std::slice::from_ref(mover_id),
+                            entity,
+                        );
                     }
                 } else if peer_entity >= protocol::world::LOOT_BAG_ID_BASE {
                     // Loot bag OR corpse — they share the id partition (corpses
@@ -8994,18 +8997,7 @@ pub async fn run(
                             handlers::send_corpse_contents(&mut server, *mover_id, corpse);
                         }
                     }
-                } else if peer_entity >= protocol::world::ENEMY_ID_BASE {
-                    // Enemy — seed the mover with EnemySpawn.
-                    if let Some(entity) = enemies.get(&peer_entity) {
-                        if entity.is_alive() {
-                            handlers::fan_out_enemy_spawn(
-                                &mut server,
-                                std::slice::from_ref(mover_id),
-                                entity,
-                            );
-                        }
-                    }
-                } else {
+                } else if peer_entity < protocol::world::ENEMY_ID_BASE {
                     // Player — mutual EntitySpawn.
                     let peer_id = peer_entity as ClientId;
                     // Mover → peer: peer can now see the mover
@@ -9511,19 +9503,28 @@ pub async fn run(
                 if !entity.is_alive() || !entity.position_broadcast_due(now) {
                     continue;
                 }
+                // Audience first, with the allocation-free cell test (each
+                // connection carries its cell): an entity nobody is near
+                // neither marks nor encodes, so the sequence really does
+                // advance only on a send.
+                let enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
+                let can_see = |cid: &ClientId| {
+                    connections
+                        .get(cid)
+                        .is_some_and(|c| aoi.can_see(c.aoi_cell, enemy_cell))
+                };
+                if !in_world_ids.iter().any(|cid| can_see(cid)) {
+                    continue;
+                }
                 // Mark before building: the message carries the advanced
                 // sequence and the snapshotted pos / yaw.
                 entity.mark_position_broadcast(now);
                 let Some(bytes) = handlers::build_enemy_position_msg(entity) else {
                     continue;
                 };
-                let enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
-                let visible = aoi.entities_visible_from(enemy_cell);
-                for recipient_id in &in_world_ids {
-                    if visible.contains(recipient_id) {
-                        server.send_message(*recipient_id, CHANNEL_POSITION, bytes.clone());
-                        enemy_pos_sent += 1;
-                    }
+                for recipient_id in in_world_ids.iter().filter(|cid| can_see(cid)) {
+                    server.send_message(*recipient_id, CHANNEL_POSITION, bytes.clone());
+                    enemy_pos_sent += 1;
                 }
             }
             if now.duration_since(last_fan_report) >= ENEMY_FAN_REPORT_INTERVAL {

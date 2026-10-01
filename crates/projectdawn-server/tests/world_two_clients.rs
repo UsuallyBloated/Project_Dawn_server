@@ -3808,10 +3808,24 @@ async fn set_char_pos(db_url: &str, char_id: i64, x: f32, z: f32) {
         .expect("seed character position");
 }
 
+/// A transport-level disconnect mid-helper otherwise reads as a silent
+/// timeout on whatever the caller was waiting for (the trap `wait_for`
+/// surfaces for a single client); fail loudly with the reason instead.
+fn assert_both_connected(a: &WorldClient, b: &WorldClient, during: &str) {
+    assert!(
+        !a.client.is_disconnected() && !b.client.is_disconnected(),
+        "a client DISCONNECTED during {during} (a: {:?}, b: {:?})",
+        a.client.disconnect_reason(),
+        b.client.disconnect_reason()
+    );
+}
+
 /// Wait for a CHANNEL_SYSTEM message on `a` that satisfies `pred` while
 /// pumping BOTH transports and heart-beating both clients, so neither socket
 /// starves under the position fan and neither trips the app-layer idle
-/// timeout. `WorldClient::wait_for` only services the client it is called on.
+/// timeout (only app-layer messages touch the connection; netcode traffic
+/// from `tick_one` does not). `WorldClient::wait_for` only services the
+/// client it is called on.
 async fn wait_on_a_pumping_b(
     a: &mut WorldClient,
     b: &mut WorldClient,
@@ -3820,9 +3834,12 @@ async fn wait_on_a_pumping_b(
 ) -> Option<ServerWorldMsg> {
     let deadline = Instant::now() + timeout;
     let mut ticks: u32 = 0;
+    a.send_heartbeat();
+    b.send_heartbeat();
     while Instant::now() < deadline {
         tick_one(&mut a.client, &mut a.transport);
         tick_one(&mut b.client, &mut b.transport);
+        assert_both_connected(a, b, "wait_on_a_pumping_b");
         ticks += 1;
         if ticks % 80 == 0 {
             a.send_heartbeat();
@@ -3843,12 +3860,16 @@ async fn wait_on_a_pumping_b(
     None
 }
 
-/// Service both transports for `d` without sending anything.
+/// Service both transports for `d`, heart-beating both first so a long pump
+/// (a cast bar) cannot run a silent client into the idle timeout.
 async fn pump_both_for(a: &mut WorldClient, b: &mut WorldClient, d: Duration) {
+    a.send_heartbeat();
+    b.send_heartbeat();
     let end = Instant::now() + d;
     while Instant::now() < end {
         tick_one(&mut a.client, &mut a.transport);
         tick_one(&mut b.client, &mut b.transport);
+        assert_both_connected(a, b, "pump_both_for");
         tokio::time::sleep(TICK_DT).await;
     }
 }
@@ -3862,11 +3883,13 @@ async fn walk_pumping(
     dir: Vec3,
     ticks: u32,
 ) {
+    other.send_heartbeat();
     for _ in 0..ticks {
         who.send_move(*seq, dir);
         *seq += 1;
         tick_one(&mut who.client, &mut who.transport);
         tick_one(&mut other.client, &mut other.transport);
+        assert_both_connected(who, other, "walk_pumping");
         tokio::time::sleep(TICK_DT).await;
     }
 }
@@ -3911,11 +3934,12 @@ async fn enemy_crossing_a_cell_boundary_spawns_and_despawns_for_players() {
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
     pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
 
-    // The runner spawns ~3 m from B, inside aggro 12, so it closes on B at
-    // once and follows when B walks; 1 dmg swings are harmless. Chase leashes
-    // on distance to the TARGET (aggro x 2 = 24 m), and B outruns it by only
-    // ~12 m over the walk.
-    b.send_dev_spawn("Border Runner", 1, 10.0, 1, 3.0, 12.0);
+    // The runner spawns ~3 m from B, inside aggro, so it closes on B at once
+    // and follows when B walks; 1 dmg swings are harmless. Chase leashes on
+    // distance to the TARGET (aggro x 2), and B at 7.5 m/s opens the gap by
+    // 4.5 m per wall-clock second of walking, so aggro is set to the 50 cap
+    // (100 m leash) to keep a slow test loop from leashing it home.
+    b.send_dev_spawn("Border Runner", 1, 10.0, 1, 3.0, 50.0);
     let spawn_evt = b
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Border Runner")

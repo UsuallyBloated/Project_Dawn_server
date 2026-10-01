@@ -16,6 +16,24 @@ pub(super) fn dev_cmds_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("PD_DEV_CMDS").as_deref() == Ok("1"))
 }
 
+/// One authorized dev/GM command waiting for the tick's audit flush to write
+/// it to `gm_actions`. Queued by [`PerConnection::audit_gm`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct GmAuditEntry {
+    pub command: &'static str,
+    pub args: String,
+}
+
+/// Most audit rows one connection may queue per tick. An honest GM issues a
+/// command every few seconds; this only bounds what a flood from a GM client
+/// can turn into database writes. The overflow is counted and written as a
+/// single `audit_overflow` row, so a flood is recorded as a flood.
+pub const GM_AUDIT_MAX_PER_TICK: usize = 8;
+
+/// Longest `args` text stored per audit row. Some of it is client-supplied
+/// (an item name, a mob name), so it is cut here rather than trusted.
+pub const GM_AUDIT_ARGS_MAX: usize = 200;
+
 #[derive(Debug, Clone, Copy)]
 pub struct Vec3f {
     pub x: f32,
@@ -284,6 +302,13 @@ pub struct PerConnection {
     /// client can't forge it: `user_data` rides the signed netcode token.
     pub is_gm: bool,
 
+    /// Authorized dev/GM commands issued this tick, waiting for the tick's
+    /// audit flush to write them to `gm_actions`. Filled by `audit_gm`.
+    pub gm_audit: Vec<GmAuditEntry>,
+    /// Entries `audit_gm` turned away past `GM_AUDIT_MAX_PER_TICK`; the flush
+    /// writes one summary row for them and resets this.
+    pub gm_audit_dropped: u32,
+
     /// Track 7 — AOI grid cell the player currently occupies. Derived from
     /// `pos.x` / `pos.z` via `aoi::cell_for`; updated by the tick loop
     /// whenever the player's position crosses a cell boundary. Used to
@@ -523,6 +548,8 @@ impl PerConnection {
             // token's user_data at the connect site in tick.rs (from_spawn
             // only sees the character spawn, not the account's GM flag).
             is_gm: false,
+            gm_audit: Vec::new(),
+            gm_audit_dropped: 0,
             aoi_cell: (0, 0), // tick.rs sets the real cell from aoi::cell_for after construction
             regen_hp_acc: 0.0,
             regen_mp_acc: 0.0,
@@ -568,6 +595,25 @@ impl PerConnection {
     /// a GM account keep its tools.
     pub fn can_use_dev_cmds(&self) -> bool {
         self.is_dev || self.is_gm
+    }
+
+    /// Queue one authorized dev/GM command for the audit log (`gm_actions`).
+    /// Call it right after the `can_use_dev_cmds` gate passes: the log holds
+    /// what an authorized account ISSUED, and the server log holds the
+    /// outcome. `via` records which authority allowed it. On a hosted server
+    /// every row should read `via=gm`; a `via=dev` row there means the
+    /// process ran with `PD_DEV_CMDS` on, which hands these tools to everyone.
+    pub fn audit_gm(&mut self, command: &'static str, args: String) {
+        if self.gm_audit.len() >= GM_AUDIT_MAX_PER_TICK {
+            self.gm_audit_dropped = self.gm_audit_dropped.saturating_add(1);
+            return;
+        }
+        let via = if self.is_gm { "gm" } else { "dev" };
+        let args: String = args.chars().take(GM_AUDIT_ARGS_MAX).collect();
+        self.gm_audit.push(GmAuditEntry {
+            command,
+            args: format!("{args} via={via}"),
+        });
     }
 
     /// True if the connection has gone silent for at least
@@ -764,6 +810,36 @@ mod tests {
         conn.is_gm = false;
         conn.is_dev = true;
         assert!(conn.can_use_dev_cmds(), "a dev server may use dev commands");
+    }
+
+    // The audit queue: tagged with the authority that allowed the command,
+    // capped per tick, with the overflow counted rather than silently lost.
+    #[test]
+    fn audit_gm_tags_the_authority_and_caps_the_queue() {
+        let mut conn = PerConnection::from_spawn(test_spawn(), Instant::now());
+        conn.is_dev = false;
+        conn.is_gm = true;
+        conn.audit_gm("heal_self", "amount=50".to_string());
+        assert_eq!(
+            conn.gm_audit,
+            vec![GmAuditEntry { command: "heal_self", args: "amount=50 via=gm".to_string() }]
+        );
+
+        conn.is_gm = false;
+        conn.is_dev = true;
+        conn.audit_gm("give", "item=\"Bread Loaf\" qty=1".to_string());
+        assert!(conn.gm_audit[1].args.ends_with("via=dev"), "a dev-server command says so");
+
+        // Client-supplied text is cut, not trusted.
+        conn.audit_gm("give", "x".repeat(5_000));
+        assert!(conn.gm_audit[2].args.len() <= GM_AUDIT_ARGS_MAX + " via=dev".len());
+
+        // Past the cap, entries are counted instead of queued.
+        for _ in 0..20 {
+            conn.audit_gm("heal_self", "amount=1".to_string());
+        }
+        assert_eq!(conn.gm_audit.len(), GM_AUDIT_MAX_PER_TICK);
+        assert_eq!(conn.gm_audit_dropped as usize, 20 + 3 - GM_AUDIT_MAX_PER_TICK);
     }
 
     // PD_W0024 — the login-time journal normalization: unknown quest ids

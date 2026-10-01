@@ -442,6 +442,45 @@ pub async fn set_account_gm(
     Ok(Some(before))
 }
 
+/// One row for the `gm_actions` audit table: an authorized dev/GM command as
+/// issued. Every current dev command acts on the issuer's own character, so
+/// the target account is the actor and the target character is theirs.
+#[derive(Debug, Clone)]
+pub struct GmActionRow {
+    pub actor_account: i64,
+    pub target_char: i64,
+    pub command: String,
+    pub args: String,
+}
+
+/// Write a tick's worth of audit rows in ONE transaction (the table has
+/// existed since the auth schema and sat empty until 2026-10-01). Read them
+/// back with the `admin_report` bin.
+///
+/// Note for whoever builds an account-delete tool: `gm_actions` references
+/// accounts and characters WITHOUT `ON DELETE CASCADE`, unlike every other
+/// child table, so a delete has to decide what happens to these rows.
+pub async fn record_gm_actions(pool: &SqlitePool, rows: &[GmActionRow]) -> AuthResult<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    for row in rows {
+        sqlx::query(
+            "INSERT INTO gm_actions (actor_account, target_account, target_char, command, args)
+             VALUES (?1, ?1, ?2, ?3, ?4)",
+        )
+        .bind(row.actor_account)
+        .bind(row.target_char)
+        .bind(&row.command)
+        .bind(&row.args)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 /// A character's bind point: where `Respawn` puts them. Coordinates are
 /// authoritative; the zone is persisted alongside (see `set_bind_point`) so a
 /// future multi-zone world can refuse or route a cross-zone respawn. A character
@@ -1523,6 +1562,94 @@ pub async fn reset_password(
     tx.commit().await?;
 
     Ok((account_id, purged))
+}
+
+#[cfg(test)]
+mod gm_audit_tests {
+    //! The audit writer: rows land with the actor, the character and the
+    //! command as issued; an empty batch writes nothing; and a batch is one
+    //! transaction, so a bad row takes the rest down with it instead of
+    //! leaving a half-written tick.
+    use super::*;
+    use tempfile::TempDir;
+
+    async fn fresh_pool() -> (sqlx::SqlitePool, TempDir) {
+        let tmp = TempDir::new().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("audit_test.db").display());
+        let pool = open(&url).await.expect("open");
+        migrate(&pool).await.expect("migrate");
+        (pool, tmp)
+    }
+
+    fn row(actor_account: i64, target_char: i64, command: &str, args: &str) -> GmActionRow {
+        GmActionRow {
+            actor_account,
+            target_char,
+            command: command.to_string(),
+            args: args.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_rows_land_in_order_with_actor_and_character() {
+        let (pool, _tmp) = fresh_pool().await;
+        create_account(&pool, "auditor", "longpassword", None)
+            .await
+            .expect("create account");
+        let char_id = create_character(&pool, 1, "Auditor", "Human", "Warrior")
+            .await
+            .expect("create character");
+
+        record_gm_actions(&pool, &[]).await.expect("an empty batch is a no-op");
+        record_gm_actions(
+            &pool,
+            &[
+                row(1, char_id, "heal_self", "amount=50 via=gm"),
+                row(1, char_id, "give", "item=\"Bread Loaf\" qty=1 via=gm"),
+            ],
+        )
+        .await
+        .expect("record");
+
+        let rows = sqlx::query(
+            "SELECT actor_account, target_account, target_char, command, args
+             FROM gm_actions ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].get::<i64, _>("actor_account"), 1);
+        assert_eq!(rows[0].get::<i64, _>("target_account"), 1);
+        assert_eq!(rows[0].get::<i64, _>("target_char"), char_id);
+        assert_eq!(rows[0].get::<String, _>("command"), "heal_self");
+        assert_eq!(rows[1].get::<String, _>("command"), "give");
+        assert_eq!(rows[1].get::<String, _>("args"), "item=\"Bread Loaf\" qty=1 via=gm");
+    }
+
+    #[tokio::test]
+    async fn a_bad_row_rolls_the_whole_batch_back() {
+        let (pool, _tmp) = fresh_pool().await;
+        create_account(&pool, "auditor", "longpassword", None)
+            .await
+            .expect("create account");
+        let char_id = create_character(&pool, 1, "Auditor", "Human", "Warrior")
+            .await
+            .expect("create character");
+
+        // Account 999 does not exist: the foreign key refuses it.
+        let result = record_gm_actions(
+            &pool,
+            &[row(1, char_id, "heal_self", "amount=1"), row(999, char_id, "give", "x")],
+        )
+        .await;
+        assert!(result.is_err(), "an unknown actor account must be refused");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM gm_actions")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count, 0, "the good row must not survive the failed batch");
+    }
 }
 
 #[cfg(test)]

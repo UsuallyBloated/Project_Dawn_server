@@ -4119,3 +4119,60 @@ async fn inspect_player_answers_within_range() {
         assert_eq!(target_name, "Inspbud");
     }
 }
+
+// ── GM action audit log ───────────────────────────────────────────────────
+
+/// Every AUTHORIZED dev/GM command lands in `gm_actions`, tagged with the
+/// authority that allowed it; the same commands from a plain account are
+/// ignored by the gate and leave no row (a refused attempt must not be a way
+/// for any client to make the server write).
+#[tokio::test]
+async fn gm_commands_are_audited_only_when_authorized() {
+    use sqlx::Row;
+    // Same guard as is_gm_gates_dev_commands: with PD_DEV_CMDS=1 every
+    // connection is dev, so the plain account would be authorized too.
+    if std::env::var("PD_DEV_CMDS").as_deref() == Ok("1") {
+        eprintln!("skipping gm_commands_are_audited_only_when_authorized: PD_DEV_CMDS=1");
+        return;
+    }
+    let h = start_both().await;
+    let (gm_session, gm_char, _stale_token) =
+        provision_client(&h.auth_url, "auditgm", "Auditgm", "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "auditgm", true).await.expect("set is_gm");
+    let gm_token = request_world_token(&h.auth_url, &gm_session, gm_char).await;
+    let (pl_session, pl_char, pl_token) =
+        provision_client(&h.auth_url, "auditpl", "Auditpl", "Human", "Warrior").await;
+
+    let mut gm = WorldClient::start(gm_token, &gm_session, gm_char).await;
+    let mut plain = WorldClient::start(pl_token, &pl_session, pl_char).await;
+
+    gm.send_grant_quest_xp(250);
+    gm.send_dev_spawn("Audit Dummy", 1, 10.0, 0, 0.0, 0.0);
+    plain.send_grant_quest_xp(250);
+    plain.send_dev_spawn("Forged Dummy", 1, 10.0, 0, 0.0, 0.0);
+    pump_both_for(&mut gm, &mut plain, Duration::from_millis(500)).await;
+
+    let rows = sqlx::query(
+        "SELECT a.username AS actor, g.target_char, g.command, g.args
+         FROM gm_actions g JOIN accounts a ON a.id = g.actor_account
+         ORDER BY g.id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read gm_actions");
+    let seen: Vec<(String, i64, String, String)> = rows
+        .iter()
+        .map(|r| (r.get("actor"), r.get("target_char"), r.get("command"), r.get("args")))
+        .collect();
+    assert_eq!(seen.len(), 2, "exactly the GM's two commands are recorded, got {seen:?}");
+    for (actor, target_char, _, args) in &seen {
+        assert_eq!(actor, "auditgm", "only the authorized account appears");
+        assert_eq!(*target_char, gm_char);
+        assert!(args.ends_with("via=gm"), "the row names the authority: {args}");
+    }
+    assert_eq!(seen[0].2, "grant_xp");
+    assert!(seen[0].3.starts_with("amount=250"));
+    assert_eq!(seen[1].2, "dev_spawn_mob");
+    assert!(seen[1].3.contains("Audit Dummy"));
+}

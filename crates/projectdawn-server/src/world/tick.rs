@@ -2139,6 +2139,42 @@ pub async fn run(
             }
         }
 
+        // 3-bis. GM action audit flush. Handlers queue one entry per AUTHORIZED
+        //    dev/GM command (`PerConnection::audit_gm`); they are written
+        //    here, straight after the message drain and BEFORE anything can
+        //    reap a connection this tick, so a command issued in the same
+        //    tick as a disconnect is still recorded. One transaction per
+        //    tick, and at most GM_AUDIT_MAX_PER_TICK rows plus one overflow
+        //    row per connection, so a flood from a GM client cannot amplify
+        //    into unbounded writes. A failed write is logged with its rows and
+        //    dropped; the per-command info lines in the server log remain.
+        let mut audit_rows: Vec<db::GmActionRow> = Vec::new();
+        for conn in connections.values_mut() {
+            let (actor_account, target_char) = (conn.account_id, conn.char_id);
+            for entry in conn.gm_audit.drain(..) {
+                audit_rows.push(db::GmActionRow {
+                    actor_account,
+                    target_char,
+                    command: entry.command.to_string(),
+                    args: entry.args,
+                });
+            }
+            if conn.gm_audit_dropped > 0 {
+                audit_rows.push(db::GmActionRow {
+                    actor_account,
+                    target_char,
+                    command: "audit_overflow".to_string(),
+                    args: format!("dropped={}", conn.gm_audit_dropped),
+                });
+                conn.gm_audit_dropped = 0;
+            }
+        }
+        if !audit_rows.is_empty() {
+            if let Err(e) = db::record_gm_actions(&pool, &audit_rows).await {
+                tracing::error!(error = %e, rows = ?audit_rows, "gm audit write failed — rows dropped");
+            }
+        }
+
         // 4. App-layer heartbeat timeout — catches frozen game windows that
         //    transport-level keepalive doesn't notice. Skip connections that
         //    are already lingering linkdead: their transport is gone, so

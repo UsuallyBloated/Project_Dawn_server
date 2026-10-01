@@ -687,6 +687,7 @@ pub fn handle_message(
                 return Outcome::Continue;
             }
             tracing::info!(char_id = conn.char_id, amount, "dev quest xp grant");
+            conn.audit_gm("grant_xp", format!("amount={amount}"));
             super::progression::award_xp(server, conn, amount);
             Outcome::Continue
         }
@@ -859,6 +860,13 @@ pub fn handle_message(
                 level = mob.level,
                 "dev spawn mob"
             );
+            conn.audit_gm(
+                "dev_spawn_mob",
+                format!(
+                    "name={:?} level={} hp={} dmg={} speed={} aggro={} pos={:.1},{:.1}",
+                    mob.name, mob.level, mob.hp, mob.dmg, mob.speed, mob.aggro, pos.x, pos.z
+                ),
+            );
             Outcome::DevSpawnMobIntent { pos, mob }
         }
 
@@ -875,6 +883,7 @@ pub fn handle_message(
                 new_hp = conn.hp,
                 "dev damage self"
             );
+            conn.audit_gm("damage_self", format!("amount={delta}"));
             Outcome::Continue
         }
 
@@ -898,6 +907,7 @@ pub fn handle_message(
                 new_hp = conn.hp,
                 "dev full restore (hp/mp/stamina)"
             );
+            conn.audit_gm("heal_self", format!("amount={delta}"));
             Outcome::Continue
         }
 
@@ -919,6 +929,10 @@ pub fn handle_message(
                 platinum, gold, silver, copper,
                 total_copper = conn.coins.total_copper(),
                 "dev coin grant"
+            );
+            conn.audit_gm(
+                "give_coins",
+                format!("p={platinum} g={gold} s={silver} c={copper}"),
             );
             Outcome::Continue
         }
@@ -1503,6 +1517,7 @@ pub fn handle_message(
                 if item_name.is_empty() {
                     return Outcome::Continue;
                 }
+                conn.audit_gm("give", format!("item={item_name:?} qty={qty}"));
                 return Outcome::GmGiveIntent {
                     owner: conn.char_id as u64,
                     item_name,

@@ -90,6 +90,20 @@ and vary run to run, all of which pass in isolation:
 the property the suite lost for three weeks and has now got back. Re-run, or run
 the named test in isolation, before blaming a change.
 
+> **SUPERSEDED — do not use the rule in the paragraph above.** It was already
+> corrected on 2026-08-23, when FIVE distinct tests were seen failing under load
+> in one sitting (the three named here plus `charm_converts_enemy_to_pet` and
+> `player_attack_kills_enemy_and_corpse_despawns`), each passing alone; an A/B
+> proved it was not a regression because the clean tree failed too, with a
+> different subset each run. Naming a fixed list cuts both ways: it sends you
+> chasing a phantom when an unlisted test fails, and it invites waving away a
+> genuine regression as "probably flake". **The live rule is: a failure that
+> reproduces IN ISOLATION is real; a failure that passes alone is
+> load-sensitivity, whichever test it is.** After the 2026-09-16 fix the suite
+> runs green and the only test still observed varying under load is
+> `charm_converts_enemy_to_pet` (2026-09-29, 2026-09-30 — passes alone both
+> times).
+
 The original 2026-06-15 analysis below still describes that residue accurately.
 
 ---

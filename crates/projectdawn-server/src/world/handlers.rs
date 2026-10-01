@@ -2230,6 +2230,23 @@ pub fn fan_out_pet_spawn(
     }
 }
 
+/// The spawn message for anything in the `enemies` map: `PetSpawn` for a
+/// pet, `EnemySpawn` otherwise. Dispatching on the entity rather than on its
+/// id partition is the point: the partitions stack (player < enemy < bag <
+/// pet) and a partition test in the wrong order once swallowed pets into a
+/// bag arm, so a player walking into view of an existing pet never saw it.
+pub fn fan_out_entity_spawn(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    entity: &Entity,
+) {
+    if entity.is_pet() {
+        fan_out_pet_spawn(server, recipients, entity);
+    } else {
+        fan_out_enemy_spawn(server, recipients, entity);
+    }
+}
+
 /// Fan out `conn`'s cached resources to every recipient as three separate
 /// ServerWorldMsg variants (HealthUpdate / ManaUpdate / StaminaUpdate).
 /// Each variant is encoded once and the bytes cloned per recipient —

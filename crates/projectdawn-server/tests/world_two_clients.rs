@@ -309,6 +309,11 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Heartbeat);
     }
 
+    /// Dev/GM command: take `amount` damage. Gated like the other dev tools.
+    fn send_damage_self(&mut self, amount: i32) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::DamageSelf { amount });
+    }
+
     fn send_inspect_player(&mut self, target_char_id: i64) {
         send_msg(
             &mut self.client,
@@ -4306,14 +4311,17 @@ async fn banned_account_is_refused_at_world_connect() {
 #[tokio::test]
 async fn charm_refuses_a_target_out_of_range() {
     let h = start_both().await;
-    let (a_session, a_char_id, a_token) =
+    let (a_session, a_char_id, _stale_a) =
         provision_client(&h.auth_url, "farench", "Farench", "Human", "Enchanter").await;
     set_char_level(&h.db_url, a_char_id, 20).await;
-    let (b_session, b_char_id, _stale_token) =
+    let (b_session, b_char_id, _stale_b) =
         provision_client(&h.auth_url, "farspawn", "Farspawn", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
+    // Both are GMs: B conjures the far dummy, A conjures a near one at the end.
+    db::set_account_gm(&pool, "farench", true).await.expect("set is_gm");
     db::set_account_gm(&pool, "farspawn", true).await.expect("set is_gm");
     set_char_pos(&h.db_url, b_char_id, 248.0, 60.0).await;
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
@@ -4351,6 +4359,28 @@ async fn charm_refuses_a_target_out_of_range() {
     })
     .await;
     assert!(gone.is_none(), "the dummy is still standing where B conjured it");
+
+    // A refused cast costs NOTHING, cooldown included. Charm's cooldown is
+    // 60 s; when refusals were handled after the stamp, the cast above would
+    // have locked Charm out for a minute. A charms a dummy at its feet at once.
+    a.send_dev_spawn("Near Dummy", 1, 30.0, 0, 0.0, 0.0);
+    let near_evt = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Near Dummy")
+    })
+    .await
+    .expect("the near dummy spawns beside A");
+    let near_id: u64 = match near_evt {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    a.send_cast_start("Charm", 2.0);
+    pump_both_for(&mut a, &mut b, Duration::from_millis(2150)).await;
+    a.send_cast_spell("Charm", Some(near_id));
+    wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+    })
+    .await
+    .expect("the refused cast burned no cooldown: the next Charm lands");
 }
 
 /// The case that matters in play: charming a spawner-owned camp mob that is
@@ -4410,4 +4440,118 @@ async fn charm_converts_a_camp_mob_that_is_fighting_someone_else() {
         assert!(id >= PET_ID_BASE, "charmed pet id must be in the pet partition");
         assert_eq!(pet_name, "Decrepit Skeleton");
     }
+}
+
+
+// ── Cast target pre-flight: reach, and refusals that cost nothing ─────────
+
+/// A heal had no range check at all: a healer could keep a friend alive in a
+/// dungeon from the safety of town by naming their char id. B is hurt and
+/// 200 m away; A's heal must be refused, B must not be healed, and A must not
+/// pay for it in mana or in cooldown.
+#[tokio::test]
+async fn ally_heal_refuses_out_of_range_and_costs_nothing() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "farheal", "Farheal", "Human", "Shaman").await;
+    // Healing Wave is a level 4 Shaman spell: 1.0 s cast, 30 mana, 6 s cooldown.
+    set_char_level(&h.db_url, a_char_id, 4).await;
+    let (b_session, b_char_id, _stale_token) =
+        provision_client(&h.auth_url, "farhurt", "Farhurt", "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "farhurt", true).await.expect("set is_gm");
+    set_char_pos(&h.db_url, b_char_id, 200.0, 0.0).await;
+    let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    // Hurt B (a dev command, so B is a GM) and latch the damaged value.
+    b.send_damage_self(40);
+    let hurt_evt = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::HealthUpdate { id, hp, max_hp }
+            if *id == b_char_id as u64 && *hp < *max_hp)
+    })
+    .await
+    .expect("B takes the dev damage");
+    let hurt_hp = match hurt_evt {
+        ServerWorldMsg::HealthUpdate { hp, .. } => hp,
+        _ => unreachable!(),
+    };
+
+    a.send_cast_start("Healing Wave", 1.0);
+    pump_both_for(&mut a, &mut b, Duration::from_millis(1150)).await;
+    a.send_cast_spell("Healing Wave", Some(b_char_id as u64));
+
+    wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("too far away"))
+    })
+    .await
+    .expect("an out-of-range heal is refused with the line");
+    // The correction that follows the line reports untouched mana: the server
+    // never took it.
+    let mana_evt = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == a_char_id as u64)
+    })
+    .await
+    .expect("the caster is told its true mana");
+    if let ServerWorldMsg::ManaUpdate { mp, max_mp, .. } = mana_evt {
+        assert!((mp - max_mp).abs() < 0.01, "a refused heal costs no mana (got {mp} of {max_mp})");
+    }
+    // B was not healed (Healing Wave lands 15 at once; regen is 1 or 2 a tick).
+    let healed = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_millis(700), |m| {
+        matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. }
+            if *id == b_char_id as u64 && *hp >= hurt_hp + 10.0)
+    })
+    .await;
+    assert!(healed.is_none(), "a target 200 m away must not be healed");
+
+    // And no cooldown was burned: A heals ITSELF straight away, inside what
+    // would have been Healing Wave's 6 s cooldown.
+    a.send_cast_start("Healing Wave", 1.0);
+    pump_both_for(&mut a, &mut b, Duration::from_millis(1150)).await;
+    a.send_cast_spell("Healing Wave", None);
+    wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ManaUpdate { id, mp, max_mp }
+            if *id == a_char_id as u64 && *mp < *max_mp - 1.0)
+    })
+    .await
+    .expect("the next cast goes through: the refused one stamped no cooldown");
+}
+
+/// An ENEMY spell on a PLAYER had no range check either: with both sides
+/// flagged for PvP, one could nuke the other from across the world. Both are
+/// flagged here and 200 m apart; the nuke must be refused and must not land.
+#[tokio::test]
+async fn pvp_nuke_refuses_out_of_range() {
+    let h = start_both().await;
+    // Smite: level 1 Cleric, instant, 35 damage.
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "farnuke", "Farnuke", "Human", "Cleric").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "farmark", "Farmark", "Human", "Warrior").await;
+    set_char_pos(&h.db_url, b_char_id, 200.0, 0.0).await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+    a.send_pvp_toggle(true);
+    b.send_pvp_toggle(true);
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    a.send_cast_spell("Smite", Some(b_char_id as u64));
+    let line = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("too far away"))
+    })
+    .await
+    .expect("an out-of-range PvP nuke is refused with the line");
+    if let ServerWorldMsg::ChatMessage { text, .. } = line {
+        assert!(!text.contains("Farmark"), "a target out of reach is not named (got {text:?})");
+    }
+    let hit = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_millis(700), |m| {
+        matches!(m, ServerWorldMsg::Hit { target, .. } if *target == b_char_id as u64)
+    })
+    .await;
+    assert!(hit.is_none(), "a player 200 m away must not be hit");
 }

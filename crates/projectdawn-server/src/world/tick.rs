@@ -3974,9 +3974,61 @@ pub async fn run(
                 }
                 let caster_pos = caster_conn.pos;
                 let caster_max_mp = caster_conn.max_mp;
+                let (caster_mp_now, caster_hp_now, caster_max_hp_now) =
+                    (caster_conn.mp, caster_conn.hp, caster_conn.max_hp);
                 let mana_cost = spell.mana_cost;
                 let hp_cost = spell.hp_cost;
                 let dmg_type = spells::parse_damage_type(&spell.damage_type);
+
+                // Target pre-flight: presence, reach and the PvP gates, decided
+                // before the mana comes off, the cooldown is stamped or the
+                // casting skill rolls (see `cast_target_refusal`). A refused
+                // cast costs nothing, so nothing has to be handed back; but the
+                // CLIENT spent the mana optimistically at cast start, so it is
+                // told the server's untouched values to correct itself.
+                if let Some(line) = cast_target_refusal(
+                    spell,
+                    intent.target_id,
+                    intent.caster,
+                    caster_cid,
+                    caster_pos,
+                    &connections,
+                    &enemies,
+                    &group_manager,
+                ) {
+                    tracing::info!(
+                        caster = intent.caster,
+                        spell = %spell.name,
+                        target = ?intent.target_id,
+                        reason = %line,
+                        "CastSpell refused — target pre-flight"
+                    );
+                    // Clear the cast cache so this refused cast's in-flight
+                    // state cannot gate the next one.
+                    if let Some(cc) = connections.get_mut(&caster_cid) {
+                        cc.cast_spell_name.clear();
+                        cc.cast_total_duration = 0.0;
+                        cc.cast_set_at = None;
+                    }
+                    handlers::send_refusal(&mut server, caster_cid, &line);
+                    handlers::fan_out_mana_update(
+                        &mut server,
+                        &[caster_cid],
+                        intent.caster,
+                        caster_mp_now,
+                        caster_max_mp,
+                    );
+                    if hp_cost > 0.0 {
+                        handlers::fan_out_health_update(
+                            &mut server,
+                            &[caster_cid],
+                            intent.caster,
+                            caster_hp_now,
+                            caster_max_hp_now,
+                        );
+                    }
+                    continue;
+                }
 
                 // Deduct mana (+ optional hp_cost for blood / fallen
                 // spells). Both are caster-side; target-side effects
@@ -9740,6 +9792,158 @@ pub async fn run(
 /// proportional: at most two small messages per bad request the client made, so
 /// it cannot be used to amplify traffic, and it converges because every wrong
 /// belief is corrected the moment the client acts on it.
+/// The one line for a spell target that is out of reach, offline, or an id
+/// that never existed. Deliberately the SAME line for all three: telling
+/// "far" from "absent" would make a cast an is-online oracle for anyone
+/// enumerating ids. Lines that NAME a target are only ever said about one
+/// within reach, where the caster can see it anyway.
+const TARGET_UNREACHABLE: &str = "That target is too far away or no longer here.";
+
+/// Target eligibility for a cast, decided BEFORE any side effect. Returns the
+/// refusal line, or `None` when the cast may proceed.
+///
+/// Two reasons this exists as a pre-flight rather than as checks inside the
+/// per-target-type arms:
+///
+/// 1. **Reach.** ALLY spells (heals and buffs, on a player or a pet) and ENEMY
+///    spells against a player had no range check at all, so a modified client
+///    could heal a friend in a dungeon from town, or nuke a PvP-flagged player
+///    from across the world, by naming an id. Every targeted cast now needs
+///    its target within `RANGED_ATTACK_RANGE`, the one spell reach until
+///    spells carry their own. Written keep-only-when-in-reach, so a
+///    non-finite distance refuses.
+/// 2. **Order.** The handler takes the mana, stamps the cooldown and rolls the
+///    casting skill before its arms run. A refusal inside an arm could hand
+///    the mana back but could not un-stamp the cooldown or un-roll the skill:
+///    a cast at nothing was a free skill-up attempt, and a refused Charm
+///    still burned its 60 s cooldown. Everything decidable from immutable
+///    state is decided here, so a refused cast costs nothing at all.
+///
+/// The arms keep their own checks as a second line; after this they should
+/// not fire. CORPSE is left to its arm (it has its own reasons and range).
+#[allow(clippy::too_many_arguments)]
+fn cast_target_refusal(
+    spell: &spells::Spell,
+    target_id: Option<EntityId>,
+    caster_id: EntityId,
+    caster_cid: ClientId,
+    caster_pos: Vec3f,
+    connections: &HashMap<ClientId, PerConnection>,
+    enemies: &HashMap<EntityId, Entity>,
+    group_manager: &GroupManager,
+) -> Option<String> {
+    use protocol::world::{ENEMY_ID_BASE, LOOT_BAG_ID_BASE, PET_ID_BASE};
+    let caster = connections.get(&caster_cid)?;
+    let in_reach = |pos: Vec3f| pos.distance_to(caster_pos) <= RANGED_ATTACK_RANGE;
+    let unreachable = || Some(TARGET_UNREACHABLE.to_string());
+    let player_in_reach =
+        |cid: ClientId| connections.get(&cid).filter(|c| c.in_world && in_reach(c.pos));
+    let entity_in_reach =
+        |id: EntityId| enemies.get(&id).filter(|e| e.is_alive() && in_reach(e.pos));
+    let attackable = |other: &PerConnection| {
+        combat::can_attack(caster, other, caster.zone.as_deref(), other.zone.as_deref())
+    };
+
+    match spell.target_type.as_str() {
+        "ENEMY" => {
+            let Some(target) = target_id else {
+                return Some("You need a target for that spell.".to_string());
+            };
+            if target < ENEMY_ID_BASE {
+                // A player: the PvP path.
+                let target_cid = target as ClientId;
+                if target_cid == caster_cid {
+                    return Some("You cannot cast that on yourself.".to_string());
+                }
+                let Some(t) = player_in_reach(target_cid) else {
+                    return unreachable();
+                };
+                if !attackable(t) {
+                    return Some(format!("Unable to attack {}.", t.name));
+                }
+                if t.hp <= 0.0 {
+                    return Some("That target is no longer here.".to_string());
+                }
+                return None;
+            }
+            let Some(e) = entity_in_reach(target) else {
+                return unreachable();
+            };
+            // Another player's pet: allowed only if its owner is attackable,
+            // and never the caster's own.
+            if let Some(owner_id) = e.owner {
+                let owner_cid = owner_id as ClientId;
+                let owner = connections.get(&owner_cid);
+                let allowed = owner_cid != caster_cid && owner.is_some_and(attackable);
+                if !allowed {
+                    return Some(match owner {
+                        Some(o) => format!("Unable to attack {}'s {}.", o.name, e.mob.name),
+                        None => format!("Unable to attack the {}.", e.mob.name),
+                    });
+                }
+            }
+            None
+        }
+        "ALLY" => {
+            let raw = target_id.unwrap_or(0);
+            if raw == 0 || raw == caster_id {
+                return None; // self
+            }
+            if raw >= PET_ID_BASE {
+                let Some((pet, owner_id)) =
+                    entity_in_reach(raw).and_then(|p| p.owner.map(|o| (p, o)))
+                else {
+                    return unreachable();
+                };
+                // The PvP heal gate: no topping up a duel partner's pet,
+                // unless they are a group-mate.
+                let owner_cid = owner_id as ClientId;
+                if owner_cid != caster_cid {
+                    let owner = connections.get(&owner_cid);
+                    let hostile = owner.is_some_and(attackable);
+                    if hostile && !group_manager.same_group(caster_cid, owner_cid) {
+                        return Some(match owner {
+                            Some(o) => format!("You cannot heal {}'s {}.", o.name, pet.mob.name),
+                            None => "You cannot heal an enemy's pet.".to_string(),
+                        });
+                    }
+                }
+                return None;
+            }
+            if raw >= LOOT_BAG_ID_BASE {
+                return Some("Cannot heal that target.".to_string());
+            }
+            if raw >= ENEMY_ID_BASE {
+                return Some("Cannot heal enemies.".to_string());
+            }
+            let target_cid = raw as ClientId;
+            let Some(t) = player_in_reach(target_cid) else {
+                return unreachable();
+            };
+            if t.hp <= 0.0 {
+                return Some("That target is no longer here.".to_string());
+            }
+            if attackable(t) && !group_manager.same_group(caster_cid, target_cid) {
+                return Some(format!("You cannot heal {}.", t.name));
+            }
+            None
+        }
+        "PET_CHARM" => {
+            let Some(target) = target_id else {
+                return Some("You need a target for that spell.".to_string());
+            };
+            if !(ENEMY_ID_BASE..LOOT_BAG_ID_BASE).contains(&target) {
+                return Some("You cannot charm that.".to_string());
+            }
+            match entity_in_reach(target) {
+                Some(e) if !e.is_pet() => None,
+                _ => unreachable(),
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Give back a spell's cost after a cast is rejected downstream of the
 /// deduction.
 ///

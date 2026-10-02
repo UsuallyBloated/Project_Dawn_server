@@ -19,8 +19,10 @@ use super::{
     skills,
     spawn_points::Spawner,
     spells,
-    ATTACK_RANGE_TOLERANCE, CAMP_SECS, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL, ENEMY_FAN_REPORT_INTERVAL,
-    ENEMY_DESPAWN_LINGER_SECS, GROUP_COIN_SHARE_RANGE, INSPECT_RANGE, LINKDEAD_SECS,
+    ATTACK_RANGE_TOLERANCE, BAN_SWEEP_INTERVAL, CAMP_SECS, CHANNEL_POSITION, CHANNEL_SYSTEM,
+    CHECKPOINT_INTERVAL, ENEMY_FAN_REPORT_INTERVAL,
+    ENEMY_DESPAWN_LINGER_SECS, GROUP_COIN_SHARE_RANGE, INSPECT_RANGE, KICK_FLUSH_GRACE,
+    LINKDEAD_SECS,
     LOOT_BAG_LINGER_SECS,
     LOOT_PICKUP_RANGE, MAX_MOVE_SPEED,
     RANGED_ATTACK_RANGE, STALE_MOVE_THRESHOLD, TICK_DT,
@@ -1310,6 +1312,7 @@ pub async fn run(
     // current report window, logged every ENEMY_FAN_REPORT_INTERVAL.
     let mut enemy_pos_sent: u64 = 0;
     let mut last_fan_report = Instant::now();
+    let mut last_ban_sweep = Instant::now();
 
     // Track 5 sub-task 1B — server-authoritative enemies. The spawner owns
     // respawn timers per authored spawn point; `enemies` holds the live
@@ -2245,11 +2248,25 @@ pub async fn run(
         //    re-flagging them would just spam disconnect every tick while the
         //    reaper below counts down their window.
         for (client_id, conn) in connections.iter() {
-            if conn.linkdead_since.is_none() && conn.is_app_idle(now) {
+            if conn.linkdead_since.is_some() {
+                continue;
+            }
+            if conn.is_app_idle(now) {
                 tracing::info!(
                     char_id = conn.char_id,
                     "app-layer heartbeat timeout — disconnecting"
                 );
+                to_disconnect.push(*client_id);
+            } else if conn
+                .kicked_at
+                .is_some_and(|t| now.duration_since(t) >= KICK_FLUSH_GRACE)
+            {
+                // The ban sweep sent this connection its Kick a moment ago;
+                // the message has had time to arrive, so drop the transport
+                // whether or not the client left by itself. The next tick's
+                // disconnect event takes the character out by the ordinary
+                // unclean-exit path (linger, final save, reap).
+                tracing::info!(char_id = conn.char_id, "kicked connection dropped");
                 to_disconnect.push(*client_id);
             }
         }
@@ -9771,6 +9788,47 @@ pub async fn run(
             let mut dirty: Vec<&mut PerConnection> = connections.values_mut().collect();
             persistence::checkpoint_dirty(&pool, &mut dirty).await;
             last_checkpoint = now;
+        }
+
+        // 7-bis. Ban sweep. Login, session redemption and world connect all
+        //    refuse a banned account, but none of them touches a character
+        //    that is already in the world, so a ban used to need a server
+        //    restart (and its 60 s of lost progress for everyone) to remove
+        //    a player who was online. Every BAN_SWEEP_INTERVAL, ask which
+        //    accounts are banned and kick any connection that belongs to one.
+        //    The Kick goes out now and the transport is dropped
+        //    KICK_FLUSH_GRACE later (step 4), so the client hears why. A
+        //    failed query is logged and skipped: the other three gates still
+        //    hold, and the next sweep retries.
+        if now.duration_since(last_ban_sweep) >= BAN_SWEEP_INTERVAL {
+            last_ban_sweep = now;
+            if !connections.is_empty() {
+                match db::banned_account_ids(&pool).await {
+                    Ok(banned) if !banned.is_empty() => {
+                        for (client_id, conn) in connections.iter_mut() {
+                            if conn.kicked_at.is_none()
+                                && conn.linkdead_since.is_none()
+                                && banned.contains(&conn.account_id)
+                            {
+                                tracing::info!(
+                                    account_id = conn.account_id,
+                                    char_id = conn.char_id,
+                                    "banned account kicked from the world"
+                                );
+                                handlers::send_kick(
+                                    &mut server,
+                                    *client_id,
+                                    KickCode::BannedNow,
+                                    "This account is banned.",
+                                );
+                                conn.kicked_at = Some(now);
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "ban sweep query failed — will retry"),
+                }
+            }
         }
 
         // 8. Push outbound packets to the network.

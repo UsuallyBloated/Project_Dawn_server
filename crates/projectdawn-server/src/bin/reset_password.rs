@@ -104,8 +104,9 @@ async fn main() -> Result<()> {
         println!("flow yet, so this stays their password until the next reset.");
     }
     if purged > 0 {
-        println!("A live world session keeps playing until it drops (there is no kick-by-account");
-        println!("tool yet); the old password cannot start a new one.");
+        println!("A live world session keeps playing until it drops; the old password cannot start");
+        println!("a new one. A reset does not kick. If that session must end now (a stolen");
+        println!("account), ban the account with admin_account, then unban it.");
     }
     Ok(())
 }

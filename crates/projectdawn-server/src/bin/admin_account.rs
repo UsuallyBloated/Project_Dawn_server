@@ -21,9 +21,9 @@
 //! - It bites at login (no new session), at every session redemption (so a
 //!   login that was in flight when the ban landed gets nothing usable), and
 //!   at world connect (a connect token minted just before the ban).
-//! - A character ALREADY IN THE WORLD keeps playing until it drops: there is
-//!   no kick-by-account tool yet. Restart the server to force a banned
-//!   player out right away.
+//! - A character already in the world is kicked by the RUNNING server within
+//!   about ten seconds (its ban sweep reads the flag this tool writes), is
+//!   told why, and leaves by the ordinary unclean-exit path. No restart.
 //! - Re-running `ban` with no reason purges sessions again and keeps the
 //!   reason already on file.
 //!
@@ -136,8 +136,7 @@ async fn set_banned(
         }
         println!("Sessions invalidated: {}.", outcome.sessions_purged);
         println!("Logins, session use and world connects are refused from now on. A character");
-        println!("already in the world keeps playing until it drops (there is no kick-by-account");
-        println!("tool yet); restart the server to force it out.");
+        println!("already in the world is kicked by the running server within about ten seconds.");
     } else if outcome.was_banned {
         println!("Unbanned {username} (account id {id}). They can log in again.");
     } else {

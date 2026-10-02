@@ -4555,3 +4555,58 @@ async fn pvp_nuke_refuses_out_of_range() {
     .await;
     assert!(hit.is_none(), "a player 200 m away must not be hit");
 }
+
+/// A ban reaches a character that is ALREADY in the world. Login, session use
+/// and world connect all refuse a banned account, but none of them touched a
+/// live connection, so removing an online griefer used to take a server
+/// restart. The world loop's ban sweep kicks it within BAN_SWEEP_INTERVAL,
+/// says why, and then drops the transport itself.
+#[tokio::test]
+async fn banned_account_is_kicked_out_of_the_world() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "onlineban", "Onlineban", "Human", "Warrior").await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_banned(&pool, "onlineban", true, Some("test ban"))
+        .await
+        .expect("ban")
+        .expect("account exists");
+
+    // Up to one sweep interval (10 s) plus slack. Heartbeat while waiting:
+    // only app-layer messages keep a connection from the idle timeout.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut kick: Option<protocol::world::KickCode> = None;
+    let mut ticks: u32 = 0;
+    'wait: while Instant::now() < deadline {
+        tick_one(&mut a.client, &mut a.transport);
+        ticks += 1;
+        if ticks % 80 == 0 {
+            a.send_heartbeat();
+        }
+        while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
+            if let Ok((ServerWorldMsg::Kick { code, .. }, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
+                kick = Some(code);
+                break 'wait;
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    assert!(
+        matches!(kick, Some(protocol::world::KickCode::BannedNow)),
+        "a banned account's live session is kicked, and told why (got {kick:?})"
+    );
+
+    // The server drops the transport itself a moment later; it does not rely
+    // on the client leaving.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !a.client.is_disconnected() {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    assert!(a.client.is_disconnected(), "the kicked connection is dropped by the server");
+}

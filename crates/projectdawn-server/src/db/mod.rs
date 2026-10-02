@@ -466,6 +466,16 @@ pub async fn account_is_banned(pool: &SqlitePool, account_id: i64) -> AuthResult
     Ok(row.map(|r| r.get::<bool, _>("is_banned")).unwrap_or(true))
 }
 
+/// Every banned account id, for the world loop's ban sweep (which removes a
+/// banned account's character that is already in the world). A handful of
+/// rows at most; the sweep runs it every `BAN_SWEEP_INTERVAL`.
+pub async fn banned_account_ids(pool: &SqlitePool) -> AuthResult<Vec<i64>> {
+    let rows = sqlx::query("SELECT id FROM accounts WHERE is_banned = 1")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.iter().map(|r| r.get::<i64, _>("id")).collect())
+}
+
 /// What `set_account_banned` did. `reason` is what is now STORED (trimmed,
 /// bounded, or carried over from an earlier ban), which is what the player
 /// will be shown.
@@ -491,11 +501,11 @@ pub const BAN_REASON_MAX: usize = 200;
 ///
 /// Where the ban bites: `verify_login` (no new session), `touch_session`
 /// (no existing session can be redeemed, which also covers a login that was
-/// in flight when the ban landed), and the world server's connect check (a
-/// connect token minted just before the ban). What it does NOT touch is a
-/// character ALREADY in the world: that connection keeps playing until it
-/// drops. Kicking by account is its own To-Do; until then a server restart
-/// is what forces a banned player out.
+/// in flight when the ban landed), the world server's connect check (a
+/// connect token minted just before the ban), and the world loop's ban sweep
+/// (`banned_account_ids`, every `BAN_SWEEP_INTERVAL`), which kicks a
+/// character that is ALREADY in the world. So a ban reaches a live session
+/// within about ten seconds, with no restart.
 pub async fn set_account_banned(
     pool: &SqlitePool,
     username: &str,
@@ -1780,6 +1790,11 @@ mod ban_tests {
         );
         assert_eq!(out.reason.as_deref(), Some("corpse camping"), "the outcome reports what is stored");
         assert!(account_is_banned(&pool, 1).await.expect("read flag"));
+        assert_eq!(
+            banned_account_ids(&pool).await.expect("sweep query"),
+            vec![1],
+            "the world loop's sweep sees the ban"
+        );
 
         // The in-flight login: its `is_banned` read happened before the ban,
         // its Argon2 verify ran across it, and its session row lands AFTER
@@ -1816,6 +1831,10 @@ mod ban_tests {
                 .expect("read reason");
         assert_eq!(reason, None, "an unban clears the reason");
         assert!(!account_is_banned(&pool, 1).await.expect("read flag"));
+        assert!(
+            banned_account_ids(&pool).await.expect("sweep query").is_empty(),
+            "an unban takes the account out of the sweep"
+        );
         assert!(
             account_is_banned(&pool, 999).await.expect("read flag"),
             "an unknown account fails closed"

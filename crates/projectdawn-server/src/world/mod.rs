@@ -75,6 +75,18 @@ pub const CAMP_SECS: Duration = Duration::from_secs(30);
 /// Periodic position checkpoint cadence. Inventory/quest mutations write
 /// per-mutation; this is just for "where was I when the power went out".
 pub const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);
+/// How often the world loop asks the database which accounts are banned, to
+/// remove a banned account's character that is ALREADY in the world (login,
+/// session use and world connect refuse a banned account on their own). One
+/// small query per interval, skipped while nobody is connected; it is also
+/// the longest a ban takes to reach a live session.
+pub const BAN_SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+/// How long a kicked connection is left up after its Kick message is queued,
+/// so the reliable message reaches the client before the transport drops (a
+/// disconnect in the same tick would evict it and the player would see only a
+/// generic connection loss). The server drops the connection itself after
+/// this, so a client that ignores the kick gains one second.
+pub const KICK_FLUSH_GRACE: Duration = Duration::from_secs(1);
 /// Longest an enemy or pet goes without a Position fan-out while standing
 /// still. Positions fan on change (the entity moved or turned since its last
 /// send); this keepalive covers a dropped unreliable packet and bounds how

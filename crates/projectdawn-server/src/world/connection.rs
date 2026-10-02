@@ -334,6 +334,11 @@ pub struct PerConnection {
     pub gm_overflow_row_at: Option<Instant>,
     pub gm_rate_notice_at: Option<Instant>,
 
+    /// Set when the server has sent this connection a Kick (the ban sweep).
+    /// The tick drops the transport `KICK_FLUSH_GRACE` later; from there the
+    /// character leaves by the ordinary unclean-exit path.
+    pub kicked_at: Option<Instant>,
+
     /// Track 7 — AOI grid cell the player currently occupies. Derived from
     /// `pos.x` / `pos.z` via `aoi::cell_for`; updated by the tick loop
     /// whenever the player's position crosses a cell boundary. Used to
@@ -579,6 +584,7 @@ impl PerConnection {
             gm_cmd_refused: 0,
             gm_overflow_row_at: None,
             gm_rate_notice_at: None,
+            kicked_at: None,
             aoi_cell: (0, 0), // tick.rs sets the real cell from aoi::cell_for after construction
             regen_hp_acc: 0.0,
             regen_mp_acc: 0.0,

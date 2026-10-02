@@ -459,6 +459,14 @@ pub fn handle_message(
     msg: ClientWorldMsg,
     now: Instant,
 ) -> Outcome {
+    // A kicked connection gets no further say. The ban sweep leaves the
+    // transport up for KICK_FLUSH_GRACE so the Kick can arrive, and the Kick
+    // itself tells a modified client that its last second has begun; without
+    // this it could spend that second dropping its valuables for an
+    // accomplice or reshuffling its group.
+    if conn.kicked_at.is_some() {
+        return Outcome::Continue;
+    }
     conn.touch(now);
     // ── The dead-state gate (playtest 2026-09-23) ────────────────────────
     // A dead player looted their own corpse before respawning and kept all

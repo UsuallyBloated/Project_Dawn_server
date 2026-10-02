@@ -3695,11 +3695,12 @@ async fn enemy_spell_without_a_target_refunds_and_reports() {
     a.pump_for(Duration::from_millis(1700)).await;
     a.send_cast_spell("Fireball", None);
 
-    // The refusal arrives as a System chat line.
+    // The refusal arrives as a private CastFail (the client's signal to undo
+    // its optimistic spend and cooldown).
     let refusal = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::ChatMessage { text, .. }
-                if text.contains("need a target"))
+            matches!(m, ServerWorldMsg::CastFail { reason, .. }
+                if reason.contains("need a target"))
         })
         .await;
     assert!(
@@ -4343,7 +4344,7 @@ async fn charm_refuses_a_target_out_of_range() {
     pump_both_for(&mut a, &mut b, Duration::from_millis(2150)).await;
     a.send_cast_spell("Charm", Some(enemy_id));
     wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("too far away"))
+        matches!(m, ServerWorldMsg::CastFail { reason, .. } if reason.contains("too far away"))
     })
     .await
     .expect("an out-of-range charm is refused with the line");
@@ -4447,8 +4448,8 @@ async fn charm_converts_a_camp_mob_that_is_fighting_someone_else() {
 
 /// A heal had no range check at all: a healer could keep a friend alive in a
 /// dungeon from the safety of town by naming their char id. B is hurt and
-/// 200 m away; A's heal must be refused, B must not be healed, and A must not
-/// pay for it in mana or in cooldown.
+/// two cells away; A's heal must be refused, B must not be healed, and A must
+/// not pay for it in mana or in cooldown.
 #[tokio::test]
 async fn ally_heal_refuses_out_of_range_and_costs_nothing() {
     let h = start_both().await;
@@ -4460,7 +4461,9 @@ async fn ally_heal_refuses_out_of_range_and_costs_nothing() {
         provision_client(&h.auth_url, "farhurt", "Farhurt", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
     db::set_account_gm(&pool, "farhurt", true).await.expect("set is_gm");
-    set_char_pos(&h.db_url, b_char_id, 200.0, 0.0).await;
+    // (248, 60): two cells from spawn and clear of every camp. Not (200, 0),
+    // which sits inside the Ancient Wraith's aggro circle.
+    set_char_pos(&h.db_url, b_char_id, 248.0, 60.0).await;
     let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
@@ -4485,27 +4488,26 @@ async fn ally_heal_refuses_out_of_range_and_costs_nothing() {
     a.send_cast_spell("Healing Wave", Some(b_char_id as u64));
 
     wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("too far away"))
+        matches!(m, ServerWorldMsg::CastFail { reason, .. } if reason.contains("too far away"))
     })
     .await
     .expect("an out-of-range heal is refused with the line");
-    // The correction that follows the line reports untouched mana: the server
-    // never took it.
-    let mana_evt = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == a_char_id as u64)
+    // "Costs no mana" means the mana never DIPS: not deducted and handed back,
+    // never taken. Any ManaUpdate for A below full in this window is the old
+    // deduct-then-refund order (or the heal landing).
+    let dipped = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_millis(700), |m| {
+        matches!(m, ServerWorldMsg::ManaUpdate { id, mp, max_mp }
+            if *id == a_char_id as u64 && *mp < *max_mp - 1.0)
     })
-    .await
-    .expect("the caster is told its true mana");
-    if let ServerWorldMsg::ManaUpdate { mp, max_mp, .. } = mana_evt {
-        assert!((mp - max_mp).abs() < 0.01, "a refused heal costs no mana (got {mp} of {max_mp})");
-    }
+    .await;
+    assert!(dipped.is_none(), "a refused heal never takes the mana (saw {dipped:?})");
     // B was not healed (Healing Wave lands 15 at once; regen is 1 or 2 a tick).
     let healed = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_millis(700), |m| {
         matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. }
             if *id == b_char_id as u64 && *hp >= hurt_hp + 10.0)
     })
     .await;
-    assert!(healed.is_none(), "a target 200 m away must not be healed");
+    assert!(healed.is_none(), "a target two cells away must not be healed");
 
     // And no cooldown was burned: A heals ITSELF straight away, inside what
     // would have been Healing Wave's 6 s cooldown.
@@ -4522,7 +4524,8 @@ async fn ally_heal_refuses_out_of_range_and_costs_nothing() {
 
 /// An ENEMY spell on a PLAYER had no range check either: with both sides
 /// flagged for PvP, one could nuke the other from across the world. Both are
-/// flagged here and 200 m apart; the nuke must be refused and must not land.
+/// flagged here and two cells apart; the nuke must be refused and must not
+/// land.
 #[tokio::test]
 async fn pvp_nuke_refuses_out_of_range() {
     let h = start_both().await;
@@ -4531,7 +4534,9 @@ async fn pvp_nuke_refuses_out_of_range() {
         provision_client(&h.auth_url, "farnuke", "Farnuke", "Human", "Cleric").await;
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "farmark", "Farmark", "Human", "Warrior").await;
-    set_char_pos(&h.db_url, b_char_id, 200.0, 0.0).await;
+    // (248, 60): clear of every camp, so the only thing that could hit B is
+    // the nuke under test. (200, 0) is inside the Ancient Wraith's aggro.
+    set_char_pos(&h.db_url, b_char_id, 248.0, 60.0).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
@@ -4542,18 +4547,18 @@ async fn pvp_nuke_refuses_out_of_range() {
 
     a.send_cast_spell("Smite", Some(b_char_id as u64));
     let line = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("too far away"))
+        matches!(m, ServerWorldMsg::CastFail { reason, .. } if reason.contains("too far away"))
     })
     .await
     .expect("an out-of-range PvP nuke is refused with the line");
-    if let ServerWorldMsg::ChatMessage { text, .. } = line {
-        assert!(!text.contains("Farmark"), "a target out of reach is not named (got {text:?})");
+    if let ServerWorldMsg::CastFail { reason, .. } = line {
+        assert!(!reason.contains("Farmark"), "a target out of reach is not named (got {reason:?})");
     }
     let hit = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_millis(700), |m| {
         matches!(m, ServerWorldMsg::Hit { target, .. } if *target == b_char_id as u64)
     })
     .await;
-    assert!(hit.is_none(), "a player 200 m away must not be hit");
+    assert!(hit.is_none(), "a player two cells away must not be hit");
 }
 
 /// A ban reaches a character that is ALREADY in the world. Login, session use
@@ -4575,16 +4580,20 @@ async fn banned_account_is_kicked_out_of_the_world() {
         .expect("ban")
         .expect("account exists");
 
-    // Up to one sweep interval (10 s) plus slack. Heartbeat while waiting:
-    // only app-layer messages keep a connection from the idle timeout.
-    let deadline = Instant::now() + Duration::from_secs(15);
+    // Up to two sweep intervals (10 s each) plus slack, in case the ban lands
+    // just after a sweep. Heartbeat while waiting: only app-layer messages
+    // keep a connection from the idle timeout.
+    let deadline = Instant::now() + Duration::from_secs(25);
     let mut kick: Option<protocol::world::KickCode> = None;
-    let mut ticks: u32 = 0;
+    // Heartbeat by wall clock, not by loop count: under load an iteration
+    // stretches, and 80 slow iterations would outlast the 10 s idle timeout.
+    a.send_heartbeat();
+    let mut last_heartbeat = Instant::now();
     'wait: while Instant::now() < deadline {
         tick_one(&mut a.client, &mut a.transport);
-        ticks += 1;
-        if ticks % 80 == 0 {
+        if last_heartbeat.elapsed() >= Duration::from_secs(3) {
             a.send_heartbeat();
+            last_heartbeat = Instant::now();
         }
         while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
             if let Ok((ServerWorldMsg::Kick { code, .. }, _)) =
@@ -4609,4 +4618,109 @@ async fn banned_account_is_kicked_out_of_the_world() {
         tokio::time::sleep(TICK_DT).await;
     }
     assert!(a.client.is_disconnected(), "the kicked connection is dropped by the server");
+}
+
+
+/// A cast the server was always going to refuse must cost NOTHING. Bind
+/// Affinity has no server arm (the bind sprint is still ahead), so the cast
+/// used to take 30 mana, roll the caster's Alteration skill, and then refund
+/// the mana: a free skill-up attempt every three seconds from an honest
+/// hotbar. The pre-flight refuses it before any of that, so the mana never
+/// dips at all.
+#[tokio::test]
+async fn a_spell_with_no_server_effect_costs_nothing() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "binder", "Binder", "Human", "Cleric").await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    a.send_cast_start("Bind Affinity", 3.0);
+    a.pump_for(Duration::from_millis(3150)).await;
+    a.send_cast_spell("Bind Affinity", None);
+
+    // Watch everything that follows the cast for a second: the refusal must
+    // arrive, and no ManaUpdate for the caster may show less than full.
+    let end = Instant::now() + Duration::from_secs(1);
+    let mut refused = false;
+    let mut dip: Option<(f32, f32)> = None;
+    while Instant::now() < end {
+        tick_one(&mut a.client, &mut a.transport);
+        while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
+            match bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) {
+                Ok((ServerWorldMsg::CastFail { reason, .. }, _))
+                    if reason.contains("no effect here yet") =>
+                {
+                    refused = true;
+                }
+                Ok((ServerWorldMsg::ManaUpdate { id, mp, max_mp }, _))
+                    if id == a_char_id as u64 && mp < max_mp - 1.0 =>
+                {
+                    dip = Some((mp, max_mp));
+                }
+                _ => {}
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    assert!(refused, "a spell with no server arm is refused with the line");
+    assert!(
+        dip.is_none(),
+        "it is refused BEFORE the mana comes off, not deducted and refunded (saw {dip:?})"
+    );
+}
+
+/// One cast bar authorises ONE cast. Every CastSpell in a batch used to read
+/// the same CastStart cache, so a forged client could send fifty in one
+/// datagram after a single bar. Two sent back to back are in one datagram:
+/// the first resolves, the second is told to wait.
+#[tokio::test]
+async fn one_cast_per_caster_per_tick() {
+    let h = start_both().await;
+    // Smite: level 1 Cleric, instant.
+    let (a_session, a_char_id, _stale_token) =
+        provision_client(&h.auth_url, "twocast", "Twocast", "Human", "Cleric").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "twocast", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    a.send_dev_spawn("Cast Dummy", 1, 500.0, 0, 0.0, 0.0);
+    let spawn_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Cast Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let dummy: u64 = match spawn_evt {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    a.send_cast_spell("Smite", Some(dummy));
+    a.send_cast_spell("Smite", Some(dummy));
+    let end = Instant::now() + Duration::from_secs(1);
+    let mut hits = 0u32;
+    let mut told = false;
+    while Instant::now() < end {
+        tick_one(&mut a.client, &mut a.transport);
+        while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
+            match bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) {
+                Ok((ServerWorldMsg::Hit { attacker, target, .. }, _))
+                    if attacker == a_char_id as u64 && target == dummy =>
+                {
+                    hits += 1;
+                }
+                Ok((ServerWorldMsg::CastFail { reason, .. }, _))
+                    if reason.contains("One spell at a time") =>
+                {
+                    told = true;
+                }
+                _ => {}
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    assert_eq!(hits, 1, "exactly one of the two casts resolves");
+    assert!(told, "the extra cast in the same tick is answered, not silently dropped");
 }

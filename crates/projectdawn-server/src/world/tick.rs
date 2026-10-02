@@ -1313,6 +1313,10 @@ pub async fn run(
     let mut enemy_pos_sent: u64 = 0;
     let mut last_fan_report = Instant::now();
     let mut last_ban_sweep = Instant::now();
+    // The ban sweep's query runs on its own task and reports back here, so
+    // the world loop never waits on the database for it.
+    let (ban_tx, mut ban_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i64>>();
+    let mut ban_sweep_in_flight = false;
 
     // Track 5 sub-task 1B — server-authoritative enemies. The spawner owns
     // respawn timers per authored spawn point; `enemies` holds the live
@@ -1746,6 +1750,8 @@ pub async fn run(
         // combos).
         let mut attack_intents: Vec<AttackIntent> = Vec::new();
         let mut cast_spell_intents: Vec<CastSpellIntent> = Vec::new();
+        // Casters already told this tick that an extra CastSpell was dropped.
+        let mut cast_overflow_told: Vec<ClientId> = Vec::new();
         // Track 6 sub-task 5 — group intents buffered for the
         // post-dispatch sweep. The sweep needs the full connections
         // map (to resolve names to ids + fan rosters to multiple
@@ -1996,14 +2002,45 @@ pub async fn run(
                             cast_set_at_at_dispatch,
                             cast_start_pos_at_dispatch,
                         } => {
-                            cast_spell_intents.push(CastSpellIntent {
-                                caster,
-                                spell_name,
-                                target_id,
-                                cast_name_at_dispatch,
-                                cast_set_at_at_dispatch,
-                                cast_start_pos_at_dispatch,
-                            });
+                            // One CastSpell per caster per tick. Every CastSpell
+                            // in a batch reads the same CastStart cache (it is
+                            // cleared only when a cast resolves), so one cast
+                            // bar used to authorise any number of them in a
+                            // single datagram, and a refused cast is free, so
+                            // nothing else metered them. An honest client
+                            // cannot finish two casts inside 50 ms. The first
+                            // extra is answered (the client spent its mana
+                            // optimistically and needs the correction); the
+                            // rest of a flood are dropped in silence.
+                            if cast_spell_intents.iter().any(|i| i.caster == caster) {
+                                if !cast_overflow_told.contains(&client_id) {
+                                    cast_overflow_told.push(client_id);
+                                    handlers::fan_out_cast_fail(
+                                        &mut server,
+                                        &[client_id],
+                                        caster,
+                                        "One spell at a time.".to_string(),
+                                    );
+                                    if let Some(c) = connections.get(&client_id) {
+                                        handlers::fan_out_mana_update(
+                                            &mut server,
+                                            &[client_id],
+                                            caster,
+                                            c.mp,
+                                            c.max_mp,
+                                        );
+                                    }
+                                }
+                            } else {
+                                cast_spell_intents.push(CastSpellIntent {
+                                    caster,
+                                    spell_name,
+                                    target_id,
+                                    cast_name_at_dispatch,
+                                    cast_set_at_at_dispatch,
+                                    cast_start_pos_at_dispatch,
+                                });
+                            }
                         }
                         Outcome::PetCommandIntent { owner, command, target_id } => {
                             pet_command_intents.push(PetCommandI { owner, command, target_id });
@@ -3997,12 +4034,14 @@ pub async fn run(
                 let hp_cost = spell.hp_cost;
                 let dmg_type = spells::parse_damage_type(&spell.damage_type);
 
-                // Target pre-flight: presence, reach and the PvP gates, decided
-                // before the mana comes off, the cooldown is stamped or the
-                // casting skill rolls (see `cast_target_refusal`). A refused
-                // cast costs nothing, so nothing has to be handed back; but the
-                // CLIENT spent the mana optimistically at cast start, so it is
-                // told the server's untouched values to correct itself.
+                // Cast pre-flight: presence, reach, the PvP gates and "the
+                // server has no effect for this spell", decided before the mana
+                // comes off, the cooldown is stamped or the casting skill rolls
+                // (see `cast_target_refusal`). A refused cast costs nothing, so
+                // nothing has to be handed back. The CLIENT, though, spent the
+                // mana and started its own cooldown when it sent the cast: the
+                // private CastFail is its signal to undo that, and the
+                // ManaUpdate carries the server's untouched value.
                 if let Some(line) = cast_target_refusal(
                     spell,
                     intent.target_id,
@@ -4011,6 +4050,7 @@ pub async fn run(
                     caster_pos,
                     &connections,
                     &enemies,
+                    &corpses,
                     &group_manager,
                 ) {
                     tracing::info!(
@@ -4027,7 +4067,7 @@ pub async fn run(
                         cc.cast_total_duration = 0.0;
                         cc.cast_set_at = None;
                     }
-                    handlers::send_refusal(&mut server, caster_cid, &line);
+                    handlers::fan_out_cast_fail(&mut server, &[caster_cid], intent.caster, line);
                     handlers::fan_out_mana_update(
                         &mut server,
                         &[caster_cid],
@@ -4119,7 +4159,6 @@ pub async fn run(
                         // corpse; offer the res to its owner, who summons + gets an
                         // xp refund on accept. Mana was already deducted above
                         // (consistent with the rest of the cast pipeline).
-                        const RES_CAST_RANGE: f32 = 30.0;
                         let Some(corpse_id) = intent.target_id else {
                             tracing::info!(caster = intent.caster, spell = %spell.name, "resurrection rejected — no corpse targeted (target_id 0)");
                             handlers::fan_out_cast_fail(&mut server, &in_world_recipients_now, intent.caster, "No corpse targeted.".to_string());
@@ -4145,7 +4184,7 @@ pub async fn run(
                         let mut reason: Option<&str> = None;
                         let corpse_owner = match corpses.get(&corpse_id) {
                             None => { reason = Some("That is not a corpse."); 0 }
-                            Some(c) if c.pos.distance_to(caster_pos) > RES_CAST_RANGE => { reason = Some("You are too far from the corpse."); 0 }
+                            Some(c) if !(c.pos.distance_to(caster_pos) <= RES_CAST_RANGE) => { reason = Some("You are too far from the corpse."); 0 }
                             Some(c) if c.resurrected => { reason = Some("That corpse has already been resurrected."); 0 }
                             Some(c) => c.owner_char,
                         };
@@ -9796,37 +9835,54 @@ pub async fn run(
         //    restart (and its 60 s of lost progress for everyone) to remove
         //    a player who was online. Every BAN_SWEEP_INTERVAL, ask which
         //    accounts are banned and kick any connection that belongs to one.
-        //    The Kick goes out now and the transport is dropped
-        //    KICK_FLUSH_GRACE later (step 4), so the client hears why. A
-        //    failed query is logged and skipped: the other three gates still
-        //    hold, and the next sweep retries.
+        //
+        //    The query runs on its own task and answers over a channel: this
+        //    loop is the whole simulation, and a read that waited on a busy
+        //    database or an exhausted pool would freeze every player six
+        //    times a minute for a result that is almost always empty. A
+        //    failed query reports nothing banned; the other three gates still
+        //    hold and the next sweep retries.
         if now.duration_since(last_ban_sweep) >= BAN_SWEEP_INTERVAL {
             last_ban_sweep = now;
-            if !connections.is_empty() {
-                match db::banned_account_ids(&pool).await {
-                    Ok(banned) if !banned.is_empty() => {
-                        for (client_id, conn) in connections.iter_mut() {
-                            if conn.kicked_at.is_none()
-                                && conn.linkdead_since.is_none()
-                                && banned.contains(&conn.account_id)
-                            {
-                                tracing::info!(
-                                    account_id = conn.account_id,
-                                    char_id = conn.char_id,
-                                    "banned account kicked from the world"
-                                );
-                                handlers::send_kick(
-                                    &mut server,
-                                    *client_id,
-                                    KickCode::BannedNow,
-                                    "This account is banned.",
-                                );
-                                conn.kicked_at = Some(now);
-                            }
+            if !connections.is_empty() && !ban_sweep_in_flight {
+                ban_sweep_in_flight = true;
+                let (sweep_pool, tx) = (pool.clone(), ban_tx.clone());
+                tokio::spawn(async move {
+                    let banned = match db::banned_account_ids(&sweep_pool).await {
+                        Ok(ids) => ids,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "ban sweep query failed — will retry");
+                            Vec::new()
                         }
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error = %e, "ban sweep query failed — will retry"),
+                    };
+                    let _ = tx.send(banned);
+                });
+            }
+        }
+        while let Ok(banned) = ban_rx.try_recv() {
+            ban_sweep_in_flight = false;
+            for (client_id, conn) in connections.iter_mut() {
+                if conn.kicked_at.is_none()
+                    && conn.linkdead_since.is_none()
+                    && banned.contains(&conn.account_id)
+                {
+                    tracing::info!(
+                        account_id = conn.account_id,
+                        char_id = conn.char_id,
+                        "banned account kicked from the world"
+                    );
+                    handlers::send_kick(
+                        &mut server,
+                        *client_id,
+                        KickCode::BannedNow,
+                        "This account is banned.",
+                    );
+                    // Stamped at the send, not at tick start: the grace before
+                    // the transport is dropped (step 4, KICK_FLUSH_GRACE) is
+                    // for THIS message to arrive, so it runs from here. The
+                    // connection's messages are ignored from now on
+                    // (`handle_message`).
+                    conn.kicked_at = Some(Instant::now());
                 }
             }
         }
@@ -9837,30 +9893,24 @@ pub async fn run(
     }
 }
 
-/// Tell one client the true contents of the two slots a failed `MoveItem`
-/// named, so a client whose view has drifted can correct itself.
-///
-/// The server is authoritative over inventory, but authority only helps if
-/// disagreement is *reported*. Before this, a rejected or no-op move sent the
-/// client nothing at all: it kept rendering a phantom item, kept asking to move
-/// it, and kept being refused, with no path back to the truth short of a relog.
-/// A playtest on 2026-08-18 caught the same slots refused for half an hour.
-///
-/// Sending the real contents of exactly the two slots involved keeps this
-/// proportional: at most two small messages per bad request the client made, so
-/// it cannot be used to amplify traffic, and it converges because every wrong
-/// belief is corrected the moment the client acts on it.
 /// The one line for a spell target that is out of reach, offline, or an id
 /// that never existed. Deliberately the SAME line for all three: telling
 /// "far" from "absent" would make a cast an is-online oracle for anyone
-/// enumerating ids. Lines that NAME a target are only ever said about one
-/// within reach, where the caster can see it anyway.
+/// enumerating ids. No refusal names a player; the only names the caster is
+/// given are the ones already on a nameplate within reach.
 const TARGET_UNREACHABLE: &str = "That target is too far away or no longer here.";
 
-/// Target eligibility for a cast, decided BEFORE any side effect. Returns the
-/// refusal line, or `None` when the cast may proceed.
+/// The line for a spell the server has no effect for yet: a target type with
+/// no arm (BIND, PORT), an AOE with no radius, a summon with no known pet.
+const NO_EFFECT_YET: &str = "That magic has no effect here yet.";
+
+/// How close (metres) a resurrection's caster must be to the corpse.
+const RES_CAST_RANGE: f32 = 30.0;
+
+/// Cast eligibility, decided BEFORE any side effect. Returns the refusal line,
+/// or `None` when the cast may proceed.
 ///
-/// Two reasons this exists as a pre-flight rather than as checks inside the
+/// Two reasons this is a pre-flight rather than checks inside the
 /// per-target-type arms:
 ///
 /// 1. **Reach.** ALLY spells (heals and buffs, on a player or a pet) and ENEMY
@@ -9873,12 +9923,16 @@ const TARGET_UNREACHABLE: &str = "That target is too far away or no longer here.
 /// 2. **Order.** The handler takes the mana, stamps the cooldown and rolls the
 ///    casting skill before its arms run. A refusal inside an arm could hand
 ///    the mana back but could not un-stamp the cooldown or un-roll the skill:
-///    a cast at nothing was a free skill-up attempt, and a refused Charm
-///    still burned its 60 s cooldown. Everything decidable from immutable
-///    state is decided here, so a refused cast costs nothing at all.
+///    a cast the server was always going to refuse (Bind Affinity, which has
+///    no server arm; a nuke at nothing) was a free casting-skill attempt from
+///    any hotbar, and a refused Charm still burned its 60 s cooldown.
+///    Everything decidable from immutable state is decided here, so a refused
+///    cast costs nothing at all.
 ///
-/// The arms keep their own checks as a second line; after this they should
-/// not fire. CORPSE is left to its arm (it has its own reasons and range).
+/// Every target type is covered: the three with a target (ENEMY, ALLY,
+/// PET_CHARM), CORPSE, the spell-data checks (an AOE with no radius, a summon
+/// with no known pet), and any type with no arm. The arms keep their own
+/// checks as a second line; after this they should not fire.
 #[allow(clippy::too_many_arguments)]
 fn cast_target_refusal(
     spell: &spells::Spell,
@@ -9888,12 +9942,14 @@ fn cast_target_refusal(
     caster_pos: Vec3f,
     connections: &HashMap<ClientId, PerConnection>,
     enemies: &HashMap<EntityId, Entity>,
+    corpses: &HashMap<EntityId, super::corpses::Corpse>,
     group_manager: &GroupManager,
 ) -> Option<String> {
     use protocol::world::{ENEMY_ID_BASE, LOOT_BAG_ID_BASE, PET_ID_BASE};
     let caster = connections.get(&caster_cid)?;
     let in_reach = |pos: Vec3f| pos.distance_to(caster_pos) <= RANGED_ATTACK_RANGE;
     let unreachable = || Some(TARGET_UNREACHABLE.to_string());
+    let no_effect = || Some(NO_EFFECT_YET.to_string());
     let player_in_reach =
         |cid: ClientId| connections.get(&cid).filter(|c| c.in_world && in_reach(c.pos));
     let entity_in_reach =
@@ -9917,7 +9973,7 @@ fn cast_target_refusal(
                     return unreachable();
                 };
                 if !attackable(t) {
-                    return Some(format!("Unable to attack {}.", t.name));
+                    return Some("You cannot attack that player.".to_string());
                 }
                 if t.hp <= 0.0 {
                     return Some("That target is no longer here.".to_string());
@@ -9931,13 +9987,10 @@ fn cast_target_refusal(
             // and never the caster's own.
             if let Some(owner_id) = e.owner {
                 let owner_cid = owner_id as ClientId;
-                let owner = connections.get(&owner_cid);
-                let allowed = owner_cid != caster_cid && owner.is_some_and(attackable);
+                let allowed = owner_cid != caster_cid
+                    && connections.get(&owner_cid).is_some_and(attackable);
                 if !allowed {
-                    return Some(match owner {
-                        Some(o) => format!("Unable to attack {}'s {}.", o.name, e.mob.name),
-                        None => format!("Unable to attack the {}.", e.mob.name),
-                    });
+                    return Some("You cannot attack that pet.".to_string());
                 }
             }
             None
@@ -9948,22 +10001,16 @@ fn cast_target_refusal(
                 return None; // self
             }
             if raw >= PET_ID_BASE {
-                let Some((pet, owner_id)) =
-                    entity_in_reach(raw).and_then(|p| p.owner.map(|o| (p, o)))
-                else {
+                let Some(owner_id) = entity_in_reach(raw).and_then(|p| p.owner) else {
                     return unreachable();
                 };
                 // The PvP heal gate: no topping up a duel partner's pet,
                 // unless they are a group-mate.
                 let owner_cid = owner_id as ClientId;
                 if owner_cid != caster_cid {
-                    let owner = connections.get(&owner_cid);
-                    let hostile = owner.is_some_and(attackable);
+                    let hostile = connections.get(&owner_cid).is_some_and(attackable);
                     if hostile && !group_manager.same_group(caster_cid, owner_cid) {
-                        return Some(match owner {
-                            Some(o) => format!("You cannot heal {}'s {}.", o.name, pet.mob.name),
-                            None => "You cannot heal an enemy's pet.".to_string(),
-                        });
+                        return Some("You cannot heal that pet.".to_string());
                     }
                 }
                 return None;
@@ -9982,7 +10029,7 @@ fn cast_target_refusal(
                 return Some("That target is no longer here.".to_string());
             }
             if attackable(t) && !group_manager.same_group(caster_cid, target_cid) {
-                return Some(format!("You cannot heal {}.", t.name));
+                return Some("You cannot heal that player.".to_string());
             }
             None
         }
@@ -9998,7 +10045,46 @@ fn cast_target_refusal(
                 _ => unreachable(),
             }
         }
-        _ => None,
+        "CORPSE" => {
+            let Some(corpse_id) = target_id else {
+                return Some("No corpse targeted.".to_string());
+            };
+            let Some(corpse) = corpses.get(&corpse_id) else {
+                return Some("That is not a corpse.".to_string());
+            };
+            if !(corpse.pos.distance_to(caster_pos) <= RES_CAST_RANGE) {
+                return Some("You are too far from the corpse.".to_string());
+            }
+            if corpse.resurrected {
+                return Some("That corpse has already been resurrected.".to_string());
+            }
+            // The owner must be in the world to receive the offer.
+            let owner_cid = corpse.owner_char as ClientId;
+            if !connections.get(&owner_cid).is_some_and(|c| c.in_world) {
+                return Some("Their spirit is not present.".to_string());
+            }
+            None
+        }
+        "AOE" => {
+            if spell.aoe_radius > 0.0 {
+                None
+            } else {
+                no_effect()
+            }
+        }
+        "PET_SUMMON" => {
+            let known = !spell.pet_type.is_empty()
+                && pet_templates::scaled(&spell.pet_type, caster.level.max(1) as u32, 0)
+                    .is_some();
+            if known {
+                None
+            } else {
+                no_effect()
+            }
+        }
+        "SELF" => None,
+        // No arm exists for anything else (BIND, PORT, ...).
+        _ => no_effect(),
     }
 }
 
@@ -10038,6 +10124,19 @@ fn refund_spell_cost(
     }
 }
 
+/// Tell one client the true contents of the two slots a failed `MoveItem`
+/// named, so a client whose view has drifted can correct itself.
+///
+/// The server is authoritative over inventory, but authority only helps if
+/// disagreement is *reported*. Before this, a rejected or no-op move sent the
+/// client nothing at all: it kept rendering a phantom item, kept asking to move
+/// it, and kept being refused, with no path back to the truth short of a relog.
+/// A playtest on 2026-08-18 caught the same slots refused for half an hour.
+///
+/// Sending the real contents of exactly the two slots involved keeps this
+/// proportional: at most two small messages per bad request the client made, so
+/// it cannot be used to amplify traffic, and it converges because every wrong
+/// belief is corrected the moment the client acts on it.
 fn correct_client_slots(
     server: &mut RenetServer,
     cid: ClientId,

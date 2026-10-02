@@ -1,9 +1,35 @@
 # Flaky integration tests — `tests/world_two_clients.rs`
 
-**Status: RESOLVED 2026-09-16 (commits `ebb161f` + `96c6036`). The suite runs
-fully green, 44/44, verified three consecutive times — the first in its
-history.** The sections below are kept as the record of how the understanding
-evolved; only this update describes the current state.
+**Status: RESOLVED 2026-09-16 (commits `ebb161f` + `96c6036`), with the one
+remaining varier root-caused 2026-10-01 (`3523bd1` + `30f0474`). The suite runs
+fully green, 59/59, four consecutive times.** The sections below are kept as the
+record of how the understanding evolved; the newest update describes the current
+state.
+
+---
+
+## Update 2026-10-01 — the last varier had a cause too
+
+`charm_converts_enemy_to_pet` was the one test still seen varying under load
+after the 09-16 fix (09-29, 09-30, twice on 10-01), always passing alone. It was
+mechanism 2 below again, missed on 09-16: the test waited for a skeleton's hit,
+then cast the 2.0 s Charm while that skeleton kept swinging every 2.5 s, so the
+cast completed about 0.2 s before the next swing and any stretch of the test
+loop landed a hit mid-cast and rolled the ~70% interrupt. It now charms a
+dev-spawned mob that never swings, and a second test,
+`charm_converts_a_camp_mob_that_is_fighting_someone_else`, keeps the in-play
+case (a spawner-owned mob mid-fight) with the mob fighting a SECOND client, so
+nothing swings at the caster.
+
+A third lesson from the same day, for anyone writing a harness test: **do not
+let distance depend on wall-clock time.** The server integrates movement in
+real time, so a loop of N `send_move` calls covers more ground when the loop
+runs slow. A test that walked 41 m in a quiet run walked far enough to stray
+into a camp in a loaded one and was interrupted by a mob. Seed positions through
+the `characters` table (`set_char_pos`) instead of walking, and when a walk is
+the point, make the outcome insensitive to how far it went.
+
+**There is no known-flaky test.** Any failure is a real failure.
 
 ---
 

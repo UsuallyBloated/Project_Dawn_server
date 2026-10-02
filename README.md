@@ -85,16 +85,26 @@ real; one that passes alone is load-sensitivity
 
 ## Ops tools
 
-Four binaries ship from this crate, so `--bin` selects; a bare
+Five binaries ship from this crate, so `--bin` selects; a bare
 `cargo run -p projectdawn-server` resolves to the server itself via the
 `default-run` manifest key.
 
 | Binary | Writes? | Purpose |
 |---|---|---|
 | `projectdawn-server` | — | the server (default) |
-| `admin_report` | no | `world.db` summary to console + `world_report.html` |
+| `admin_report` | no | `world.db` summary to console + `world_report.html`, including the newest GM action audit rows |
 | `grant_gm` | yes | set a per-account GM flag; no args lists accounts |
 | `reset_password` | yes | reset a locked-out account's password and purge its sessions |
+| `admin_account` | yes | list accounts; `ban <username> [reason]` / `unban <username>` |
+
+The three tools that write open the database with `mode=rw`: they never create
+one. Run them from the directory that holds `world.db`, or point
+`PROJECTDAWN_DATABASE_URL` at it; a missing database is an error, not a fresh
+empty file.
+
+Every authorized dev/GM command (`/give`, coin grants, dev spawns, Full Heal,
+XP grants) is recorded in `gm_actions` and is refused if it cannot be
+recorded. `admin_report` is how you read the log.
 
 ## Crate layout
 

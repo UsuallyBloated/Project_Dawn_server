@@ -17,18 +17,34 @@ pub(super) fn dev_cmds_enabled() -> bool {
 }
 
 /// One authorized dev/GM command waiting for the tick's audit flush to write
-/// it to `gm_actions`. Queued by [`PerConnection::audit_gm`].
+/// it to `gm_actions`. Queued by [`PerConnection::authorize_dev_cmd`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct GmAuditEntry {
     pub command: &'static str,
     pub args: String,
 }
 
-/// Most audit rows one connection may queue per tick. An honest GM issues a
-/// command every few seconds; this only bounds what a flood from a GM client
-/// can turn into database writes. The overflow is counted and written as a
-/// single `audit_overflow` row, so a flood is recorded as a flood.
-pub const GM_AUDIT_MAX_PER_TICK: usize = 8;
+/// Dev/GM command budget: a token bucket per connection. A command that
+/// cannot be recorded is REFUSED, never run unrecorded, so the budget is also
+/// the bound on audit writes. The burst covers the Test Panel's largest
+/// honest batch (its crafting-materials button sends ~34 `give`s in one
+/// frame) several times over; the refill is what a flooding GM client is
+/// held to afterwards.
+pub const GM_CMD_BURST: f32 = 128.0;
+pub const GM_CMD_REFILL_PER_SEC: f32 = 8.0;
+
+/// What `PerConnection::authorize_dev_cmd` decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevCmdAuth {
+    /// Authorized and recorded: run the command.
+    Allowed,
+    /// Not a dev server and not a GM account: ignore silently (a reply would
+    /// be an oracle for whether dev commands are on).
+    Denied,
+    /// Authorized but over budget: do NOT run it. `notify` is true at most
+    /// once a second, so the refusal line cannot itself become a flood.
+    RateLimited { notify: bool },
+}
 
 /// Longest `args` text stored per audit row. Some of it is client-supplied
 /// (an item name, a mob name), so it is cut here rather than trusted.
@@ -303,11 +319,20 @@ pub struct PerConnection {
     pub is_gm: bool,
 
     /// Authorized dev/GM commands issued this tick, waiting for the tick's
-    /// audit flush to write them to `gm_actions`. Filled by `audit_gm`.
+    /// audit flush to write them to `gm_actions`. Filled only by
+    /// `authorize_dev_cmd`, which is also the gate: a command is queued here
+    /// or it does not run.
     pub gm_audit: Vec<GmAuditEntry>,
-    /// Entries `audit_gm` turned away past `GM_AUDIT_MAX_PER_TICK`; the flush
-    /// writes one summary row for them and resets this.
-    pub gm_audit_dropped: u32,
+    /// The command budget (see `GM_CMD_BURST`): tokens left, and when they
+    /// were last refilled.
+    pub gm_cmd_tokens: f32,
+    pub gm_cmd_refill_at: Instant,
+    /// Commands refused over budget since the last `audit_overflow` row, and
+    /// when that row was last written / the GM last told (each at most once
+    /// a second).
+    pub gm_cmd_refused: u32,
+    pub gm_overflow_row_at: Option<Instant>,
+    pub gm_rate_notice_at: Option<Instant>,
 
     /// Track 7 — AOI grid cell the player currently occupies. Derived from
     /// `pos.x` / `pos.z` via `aoi::cell_for`; updated by the tick loop
@@ -549,7 +574,11 @@ impl PerConnection {
             // only sees the character spawn, not the account's GM flag).
             is_gm: false,
             gm_audit: Vec::new(),
-            gm_audit_dropped: 0,
+            gm_cmd_tokens: GM_CMD_BURST,
+            gm_cmd_refill_at: now,
+            gm_cmd_refused: 0,
+            gm_overflow_row_at: None,
+            gm_rate_notice_at: None,
             aoi_cell: (0, 0), // tick.rs sets the real cell from aoi::cell_for after construction
             regen_hp_acc: 0.0,
             regen_mp_acc: 0.0,
@@ -597,23 +626,51 @@ impl PerConnection {
         self.is_dev || self.is_gm
     }
 
-    /// Queue one authorized dev/GM command for the audit log (`gm_actions`).
-    /// Call it right after the `can_use_dev_cmds` gate passes: the log holds
-    /// what an authorized account ISSUED, and the server log holds the
-    /// outcome. `via` records which authority allowed it. On a hosted server
-    /// every row should read `via=gm`; a `via=dev` row there means the
-    /// process ran with `PD_DEV_CMDS` on, which hands these tools to everyone.
-    pub fn audit_gm(&mut self, command: &'static str, args: String) {
-        if self.gm_audit.len() >= GM_AUDIT_MAX_PER_TICK {
-            self.gm_audit_dropped = self.gm_audit_dropped.saturating_add(1);
-            return;
+    /// The one gate for a dev/GM command: authorize it, charge its budget and
+    /// queue its audit row (`gm_actions`), all or nothing. Every dev handler
+    /// calls this at the point the command is about to take effect and runs
+    /// it only on `Allowed`, so "authorized" always means "recorded": a
+    /// command that cannot be recorded is refused, never run unrecorded.
+    ///
+    /// The row holds what an authorized account ISSUED (the server log holds
+    /// the outcome), and `via` names every authority in force: `gm` for a GM
+    /// account, `dev` for a `PD_DEV_CMDS` server, `gm+dev` for both. On a
+    /// hosted server every row should read plain `via=gm`; anything with
+    /// `dev` in it means the process ran with dev commands on for everyone.
+    pub fn authorize_dev_cmd(
+        &mut self,
+        now: Instant,
+        command: &'static str,
+        args: String,
+    ) -> DevCmdAuth {
+        if !self.can_use_dev_cmds() {
+            return DevCmdAuth::Denied;
         }
-        let via = if self.is_gm { "gm" } else { "dev" };
+        let elapsed = now.saturating_duration_since(self.gm_cmd_refill_at).as_secs_f32();
+        self.gm_cmd_tokens = (self.gm_cmd_tokens + elapsed * GM_CMD_REFILL_PER_SEC).min(GM_CMD_BURST);
+        self.gm_cmd_refill_at = now;
+        if self.gm_cmd_tokens < 1.0 {
+            self.gm_cmd_refused = self.gm_cmd_refused.saturating_add(1);
+            let notify = self
+                .gm_rate_notice_at
+                .is_none_or(|t| now.saturating_duration_since(t).as_secs_f32() >= 1.0);
+            if notify {
+                self.gm_rate_notice_at = Some(now);
+            }
+            return DevCmdAuth::RateLimited { notify };
+        }
+        self.gm_cmd_tokens -= 1.0;
+        let via = match (self.is_gm, self.is_dev) {
+            (true, true) => "gm+dev",
+            (true, false) => "gm",
+            _ => "dev",
+        };
         let args: String = args.chars().take(GM_AUDIT_ARGS_MAX).collect();
         self.gm_audit.push(GmAuditEntry {
             command,
             args: format!("{args} via={via}"),
         });
+        DevCmdAuth::Allowed
     }
 
     /// True if the connection has gone silent for at least
@@ -812,34 +869,94 @@ mod tests {
         assert!(conn.can_use_dev_cmds(), "a dev server may use dev commands");
     }
 
-    // The audit queue: tagged with the authority that allowed the command,
-    // capped per tick, with the overflow counted rather than silently lost.
+    // The dev-command gate: unauthorized is silent and writes nothing; an
+    // authorized command is recorded with every authority in force.
     #[test]
-    fn audit_gm_tags_the_authority_and_caps_the_queue() {
-        let mut conn = PerConnection::from_spawn(test_spawn(), Instant::now());
+    fn authorize_dev_cmd_records_and_names_the_authority() {
+        let now = Instant::now();
+        let mut conn = PerConnection::from_spawn(test_spawn(), now);
         conn.is_dev = false;
+        conn.is_gm = false;
+        assert_eq!(
+            conn.authorize_dev_cmd(now, "heal_self", "amount=50".to_string()),
+            DevCmdAuth::Denied
+        );
+        assert!(conn.gm_audit.is_empty(), "a refused attempt must queue no write");
+        assert_eq!(conn.gm_cmd_tokens, GM_CMD_BURST, "nor spend any budget");
+
         conn.is_gm = true;
-        conn.audit_gm("heal_self", "amount=50".to_string());
+        assert_eq!(
+            conn.authorize_dev_cmd(now, "heal_self", "amount=50".to_string()),
+            DevCmdAuth::Allowed
+        );
         assert_eq!(
             conn.gm_audit,
             vec![GmAuditEntry { command: "heal_self", args: "amount=50 via=gm".to_string() }]
         );
 
-        conn.is_gm = false;
+        // A GM on a dev server must not read as a clean hosted row.
         conn.is_dev = true;
-        conn.audit_gm("give", "item=\"Bread Loaf\" qty=1".to_string());
-        assert!(conn.gm_audit[1].args.ends_with("via=dev"), "a dev-server command says so");
-
+        conn.authorize_dev_cmd(now, "give", "item=\"Bread Loaf\" qty=1".to_string());
+        assert!(conn.gm_audit[1].args.ends_with("via=gm+dev"));
+        conn.is_gm = false;
+        conn.authorize_dev_cmd(now, "give", "x".repeat(5_000));
+        assert!(conn.gm_audit[2].args.ends_with("via=dev"));
         // Client-supplied text is cut, not trusted.
-        conn.audit_gm("give", "x".repeat(5_000));
         assert!(conn.gm_audit[2].args.len() <= GM_AUDIT_ARGS_MAX + " via=dev".len());
+    }
 
-        // Past the cap, entries are counted instead of queued.
-        for _ in 0..20 {
-            conn.audit_gm("heal_self", "amount=1".to_string());
+    // The budget: a burst the size of the Test Panel's biggest batch passes
+    // whole, a flood is REFUSED (not run unrecorded), and time refills it.
+    #[test]
+    fn authorize_dev_cmd_refuses_over_budget_instead_of_running_unrecorded() {
+        let t0 = Instant::now();
+        let mut conn = PerConnection::from_spawn(test_spawn(), t0);
+        conn.is_dev = false;
+        conn.is_gm = true;
+
+        // The Test Panel's crafting-materials button: ~34 gives in one frame.
+        for _ in 0..34 {
+            assert_eq!(
+                conn.authorize_dev_cmd(t0, "give", "item=x qty=1".to_string()),
+                DevCmdAuth::Allowed
+            );
         }
-        assert_eq!(conn.gm_audit.len(), GM_AUDIT_MAX_PER_TICK);
-        assert_eq!(conn.gm_audit_dropped as usize, 20 + 3 - GM_AUDIT_MAX_PER_TICK);
+        assert_eq!(conn.gm_audit.len(), 34, "every one of them is recorded");
+
+        // Drain the rest of the burst in the same instant, then one more.
+        let rest = GM_CMD_BURST as usize - 34;
+        for _ in 0..rest {
+            assert_eq!(
+                conn.authorize_dev_cmd(t0, "heal_self", "amount=0".to_string()),
+                DevCmdAuth::Allowed
+            );
+        }
+        let recorded = conn.gm_audit.len();
+        assert_eq!(
+            conn.authorize_dev_cmd(t0, "give_coins", "p=1000000 g=0 s=0 c=0".to_string()),
+            DevCmdAuth::RateLimited { notify: true },
+            "the command hidden behind the flood is refused, not granted"
+        );
+        assert_eq!(conn.gm_audit.len(), recorded, "and nothing was queued for it");
+        assert_eq!(conn.gm_cmd_refused, 1);
+        assert_eq!(
+            conn.authorize_dev_cmd(t0, "heal_self", "amount=0".to_string()),
+            DevCmdAuth::RateLimited { notify: false },
+            "the notice is at most one a second"
+        );
+
+        // One second later the refill has bought GM_CMD_REFILL_PER_SEC more.
+        let t1 = t0 + Duration::from_secs(1);
+        for _ in 0..GM_CMD_REFILL_PER_SEC as usize {
+            assert_eq!(
+                conn.authorize_dev_cmd(t1, "heal_self", "amount=0".to_string()),
+                DevCmdAuth::Allowed
+            );
+        }
+        assert!(matches!(
+            conn.authorize_dev_cmd(t1, "heal_self", "amount=0".to_string()),
+            DevCmdAuth::RateLimited { .. }
+        ));
     }
 
     // PD_W0024 — the login-time journal normalization: unknown quest ids

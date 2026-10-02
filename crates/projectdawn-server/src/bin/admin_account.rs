@@ -11,17 +11,21 @@
 //!       ban the account; the reason (optional) is shown to them at login
 //!   cargo run -p projectdawn-server --bin admin_account -- unban <username>
 //!
-//! The database defaults to `world.db`; override with the same env var the
-//! server uses, e.g. PROJECTDAWN_DATABASE_URL=sqlite://other.db?mode=rwc.
+//! The database defaults to `world.db` in the current directory and must
+//! already exist (this tool never creates one); override with the same env
+//! var the server uses, e.g. PROJECTDAWN_DATABASE_URL=sqlite://other.db?mode=rw.
 //!
 //! WHAT A BAN DOES AND DOES NOT DO
 //! - The flag, the reason and the deletion of every session row for the
-//!   account happen in ONE transaction (`db::set_account_banned`), so a
-//!   session minted before the ban cannot be redeemed after it.
-//! - A character ALREADY IN THE WORLD keeps playing until it drops: the ban
-//!   is checked when a session is created or redeemed, and there is no
-//!   kick-by-account tool yet. Restart the server to force a banned player
-//!   out right away.
+//!   account happen in ONE transaction (`db::set_account_banned`).
+//! - It bites at login (no new session), at every session redemption (so a
+//!   login that was in flight when the ban landed gets nothing usable), and
+//!   at world connect (a connect token minted just before the ban).
+//! - A character ALREADY IN THE WORLD keeps playing until it drops: there is
+//!   no kick-by-account tool yet. Restart the server to force a banned
+//!   player out right away.
+//! - Re-running `ban` with no reason purges sessions again and keeps the
+//!   reason already on file.
 //!
 //! NOT BUILT YET: account delete and the purge of soft-deleted characters
 //! (see `handoff_account_admin.md` in the client repo's session notes). Every
@@ -33,35 +37,65 @@ use projectdawn_server::db;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::Row;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let url = std::env::var("PROJECTDAWN_DATABASE_URL")
-        .unwrap_or_else(|_| "sqlite://world.db?mode=rwc".to_string());
-    let args: Vec<String> = std::env::args().skip(1).collect();
+/// What the command line asked for, decided BEFORE the database is opened so
+/// bad usage never touches a file.
+enum Action {
+    List,
+    Ban { username: String, reason: String },
+    Unban { username: String },
+}
 
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect(&url)
-        .await
-        .with_context(|| format!("opening database '{url}'"))?;
-
+fn parse_args(args: &[String]) -> Action {
     match args.first().map(|s| s.to_ascii_lowercase()).as_deref() {
-        None | Some("list") => list(&pool).await,
+        None | Some("list") => Action::List,
         Some("ban") => {
             let Some(username) = args.get(1) else { usage() };
-            let reason = args[2..].join(" ");
-            set_banned(&pool, username, true, Some(reason.as_str())).await
+            Action::Ban {
+                username: username.clone(),
+                reason: args[2..].join(" "),
+            }
         }
         Some("unban") => {
             if args.len() != 2 {
                 usage();
             }
-            set_banned(&pool, &args[1], false, None).await
+            Action::Unban { username: args[1].clone() }
         }
         Some(other) => {
             eprintln!("unknown subcommand '{other}'");
             usage()
         }
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let action = parse_args(&args);
+
+    // `mode=rw`, not `rwc`: this tool must never CREATE a database. Run from
+    // the wrong directory, `rwc` would quietly leave an empty `world.db`
+    // behind that looks like a real one to the next tool; `rw` makes a
+    // missing database the error it is.
+    let url = std::env::var("PROJECTDAWN_DATABASE_URL")
+        .unwrap_or_else(|_| "sqlite://world.db?mode=rw".to_string());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .with_context(|| {
+            format!(
+                "opening database '{url}' (run from the directory that holds world.db, \
+                 or set PROJECTDAWN_DATABASE_URL)"
+            )
+        })?;
+
+    match action {
+        Action::List => list(&pool).await,
+        Action::Ban { username, reason } => {
+            set_banned(&pool, &username, true, Some(reason.as_str())).await
+        }
+        Action::Unban { username } => set_banned(&pool, &username, false, None).await,
     }
 }
 
@@ -89,20 +123,21 @@ async fn set_banned(
     let id = outcome.account_id;
 
     if banned {
-        let reason = reason.map(str::trim).filter(|r| !r.is_empty());
         if outcome.was_banned {
-            println!("{username} (account id {id}) was already banned; reason updated.");
+            println!("{username} (account id {id}) was already banned; sessions purged again.");
         } else {
             println!("Banned {username} (account id {id}).");
         }
-        match reason {
+        // Print what is STORED (trimmed, cut at the length cap, or carried
+        // over from the earlier ban), since that is what the player sees.
+        match outcome.reason.as_deref() {
             Some(r) => println!("Reason shown at login: {r}"),
-            None => println!("No reason given; the login refusal will carry none."),
+            None => println!("No reason on file; the login refusal will carry none."),
         }
         println!("Sessions invalidated: {}.", outcome.sessions_purged);
-        println!("New logins are refused from now on. A character already in the world keeps");
-        println!("playing until it drops (there is no kick-by-account tool yet); restart the");
-        println!("server to force it out.");
+        println!("Logins, session use and world connects are refused from now on. A character");
+        println!("already in the world keeps playing until it drops (there is no kick-by-account");
+        println!("tool yet); restart the server to force it out.");
     } else if outcome.was_banned {
         println!("Unbanned {username} (account id {id}). They can log in again.");
     } else {

@@ -207,10 +207,14 @@ pub async fn touch_session(pool: &SqlitePool, token_hex: &str) -> AuthResult<i64
     let bytes = decode_token(token_hex)?;
     let now = Utc::now();
 
-    let row = sqlx::query("SELECT account_id, expires_at FROM sessions WHERE token = ?1")
-        .bind(&bytes[..])
-        .fetch_optional(pool)
-        .await?;
+    let row = sqlx::query(
+        "SELECT s.account_id, s.expires_at, a.is_banned, a.ban_reason
+         FROM sessions s JOIN accounts a ON a.id = s.account_id
+         WHERE s.token = ?1",
+    )
+    .bind(&bytes[..])
+    .fetch_optional(pool)
+    .await?;
 
     let row = row.ok_or(AuthError::SessionExpired)?;
     let account_id: i64 = row.get("account_id");
@@ -218,6 +222,15 @@ pub async fn touch_session(pool: &SqlitePool, token_hex: &str) -> AuthResult<i64
 
     if expires_at < now {
         return Err(AuthError::SessionExpired);
+    }
+    // A ban is enforced on every session redemption, not only at login. The
+    // ban transaction purges the account's sessions, but a Login already in
+    // flight reads `is_banned = false`, spends its Argon2 verify, and inserts
+    // its session AFTER that purge committed. Without this check that session
+    // would be good for its full TTL (character list, world token, the lot).
+    if row.get::<bool, _>("is_banned") {
+        let reason: Option<String> = row.get("ban_reason");
+        return Err(AuthError::Banned(reason.unwrap_or_default()));
     }
 
     sqlx::query("UPDATE sessions SET last_seen = ?1 WHERE token = ?2")
@@ -442,12 +455,26 @@ pub async fn set_account_gm(
     Ok(Some(before))
 }
 
-/// What `set_account_banned` did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Read an account's ban flag, for the world server's connect-time check. A
+/// missing account reads as banned (fail closed; the caller has just matched
+/// the account to a character, so the row should exist).
+pub async fn account_is_banned(pool: &SqlitePool, account_id: i64) -> AuthResult<bool> {
+    let row = sqlx::query("SELECT is_banned FROM accounts WHERE id = ?1")
+        .bind(account_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| r.get::<bool, _>("is_banned")).unwrap_or(true))
+}
+
+/// What `set_account_banned` did. `reason` is what is now STORED (trimmed,
+/// bounded, or carried over from an earlier ban), which is what the player
+/// will be shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BanOutcome {
     pub account_id: i64,
     pub was_banned: bool,
     pub sessions_purged: u64,
+    pub reason: Option<String>,
 }
 
 /// Longest ban reason stored. It is shown to the banned player at login.
@@ -459,31 +486,40 @@ pub const BAN_REASON_MAX: usize = 200;
 /// the reason AND deletes every session row for the account in ONE
 /// transaction, so no session minted before the ban can be redeemed after
 /// it. An unban clears the flag and the reason. `None` if no such account.
+/// Re-banning an already banned account without a reason keeps the reason it
+/// had (the operator is purging sessions again, not retracting the reason).
 ///
-/// A live WORLD connection is not touched: the ban is checked when a session
-/// is created or redeemed, so a character already in the world keeps playing
-/// until it drops. Kicking by account is its own To-Do; until then a server
-/// restart is what forces a banned player out.
+/// Where the ban bites: `verify_login` (no new session), `touch_session`
+/// (no existing session can be redeemed, which also covers a login that was
+/// in flight when the ban landed), and the world server's connect check (a
+/// connect token minted just before the ban). What it does NOT touch is a
+/// character ALREADY in the world: that connection keeps playing until it
+/// drops. Kicking by account is its own To-Do; until then a server restart
+/// is what forces a banned player out.
 pub async fn set_account_banned(
     pool: &SqlitePool,
     username: &str,
     banned: bool,
     reason: Option<&str>,
 ) -> AuthResult<Option<BanOutcome>> {
-    let row = sqlx::query("SELECT id, is_banned FROM accounts WHERE username = ?1 COLLATE NOCASE")
-        .bind(username)
-        .fetch_optional(pool)
-        .await?;
+    let row = sqlx::query(
+        "SELECT id, is_banned, ban_reason FROM accounts WHERE username = ?1 COLLATE NOCASE",
+    )
+    .bind(username)
+    .fetch_optional(pool)
+    .await?;
     let Some(row) = row else {
         return Ok(None);
     };
     let account_id: i64 = row.get("id");
     let was_banned: bool = row.get("is_banned");
+    let existing: Option<String> = row.get("ban_reason");
 
     let reason: Option<String> = if banned {
         reason
             .map(|r| r.trim().chars().take(BAN_REASON_MAX).collect::<String>())
             .filter(|r| !r.is_empty())
+            .or(if was_banned { existing } else { None })
     } else {
         None
     };
@@ -510,6 +546,7 @@ pub async fn set_account_banned(
         account_id,
         was_banned,
         sessions_purged,
+        reason,
     }))
 }
 
@@ -1636,19 +1673,28 @@ pub async fn reset_password(
 }
 
 #[cfg(test)]
-mod ban_tests {
-    //! The operator ban: login is refused with the reason, every session dies
-    //! in the same transaction, and an unban restores the account cleanly.
+mod test_support {
+    //! Shared by the db test modules below.
     use super::*;
     use tempfile::TempDir;
 
-    async fn fresh_pool() -> (sqlx::SqlitePool, TempDir) {
+    /// A migrated database in a fresh temp directory. Keep the `TempDir`
+    /// bound for the life of the test: dropping it deletes the file.
+    pub(super) async fn fresh_pool() -> (sqlx::SqlitePool, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
-        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("ban_test.db").display());
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("test.db").display());
         let pool = open(&url).await.expect("open");
         migrate(&pool).await.expect("migrate");
         (pool, tmp)
     }
+}
+
+#[cfg(test)]
+mod ban_tests {
+    //! The operator ban: login is refused with the reason, every session dies
+    //! in the same transaction, and an unban restores the account cleanly.
+    use super::test_support::fresh_pool;
+    use super::*;
 
     #[tokio::test]
     async fn ban_refuses_login_and_kills_sessions_and_unban_restores() {
@@ -1678,6 +1724,26 @@ mod ban_tests {
             touch_session(&pool, &session).await.is_err(),
             "a session minted before the ban must not outlive it"
         );
+        assert_eq!(out.reason.as_deref(), Some("corpse camping"), "the outcome reports what is stored");
+        assert!(account_is_banned(&pool, 1).await.expect("read flag"));
+
+        // The in-flight login: its `is_banned` read happened before the ban,
+        // its Argon2 verify ran across it, and its session row lands AFTER
+        // the ban's purge committed. Redemption must still refuse it.
+        let late = issue_session(&pool, 1).await.expect("late session");
+        assert!(
+            matches!(touch_session(&pool, &late).await, Err(AuthError::Banned(_))),
+            "a session that slipped in after the purge is still unusable"
+        );
+
+        // Re-banning without a reason purges again and keeps the reason.
+        let again = set_account_banned(&pool, "griefer", true, None)
+            .await
+            .expect("re-ban")
+            .expect("account exists");
+        assert!(again.was_banned);
+        assert_eq!(again.sessions_purged, 1, "the late session is purged");
+        assert_eq!(again.reason.as_deref(), Some("corpse camping"));
 
         let out = set_account_banned(&pool, "griefer", false, None)
             .await
@@ -1695,6 +1761,11 @@ mod ban_tests {
                 .await
                 .expect("read reason");
         assert_eq!(reason, None, "an unban clears the reason");
+        assert!(!account_is_banned(&pool, 1).await.expect("read flag"));
+        assert!(
+            account_is_banned(&pool, 999).await.expect("read flag"),
+            "an unknown account fails closed"
+        );
     }
 
     #[tokio::test]
@@ -1708,28 +1779,31 @@ mod ban_tests {
         create_account(&pool, "someone", "longpassword", None)
             .await
             .expect("create");
-        set_account_banned(&pool, "someone", true, Some(&"y".repeat(5_000)))
+        // A blank reason on a first ban stores nothing, not an empty string.
+        let out = set_account_banned(&pool, "someone", true, Some("   "))
             .await
             .expect("ban")
             .expect("account exists");
-        let reason: Option<String> =
-            sqlx::query_scalar("SELECT ban_reason FROM accounts WHERE id = 1")
-                .fetch_one(&pool)
-                .await
-                .expect("read reason");
-        assert_eq!(reason.map(|r| r.len()), Some(BAN_REASON_MAX));
-
-        // A blank reason stores nothing rather than an empty string.
-        set_account_banned(&pool, "someone", true, Some("   "))
-            .await
-            .expect("ban")
-            .expect("account exists");
+        assert_eq!(out.reason, None);
         let reason: Option<String> =
             sqlx::query_scalar("SELECT ban_reason FROM accounts WHERE id = 1")
                 .fetch_one(&pool)
                 .await
                 .expect("read reason");
         assert_eq!(reason, None);
+
+        // A long reason is cut, and the outcome reports the cut text.
+        let out = set_account_banned(&pool, "someone", true, Some(&"y".repeat(5_000)))
+            .await
+            .expect("ban")
+            .expect("account exists");
+        assert_eq!(out.reason.as_ref().map(|r| r.len()), Some(BAN_REASON_MAX));
+        let reason: Option<String> =
+            sqlx::query_scalar("SELECT ban_reason FROM accounts WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .expect("read reason");
+        assert_eq!(reason, out.reason);
     }
 }
 
@@ -1739,16 +1813,8 @@ mod gm_audit_tests {
     //! command as issued; an empty batch writes nothing; and a batch is one
     //! transaction, so a bad row takes the rest down with it instead of
     //! leaving a half-written tick.
+    use super::test_support::fresh_pool;
     use super::*;
-    use tempfile::TempDir;
-
-    async fn fresh_pool() -> (sqlx::SqlitePool, TempDir) {
-        let tmp = TempDir::new().expect("tempdir");
-        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("audit_test.db").display());
-        let pool = open(&url).await.expect("open");
-        migrate(&pool).await.expect("migrate");
-        (pool, tmp)
-    }
 
     fn row(actor_account: i64, target_char: i64, command: &str, args: &str) -> GmActionRow {
         GmActionRow {
@@ -1826,16 +1892,8 @@ mod reset_password_tests {
     //! The operator reset: the new password works, the OLD one stops working,
     //! and every session dies with it (a live session outliving a reset is the
     //! whole reason the purge is in the same transaction).
+    use super::test_support::fresh_pool;
     use super::*;
-    use tempfile::TempDir;
-
-    async fn fresh_pool() -> (sqlx::SqlitePool, TempDir) {
-        let tmp = TempDir::new().expect("tempdir");
-        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reset_test.db").display());
-        let pool = open(&url).await.expect("open");
-        migrate(&pool).await.expect("migrate");
-        (pool, tmp)
-    }
 
     #[tokio::test]
     async fn reset_swaps_the_password_and_kills_every_session() {
@@ -1901,16 +1959,8 @@ mod corpse_loot_tests {
     //! (it stays) while updating the looter, and a FULL loot DELETES the corpse in
     //! the SAME tx as the inventory write — so a crash can never drop the body
     //! while losing the gear. Each asserts the looter side AND the corpse side.
+    use super::test_support::fresh_pool;
     use super::*;
-    use tempfile::TempDir;
-
-    async fn fresh_pool() -> (sqlx::SqlitePool, TempDir) {
-        let tmp = TempDir::new().expect("tempdir");
-        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("corpse_test.db").display());
-        let pool = open(&url).await.expect("open");
-        migrate(&pool).await.expect("migrate");
-        (pool, tmp)
-    }
 
     async fn wallet_cols(pool: &sqlx::SqlitePool, char_id: i64) -> (i64, i64, i64, i64) {
         sqlx::query_as("SELECT platinum, gold, silver, copper FROM characters WHERE id = ?1")

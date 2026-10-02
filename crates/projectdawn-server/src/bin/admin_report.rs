@@ -451,8 +451,9 @@ fn render_html(
     h
 }
 
-/// The audit log as its own card, newest first. `data-name` keeps it visible
-/// under the page's name filter only when the filter is empty or matches it.
+/// The audit log as its own card, newest first. Each row carries the actor
+/// and character names for the page's filter, so filtering by an account
+/// under investigation keeps what that account did on screen.
 fn render_gm_actions(h: &mut String, actions: &[GmAction], total: i64) {
     h.push_str("<section class=\"card\" data-name=\"gm actions audit\">\n");
     h.push_str("<div class=\"card-head\"><span class=\"acc-name\">GM actions</span>");
@@ -478,7 +479,15 @@ fn render_gm_actions(h: &mut String, actions: &[GmAction], total: i64) {
     }
     h.push_str("</tr></thead>\n<tbody>\n");
     for g in actions {
-        h.push_str("<tr>");
+        // `data-name` is what the page's filter matches rows on, so typing
+        // an account or character name keeps this card and its rows in view.
+        let filter_key = format!(
+            "{} {}",
+            g.actor.as_deref().unwrap_or(""),
+            g.char_name.as_deref().unwrap_or("")
+        )
+        .to_lowercase();
+        let _ = write!(h, "<tr data-name=\"{}\" data-deleted=\"false\">", esc(&filter_key));
         let _ = write!(h, "<td class=\"muted mono\">{}</td>", cell(g.timestamp.as_deref(), "?"));
         let _ = write!(h, "<td class=\"cname\">{}</td>", cell(g.actor.as_deref(), "(account gone)"));
         let _ = write!(h, "<td>{}</td>", cell(g.char_name.as_deref(), "-"));

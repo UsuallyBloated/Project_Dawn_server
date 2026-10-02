@@ -20,8 +20,11 @@ use sqlx::Row;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `mode=rw`, not `rwc`: an ops tool must never CREATE a database. Run
+    // from the wrong directory, `rwc` leaves an empty `world.db` behind that
+    // looks real to the next tool; `rw` makes a missing database an error.
     let url = std::env::var("PROJECTDAWN_DATABASE_URL")
-        .unwrap_or_else(|_| "sqlite://world.db?mode=rwc".to_string());
+        .unwrap_or_else(|_| "sqlite://world.db?mode=rw".to_string());
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let pool = SqlitePoolOptions::new()

@@ -3,7 +3,7 @@
 //! and may queue replies on the renet server for the next packet flush.
 
 use super::{
-    connection::{PerConnection, Vec3f},
+    connection::{DevCmdAuth, PerConnection, Vec3f},
     entity::Entity,
     loot::LootBag,
     CHANNEL_POSITION, CHANNEL_SYSTEM,
@@ -419,6 +419,39 @@ fn quest_id_well_formed(quest_id: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
+/// The gate every dev/GM command goes through: authorize it, charge its
+/// budget and queue its audit row in one step (`authorize_dev_cmd`). True
+/// only when the command should run. An unauthorized client gets silence (a
+/// reply would be an oracle for whether dev commands are on); an authorized
+/// one over its budget is told, at most once a second.
+///
+/// Call it at the point the command is about to take effect, after every
+/// other precondition, so a row is only written for a command that runs. A
+/// new dev command that gates on this cannot forget its audit row.
+fn dev_cmd_allowed(
+    server: &mut RenetServer,
+    conn: &mut PerConnection,
+    client_id: ClientId,
+    now: Instant,
+    command: &'static str,
+    args: String,
+) -> bool {
+    match conn.authorize_dev_cmd(now, command, args) {
+        DevCmdAuth::Allowed => true,
+        DevCmdAuth::Denied => false,
+        DevCmdAuth::RateLimited { notify } => {
+            if notify {
+                send_refusal(
+                    server,
+                    client_id,
+                    "Dev commands are rate limited; that one was not run.",
+                );
+            }
+            false
+        }
+    }
+}
+
 pub fn handle_message(
     server: &mut RenetServer,
     conn: &mut PerConnection,
@@ -683,11 +716,20 @@ pub fn handle_message(
             // an instant level cap. Real quest turn-ins now go through
             // `CompleteQuest` (server-authored reward). This survives only for
             // the Test Panel leveling buttons ("Level Up" / "Grant 250 XP").
-            if !conn.ready || amount <= 0 || !conn.can_use_dev_cmds() {
+            if !conn.ready
+                || amount <= 0
+                || !dev_cmd_allowed(
+                    server,
+                    conn,
+                    client_id,
+                    now,
+                    "grant_xp",
+                    format!("amount={amount}"),
+                )
+            {
                 return Outcome::Continue;
             }
             tracing::info!(char_id = conn.char_id, amount, "dev quest xp grant");
-            conn.audit_gm("grant_xp", format!("amount={amount}"));
             super::progression::award_xp(server, conn, amount);
             Outcome::Continue
         }
@@ -854,24 +896,34 @@ pub fn handle_message(
                 y: conn.pos.y,
                 z: conn.pos.z - conn.yaw.cos() * 3.0,
             };
+            let audit_args = format!(
+                "name={:?} level={} hp={} dmg={} speed={} aggro={} pos={:.1},{:.1}",
+                mob.name, mob.level, mob.hp, mob.dmg, mob.speed, mob.aggro, pos.x, pos.z
+            );
+            if !dev_cmd_allowed(server, conn, client_id, now, "dev_spawn_mob", audit_args) {
+                return Outcome::Continue;
+            }
             tracing::info!(
                 char_id = conn.char_id,
                 mob = %mob.name,
                 level = mob.level,
                 "dev spawn mob"
             );
-            conn.audit_gm(
-                "dev_spawn_mob",
-                format!(
-                    "name={:?} level={} hp={} dmg={} speed={} aggro={} pos={:.1},{:.1}",
-                    mob.name, mob.level, mob.hp, mob.dmg, mob.speed, mob.aggro, pos.x, pos.z
-                ),
-            );
             Outcome::DevSpawnMobIntent { pos, mob }
         }
 
         ClientWorldMsg::DamageSelf { amount } => {
-            if !conn.in_world || conn.hp <= 0.0 || !conn.can_use_dev_cmds() {
+            if !conn.in_world
+                || conn.hp <= 0.0
+                || !dev_cmd_allowed(
+                    server,
+                    conn,
+                    client_id,
+                    now,
+                    "damage_self",
+                    format!("amount={}", amount.max(0)),
+                )
+            {
                 return Outcome::Continue;
             }
             let delta = amount.max(0) as f32;
@@ -883,12 +935,20 @@ pub fn handle_message(
                 new_hp = conn.hp,
                 "dev damage self"
             );
-            conn.audit_gm("damage_self", format!("amount={delta}"));
             Outcome::Continue
         }
 
         ClientWorldMsg::HealSelf { amount } => {
-            if !conn.in_world || !conn.can_use_dev_cmds() {
+            if !conn.in_world
+                || !dev_cmd_allowed(
+                    server,
+                    conn,
+                    client_id,
+                    now,
+                    "heal_self",
+                    format!("amount={}", amount.max(0)),
+                )
+            {
                 return Outcome::Continue;
             }
             let delta = amount.max(0) as f32;
@@ -907,12 +967,20 @@ pub fn handle_message(
                 new_hp = conn.hp,
                 "dev full restore (hp/mp/stamina)"
             );
-            conn.audit_gm("heal_self", format!("amount={delta}"));
             Outcome::Continue
         }
 
         ClientWorldMsg::GiveCoins { platinum, gold, silver, copper } => {
-            if !conn.in_world || !conn.can_use_dev_cmds() {
+            if !conn.in_world
+                || !dev_cmd_allowed(
+                    server,
+                    conn,
+                    client_id,
+                    now,
+                    "give_coins",
+                    format!("p={platinum} g={gold} s={silver} c={copper}"),
+                )
+            {
                 return Outcome::Continue;
             }
             // Exact per-tier credit, no reduction — a raw-copper grant must
@@ -929,10 +997,6 @@ pub fn handle_message(
                 platinum, gold, silver, copper,
                 total_copper = conn.coins.total_copper(),
                 "dev coin grant"
-            );
-            conn.audit_gm(
-                "give_coins",
-                format!("p={platinum} g={gold} s={silver} c={copper}"),
             );
             Outcome::Continue
         }
@@ -1517,7 +1581,10 @@ pub fn handle_message(
                 if item_name.is_empty() {
                     return Outcome::Continue;
                 }
-                conn.audit_gm("give", format!("item={item_name:?} qty={qty}"));
+                let audit_args = format!("item={item_name:?} qty={qty}");
+                if !dev_cmd_allowed(server, conn, client_id, now, "give", audit_args) {
+                    return Outcome::Continue;
+                }
                 return Outcome::GmGiveIntent {
                     owner: conn.char_id as u64,
                     item_name,

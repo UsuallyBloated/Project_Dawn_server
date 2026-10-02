@@ -207,10 +207,14 @@ pub async fn touch_session(pool: &SqlitePool, token_hex: &str) -> AuthResult<i64
     let bytes = decode_token(token_hex)?;
     let now = Utc::now();
 
-    let row = sqlx::query("SELECT account_id, expires_at FROM sessions WHERE token = ?1")
-        .bind(&bytes[..])
-        .fetch_optional(pool)
-        .await?;
+    let row = sqlx::query(
+        "SELECT s.account_id, s.expires_at, a.is_banned, a.ban_reason
+         FROM sessions s JOIN accounts a ON a.id = s.account_id
+         WHERE s.token = ?1",
+    )
+    .bind(&bytes[..])
+    .fetch_optional(pool)
+    .await?;
 
     let row = row.ok_or(AuthError::SessionExpired)?;
     let account_id: i64 = row.get("account_id");
@@ -218,6 +222,15 @@ pub async fn touch_session(pool: &SqlitePool, token_hex: &str) -> AuthResult<i64
 
     if expires_at < now {
         return Err(AuthError::SessionExpired);
+    }
+    // A ban is enforced on every session redemption, not only at login. The
+    // ban transaction purges the account's sessions, but a Login already in
+    // flight reads `is_banned = false`, spends its Argon2 verify, and inserts
+    // its session AFTER that purge committed. Without this check that session
+    // would be good for its full TTL (character list, world token, the lot).
+    if row.get::<bool, _>("is_banned") {
+        let reason: Option<String> = row.get("ban_reason");
+        return Err(AuthError::Banned(reason.unwrap_or_default()));
     }
 
     sqlx::query("UPDATE sessions SET last_seen = ?1 WHERE token = ?2")
@@ -440,6 +453,140 @@ pub async fn set_account_gm(
         .execute(pool)
         .await?;
     Ok(Some(before))
+}
+
+/// Read an account's ban flag, for the world server's connect-time check. A
+/// missing account reads as banned (fail closed; the caller has just matched
+/// the account to a character, so the row should exist).
+pub async fn account_is_banned(pool: &SqlitePool, account_id: i64) -> AuthResult<bool> {
+    let row = sqlx::query("SELECT is_banned FROM accounts WHERE id = ?1")
+        .bind(account_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| r.get::<bool, _>("is_banned")).unwrap_or(true))
+}
+
+/// What `set_account_banned` did. `reason` is what is now STORED (trimmed,
+/// bounded, or carried over from an earlier ban), which is what the player
+/// will be shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BanOutcome {
+    pub account_id: i64,
+    pub was_banned: bool,
+    pub sessions_purged: u64,
+    pub reason: Option<String>,
+}
+
+/// Longest ban reason stored. It is shown to the banned player at login.
+pub const BAN_REASON_MAX: usize = 200;
+
+/// Ban or unban an account by username (the `admin_account` bin). `is_banned`
+/// has been ENFORCED at login since the auth schema (`verify_login` returns
+/// `AuthError::Banned`), but nothing could set it. A ban writes the flag and
+/// the reason AND deletes every session row for the account in ONE
+/// transaction, so no session minted before the ban can be redeemed after
+/// it. An unban clears the flag and the reason. `None` if no such account.
+/// Re-banning an already banned account without a reason keeps the reason it
+/// had (the operator is purging sessions again, not retracting the reason).
+///
+/// Where the ban bites: `verify_login` (no new session), `touch_session`
+/// (no existing session can be redeemed, which also covers a login that was
+/// in flight when the ban landed), and the world server's connect check (a
+/// connect token minted just before the ban). What it does NOT touch is a
+/// character ALREADY in the world: that connection keeps playing until it
+/// drops. Kicking by account is its own To-Do; until then a server restart
+/// is what forces a banned player out.
+pub async fn set_account_banned(
+    pool: &SqlitePool,
+    username: &str,
+    banned: bool,
+    reason: Option<&str>,
+) -> AuthResult<Option<BanOutcome>> {
+    let row = sqlx::query(
+        "SELECT id, is_banned, ban_reason FROM accounts WHERE username = ?1 COLLATE NOCASE",
+    )
+    .bind(username)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let account_id: i64 = row.get("id");
+    let was_banned: bool = row.get("is_banned");
+    let existing: Option<String> = row.get("ban_reason");
+
+    let reason: Option<String> = if banned {
+        reason
+            .map(|r| r.trim().chars().take(BAN_REASON_MAX).collect::<String>())
+            .filter(|r| !r.is_empty())
+            .or(if was_banned { existing } else { None })
+    } else {
+        None
+    };
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE accounts SET is_banned = ?1, ban_reason = ?2 WHERE id = ?3")
+        .bind(banned)
+        .bind(&reason)
+        .bind(account_id)
+        .execute(&mut *tx)
+        .await?;
+    let sessions_purged = if banned {
+        sqlx::query("DELETE FROM sessions WHERE account_id = ?1")
+            .bind(account_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+    } else {
+        0
+    };
+    tx.commit().await?;
+
+    Ok(Some(BanOutcome {
+        account_id,
+        was_banned,
+        sessions_purged,
+        reason,
+    }))
+}
+
+/// One row for the `gm_actions` audit table: an authorized dev/GM command as
+/// issued. Every current dev command acts on the issuer's own character, so
+/// the target account is the actor and the target character is theirs.
+#[derive(Debug, Clone)]
+pub struct GmActionRow {
+    pub actor_account: i64,
+    pub target_char: i64,
+    pub command: String,
+    pub args: String,
+}
+
+/// Write a tick's worth of audit rows in ONE transaction (the table has
+/// existed since the auth schema and sat empty until 2026-10-01). Read them
+/// back with the `admin_report` bin.
+///
+/// Note for whoever builds an account-delete tool: `gm_actions` references
+/// accounts and characters WITHOUT `ON DELETE CASCADE`, unlike every other
+/// child table, so a delete has to decide what happens to these rows.
+pub async fn record_gm_actions(pool: &SqlitePool, rows: &[GmActionRow]) -> AuthResult<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    for row in rows {
+        sqlx::query(
+            "INSERT INTO gm_actions (actor_account, target_account, target_char, command, args)
+             VALUES (?1, ?1, ?2, ?3, ?4)",
+        )
+        .bind(row.actor_account)
+        .bind(row.target_char)
+        .bind(&row.command)
+        .bind(&row.args)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 /// A character's bind point: where `Respawn` puts them. Coordinates are
@@ -1580,20 +1727,227 @@ pub async fn reset_password(
 }
 
 #[cfg(test)]
-mod reset_password_tests {
-    //! The operator reset: the new password works, the OLD one stops working,
-    //! and every session dies with it (a live session outliving a reset is the
-    //! whole reason the purge is in the same transaction).
+mod test_support {
+    //! Shared by the db test modules below.
     use super::*;
     use tempfile::TempDir;
 
-    async fn fresh_pool() -> (sqlx::SqlitePool, TempDir) {
+    /// A migrated database in a fresh temp directory. Keep the `TempDir`
+    /// bound for the life of the test: dropping it deletes the file.
+    pub(super) async fn fresh_pool() -> (sqlx::SqlitePool, TempDir) {
         let tmp = TempDir::new().expect("tempdir");
-        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reset_test.db").display());
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("test.db").display());
         let pool = open(&url).await.expect("open");
         migrate(&pool).await.expect("migrate");
         (pool, tmp)
     }
+}
+
+#[cfg(test)]
+mod ban_tests {
+    //! The operator ban: login is refused with the reason, every session dies
+    //! in the same transaction, and an unban restores the account cleanly.
+    use super::test_support::fresh_pool;
+    use super::*;
+
+    #[tokio::test]
+    async fn ban_refuses_login_and_kills_sessions_and_unban_restores() {
+        let (pool, _tmp) = fresh_pool().await;
+        create_account(&pool, "griefer", "longpassword", None)
+            .await
+            .expect("create");
+        let session = issue_session(&pool, 1).await.expect("session");
+        assert!(touch_session(&pool, &session).await.is_ok(), "live before the ban");
+
+        let out = set_account_banned(&pool, "GRIEFER", true, Some("  corpse camping  "))
+            .await
+            .expect("ban")
+            .expect("account exists (lookup is case-insensitive)");
+        assert_eq!(out.account_id, 1);
+        assert!(!out.was_banned);
+        assert_eq!(out.sessions_purged, 1);
+
+        assert!(
+            matches!(
+                verify_login(&pool, "griefer", "longpassword").await,
+                Err(AuthError::Banned(reason)) if reason == "corpse camping"
+            ),
+            "a banned account is refused with the trimmed reason, even with the right password"
+        );
+        assert!(
+            touch_session(&pool, &session).await.is_err(),
+            "a session minted before the ban must not outlive it"
+        );
+        assert_eq!(out.reason.as_deref(), Some("corpse camping"), "the outcome reports what is stored");
+        assert!(account_is_banned(&pool, 1).await.expect("read flag"));
+
+        // The in-flight login: its `is_banned` read happened before the ban,
+        // its Argon2 verify ran across it, and its session row lands AFTER
+        // the ban's purge committed. Redemption must still refuse it.
+        let late = issue_session(&pool, 1).await.expect("late session");
+        assert!(
+            matches!(touch_session(&pool, &late).await, Err(AuthError::Banned(_))),
+            "a session that slipped in after the purge is still unusable"
+        );
+
+        // Re-banning without a reason purges again and keeps the reason.
+        let again = set_account_banned(&pool, "griefer", true, None)
+            .await
+            .expect("re-ban")
+            .expect("account exists");
+        assert!(again.was_banned);
+        assert_eq!(again.sessions_purged, 1, "the late session is purged");
+        assert_eq!(again.reason.as_deref(), Some("corpse camping"));
+
+        let out = set_account_banned(&pool, "griefer", false, None)
+            .await
+            .expect("unban")
+            .expect("account exists");
+        assert!(out.was_banned);
+        assert_eq!(out.sessions_purged, 0, "an unban purges nothing");
+        assert!(
+            verify_login(&pool, "griefer", "longpassword").await.is_ok(),
+            "an unbanned account logs in again"
+        );
+        let reason: Option<String> =
+            sqlx::query_scalar("SELECT ban_reason FROM accounts WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .expect("read reason");
+        assert_eq!(reason, None, "an unban clears the reason");
+        assert!(!account_is_banned(&pool, 1).await.expect("read flag"));
+        assert!(
+            account_is_banned(&pool, 999).await.expect("read flag"),
+            "an unknown account fails closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn ban_of_an_unknown_account_is_none_and_the_reason_is_bounded() {
+        let (pool, _tmp) = fresh_pool().await;
+        assert_eq!(
+            set_account_banned(&pool, "nobody", true, Some("x")).await.expect("query"),
+            None
+        );
+
+        create_account(&pool, "someone", "longpassword", None)
+            .await
+            .expect("create");
+        // A blank reason on a first ban stores nothing, not an empty string.
+        let out = set_account_banned(&pool, "someone", true, Some("   "))
+            .await
+            .expect("ban")
+            .expect("account exists");
+        assert_eq!(out.reason, None);
+        let reason: Option<String> =
+            sqlx::query_scalar("SELECT ban_reason FROM accounts WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .expect("read reason");
+        assert_eq!(reason, None);
+
+        // A long reason is cut, and the outcome reports the cut text.
+        let out = set_account_banned(&pool, "someone", true, Some(&"y".repeat(5_000)))
+            .await
+            .expect("ban")
+            .expect("account exists");
+        assert_eq!(out.reason.as_ref().map(|r| r.len()), Some(BAN_REASON_MAX));
+        let reason: Option<String> =
+            sqlx::query_scalar("SELECT ban_reason FROM accounts WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .expect("read reason");
+        assert_eq!(reason, out.reason);
+    }
+}
+
+#[cfg(test)]
+mod gm_audit_tests {
+    //! The audit writer: rows land with the actor, the character and the
+    //! command as issued; an empty batch writes nothing; and a batch is one
+    //! transaction, so a bad row takes the rest down with it instead of
+    //! leaving a half-written tick.
+    use super::test_support::fresh_pool;
+    use super::*;
+
+    fn row(actor_account: i64, target_char: i64, command: &str, args: &str) -> GmActionRow {
+        GmActionRow {
+            actor_account,
+            target_char,
+            command: command.to_string(),
+            args: args.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_rows_land_in_order_with_actor_and_character() {
+        let (pool, _tmp) = fresh_pool().await;
+        create_account(&pool, "auditor", "longpassword", None)
+            .await
+            .expect("create account");
+        let char_id = create_character(&pool, 1, "Auditor", "Human", "Warrior")
+            .await
+            .expect("create character");
+
+        record_gm_actions(&pool, &[]).await.expect("an empty batch is a no-op");
+        record_gm_actions(
+            &pool,
+            &[
+                row(1, char_id, "heal_self", "amount=50 via=gm"),
+                row(1, char_id, "give", "item=\"Bread Loaf\" qty=1 via=gm"),
+            ],
+        )
+        .await
+        .expect("record");
+
+        let rows = sqlx::query(
+            "SELECT actor_account, target_account, target_char, command, args
+             FROM gm_actions ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read back");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].get::<i64, _>("actor_account"), 1);
+        assert_eq!(rows[0].get::<i64, _>("target_account"), 1);
+        assert_eq!(rows[0].get::<i64, _>("target_char"), char_id);
+        assert_eq!(rows[0].get::<String, _>("command"), "heal_self");
+        assert_eq!(rows[1].get::<String, _>("command"), "give");
+        assert_eq!(rows[1].get::<String, _>("args"), "item=\"Bread Loaf\" qty=1 via=gm");
+    }
+
+    #[tokio::test]
+    async fn a_bad_row_rolls_the_whole_batch_back() {
+        let (pool, _tmp) = fresh_pool().await;
+        create_account(&pool, "auditor", "longpassword", None)
+            .await
+            .expect("create account");
+        let char_id = create_character(&pool, 1, "Auditor", "Human", "Warrior")
+            .await
+            .expect("create character");
+
+        // Account 999 does not exist: the foreign key refuses it.
+        let result = record_gm_actions(
+            &pool,
+            &[row(1, char_id, "heal_self", "amount=1"), row(999, char_id, "give", "x")],
+        )
+        .await;
+        assert!(result.is_err(), "an unknown actor account must be refused");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM gm_actions")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count, 0, "the good row must not survive the failed batch");
+    }
+}
+
+#[cfg(test)]
+mod reset_password_tests {
+    //! The operator reset: the new password works, the OLD one stops working,
+    //! and every session dies with it (a live session outliving a reset is the
+    //! whole reason the purge is in the same transaction).
+    use super::test_support::fresh_pool;
+    use super::*;
 
     #[tokio::test]
     async fn reset_swaps_the_password_and_kills_every_session() {
@@ -1659,16 +2013,8 @@ mod corpse_loot_tests {
     //! (it stays) while updating the looter, and a FULL loot DELETES the corpse in
     //! the SAME tx as the inventory write — so a crash can never drop the body
     //! while losing the gear. Each asserts the looter side AND the corpse side.
+    use super::test_support::fresh_pool;
     use super::*;
-    use tempfile::TempDir;
-
-    async fn fresh_pool() -> (sqlx::SqlitePool, TempDir) {
-        let tmp = TempDir::new().expect("tempdir");
-        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("corpse_test.db").display());
-        let pool = open(&url).await.expect("open");
-        migrate(&pool).await.expect("migrate");
-        (pool, tmp)
-    }
 
     async fn wallet_cols(pool: &sqlx::SqlitePool, char_id: i64) -> (i64, i64, i64, i64) {
         sqlx::query_as("SELECT platinum, gold, silver, copper FROM characters WHERE id = ?1")

@@ -350,6 +350,14 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Heartbeat);
     }
 
+    fn send_inspect_player(&mut self, target_char_id: i64) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::InspectPlayer { target_char_id },
+        );
+    }
+
     fn send_attack(&mut self, target_id: u64, weapon_path: &str, is_offhand: bool, dmg_type: DamageType) {
         let msg = ClientWorldMsg::Attack {
             target_id,
@@ -1974,41 +1982,34 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
 async fn charm_converts_enemy_to_pet() {
     let h = start_both().await;
 
-    let (a_session, a_char_id, a_token) =
+    let (a_session, a_char_id, _stale_token) =
         provision_client(&h.auth_url, "ench", "Enchanted", "Human", "Enchanter").await;
     // Charm requires level 20; provisioned characters start at 1.
     set_char_level(&h.db_url, a_char_id, 20).await;
+    // GM for the dev spawn below; re-mint the token so the flag rides it.
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "ench", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
-    // Walk into camp 0 to aggro an enemy (gives us a target id).
-    // Phase 4 layout note: every camp-walking test aims at the Bonepile's
-    // isolated [-16, 0, -14] spawn â€” the one ring 1 spawn whose aggro circle
-    // overlaps no other, so exactly ONE slow (1.8 m/s, 2.5 s swing) level 1
-    // Decrepit Skeleton pulls, the same single-puller semantics these tests
-    // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
-    // pack, and standing in it turns every cast into interrupt rolls.
-    let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
-    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
-    // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
-    // whether an enemy locks on before the wait expires depended on where it
-    // happened to be wandering. Walking fully in makes the pull deterministic.
-    let walk_end = Instant::now() + Duration::from_millis(3_500);
-    let mut seq: u32 = 1;
-    while Instant::now() < walk_end {
-        a.send_move(seq, dir);
-        seq += 1;
-        tick_one(&mut a.client, &mut a.transport);
-        tokio::time::sleep(TICK_DT).await;
-    }
-    let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
-            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
+    // Charm a mob that is NOT attacking. This test used to walk into the
+    // Bonepile, wait for the skeleton's hit, then cast the 2.0 s Charm while
+    // that skeleton kept swinging every 2.5 s: the cast finished about 0.2 s
+    // before the next swing, so any stretch of the test loop landed a hit
+    // mid-cast and rolled the ~70% channeling-0 interrupt. That race was the
+    // whole of its "load sensitivity". A dev-spawned mob with aggro 0 and
+    // speed 0 never targets or swings, so an interrupt is impossible rather
+    // than unlikely (the same fix the AOE test got on 2026-09-16).
+    a.send_dev_spawn("Charm Dummy", 1, 30.0, 0, 0.0, 0.0);
+    let spawn_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
         })
         .await
-        .expect("enemy hits player");
-    let enemy_id: u64 = match hit_evt {
-        ServerWorldMsg::Hit { attacker, .. } => attacker,
+        .expect("the dev-spawned dummy fans an EnemySpawn");
+    let enemy_id: u64 = match spawn_evt {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
         _ => unreachable!(),
     };
 
@@ -2041,9 +2042,9 @@ async fn charm_converts_enemy_to_pet() {
         .expect("a fresh pet id spawns for the caster");
     if let ServerWorldMsg::PetSpawn { id, pet_name, .. } = pet_spawn {
         assert!(id >= PET_ID_BASE, "charmed pet id must be in pet partition");
-        // Mob name preserved â€” charmed Decrepit Skeleton stays
-        // named "Decrepit Skeleton" on the pet entity.
-        assert_eq!(pet_name, "Decrepit Skeleton");
+        // Mob name preserved: the charmed dummy keeps its name on the
+        // pet entity.
+        assert_eq!(pet_name, "Charm Dummy");
     }
 }
 
@@ -4332,4 +4333,363 @@ async fn player_crossing_into_view_of_an_existing_pet_gets_pet_spawn() {
         spawned.is_some(),
         "A must get the existing pet's PetSpawn on walking into its neighbourhood"
     );
+}
+
+// ── InspectPlayer range gate (exploit audit finding 10) ───────────────────
+
+/// A paperdoll used to be readable from anywhere in the world. B is seeded
+/// 200 m from A, far beyond INSPECT_RANGE: A's inspect must be refused with a
+/// chat line and an empty result. An id that never existed must get the very
+/// same answer, or the gate would be a char_id to name map and an is-online
+/// oracle for anyone enumerating ids.
+#[tokio::test]
+async fn inspect_player_refuses_beyond_range() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "inspfar", "Inspfar", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "insptgt", "Insptgt", "Elf", "Cleric").await;
+    set_char_pos(&h.db_url, b_char_id, 200.0, 0.0).await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    const NOBODY: i64 = 999_999;
+    for (label, target) in [("out of range", b_char_id), ("nonexistent", NOBODY)] {
+        a.send_inspect_player(target);
+        // The line, then the result, in the order the server sends them.
+        let line = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+                if text.contains("not close enough to inspect"))
+        })
+        .await
+        .unwrap_or_else(|| panic!("a {label} inspect must answer with the refusal line"));
+        if let ServerWorldMsg::ChatMessage { text, .. } = line {
+            assert!(
+                !text.contains("Insptgt"),
+                "the refusal must not name the target (got {text:?})"
+            );
+        }
+        let result = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InspectResult { target_char_id, .. }
+                if *target_char_id == target)
+        })
+        .await
+        .unwrap_or_else(|| panic!("a {label} inspect still closes the client's waiting state"));
+        if let ServerWorldMsg::InspectResult { target_name, slots, .. } = result {
+            assert!(target_name.is_empty(), "a {label} inspect names nobody");
+            assert!(slots.is_empty(), "a {label} inspect discloses no slots");
+        }
+    }
+}
+
+/// The honest path is untouched: 20 m apart, inside INSPECT_RANGE, the
+/// inspect returns the target's name.
+#[tokio::test]
+async fn inspect_player_answers_within_range() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "inspnear", "Inspnear", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "inspbud", "Inspbud", "Elf", "Cleric").await;
+    set_char_pos(&h.db_url, b_char_id, 20.0, 0.0).await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    a.send_inspect_player(b_char_id);
+    let result = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InspectResult { target_char_id, .. }
+            if *target_char_id == b_char_id)
+    })
+    .await
+    .expect("an in-range inspect answers");
+    if let ServerWorldMsg::InspectResult { target_name, .. } = result {
+        assert_eq!(target_name, "Inspbud");
+    }
+}
+
+// ── GM action audit log ───────────────────────────────────────────────────
+
+/// Every AUTHORIZED dev/GM command lands in `gm_actions`, tagged with the
+/// authority that allowed it; the same commands from a plain account are
+/// ignored by the gate and leave no row (a refused attempt must not be a way
+/// for any client to make the server write).
+#[tokio::test]
+async fn gm_commands_are_audited_only_when_authorized() {
+    use sqlx::Row;
+    // Same guard as is_gm_gates_dev_commands: with PD_DEV_CMDS=1 every
+    // connection is dev, so the plain account would be authorized too.
+    if std::env::var("PD_DEV_CMDS").as_deref() == Ok("1") {
+        eprintln!("skipping gm_commands_are_audited_only_when_authorized: PD_DEV_CMDS=1");
+        return;
+    }
+    let h = start_both().await;
+    let (gm_session, gm_char, _stale_token) =
+        provision_client(&h.auth_url, "auditgm", "Auditgm", "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "auditgm", true).await.expect("set is_gm");
+    let gm_token = request_world_token(&h.auth_url, &gm_session, gm_char).await;
+    let (pl_session, pl_char, pl_token) =
+        provision_client(&h.auth_url, "auditpl", "Auditpl", "Human", "Warrior").await;
+
+    let mut gm = WorldClient::start(gm_token, &gm_session, gm_char).await;
+    let mut plain = WorldClient::start(pl_token, &pl_session, pl_char).await;
+
+    gm.send_grant_quest_xp(250);
+    gm.send_dev_spawn("Audit Dummy", 1, 10.0, 0, 0.0, 0.0);
+    plain.send_grant_quest_xp(250);
+    plain.send_dev_spawn("Forged Dummy", 1, 10.0, 0, 0.0, 0.0);
+    // Probe: the plain account's self-inspect rides the same ordered channel
+    // AFTER its two dev commands, and its answer is sent later in the tick
+    // than the audit flush. Once it arrives, both commands have been handled
+    // and any row they caused would be committed, so "no row" is not vacuous.
+    plain.send_inspect_player(pl_char);
+
+    // Wait on effects, not on a clock. The GM's dev spawn is fanned in the
+    // same tick as the flush that records it, after it.
+    wait_on_a_pumping_b(&mut gm, &mut plain, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Audit Dummy")
+    })
+    .await
+    .expect("the GM's dev spawn takes effect");
+    wait_on_a_pumping_b(&mut plain, &mut gm, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::InspectResult { target_char_id, .. }
+            if *target_char_id == pl_char)
+    })
+    .await
+    .expect("the plain account's probe is answered");
+
+    let rows = sqlx::query(
+        "SELECT a.username AS actor, g.target_char, g.command, g.args
+         FROM gm_actions g JOIN accounts a ON a.id = g.actor_account
+         ORDER BY g.id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read gm_actions");
+    let seen: Vec<(String, i64, String, String)> = rows
+        .iter()
+        .map(|r| (r.get("actor"), r.get("target_char"), r.get("command"), r.get("args")))
+        .collect();
+    assert_eq!(seen.len(), 2, "exactly the GM's two commands are recorded, got {seen:?}");
+    for (actor, target_char, _, args) in &seen {
+        assert_eq!(actor, "auditgm", "only the authorized account appears");
+        assert_eq!(*target_char, gm_char);
+        assert!(args.ends_with("via=gm"), "the row names the authority: {args}");
+    }
+    assert_eq!(seen[0].2, "grant_xp");
+    assert!(seen[0].3.starts_with("amount=250"));
+    assert_eq!(seen[1].2, "dev_spawn_mob");
+    assert!(seen[1].3.contains("Audit Dummy"));
+}
+
+
+/// The Test Panel's crafting-materials button sends about 34 dev commands in
+/// one frame. Every one of them must be recorded (the first cut of the audit
+/// capped a tick at 8 rows and let the rest RUN unrecorded), and a burst
+/// that size is inside the budget, so nothing is refused.
+#[tokio::test]
+async fn gm_command_burst_is_recorded_whole() {
+    if std::env::var("PD_DEV_CMDS").as_deref() == Ok("1") {
+        eprintln!("skipping gm_command_burst_is_recorded_whole: PD_DEV_CMDS=1");
+        return;
+    }
+    let h = start_both().await;
+    let (gm_session, gm_char, _stale_token) =
+        provision_client(&h.auth_url, "burstgm", "Burstgm", "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "burstgm", true).await.expect("set is_gm");
+    let gm_token = request_world_token(&h.auth_url, &gm_session, gm_char).await;
+    let mut gm = WorldClient::start(gm_token, &gm_session, gm_char).await;
+
+    for _ in 0..34 {
+        gm.send_grant_quest_xp(1);
+    }
+    // Marker: ordered after the burst, fanned after the flush that records it.
+    gm.send_dev_spawn("Burst Marker", 1, 10.0, 0, 0.0, 0.0);
+    gm.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Burst Marker")
+    })
+    .await
+    .expect("the marker spawn takes effect");
+
+    let recorded: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM gm_actions WHERE command = 'grant_xp'")
+            .fetch_one(&pool)
+            .await
+            .expect("count grant_xp rows");
+    assert_eq!(recorded, 34, "every command in the burst has its own row");
+    let overflow: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM gm_actions WHERE command = 'audit_overflow'")
+            .fetch_one(&pool)
+            .await
+            .expect("count overflow rows");
+    assert_eq!(overflow, 0, "an honest burst is inside the budget");
+}
+
+/// A ban holds at world connect: a connect token minted BEFORE the ban is
+/// still valid for its short life, and must not get the account into the
+/// world. The server answers the transport connect with a BannedNow kick.
+#[tokio::test]
+async fn banned_account_is_refused_at_world_connect() {
+    let h = start_both().await;
+    // The token is minted here, while the account is still in good standing.
+    let (_session, _char_id, token) =
+        provision_client(&h.auth_url, "bannedguy", "Bannedguy", "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_banned(&pool, "bannedguy", true, Some("test ban"))
+        .await
+        .expect("ban")
+        .expect("account exists");
+
+    // The first half of WorldClient::start: the renet handshake only.
+    let connect_token =
+        ConnectToken::read(&mut Cursor::new(&token[..])).expect("ConnectToken::read");
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("udp bind");
+    socket.set_nonblocking(true).expect("nonblocking");
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let auth = ClientAuthentication::Secure { connect_token };
+    let mut transport = NetcodeClientTransport::new(now, auth, socket).expect("transport");
+    let mut client = RenetClient::new(connection_config_matching_server());
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut kick: Option<(protocol::world::KickCode, String)> = None;
+    'wait: while Instant::now() < deadline {
+        tick_one(&mut client, &mut transport);
+        while let Some(bytes) = client.receive_message(CHANNEL_SYSTEM) {
+            if let Ok((ServerWorldMsg::Kick { code, reason, .. }, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
+                kick = Some((code, reason));
+                break 'wait;
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    let (code, reason) = kick.expect("a banned account's connect is answered with a Kick");
+    assert!(
+        matches!(code, protocol::world::KickCode::BannedNow),
+        "the kick says why (got {code:?}: {reason})"
+    );
+}
+
+/// Charm had no range check: any live enemy id in the world could be charmed
+/// from anywhere. This is that exploit as a client would run it: B, seeded two
+/// cells away, conjures a dummy there; A, standing at the starter spawn and
+/// never even told the dummy exists, names its id in a Charm. It must be
+/// refused with the line, and the dummy must still be standing.
+///
+/// Nobody walks: an earlier shape walked the caster away from a dummy, and
+/// under a loaded run the walk covered more ground in wall-clock time, strayed
+/// into a camp, and the cast was interrupted by a mob instead.
+#[tokio::test]
+async fn charm_refuses_a_target_out_of_range() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "farench", "Farench", "Human", "Enchanter").await;
+    set_char_level(&h.db_url, a_char_id, 20).await;
+    let (b_session, b_char_id, _stale_token) =
+        provision_client(&h.auth_url, "farspawn", "Farspawn", "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "farspawn", true).await.expect("set is_gm");
+    set_char_pos(&h.db_url, b_char_id, 248.0, 60.0).await;
+    let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    b.send_dev_spawn("Far Dummy", 1, 30.0, 0, 0.0, 0.0);
+    let spawn_evt = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Far Dummy")
+    })
+    .await
+    .expect("the dummy spawns beside B");
+    let enemy_id: u64 = match spawn_evt {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    a.send_cast_start("Charm", 2.0);
+    pump_both_for(&mut a, &mut b, Duration::from_millis(2150)).await;
+    a.send_cast_spell("Charm", Some(enemy_id));
+    wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("too far away"))
+    })
+    .await
+    .expect("an out-of-range charm is refused with the line");
+
+    // Nothing was charmed: no pet for A, and B never sees its dummy despawn.
+    let pet = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_millis(600), |m| {
+        matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+    })
+    .await;
+    assert!(pet.is_none(), "nothing is charmed from out of range");
+    let gone = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_millis(300), |m| {
+        matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id)
+    })
+    .await;
+    assert!(gone.is_none(), "the dummy is still standing where B conjured it");
+}
+
+/// The case that matters in play: charming a spawner-owned camp mob that is
+/// aggroed and mid-fight. The dummy test above proves the conversion without
+/// timing risk; this one keeps a live target, a threat table and a running
+/// swing timer under the charm. The skeleton fights B, so nothing swings at
+/// the caster and no interrupt can roll: the old single-client shape raced
+/// the mob's own swing timer.
+#[tokio::test]
+async fn charm_converts_a_camp_mob_that_is_fighting_someone_else() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "campench", "Campench", "Human", "Enchanter").await;
+    set_char_level(&h.db_url, a_char_id, 20).await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "camptank", "Camptank", "Human", "Warrior").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    // B walks 18 m toward the Bonepile's isolated [-16, -14] spawn (21 m from
+    // the starter spawn, aggro 8) and stops: inside its aggro circle, and the
+    // fight then happens under 20 m from A, who stays at spawn, outside that
+    // circle and inside charm range (25 m).
+    let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
+    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
+    let mut seq: u32 = 1;
+    walk_pumping(&mut b, &mut a, &mut seq, dir, 48).await;
+    b.send_move(seq, Vec3 { x: 0.0, y: 0.0, z: 0.0 });
+
+    let hit_evt = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_secs(35), |m| {
+        matches!(m, ServerWorldMsg::Hit { target, .. } if *target == b_char_id as u64)
+    })
+    .await
+    .expect("the skeleton engages B");
+    let enemy_id: u64 = match hit_evt {
+        ServerWorldMsg::Hit { attacker, .. } => attacker,
+        _ => unreachable!(),
+    };
+
+    a.send_cast_start("Charm", 2.0);
+    pump_both_for(&mut a, &mut b, Duration::from_millis(2150)).await;
+    a.send_cast_spell("Charm", Some(enemy_id));
+
+    wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id)
+    })
+    .await
+    .expect("the fighting mob's enemy id despawns on charm");
+    let pet_spawn = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+    })
+    .await
+    .expect("it comes back as the caster's pet");
+    if let ServerWorldMsg::PetSpawn { id, pet_name, .. } = pet_spawn {
+        assert!(id >= PET_ID_BASE, "charmed pet id must be in the pet partition");
+        assert_eq!(pet_name, "Decrepit Skeleton");
+    }
 }

@@ -20,7 +20,8 @@ use super::{
     spawn_points::Spawner,
     spells,
     ATTACK_RANGE_TOLERANCE, CAMP_SECS, CHANNEL_POSITION, CHANNEL_SYSTEM, CHECKPOINT_INTERVAL, ENEMY_FAN_REPORT_INTERVAL,
-    ENEMY_DESPAWN_LINGER_SECS, GROUP_COIN_SHARE_RANGE, LINKDEAD_SECS, LOOT_BAG_LINGER_SECS,
+    ENEMY_DESPAWN_LINGER_SECS, GROUP_COIN_SHARE_RANGE, INSPECT_RANGE, LINKDEAD_SECS,
+    LOOT_BAG_LINGER_SECS,
     LOOT_PICKUP_RANGE, MAX_MOVE_SPEED,
     RANGED_ATTACK_RANGE, STALE_MOVE_THRESHOLD, TICK_DT,
 };
@@ -951,6 +952,56 @@ fn fan_entity_cell_crossing(
     }
 }
 
+/// Move a connection's queued audit entries into `out` as `gm_actions` rows.
+/// Commands refused over budget are summarized as one `audit_overflow` row,
+/// written at most once a second per connection (`force` writes it now: the
+/// connection is leaving), so a flood is recorded as a flood without the
+/// summary itself becoming a write per tick.
+fn collect_gm_audit(
+    conn: &mut PerConnection,
+    now: Instant,
+    force: bool,
+    out: &mut Vec<db::GmActionRow>,
+) {
+    let (actor_account, target_char) = (conn.account_id, conn.char_id);
+    for entry in conn.gm_audit.drain(..) {
+        out.push(db::GmActionRow {
+            actor_account,
+            target_char,
+            command: entry.command.to_string(),
+            args: entry.args,
+        });
+    }
+    if conn.gm_cmd_refused > 0 {
+        let due = force
+            || conn
+                .gm_overflow_row_at
+                .is_none_or(|t| now.saturating_duration_since(t).as_secs_f32() >= 1.0);
+        if due {
+            out.push(db::GmActionRow {
+                actor_account,
+                target_char,
+                command: "audit_overflow".to_string(),
+                args: format!("refused={}", conn.gm_cmd_refused),
+            });
+            conn.gm_cmd_refused = 0;
+            conn.gm_overflow_row_at = Some(now);
+        }
+    }
+}
+
+/// Write collected audit rows in one transaction. A failed write is logged
+/// with its rows and dropped; the per-command info lines in the server log
+/// remain as the fallback record.
+async fn write_gm_audit(pool: &SqlitePool, rows: &[db::GmActionRow]) {
+    if rows.is_empty() {
+        return;
+    }
+    if let Err(e) = db::record_gm_actions(pool, rows).await {
+        tracing::error!(error = %e, rows = ?rows, "gm audit write failed — rows dropped");
+    }
+}
+
 /// Despawn the pet(s) owned by `owner_entity`: fan EntityDespawn to the AOI
 /// peers who could see each pet, then drop it from the grid and the enemies
 /// map. Idempotent — a second call after the pets are already gone is a no-op.
@@ -1074,6 +1125,14 @@ async fn reap_connection(
     }
 
     if let Some(mut conn) = connections.remove(&client_id) {
+        // Whatever the audit queue still holds goes out with the connection.
+        // The per-tick flush runs before the reaps, so this is normally
+        // empty; it is here so a dev command handled in the same pass as a
+        // disconnect can never have run unrecorded.
+        let mut audit_rows = Vec::new();
+        collect_gm_audit(&mut conn, Instant::now(), true, &mut audit_rows);
+        write_gm_audit(pool, &audit_rows).await;
+
         // One last save for the road. Failure is non-fatal — worst case the
         // player rolls back to the last 60 s checkpoint.
         if conn.is_dirty_for_persist() {
@@ -1403,6 +1462,32 @@ pub async fn run(
                                     KickCode::DuplicateLogin,
                                     &reason,
                                     reconnect_after_secs,
+                                );
+                                continue;
+                            }
+                            // A ban holds at world connect too. Banning purges
+                            // the account's sessions and session redemption
+                            // refuses a banned account, but a connect token
+                            // minted just BEFORE the ban is still valid for its
+                            // short life; this is what stops it at the door.
+                            // Fails closed: if the flag cannot be read, refuse.
+                            // Same no-disconnect kick as the refusal above, so
+                            // the reliable Kick reaches the client.
+                            let banned = match db::account_is_banned(&pool, account_id).await {
+                                Ok(banned) => banned,
+                                Err(e) => {
+                                    tracing::error!(account_id, char_id, error = %e,
+                                        "could not read the ban flag at connect — refusing");
+                                    true
+                                }
+                            };
+                            if banned {
+                                tracing::info!(account_id, char_id, "banned account refused at world connect");
+                                handlers::send_kick(
+                                    &mut server,
+                                    client_id,
+                                    KickCode::BannedNow,
+                                    "This account is banned.",
                                 );
                                 continue;
                             }
@@ -2180,6 +2265,22 @@ pub async fn run(
             }
         }
 
+        // 3-bis. GM action audit flush. A dev/GM command runs only if
+        //    `authorize_dev_cmd` queued its row, and the rows are written
+        //    here, straight after the message drain (`reap_connection`
+        //    flushes its own connection too, so a command handled in the
+        //    same pass as a disconnect is still recorded). One transaction
+        //    for the tick. The write volume is bounded over TIME, not just
+        //    per tick, by the per-connection command budget: after its burst
+        //    a flooding GM client is held to GM_CMD_REFILL_PER_SEC rows a
+        //    second plus one overflow summary, and the commands it is refused
+        //    do not run.
+        let mut audit_rows: Vec<db::GmActionRow> = Vec::new();
+        for conn in connections.values_mut() {
+            collect_gm_audit(conn, now, false, &mut audit_rows);
+        }
+        write_gm_audit(&pool, &audit_rows).await;
+
         // 4. App-layer heartbeat timeout — catches frozen game windows that
         //    transport-level keepalive doesn't notice. Skip connections that
         //    are already lingering linkdead: their transport is gone, so
@@ -2726,16 +2827,38 @@ pub async fn run(
         }
 
         // Inspect-player drain. Look up target by char_id, ensure they're
-        // in-world, pack their paperdoll slot map into `(slot, item_path)`
-        // pairs and send back to the inspector only. Empty result for
-        // unknown / offline targets — client renders "—" everywhere.
+        // in-world and within INSPECT_RANGE, pack their paperdoll slot map
+        // into `(slot, item_path)` pairs and send back to the inspector only.
+        // Empty result for unknown / offline targets — client renders "—"
+        // everywhere.
         for (inspector_id, target_char_id) in inspect_intents.drain(..) {
             if to_disconnect.contains(&inspector_id) {
                 continue;
             }
+            let Some(inspector_pos) = connections.get(&inspector_id).map(|c| c.pos) else {
+                continue;
+            };
+            // Range gate (exploit audit finding 10): a paperdoll used to be
+            // readable from anywhere in the world. Written as "keep only
+            // when dist <= RANGE" so a non-finite distance refuses instead of
+            // slipping past a `dist > RANGE` test (the NaN Move lesson).
+            //
+            // A target that is too far, offline, or an id that never existed
+            // all get the SAME answer: one generic line and an empty result.
+            // Naming the target in the refusal, or answering "far" and
+            // "absent" differently, would turn the gate into a char_id to
+            // name map and an is-online oracle for anyone enumerating ids.
             let target = connections
                 .iter()
-                .find(|(_, c)| c.char_id == target_char_id && c.in_world);
+                .find(|(_, c)| c.char_id == target_char_id && c.in_world)
+                .filter(|(_, c)| inspector_pos.distance_to(c.pos) <= INSPECT_RANGE);
+            if target.is_none() {
+                handlers::send_refusal(
+                    &mut server,
+                    inspector_id,
+                    "That player is not close enough to inspect.",
+                );
+            }
             let (target_name, slots) = match target {
                 Some((_, c)) => {
                     let mut slots: Vec<(u8, String)> = c
@@ -5116,6 +5239,27 @@ pub async fn run(
                             );
                             continue;
                         };
+                        // Range gate, the same reach as a nuke. Charm had none,
+                        // so any live enemy id in the world could be charmed
+                        // from anywhere (a named mob from the safety of town).
+                        // Kept-only-when-in-range, so a non-finite distance
+                        // refuses.
+                        if !(pos.distance_to(caster_pos) <= RANGED_ATTACK_RANGE) {
+                            tracing::info!(caster = owner_id, target = target_id, "PET_CHARM dropped — out of range");
+                            refund_spell_cost(
+                                &mut server,
+                                &mut connections,
+                                &in_world_recipients_now,
+                                caster_cid,
+                                intent.caster,
+                                mana_cost,
+                                hp_cost,
+                            );
+                            handlers::send_refusal(
+                                &mut server, caster_cid, "That target is too far away.",
+                            );
+                            continue;
+                        }
                         // Despawn the old enemy id from AOI + fan.
                         let enemy_cell = aoi::cell_for(pos.x, pos.z);
                         aoi.remove(target_id, enemy_cell);

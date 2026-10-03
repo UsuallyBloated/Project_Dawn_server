@@ -4341,6 +4341,132 @@ async fn player_crossing_into_view_of_an_existing_pet_gets_pet_spawn() {
     );
 }
 
+/// The owner always sees their own pet (user call, 2026-10-02). B parks a
+/// skeleton with `/pet guard` in cell (1,0) and walks west until B stands in
+/// cell (-1,0), two cells from the pet and outside the 3x3 that decides what
+/// anyone else sees. Before this change B's own cell crossing sent B an
+/// EntityDespawn for the pet, so the pet panel and every `/pet` command went
+/// dark until B walked back. Now: no despawn, the pet's Position keeps
+/// arriving (the guard keepalive), and `/pet follow` from out there brings it
+/// back, which B watches arrive.
+#[tokio::test]
+async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "petfar_w", "Petfarw", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "petfar_o", "Petfaro", "Human", "Necromancer").await;
+    set_char_level(&h.db_url, b_char_id, 6).await;
+    // B in cell (0,0) a metre short of the x=120 line; the summon lands the
+    // pet 1.5 m east of B, in cell (1,0).
+    set_char_pos(&h.db_url, b_char_id, 119.0, 60.0).await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    let pet_id = summon_skeleton(&mut b, &mut a, b_char_id).await;
+    b.send_pet_command(protocol::world::pet_command::GUARD, None);
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    // Walk B west until its own echoed Position is past x = -2 (cell -1),
+    // draining B's channels the whole way: a pet despawn anywhere in here
+    // is the old behaviour.
+    let mut seq: u32 = 1;
+    let mut b_x: f32 = 119.0;
+    let mut pet_despawned = false;
+    let mut last_pet_pos: Option<Vec3> = None;
+    let west = Vec3 { x: -1.0, y: 0.0, z: 0.0 };
+    let drain_b = |b: &mut WorldClient, b_x: &mut f32, pet_despawned: &mut bool, last_pet_pos: &mut Option<Vec3>| {
+        while let Some(bytes) = b.client.receive_message(CHANNEL_POSITION) {
+            if let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
+                if let ServerWorldMsg::Position { id, pos, .. } = msg {
+                    if id == b_char_id as u64 {
+                        *b_x = pos.x;
+                    } else if id == pet_id {
+                        *last_pet_pos = Some(pos);
+                    }
+                }
+            }
+        }
+        while let Some(bytes) = b.client.receive_message(CHANNEL_SYSTEM) {
+            if let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
+                if matches!(msg, ServerWorldMsg::EntityDespawn { id } if id == pet_id) {
+                    *pet_despawned = true;
+                }
+            }
+        }
+    };
+    let mut ticks: u32 = 0;
+    while b_x > -2.0 {
+        assert!(ticks < 800, "B never reached cell (-1,0): x = {b_x} after {ticks} moves");
+        b.send_move(seq, west);
+        seq += 1;
+        ticks += 1;
+        if ticks % 80 == 0 {
+            a.send_heartbeat();
+        }
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        assert_both_connected(&a, &b, "the owner's walk west");
+        drain_b(&mut b, &mut b_x, &mut pet_despawned, &mut last_pet_pos);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    assert!(!pet_despawned, "B was sent an EntityDespawn for its own pet on walking out of view");
+
+    // Out here only the owner rule delivers the parked pet's keepalives:
+    // the pet's cell (1,0) is not adjacent to B's (-1,0).
+    last_pet_pos = None;
+    let end = Instant::now() + Duration::from_millis(1500);
+    a.send_heartbeat();
+    b.send_heartbeat();
+    while Instant::now() < end {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        drain_b(&mut b, &mut b_x, &mut pet_despawned, &mut last_pet_pos);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    let parked = last_pet_pos.expect("the parked pet's Position must keep reaching its owner two cells away");
+    assert!(
+        (parked.x - 120.5).abs() < 1.0,
+        "a guarding pet should still be where it was parked, got x = {}",
+        parked.x
+    );
+    assert!(!pet_despawned, "B was sent an EntityDespawn for its own pet while parked out of view");
+
+    // The point of the rule: the pet can be called back from out of view.
+    b.send_pet_command(protocol::world::pet_command::FOLLOW, None);
+    let end = Instant::now() + Duration::from_secs(10);
+    let mut came_back = false;
+    let mut t: u32 = 0;
+    while Instant::now() < end {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        assert_both_connected(&a, &b, "the pet's walk back");
+        drain_b(&mut b, &mut b_x, &mut pet_despawned, &mut last_pet_pos);
+        if last_pet_pos.is_some_and(|p| p.x < 100.0) {
+            came_back = true;
+            break;
+        }
+        t += 1;
+        if t % 80 == 0 {
+            a.send_heartbeat();
+            b.send_heartbeat();
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    assert!(
+        came_back,
+        "after /pet follow the owner must watch the pet walk back (last pet x = {:?})",
+        last_pet_pos.map(|p| p.x)
+    );
+    assert!(!pet_despawned, "B was sent an EntityDespawn for its own pet during the walk back");
+}
+
 // ── InspectPlayer range gate (exploit audit finding 10) ───────────────────
 
 /// A paperdoll used to be readable from anywhere in the world. B is seeded

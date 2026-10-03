@@ -561,7 +561,7 @@ CREATE TABLE server_config (
 
 **Combat is event-driven, not per-tick**. When the player presses Attack, the auto-attack timer resolves on the server-side timer; the server emits a `Hit` / `Miss` event whenever the swing lands. The 20 Hz tick polls timer state but doesn't introduce 50 ms of latency on top.
 
-**Area of interest (AOI)**: a sparse grid of 120 m square cells (`world/aoi.rs`). A player sees, and receives updates for, every entity in the 3x3 neighbourhood of its own cell (~360 m square). Any entity crossing a cell boundary, player, enemy or pet, fans its spawn to the players it comes into view of and a despawn to the ones it leaves. Saves bandwidth and CPU on large worlds.
+**Area of interest (AOI)**: a sparse grid of 120 m square cells (`world/aoi.rs`). A player sees, and receives updates for, every entity in the 3x3 neighbourhood of its own cell (~360 m square). Any entity crossing a cell boundary, player, enemy or pet, fans its spawn to the players it comes into view of and a despawn to the ones it leaves. One exception: a pet's owner always sees their own pet, wherever either stands (its Position fans to the owner outside the neighbourhood, a view loss never despawns it for them, and its real end reaches them anywhere), so a pet parked with `/pet guard` can be called back from across the zone. Saves bandwidth and CPU on large worlds.
 
 ---
 

@@ -924,6 +924,37 @@ enum CombatEvent {
     },
 }
 
+/// The owner always sees their own pet, wherever either of them stands
+/// (user call, 2026-10-02). A pet is never despawned for its owner by a loss
+/// of view, its Position fans to the owner outside the AOI neighbourhood,
+/// and the real end of it (charm expiry, the body expiring) reaches the owner
+/// wherever they are. The alternative was a pet parked with `/pet guard`
+/// vanishing from its owner's HUD, and every `/pet` command with it, once
+/// the owner walked two cells away. Returns the owner's client id for a pet,
+/// None for anything else.
+fn pet_owner_cid(entity: &Entity) -> Option<ClientId> {
+    if entity.is_pet() {
+        entity.owner.map(|o| o as ClientId)
+    } else {
+        None
+    }
+}
+
+/// Who is told an entity is gone for real: the in-world players who could
+/// see its cell, plus a pet's owner wherever they are (`pet_owner_cid`).
+fn despawn_recipients(
+    visible: &std::collections::HashSet<EntityId>,
+    in_world: &[ClientId],
+    entity: &Entity,
+) -> Vec<ClientId> {
+    let owner_cid = pet_owner_cid(entity);
+    in_world
+        .iter()
+        .copied()
+        .filter(|cid| visible.contains(cid) || owner_cid == Some(*cid))
+        .collect()
+}
+
 /// Fan what an enemy or pet crossing an AOI cell implies: in-world players in
 /// the cells its 3x3 neighbourhood gained get its spawn message, players in
 /// the cells it lost get an EntityDespawn. Mirror of the player cell-change
@@ -931,7 +962,8 @@ enum CombatEvent {
 /// Position for an id the client was never given a spawn for, which the
 /// client drops (it has no name, level or hp to build a placeholder from), so
 /// the mob stayed invisible until a re-enter. Callers pass live entities:
-/// only alive ones take the AI pass that moves them between cells.
+/// only alive ones take the AI pass that moves them between cells. A pet's
+/// owner is left out of both lists: they never lost it.
 fn fan_entity_cell_crossing(
     server: &mut RenetServer,
     aoi: &AoiGrid,
@@ -940,11 +972,13 @@ fn fan_entity_cell_crossing(
     gained_cells: &[aoi::Cell],
     lost_cells: &[aoi::Cell],
 ) {
+    let owner_cid = pet_owner_cid(entity);
     let in_world_players = |cells: &[aoi::Cell]| -> Vec<ClientId> {
         aoi.entities_in_cells(cells.iter())
             .into_iter()
             .filter(|id| *id < protocol::world::ENEMY_ID_BASE)
             .map(|id| id as ClientId)
+            .filter(|cid| owner_cid != Some(*cid))
             .filter(|cid| connections.get(cid).is_some_and(|c| c.in_world))
             .collect()
     };
@@ -3075,25 +3109,26 @@ pub async fn run(
         //      charm_expires_at has passed despawn cleanly ("mob
         //      runs away" — no death broadcast, no loot). Collect
         //      then drain to avoid a `enemies` iter+mut overlap.
-        let expired_charms: Vec<(EntityId, Vec3f)> = enemies
+        let expired_charms: Vec<EntityId> = enemies
             .iter()
             .filter_map(|(id, e)| {
                 let exp = e.charm_expires_at?;
                 if now.duration_since(exp).as_secs_f32() >= 0.0 {
-                    Some((*id, e.pos))
+                    Some(*id)
                 } else {
                     None
                 }
             })
             .collect();
-        for (pet_id, pet_pos) in expired_charms {
-            let cell = aoi::cell_for(pet_pos.x, pet_pos.z);
+        for pet_id in expired_charms {
+            let Some(pet) = enemies.get(&pet_id) else {
+                continue;
+            };
+            let cell = aoi::cell_for(pet.pos.x, pet.pos.z);
             aoi.remove(pet_id, cell);
             let visible = aoi.entities_visible_from(cell);
-            for &recipient in &in_world_recipients_now {
-                if visible.contains(&recipient) {
-                    handlers::send_entity_despawn(&mut server, recipient, pet_id);
-                }
+            for recipient in despawn_recipients(&visible, &in_world_recipients_now, pet) {
+                handlers::send_entity_despawn(&mut server, recipient, pet_id);
             }
             enemies.remove(&pet_id);
             tracing::info!(pet_id, "charm expired — pet released");
@@ -8097,14 +8132,13 @@ pub async fn run(
                 continue;
             };
             // Track 7: remove from AOI; fan EntityDespawn only to players
-            // who could see the enemy's cell.
+            // who could see the enemy's cell (plus a dead pet's owner,
+            // wherever they are).
             let enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
             aoi.remove(entity.id, enemy_cell);
             let visible = aoi.entities_visible_from(enemy_cell);
-            for &recipient in &in_world_recipients_now {
-                if visible.contains(&recipient) {
-                    handlers::send_entity_despawn(&mut server, recipient, entity.id);
-                }
+            for recipient in despawn_recipients(&visible, &in_world_recipients_now, &entity) {
+                handlers::send_entity_despawn(&mut server, recipient, entity.id);
             }
             spawner.on_enemy_died(entity.spawn_point_idx, now);
         }
@@ -9221,7 +9255,9 @@ pub async fn run(
                 // An enemy or pet id with no live entry has already been
                 // cleaned up and matches no arm.
                 if let Some(entity) = enemies.get(&peer_entity) {
-                    if entity.is_alive() {
+                    // The mover's own pet is skipped: they have had it all
+                    // along (`pet_owner_cid`).
+                    if entity.is_alive() && pet_owner_cid(entity) != Some(*mover_id) {
                         handlers::fan_out_entity_spawn(
                             &mut server,
                             std::slice::from_ref(mover_id),
@@ -9294,8 +9330,15 @@ pub async fn run(
                     continue;
                 }
                 if peer_entity >= protocol::world::ENEMY_ID_BASE {
-                    // Enemy, pet or bag — just tell the mover it's gone.
-                    handlers::send_entity_despawn(&mut server, *mover_id, peer_entity);
+                    // Enemy, pet or bag — just tell the mover it's gone. Not
+                    // the mover's own pet: the owner always sees it
+                    // (`pet_owner_cid`).
+                    let own_pet = enemies
+                        .get(&peer_entity)
+                        .is_some_and(|e| pet_owner_cid(e) == Some(*mover_id));
+                    if !own_pet {
+                        handlers::send_entity_despawn(&mut server, *mover_id, peer_entity);
+                    }
                 } else {
                     // Player — mutual despawn.
                     let peer_id = peer_entity as ClientId;
@@ -9758,12 +9801,16 @@ pub async fn run(
                 // Audience first, with the allocation-free cell test (each
                 // connection carries its cell): an entity nobody is near
                 // neither marks nor encodes, so the sequence really does
-                // advance only on a send.
+                // advance only on a send. A pet's owner is always in the
+                // audience: the owner sees their own pet wherever it is
+                // (`pet_owner_cid`).
                 let enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
+                let owner_cid = pet_owner_cid(entity);
                 let can_see = |cid: &ClientId| {
-                    connections
-                        .get(cid)
-                        .is_some_and(|c| aoi.can_see(c.aoi_cell, enemy_cell))
+                    owner_cid == Some(*cid)
+                        || connections
+                            .get(cid)
+                            .is_some_and(|c| aoi.can_see(c.aoi_cell, enemy_cell))
                 };
                 if !in_world_ids.iter().any(|cid| can_see(cid)) {
                     continue;

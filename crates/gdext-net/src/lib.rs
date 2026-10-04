@@ -293,6 +293,13 @@ impl NetClient {
     #[signal]
     fn teleport(pos: Vector3);
 
+    /// The world clock's hour, in [0, 24): sent as the player enters the
+    /// world and re-sent to everyone about once a minute. The client's sky
+    /// runs on its own clock between sends and uses this to stay in step
+    /// with every other player.
+    #[signal]
+    fn time_of_day(hour: f64);
+
     /// Track 5 sub-task 4 — private confirmation that the local
     /// player's LootItem / LootAll intent landed and the server has
     /// transferred `count` of `item_path` into our inventory. The
@@ -1508,6 +1515,9 @@ enum Incoming {
     Teleport {
         pos: WireVec3,
     },
+    TimeOfDay {
+        hour: f32,
+    },
     LootGranted {
         item_path: String,
         count: u32,
@@ -2088,6 +2098,10 @@ impl NetClient {
                         &[Vector3::new(pos.x, pos.y, pos.z).to_variant()],
                     );
                 }
+                Incoming::TimeOfDay { hour } => {
+                    self.base_mut()
+                        .emit_signal("time_of_day", &[(hour as f64).to_variant()]);
+                }
                 Incoming::LootGranted { item_path, count } => {
                     self.base_mut().emit_signal(
                         "loot_granted",
@@ -2585,6 +2599,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             xp_percent: xp_percent as i64,
         },
         ServerWorldMsg::Teleport { pos } => Incoming::Teleport { pos },
+        ServerWorldMsg::TimeOfDay { hour } => Incoming::TimeOfDay { hour },
         ServerWorldMsg::LootGranted { item_path, count } => Incoming::LootGranted {
             item_path,
             count,

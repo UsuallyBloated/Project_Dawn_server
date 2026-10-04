@@ -5,6 +5,7 @@
 use super::{
     aoi::{self, AoiGrid},
     buffs::{self, ActiveBuff},
+    clock,
     combat,
     connection::{PerConnection, Vec3f},
     entity::{self, ActiveCc, Entity, EnemyState, HitIntent},
@@ -1347,6 +1348,7 @@ pub async fn run(
     let mut enemy_pos_sent: u64 = 0;
     let mut last_fan_report = Instant::now();
     let mut last_ban_sweep = Instant::now();
+    let mut last_time_broadcast = Instant::now();
     // The ban sweep's query runs on its own task and reports back here, so
     // the world loop never waits on the database for it.
     let (ban_tx, mut ban_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i64>>();
@@ -2538,6 +2540,13 @@ pub async fn run(
             if let Some(new_conn) = connections.get(new_id) {
                 handlers::send_coins_update(&mut server, *new_id, new_conn.coins);
             }
+            // The shared sky: a joiner is told the hour at once instead of
+            // waiting up to a minute for the next broadcast (step 7-ter).
+            handlers::fan_out_time_of_day(
+                &mut server,
+                std::slice::from_ref(new_id),
+                clock::current_hour(),
+            );
             // Seed the new joiner with their persisted XP into the current level.
             // ConnectOk carries level but not xp, so `apply_character` leaves the
             // client bar at 0/band until the first XpGained; without this seed a
@@ -9874,6 +9883,16 @@ pub async fn run(
             let mut dirty: Vec<&mut PerConnection> = connections.values_mut().collect();
             persistence::checkpoint_dirty(&pool, &mut dirty).await;
             last_checkpoint = now;
+        }
+
+        // 7-ter. The world clock. Everyone in the world is told the hour on a
+        //    slow cadence; clients run their own clock at the same rate in
+        //    between, so this only corrects drift. Joiners are seeded at
+        //    EnterWorld. Reliable channel: a lost update would leave one
+        //    client's sky wrong for a whole interval.
+        if now.duration_since(last_time_broadcast) >= clock::BROADCAST_INTERVAL {
+            handlers::fan_out_time_of_day(&mut server, &in_world_ids, clock::current_hour());
+            last_time_broadcast = now;
         }
 
         // 7-bis. Ban sweep. Login, session redemption and world connect all

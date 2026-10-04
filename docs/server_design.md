@@ -549,7 +549,7 @@ CREATE TABLE server_config (
 3. **Run AI**: enemies with `next_action_at <= now` evaluate behavior tree, possibly attack.
 4. **Resolve combat events**: damage, hit/miss/crit/evade, on-hit procs, buff applications.
 5. **Tick buffs / DoTs / HoTs / cooldowns**: decrement timers, apply periodic effects.
-6. **Tick TimeOfDay**: advance world clock, broadcast every 1 minute.
+6. **Tick TimeOfDay**: broadcast the world clock's hour every 1 minute, and to each player as they enter the world (built 2026-10-04, `world/clock.rs`). The hour is derived from the wall clock (a 20-minute day), not counted up from boot, so it survives a restart with nothing persisted; clients run their own clock at the same rate between sends and use the broadcast only to stay in step.
 7. **Build per-client snapshots**: delta-encoded against the last sequence each client acked. Includes only entities in their area-of-interest. Enemy and pet positions fan on change (moved or turned since the last send) plus a 500 ms keepalive (`ENEMY_POSITION_KEEPALIVE`), not every tick; the `enemy position fan` log line reports the stream once a minute while anyone is online.
 8. **Send snapshots** via renet's `send_message` per channel. renet handles retries / acks.
 

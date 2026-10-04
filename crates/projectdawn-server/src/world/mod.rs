@@ -15,6 +15,7 @@
 
 mod aoi;
 mod buffs;
+mod clock;
 mod combat;
 mod connection;
 mod corpses;

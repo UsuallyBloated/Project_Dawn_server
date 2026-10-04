@@ -2610,6 +2610,22 @@ pub fn send_trade_closed(
     }
 }
 
+/// The world clock's hour (`clock::current_hour`), to one player entering
+/// the world or to everyone on the slow cadence. Clients keep their own
+/// time between sends; this only keeps them in step with each other.
+pub fn fan_out_time_of_day(server: &mut RenetServer, recipients: &[ClientId], hour: f32) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::TimeOfDay { hour };
+    let Some(bytes) = encode(&msg) else {
+        return;
+    };
+    for &recipient_id in recipients {
+        server.send_message(recipient_id, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
 /// Track 14 follow-up — fan a `CoinsUpdate` privately to one
 /// client. Vendor BuyItem / SellItem use this after mutating
 /// `conn.coins`. Carries the full four-tier `Coins` wallet

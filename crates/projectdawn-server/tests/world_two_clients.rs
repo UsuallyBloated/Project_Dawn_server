@@ -4347,8 +4347,8 @@ async fn player_crossing_into_view_of_an_existing_pet_gets_pet_spawn() {
 /// anyone else sees. Before this change B's own cell crossing sent B an
 /// EntityDespawn for the pet, so the pet panel and every `/pet` command went
 /// dark until B walked back. Now: no despawn, the pet's Position keeps
-/// arriving (the guard keepalive), and `/pet follow` from out there brings it
-/// back, which B watches arrive.
+/// arriving (the guard keepalive), and `/pet follow` from out there starts it
+/// back, which B watches it do.
 #[tokio::test]
 async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
     let h = start_both().await;
@@ -4419,14 +4419,17 @@ async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
     assert!(!pet_despawned, "B was sent an EntityDespawn for its own pet on walking out of view");
 
     // Out here only the owner rule delivers the parked pet's keepalives:
-    // the pet's cell (1,0) is not adjacent to B's (-1,0).
+    // the pet's cell (1,0) is not adjacent to B's (-1,0). Wait for the next
+    // one rather than for a fixed window: under a loaded test run the
+    // server's 500 ms keepalive can arrive late, and that is not the bug.
     last_pet_pos = None;
-    let end = Instant::now() + Duration::from_millis(1500);
+    let end = Instant::now() + Duration::from_secs(8);
     a.send_heartbeat();
     b.send_heartbeat();
-    while Instant::now() < end {
+    while Instant::now() < end && last_pet_pos.is_none() {
         tick_one(&mut a.client, &mut a.transport);
         tick_one(&mut b.client, &mut b.transport);
+        assert_both_connected(&a, &b, "the wait for a parked keepalive");
         drain_b(&mut b, &mut b_x, &mut pet_despawned, &mut last_pet_pos);
         tokio::time::sleep(TICK_DT).await;
     }
@@ -4439,8 +4442,12 @@ async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
     assert!(!pet_despawned, "B was sent an EntityDespawn for its own pet while parked out of view");
 
     // The point of the rule: the pet can be called back from out of view.
+    // The proof is that the owner SEES it set off (a few metres west of
+    // where it was parked), not that it covers a distance against a clock:
+    // how far a pet gets in N wall-clock seconds depends on how loaded the
+    // machine is, and a deadline on distance failed in a full parallel run.
     b.send_pet_command(protocol::world::pet_command::FOLLOW, None);
-    let end = Instant::now() + Duration::from_secs(10);
+    let end = Instant::now() + Duration::from_secs(30);
     let mut came_back = false;
     let mut t: u32 = 0;
     while Instant::now() < end {
@@ -4448,7 +4455,7 @@ async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
         tick_one(&mut b.client, &mut b.transport);
         assert_both_connected(&a, &b, "the pet's walk back");
         drain_b(&mut b, &mut b_x, &mut pet_despawned, &mut last_pet_pos);
-        if last_pet_pos.is_some_and(|p| p.x < 100.0) {
+        if last_pet_pos.is_some_and(|p| p.x < parked.x - 3.0) {
             came_back = true;
             break;
         }
@@ -4461,10 +4468,65 @@ async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
     }
     assert!(
         came_back,
-        "after /pet follow the owner must watch the pet walk back (last pet x = {:?})",
+        "after /pet follow the owner must watch the pet set off toward them (last pet x = {:?})",
         last_pet_pos.map(|p| p.x)
     );
     assert!(!pet_despawned, "B was sent an EntityDespawn for its own pet during the walk back");
+}
+
+// ── The world clock ───────────────────────────────────────────────────────
+
+/// Every player is told the hour as they enter the world, and two players
+/// are told the same hour. Before this the variant existed on the wire with
+/// no sender, so each client ran a private clock that restarted at 8 AM with
+/// the game process, and no two friends shared a sky. B joins after A here,
+/// so B is also the late-joiner case: seeded at once, not left waiting up to
+/// a minute for the next broadcast.
+#[tokio::test]
+async fn every_player_is_told_the_same_hour_on_entering_the_world() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "skyone", "Skyone", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "skytwo", "Skytwo", "Elf", "Cleric").await;
+
+    let hour_of = |m: Option<ServerWorldMsg>, who: &str| -> f32 {
+        match m {
+            Some(ServerWorldMsg::TimeOfDay { hour }) => hour,
+            _ => panic!("{who} was not told the hour on entering the world"),
+        }
+    };
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let a_hour = hour_of(
+        a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::TimeOfDay { .. })
+        })
+        .await,
+        "A",
+    );
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    let b_hour = hour_of(
+        b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::TimeOfDay { .. })
+        })
+        .await,
+        "B",
+    );
+
+    for (who, hour) in [("A", a_hour), ("B", b_hour)] {
+        assert!((0.0..24.0).contains(&hour), "{who} was told hour {hour}, outside the day");
+    }
+    // B entered a second or two after A; a game hour is 50 real seconds, so
+    // the two differ by a few hundredths of an hour at most. Compare around
+    // the clock so a midnight between the two sends does not read as 24.
+    let apart = (b_hour - a_hour).rem_euclid(24.0);
+    let apart = apart.min(24.0 - apart);
+    assert!(
+        apart < 0.5,
+        "A was told {a_hour} and B {b_hour}: the same clock should not differ by {apart} hours"
+    );
+    assert_both_connected(&a, &b, "the world clock test");
 }
 
 // ── InspectPlayer range gate (exploit audit finding 10) ───────────────────

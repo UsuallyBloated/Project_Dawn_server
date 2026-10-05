@@ -219,6 +219,34 @@ mod tests {
         assert!(!table.is_empty(), "spells.toml produced no entries");
     }
 
+    /// The nine direct-damage spells ported 2026-10-05 from the client's
+    /// definitions. Each used to be refused as an unknown spell. Class,
+    /// level and damage are the client's values; this pins them so a
+    /// regenerated toml that drops one fails here instead of in play.
+    #[test]
+    fn ported_direct_damage_spells_resolve() {
+        let expected: [(&str, &str, i32, f32, &str); 9] = [
+            ("Blizzard", "Wizard", 8, 65.0, "ICE"),
+            ("Thunder Clap", "Wizard", 10, 100.0, "LIGHTNING"),
+            ("Bloodfire", "Sorcerer", 4, 40.0, "FIRE"),
+            ("Void Lance", "Sorcerer", 6, 55.0, "ARCANE"),
+            ("Tempest Bolt", "Sorcerer", 10, 65.0, "LIGHTNING"),
+            ("Cascade of Stars", "Enchanter", 12, 55.0, "ARCANE"),
+            ("Chorus of Misery", "Bard", 10, 45.0, "ARCANE"),
+            ("Feral Shriek", "Beast Master", 4, 35.0, "SPIRIT"),
+            ("Judgment", "Paladin", 12, 80.0, "HOLY"),
+        ];
+        for (name, class, level, damage, dtype) in expected {
+            let s = lookup(name).unwrap_or_else(|| panic!("{name} missing from spells.toml"));
+            assert_eq!(s.target_type, "ENEMY", "{name}");
+            assert_eq!(s.damage_type, dtype, "{name}");
+            assert_eq!(s.min_level, level, "{name}");
+            assert!((s.base_damage - damage).abs() < 0.01, "{name} damage {}", s.base_damage);
+            assert_eq!(s.classes, vec![class.to_string()], "{name}");
+            assert!(s.mana_cost > 0.0, "{name} must cost mana");
+        }
+    }
+
     #[test]
     fn fireball_resolves() {
         let s = lookup("Fireball").expect("Fireball in table");

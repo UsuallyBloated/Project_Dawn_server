@@ -5140,6 +5140,43 @@ async fn a_spell_with_no_server_effect_costs_nothing() {
     );
 }
 
+/// A spell ported from the client's definitions on 2026-10-05 actually lands.
+/// Bloodfire (Sorcerer, level 4, instant) had no entry in spells.toml, so the
+/// server refused it as unknown and a Sorcerer's second nuke did nothing
+/// online. With the entry it goes through the ordinary ENEMY arm.
+#[tokio::test]
+async fn a_ported_spell_lands_on_its_target() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale_token) =
+        provision_client(&h.auth_url, "bloodfire", "Bloodfire", "Human", "Sorcerer").await;
+    set_char_level(&h.db_url, a_char_id, 4).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "bloodfire", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    a.send_dev_spawn("Nuke Dummy", 1, 500.0, 0, 0.0, 0.0);
+    let spawn_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Nuke Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let dummy: u64 = match spawn_evt {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    a.send_cast_spell("Bloodfire", Some(dummy));
+    let hit = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
+                if *attacker == a_char_id as u64 && *target == dummy)
+        })
+        .await;
+    assert!(hit.is_some(), "Bloodfire must land on the dummy now that the server knows it");
+}
+
 /// One cast bar authorises ONE cast. Every CastSpell in a batch used to read
 /// the same CastStart cache, so a forged client could send fifty in one
 /// datagram after a single bar. Two sent back to back are in one datagram:

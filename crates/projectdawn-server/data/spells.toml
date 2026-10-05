@@ -13,11 +13,12 @@
 # for the most-cast spells. Re-running the tool will land the
 # remaining ~50 (more damage variants, rank II/III spells).
 #
-# Buffs / HoT / DoT / CC / port / song fields are intentionally
-# absent — those stay client-side until sub-task 4 lifts buff state
-# server-side. The server's CastSpell handler applies base_damage
-# (to ENEMY target) or heal_amount (to SELF) and ignores side
-# effects.
+# What the server models today: direct damage and heals, HoTs, mana
+# regen, stat / speed / haste / shield / absorb buffs, mez and root,
+# pet summon and charm, resurrection. NOT modelled, so a spell that
+# depends on one must stay out of this file until it is: damage over
+# time, mana drain, stealth, and ports. A spell absent from this file
+# is refused as unknown and costs the caster nothing.
 
 # ── Magician ────────────────────────────────────────────────────────
 [[spell]]
@@ -1671,4 +1672,117 @@ cast_time = 12.0
 cooldown = 180.0
 min_level = 35
 res_xp_percent = 20.0
+classes = ["Paladin"]
+
+# ── Ported 2026-10-05: plain direct-damage spells ───────────────────
+# These nine sat in the client's spell_definitions.gd with no entry
+# here, so each was refused as an unknown spell and did nothing
+# online. They need nothing the ENEMY arm does not already do. Values
+# are the client's, unchanged (LOCKSTEP: edit both files together).
+[[spell]]
+name = "Blizzard"
+target_type = "ENEMY"
+damage_type = "ICE"
+base_damage = 65.0
+heal_amount = 0.0
+mana_cost = 45.0
+cast_time = 2.0
+cooldown = 12.0
+min_level = 8
+classes = ["Wizard"]
+
+[[spell]]
+name = "Thunder Clap"
+target_type = "ENEMY"
+damage_type = "LIGHTNING"
+base_damage = 100.0
+heal_amount = 0.0
+mana_cost = 50.0
+cast_time = 2.5
+cooldown = 14.0
+min_level = 10
+classes = ["Wizard"]
+
+[[spell]]
+name = "Bloodfire"
+target_type = "ENEMY"
+damage_type = "FIRE"
+base_damage = 40.0
+heal_amount = 0.0
+mana_cost = 22.0
+cast_time = 0.0
+cooldown = 4.0
+min_level = 4
+classes = ["Sorcerer"]
+
+[[spell]]
+name = "Void Lance"
+target_type = "ENEMY"
+damage_type = "ARCANE"
+base_damage = 55.0
+heal_amount = 0.0
+mana_cost = 28.0
+cast_time = 1.0
+cooldown = 6.0
+min_level = 6
+classes = ["Sorcerer"]
+
+[[spell]]
+name = "Tempest Bolt"
+target_type = "ENEMY"
+damage_type = "LIGHTNING"
+base_damage = 65.0
+heal_amount = 0.0
+mana_cost = 35.0
+cast_time = 1.5
+cooldown = 10.0
+min_level = 10
+classes = ["Sorcerer"]
+
+[[spell]]
+name = "Cascade of Stars"
+target_type = "ENEMY"
+damage_type = "ARCANE"
+base_damage = 55.0
+heal_amount = 0.0
+mana_cost = 35.0
+cast_time = 1.5
+cooldown = 10.0
+min_level = 12
+classes = ["Enchanter"]
+
+[[spell]]
+name = "Chorus of Misery"
+target_type = "ENEMY"
+damage_type = "ARCANE"
+base_damage = 45.0
+heal_amount = 0.0
+mana_cost = 30.0
+cast_time = 1.5
+cooldown = 9.0
+min_level = 10
+classes = ["Bard"]
+
+[[spell]]
+name = "Feral Shriek"
+target_type = "ENEMY"
+damage_type = "SPIRIT"
+base_damage = 35.0
+heal_amount = 0.0
+mana_cost = 22.0
+cast_time = 0.0
+cooldown = 6.0
+min_level = 4
+classes = ["Beast Master"]
+
+[[spell]]
+name = "Judgment"
+target_type = "ENEMY"
+damage_type = "HOLY"
+base_damage = 80.0
+heal_amount = 0.0
+mana_cost = 40.0
+cast_time = 2.0
+cooldown = 10.0
+min_level = 12
 classes = ["Paladin"]

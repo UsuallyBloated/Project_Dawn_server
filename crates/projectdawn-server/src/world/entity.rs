@@ -469,8 +469,16 @@ impl Entity {
         self.state_entered_at = now;
     }
 
+    /// How far from itself a mob keeps chasing, and how far out it will
+    /// turn on something that hits it. Never below `MIN_LEASH_RANGE` for a
+    /// mob that aggros at all, so nothing in spell reach is out of its reach.
     pub fn leash_range(&self) -> f32 {
-        self.mob.leash.unwrap_or(self.mob.aggro * 2.0)
+        let configured = self.mob.leash.unwrap_or(self.mob.aggro * 2.0);
+        if self.mob.aggro > 0.0 {
+            configured.max(super::MIN_LEASH_RANGE)
+        } else {
+            configured
+        }
     }
 
     pub fn melee_range(&self) -> f32 {
@@ -1260,6 +1268,33 @@ mod tests {
         let _ = e.tick_ai(&targets, &enemy_targets, 0.05, now);
         assert_eq!(e.target, Some(attacker), "damage must provoke the mob");
         assert!(matches!(e.state, EnemyState::Chase));
+    }
+
+    /// A small aggro radius used to mean a short leash: 8 m aggro, 16 m leash,
+    /// nukable from 20 m with no response. The floor closes that for every mob
+    /// that aggros at all and leaves a dummy with no aggro passive.
+    #[test]
+    fn leash_never_falls_short_of_spell_reach() {
+        let now = Instant::now();
+        let mut small = template();
+        small.aggro = 8.0;
+        small.leash = None;
+        let e = Entity::from_spawn(0, Vec3f::ZERO, small, now);
+        assert!((e.leash_range() - super::super::MIN_LEASH_RANGE).abs() < 1e-6);
+        assert!(
+            super::super::MIN_LEASH_RANGE > super::super::RANGED_ATTACK_RANGE,
+            "the floor must sit past spell reach or the hole stays open"
+        );
+        let mut wide = template();
+        wide.aggro = 20.0;
+        wide.leash = None;
+        let e = Entity::from_spawn(0, Vec3f::ZERO, wide, now);
+        assert!((e.leash_range() - 40.0).abs() < 1e-6, "a long leash is untouched");
+        let mut passive = template();
+        passive.aggro = 0.0;
+        passive.leash = None;
+        let e = Entity::from_spawn(0, Vec3f::ZERO, passive, now);
+        assert_eq!(e.leash_range(), 0.0, "a mob that never aggros stays passive");
     }
 
     /// The other half of the same fix: an attacker beyond leash range is NOT

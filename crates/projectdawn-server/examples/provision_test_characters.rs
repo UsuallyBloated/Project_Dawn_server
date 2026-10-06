@@ -117,6 +117,9 @@ async fn main() -> anyhow::Result<()> {
         made.push((name, class, *level, char_id));
     }
     let _ = rpc(&mut ws, ClientAuthMsg::Logout { session_token: session }).await;
+    // A proper close handshake, or the server logs the dropped socket as a
+    // protocol error (it did, on the first run).
+    let _ = ws.close(None).await;
 
     println!();
     println!("Log in with  account: {username}   password: {password}");

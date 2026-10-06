@@ -2050,7 +2050,105 @@ async fn charm_converts_enemy_to_pet() {
         // Mob name preserved: the charmed dummy keeps its name on the
         // pet entity.
         assert_eq!(pet_name, "Charm Dummy");
+        // And the charm HOLDS. The decay sweep used to compare with a
+        // saturating duration, so every charm "expired" 50 ms after it
+        // landed (seen in play 2026-10-06). Charm lasts 60 s; nothing may
+        // despawn the pet in the next second and a half.
+        let early_release = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_millis(1500), |m| {
+                matches!(m, ServerWorldMsg::EntityDespawn { id: gone } if *gone == id)
+            })
+            .await;
+        assert!(early_release.is_none(), "a fresh charm must not release on the next tick");
     }
+}
+
+/// Seen in play 2026-10-06: a Wild Boar (aggro 10, so a 20 m leash) nuked
+/// from about 22 m stood there and took it. An idle mob turns on an attacker
+/// only inside its leash, and spells reach 25 m. Every aggressive mob's leash
+/// now has a floor past spell reach. Here a short-sighted mob (aggro 1 m, so
+/// a 2 m leash before the floor) is nuked from 20 m and must turn on the
+/// caster. The radius is 1 m rather than the boar's 10 because a dev spawn
+/// lands 3 m from the requester, and a mob that notices the caster on its
+/// first tick would have targeted them before the nuke.
+#[tokio::test]
+async fn a_mob_nuked_from_beyond_its_old_leash_turns_on_the_caster() {
+    let h = start_both().await;
+    // Smite: Cleric, level 1, instant.
+    let (a_session, a_char_id, _stale_token) =
+        provision_client(&h.auth_url, "leashnuke", "Leashnuke", "Human", "Cleric").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "leashnuke", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Aggro 1 m, no leash given: 2 m before the floor. Speed 0 so the test
+    // reads the mob's decision (its target), not a chase.
+    a.send_dev_spawn("Timid Skeleton", 1, 500.0, 0, 0.0, 1.0);
+    let spawn_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Timid Skeleton")
+        })
+        .await
+        .expect("the skeleton spawns");
+    let (mob, mob_pos): (u64, Vec3) = match spawn_evt {
+        ServerWorldMsg::EnemySpawn { id, pos, .. } => (id, pos),
+        _ => unreachable!(),
+    };
+
+    // The dev spawn lands 3 m ahead (-Z at yaw 0); back off to about 20 m:
+    // outside the old 16 m leash, inside the 25 m spell reach. 46 Moves at
+    // 7.5 m/s, 50 ms each.
+    let mut seq: u32 = 1;
+    for _ in 0..46 {
+        a.send_move(seq, Vec3 { x: 0.0, y: 0.0, z: 1.0 });
+        seq += 1;
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    a.pump_for(Duration::from_millis(600)).await; // let the park settle
+
+    // Read the distance off the server's own Position fan rather than
+    // trusting the arithmetic: the test is only evidence if the caster really
+    // stands past the old leash and inside spell reach.
+    let mut own_pos: Option<Vec3> = None;
+    while let Some(bytes) = a.client.receive_message(CHANNEL_POSITION) {
+        if let Ok((ServerWorldMsg::Position { id, pos, .. }, _)) =
+            bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+        {
+            if id == a_char_id as u64 {
+                own_pos = Some(pos);
+            }
+        }
+    }
+    let own_pos = own_pos.expect("the server fans the caster their own position");
+    let dist = ((own_pos.x - mob_pos.x).powi(2) + (own_pos.z - mob_pos.z).powi(2)).sqrt();
+    assert!(
+        (17.0..25.0).contains(&dist),
+        "test setup: caster must stand past the old leash and inside 25 m reach, is at {dist:.1} m"
+    );
+    // And the mob must not have noticed the caster yet, or a target message
+    // from the setup would answer for the nuke (the first cut of this test
+    // passed on the old code for exactly that reason).
+    while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
+        if let Ok((ServerWorldMsg::EntityTarget { id, target: Some(_) }, _)) =
+            bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+        {
+            assert_ne!(id, mob, "test setup: the mob targeted someone before the nuke");
+        }
+    }
+
+    a.send_cast_spell("Smite", Some(mob));
+    let turned = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(t) }
+                if *id == mob && *t == a_char_id as u64)
+        })
+        .await;
+    assert!(
+        turned.is_some(),
+        "a mob hit from inside spell reach must turn on the caster, not stand and take it"
+    );
 }
 
 /// Track 12 Piece B â€” Beast Masters auto-summon a Wolf warder when

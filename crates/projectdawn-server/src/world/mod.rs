@@ -142,6 +142,15 @@ pub const ENEMY_DESPAWN_LINGER_SECS: f32 = 5.0;
 /// client room to be slightly behind without rejecting legitimate
 /// swings.
 pub const ATTACK_RANGE_TOLERANCE: f32 = 1.5;
+/// Floor on every aggressive mob's leash (`Entity::leash_range`), in metres.
+/// An idle mob only turns on an attacker inside its leash, and a leash
+/// defaults to twice the aggro radius, so a mob with a small radius (8 to
+/// 12 m) could be nuked from 17 to 24 m out and never respond: inside spell
+/// reach, outside its leash. Seen in play 2026-10-06 (a Wild Boar, leash
+/// 20 m). The floor sits past `RANGED_ATTACK_RANGE` so nothing a spell or a
+/// bow can reach is out of a mob's reach back. Mobs with an aggro radius of
+/// 0 (dev-spawned dummies) are left passive.
+pub const MIN_LEASH_RANGE: f32 = 30.0;
 /// Maximum distance a ranged attack (`weapon.is_ranged == true`) can
 /// connect at. Mirrors the GDScript `Combat.RANGED_RANGE = 25.0` so
 /// bows / crossbows feel the same on server-authoritative combat. The

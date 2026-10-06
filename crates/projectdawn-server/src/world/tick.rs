@@ -3164,7 +3164,12 @@ pub async fn run(
             .iter()
             .filter_map(|(id, e)| {
                 let exp = e.charm_expires_at?;
-                if now.duration_since(exp).as_secs_f32() >= 0.0 {
+                // `Instant::duration_since` saturates to zero when the
+                // argument is still in the future, so the old `>= 0.0`
+                // test was true on the very next tick: every charm ended
+                // 50 ms after it landed (seen in play 2026-10-06, twice).
+                // Same bug the warder retreat timer had.
+                if now >= exp {
                     Some(*id)
                 } else {
                     None

@@ -2110,6 +2110,97 @@ async fn a_mob_nuked_from_beyond_its_old_leash_turns_on_the_caster() {
     );
 }
 
+/// A charm that ends hands the mob back (user call 2026-10-06, EQ's rule): the
+/// pet is despawned, the same mob respawns in its place with the HP it had,
+/// and it comes straight for the one who charmed it. Siren's Song is the
+/// shortest charm (30 s), so the wait is real time; heartbeats keep the
+/// app-layer idle timeout quiet meanwhile. Fails on the previous code at the
+/// EnemySpawn: the old sweep deleted the pet and spawned nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_charm_hands_the_mob_back_and_it_turns_on_the_charmer() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale_token) =
+        provision_client(&h.auth_url, "siren", "Sirenna", "Human", "Bard").await;
+    // Siren's Song is Bard level 14.
+    set_char_level(&h.db_url, a_char_id, 14).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "siren", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Aggro 1 m: it does not notice the bard 3 m away before the charm (so
+    // the 1.5 s cast cannot be interrupted) and has a real leash afterwards;
+    // speed 2 and dmg 5 so, once returned, it can reach and hit the bard.
+    a.send_dev_spawn("Charm Dummy", 1, 500.0, 5, 2.0, 1.0);
+    let spawn_evt = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let enemy_id: u64 = match spawn_evt {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    a.send_cast_start("Siren's Song", 1.5);
+    a.pump_for(Duration::from_millis(1700)).await;
+    a.send_cast_spell("Siren's Song", Some(enemy_id));
+    let pet_spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+        })
+        .await
+        .expect("the charm lands");
+    let pet_id: u64 = match pet_spawn {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    // 30 s of charm. A heartbeat every few seconds so the 10 s idle timeout
+    // does not reap the bard first.
+    let deadline = Instant::now() + Duration::from_secs(40);
+    let mut released = None;
+    while released.is_none() && Instant::now() < deadline {
+        a.send_heartbeat();
+        released = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == pet_id)
+            })
+            .await;
+    }
+    assert!(released.is_some(), "the charm ends and the pet is despawned");
+
+    let back = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
+        })
+        .await
+        .expect("the mob comes back as an enemy where the pet stood");
+    let (mob_id, hp) = match back {
+        ServerWorldMsg::EnemySpawn { id, hp, .. } => (id, hp),
+        _ => unreachable!(),
+    };
+    assert_ne!(mob_id, enemy_id, "a fresh enemy id; the old one is never reused");
+    assert!((hp - 500.0).abs() < 1e-3, "it keeps the HP it had, got {hp}");
+
+    a.send_heartbeat();
+    let turned = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(t) }
+                if *id == mob_id && *t == a_char_id as u64)
+        })
+        .await;
+    assert!(turned.is_some(), "the returned mob targets its former charmer");
+    let hit = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(10), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
+                if *attacker == mob_id && *target == a_char_id as u64)
+        })
+        .await;
+    assert!(hit.is_some(), "and comes for them: a hit on the bard within seconds");
+}
+
 /// Track 12 Piece B â€” Beast Masters auto-summon a Wolf warder when
 /// they enter the world. No PET_SUMMON cast required; the server
 /// detects the class on first EnterWorld and spawns the warder

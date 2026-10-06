@@ -1041,9 +1041,11 @@ async fn write_gm_audit(pool: &SqlitePool, rows: &[db::GmActionRow]) {
 
 /// Despawn the pet(s) owned by `owner_entity`: fan EntityDespawn to the AOI
 /// peers who could see each pet, then drop it from the grid and the enemies
-/// map. Idempotent — a second call after the pets are already gone is a no-op.
-/// Called both when a player goes linkdead (the body lingers but the pet
-/// can't be commanded) and from the final reap.
+/// map. A charmed mob is not dropped but handed back (`return_charmed_mob`),
+/// with nobody to turn on since the charmer is gone. Idempotent — a second
+/// call after the pets are already gone is a no-op. Called both when a player
+/// goes linkdead (the body lingers but the pet can't be commanded) and from
+/// the final reap.
 fn despawn_owned_pets(
     server: &mut RenetServer,
     connections: &HashMap<ClientId, PerConnection>,
@@ -1051,31 +1053,78 @@ fn despawn_owned_pets(
     enemies: &mut HashMap<EntityId, Entity>,
     owner_entity: EntityId,
     owner_client_id: ClientId,
+    now: std::time::Instant,
 ) {
     // Track 11 — owner's pet dies with them. Future work: hand off pets on
     // zone change rather than instant despawn.
-    let owned_pets: Vec<(EntityId, Vec3f)> = enemies
+    let owned_pets: Vec<EntityId> = enemies
         .iter()
         .filter(|(_, e)| e.owner == Some(owner_entity))
-        .map(|(id, e)| (*id, e.pos))
+        .map(|(id, _)| *id)
         .collect();
-    for (pet_id, pet_pos) in owned_pets {
-        let pet_cell = aoi::cell_for(pet_pos.x, pet_pos.z);
+    // The leaver's transport is going or gone, so they are not an audience.
+    let in_world: Vec<ClientId> = connections
+        .iter()
+        .filter(|(id, c)| **id != owner_client_id && c.in_world)
+        .map(|(id, _)| *id)
+        .collect();
+    for pet_id in owned_pets {
+        let Some(pet) = enemies.remove(&pet_id) else {
+            continue;
+        };
+        if pet.charm_expires_at.is_some() {
+            let mob_id = return_charmed_mob(server, aoi, enemies, &in_world, pet, None, now);
+            tracing::info!(owner = owner_entity, pet_id, mob_id, "charm broken by owner leaving — mob returned");
+            continue;
+        }
+        let pet_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
         aoi.remove(pet_id, pet_cell);
         let pet_visible = aoi.entities_visible_from(pet_cell);
-        let pet_recipients: Vec<ClientId> = connections
-            .iter()
-            .filter(|(id, c)| {
-                **id != owner_client_id && c.in_world && pet_visible.contains(*id)
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        for peer_id in pet_recipients {
+        for peer_id in in_world.iter().copied().filter(|id| pet_visible.contains(id)) {
             handlers::send_entity_despawn(server, peer_id, pet_id);
         }
-        enemies.remove(&pet_id);
         tracing::info!(owner = owner_entity, pet_id, "pet despawned on owner disconnect");
     }
+}
+
+/// A charm ending, by expiry or by the charmer leaving: the pet (already
+/// taken out of `enemies` by the caller) is despawned for everyone who saw it,
+/// and the mob it was comes back in its place, into the camp slot the charm
+/// carried, at the pet's position with the pet's HP (EQ's rule, user call
+/// 2026-10-06). With `turn_on` set it comes straight for its former charmer.
+/// Returns the new enemy id.
+fn return_charmed_mob(
+    server: &mut RenetServer,
+    aoi: &mut AoiGrid,
+    enemies: &mut HashMap<EntityId, Entity>,
+    in_world: &[ClientId],
+    pet: Entity,
+    turn_on: Option<EntityId>,
+    now: std::time::Instant,
+) -> EntityId {
+    let cell = aoi::cell_for(pet.pos.x, pet.pos.z);
+    aoi.remove(pet.id, cell);
+    let visible = aoi.entities_visible_from(cell);
+    for recipient in despawn_recipients(&visible, in_world, &pet) {
+        handlers::send_entity_despawn(server, recipient, pet.id);
+    }
+    let mut mob = Entity::released_from_charm(&pet, now);
+    if let Some(charmer) = turn_on {
+        mob.turn_on(charmer, now);
+    }
+    let mob_id = mob.id;
+    aoi.insert(mob_id, cell);
+    let audience: Vec<ClientId> = in_world
+        .iter()
+        .copied()
+        .filter(|cid| visible.contains(cid))
+        .collect();
+    handlers::fan_out_enemy_spawn(server, &audience, &mob);
+    if let Some(charmer) = turn_on {
+        handlers::fan_out_entity_target(server, in_world, mob_id, Some(charmer));
+    }
+    enemies.insert(mob_id, mob);
+    mob_id
 }
 
 /// Full disconnect cleanup, shared by the immediate clean-disconnect path and
@@ -1095,6 +1144,7 @@ async fn reap_connection(
     group_manager: &mut GroupManager,
     pool: &SqlitePool,
     client_id: ClientId,
+    now: std::time::Instant,
 ) {
     // Track 7: remove the leaver from the AOI grid BEFORE computing recipients
     // so entities_visible_from gives the correct set of peers who could see
@@ -1115,7 +1165,7 @@ async fn reap_connection(
             handlers::send_entity_despawn(server, peer_id, entity_id);
         }
         // Despawn any pet still alive (no-op if linkdead already dropped it).
-        despawn_owned_pets(server, connections, aoi, enemies, entity_id, client_id);
+        despawn_owned_pets(server, connections, aoi, enemies, entity_id, client_id, now);
     }
 
     // Track 6 sub-task 5 — remove the leaver from their group. If the group
@@ -1711,6 +1761,7 @@ pub async fn run(
                             &mut group_manager,
                             &pool,
                             client_id,
+                            now,
                         )
                         .await;
                     } else {
@@ -1731,6 +1782,7 @@ pub async fn run(
                                 &mut enemies,
                                 owner_entity,
                                 client_id,
+                                now,
                             );
                         }
                         if let Some(conn) = connections.get_mut(&client_id) {
@@ -2410,6 +2462,7 @@ pub async fn run(
                 &mut group_manager,
                 &pool,
                 client_id,
+                now,
             )
             .await;
         }
@@ -3156,10 +3209,12 @@ pub async fn run(
             );
         }
 
-        // 4g4. Track 12 Piece C — charm decay sweep. Pets whose
-        //      charm_expires_at has passed despawn cleanly ("mob
-        //      runs away" — no death broadcast, no loot). Collect
-        //      then drain to avoid a `enemies` iter+mut overlap.
+        // 4g4. Track 12 Piece C — charm decay sweep. A pet whose
+        //      charm_expires_at has passed is handed back as the mob it
+        //      was, and comes for its charmer if they are still here to
+        //      be hated (EQ's rule, user call 2026-10-06; v1 despawned it
+        //      as "mob runs away"). Collect then drain to avoid an
+        //      `enemies` iter+mut overlap.
         let expired_charms: Vec<EntityId> = enemies
             .iter()
             .filter_map(|(id, e)| {
@@ -3177,17 +3232,26 @@ pub async fn run(
             })
             .collect();
         for pet_id in expired_charms {
-            let Some(pet) = enemies.get(&pet_id) else {
+            let Some(pet) = enemies.remove(&pet_id) else {
                 continue;
             };
-            let cell = aoi::cell_for(pet.pos.x, pet.pos.z);
-            aoi.remove(pet_id, cell);
-            let visible = aoi.entities_visible_from(cell);
-            for recipient in despawn_recipients(&visible, &in_world_recipients_now, pet) {
-                handlers::send_entity_despawn(&mut server, recipient, pet_id);
-            }
-            enemies.remove(&pet_id);
-            tracing::info!(pet_id, "charm expired — pet released");
+            // The charmer, if still in the world and alive.
+            let charmer = pet.owner.filter(|o| {
+                connections
+                    .get(&(*o as ClientId))
+                    .map(|c| c.in_world && c.hp > 0.0 && !c.death_processed)
+                    .unwrap_or(false)
+            });
+            let mob_id = return_charmed_mob(
+                &mut server,
+                &mut aoi,
+                &mut enemies,
+                &in_world_recipients_now,
+                pet,
+                charmer,
+                now,
+            );
+            tracing::info!(pet_id, mob_id, charmer = ?charmer, "charm expired — mob returned hostile");
         }
 
         // 4h. Apply player → server attack intents. The handler queued
@@ -5336,9 +5400,10 @@ pub async fn run(
                         // partition: EntityDespawn the old enemy id,
                         // PetSpawn a fresh pet id at the same pos
                         // with the same hp/max_hp, owner = caster.
-                        // Charm decay (in the sweep below) simply
-                        // despawns the pet — "mob runs away"
-                        // semantics matching the GDScript charm.
+                        // When the charm ends (the sweep below, or the
+                        // owner leaving) the mob is handed back as the
+                        // enemy it was, hostile to its charmer; see
+                        // `return_charmed_mob`.
                         let Some(target_id) = intent.target_id else {
                             tracing::info!(caster = intent.caster, spell = %spell.name, "PET_CHARM dropped — no target");
                             refund_spell_cost(
@@ -5376,11 +5441,11 @@ pub async fn run(
                         let owner_id = intent.caster;
                         // Look up the target; copy out the stats we
                         // need then remove it from the map + AOI.
-                        let extracted: Option<(crate::world::zones::MobTemplate, f32, f32, Vec3f, f32)> = enemies
+                        let extracted: Option<(crate::world::zones::MobTemplate, f32, f32, Vec3f, f32, usize, Vec3f)> = enemies
                             .get(&target_id)
                             .filter(|e| e.is_alive() && !e.is_pet())
-                            .map(|e| (e.mob.clone(), e.hp, e.max_hp, e.pos, e.yaw));
-                        let Some((mob, hp, max_hp, pos, yaw)) = extracted else {
+                            .map(|e| (e.mob.clone(), e.hp, e.max_hp, e.pos, e.yaw, e.spawn_point_idx, e.spawn_pos));
+                        let Some((mob, hp, max_hp, pos, yaw, slot_idx, home_pos)) = extracted else {
                             tracing::info!(caster = owner_id, target = target_id, "PET_CHARM dropped — target gone or not a live enemy");
                             refund_spell_cost(
                                 &mut server,
@@ -5426,25 +5491,27 @@ pub async fn run(
                                 handlers::send_entity_despawn(&mut server, recipient, target_id);
                             }
                         }
-                        // Also fire spawn-point respawn so the camp
-                        // doesn't think the slot is still occupied.
-                        // (Charmed mobs that get re-keyed shouldn't
-                        // block respawn at their old anchor.)
-                        let old_idx = enemies
-                            .get(&target_id)
-                            .map(|e| e.spawn_point_idx)
-                            .unwrap_or(usize::MAX);
+                        // The camp slot stays OCCUPIED for the charm's
+                        // life. It used to be freed here, so the camp
+                        // respawned a replacement while the charmed mob
+                        // still existed; now that the mob comes back
+                        // when the charm ends, freeing it would let a
+                        // charm-and-wait add a mob to the camp per cast.
+                        // The slot rides on the pet: the return puts the
+                        // mob back into it, and a pet that dies charmed
+                        // frees it through the corpse sweep like any
+                        // death.
                         enemies.remove(&target_id);
-                        if old_idx != usize::MAX {
-                            spawner.on_enemy_died(old_idx, now);
-                        }
                         // Build the fresh pet entity. Override hp/
                         // max_hp/yaw from the original so the charm
-                        // preserves the mob's current state.
+                        // preserves the mob's current state, and carry
+                        // its slot and home so it can be given back.
                         let mut pet = Entity::from_pet_summon(owner_id, pos, mob, now);
                         pet.max_hp = max_hp;
                         pet.hp = hp;
                         pet.yaw = yaw;
+                        pet.spawn_point_idx = slot_idx;
+                        pet.spawn_pos = home_pos;
                         let duration = if spell.duration > 0.0 { spell.duration } else { 30.0 };
                         pet.charm_expires_at = Some(now + std::time::Duration::from_secs_f32(duration));
                         let pet_id = pet.id;

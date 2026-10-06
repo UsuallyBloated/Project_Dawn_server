@@ -347,6 +347,37 @@ impl Entity {
         }
     }
 
+    /// A charm ending: the pet becomes the enemy it was (user call
+    /// 2026-10-06, EQ's rule; the v1 "mob runs away" despawn is gone). A
+    /// fresh enemy id (ids are never reused), the camp slot and home position
+    /// the charm carried along, the pet's current HP and position, the same
+    /// template. `from_spawn`'s named scaling is skipped on purpose:
+    /// `apply_named` multiplied this template's hp and dmg in place when the
+    /// mob first spawned and the charm cloned it scaled, so a second pass
+    /// would double a named mob. Hostility is the caller's choice (`turn_on`):
+    /// an owner who logged out is not there to be hated.
+    pub fn released_from_charm(pet: &Entity, now: Instant) -> Self {
+        let mut mob = pet.mob.clone();
+        let named_id = mob.named_id.take();
+        let mut e = Self::from_spawn(pet.spawn_point_idx, pet.spawn_pos, mob, now);
+        e.mob.named_id = named_id;
+        e.pos = pet.pos;
+        e.yaw = pet.yaw;
+        e.last_bcast_pos = pet.pos;
+        e.hp = pet.hp;
+        e.max_hp = pet.max_hp;
+        e
+    }
+
+    /// A charm that breaks sends the mob straight for the one who charmed it.
+    /// Threat is what the AI reads for its target; the `aggro` ledger stays
+    /// untouched because the charmer has dealt it no damage.
+    pub fn turn_on(&mut self, former_owner: EntityId, now: Instant) {
+        self.threat.insert(former_owner, self.max_hp.max(1.0));
+        self.target = Some(former_owner);
+        self.transition(EnemyState::Chase, now);
+    }
+
     /// Track 13 — add a stat buff's deltas to the pet's live stats +
     /// max_hp. Mirror of `buffs::apply_stat_deltas` for a connection.
     /// `max_mp_delta` is ignored — pets have no mana pool.
@@ -1312,5 +1343,45 @@ mod tests {
         let _ = e.tick_ai(&targets, &enemy_targets, 0.05, now);
         assert_eq!(e.target, None, "beyond leash: stand and wait, don't flap");
         assert!(matches!(e.state, EnemyState::Idle));
+    }
+
+    /// A charm ending hands the mob back as it was: same camp slot, same
+    /// home, current HP, a fresh enemy id, and a named mob scaled once, not
+    /// twice. Turned on its charmer it chases with threat, not aggro.
+    #[test]
+    fn released_from_charm_returns_the_same_mob_scaled_once() {
+        let now = Instant::now();
+        let home = Vec3f { x: 10.0, y: 0.0, z: -4.0 };
+        let original = Entity::from_spawn(7, home, named_template("rotfang"), now);
+        let scaled_dmg = original.mob.dmg;
+        let scaled_hp = original.max_hp;
+        // The charm arm's conversion: the scaled template rides onto the pet.
+        let mut pet = Entity::from_pet_summon(42, original.pos, original.mob.clone(), now);
+        pet.spawn_point_idx = original.spawn_point_idx;
+        pet.spawn_pos = original.spawn_pos;
+        pet.max_hp = original.max_hp;
+        pet.hp = original.hp * 0.5;
+        pet.pos = Vec3f { x: 12.0, y: 0.0, z: -1.0 };
+        pet.charm_expires_at = Some(now);
+
+        let mut back = Entity::released_from_charm(&pet, now);
+        assert!(back.id >= ENEMY_ID_BASE && back.id < PET_ID_BASE, "an enemy id again");
+        assert_ne!(back.id, original.id, "ids are never reused");
+        assert_eq!(back.spawn_point_idx, 7, "the camp slot it still occupies");
+        let close = |a: Vec3f, b: Vec3f| (a.x - b.x).abs() < 1e-6 && (a.z - b.z).abs() < 1e-6;
+        assert!(close(back.spawn_pos, home), "home for the leash");
+        assert!(close(back.pos, pet.pos), "it stands where the pet stood");
+        assert!((back.hp - pet.hp).abs() < 1e-6, "the HP it had as a pet");
+        assert!((back.max_hp - scaled_hp).abs() < 1e-6);
+        assert_eq!(back.mob.dmg, scaled_dmg, "named damage multiplied once, not again");
+        assert_eq!(back.mob.named_id.as_deref(), Some("rotfang"));
+        assert!(!back.is_pet() && back.charm_expires_at.is_none());
+        assert_eq!(back.target, None, "hostility is the caller's call");
+
+        back.turn_on(42, now);
+        assert_eq!(back.target, Some(42));
+        assert!(matches!(back.state, EnemyState::Chase));
+        assert!(back.threat.get(&42).copied().unwrap_or(0.0) > 0.0);
+        assert!(back.aggro.is_empty(), "no damage dealt, no aggro ledger");
     }
 }

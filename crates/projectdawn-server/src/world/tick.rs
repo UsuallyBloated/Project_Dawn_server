@@ -5495,6 +5495,48 @@ pub async fn run(
                             "enemy charmed into pet"
                         );
                     }
+                    "PET_HEAL" => {
+                        // Mends the caster's own pet, whatever is targeted;
+                        // the pre-flight found it alive and in reach. Warder's
+                        // Mend was the one client-only pet spell (ported
+                        // 2026-10-07 after the tester asked for none).
+                        let own_pet_id = enemies
+                            .iter()
+                            .find(|(_, e)| e.owner == Some(intent.caster) && e.is_alive())
+                            .map(|(id, _)| *id);
+                        let Some(pet_id) = own_pet_id else {
+                            refund_spell_cost(
+                                &mut server,
+                                &mut connections,
+                                &in_world_recipients_now,
+                                caster_cid,
+                                intent.caster,
+                                mana_cost,
+                                hp_cost,
+                            );
+                            handlers::send_refusal(&mut server, caster_cid, "You have no pet to mend.");
+                            continue;
+                        };
+                        let heal = spell.heal_amount.max(0.0);
+                        if let Some(pet) = enemies.get_mut(&pet_id) {
+                            pet.hp = (pet.hp + heal).min(pet.max_hp);
+                            let (new_hp, max_hp) = (pet.hp, pet.max_hp);
+                            handlers::fan_out_health_update(
+                                &mut server,
+                                &in_world_recipients_now,
+                                pet_id,
+                                new_hp,
+                                max_hp,
+                            );
+                            tracing::info!(
+                                caster = intent.caster,
+                                pet_id,
+                                spell = %spell.name,
+                                heal,
+                                "PET_HEAL applied"
+                            );
+                        }
+                    }
                     "NONE" | _ => {
                         // port / bind — not yet applied server-side.
                         // Mana already deducted; the client-local
@@ -10069,9 +10111,10 @@ const RES_CAST_RANGE: f32 = 30.0;
 ///    cast costs nothing at all.
 ///
 /// Every target type is covered: the three with a target (ENEMY, ALLY,
-/// PET_CHARM), CORPSE, the spell-data checks (an AOE with no radius, a summon
-/// with no known pet), and any type with no arm. The arms keep their own
-/// checks as a second line; after this they should not fire.
+/// PET_CHARM), PET_HEAL (the caster's own pet), CORPSE, the spell-data checks
+/// (an AOE with no radius, a summon with no known pet), and any type with no
+/// arm. The arms keep their own checks as a second line; after this they
+/// should not fire.
 #[allow(clippy::too_many_arguments)]
 fn cast_target_refusal(
     spell: &spells::Spell,
@@ -10219,6 +10262,19 @@ fn cast_target_refusal(
                 None
             } else {
                 no_effect()
+            }
+        }
+        "PET_HEAL" => {
+            // The caster's own pet, whatever is targeted (the spell names it).
+            // Having no pet says nothing about anyone else, so it can be
+            // said plainly.
+            let own_pet = enemies
+                .values()
+                .find(|e| e.owner == Some(caster_id) && e.is_alive());
+            match own_pet {
+                None => Some("You have no pet to mend.".to_string()),
+                Some(p) if in_reach(p.pos) => None,
+                Some(_) => unreachable(),
             }
         }
         "SELF" => None,

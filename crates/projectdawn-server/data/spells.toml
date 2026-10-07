@@ -995,6 +995,20 @@ cooldown = 4.0
 min_level = 1
 classes = ["Beast Master"]
 
+# Mends the caster's OWN pet, whatever is targeted (ported 2026-10-07; it was
+# the one client-only pet spell). Values are the client's, unchanged.
+[[spell]]
+name = "Warder's Mend"
+target_type = "PET_HEAL"
+damage_type = "SPIRIT"
+base_damage = 0.0
+heal_amount = 60.0
+mana_cost = 30.0
+cast_time = 1.5
+cooldown = 8.0
+min_level = 1
+classes = ["Beast Master"]
+
 [[spell]]
 name = "Spirit Strike"
 target_type = "ENEMY"

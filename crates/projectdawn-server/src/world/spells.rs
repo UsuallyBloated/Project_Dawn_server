@@ -247,6 +247,16 @@ mod tests {
         }
     }
 
+    /// Warder's Mend, the one client-only pet spell, resolves (2026-10-07).
+    #[test]
+    fn warders_mend_resolves_as_a_pet_heal() {
+        let s = lookup("Warder's Mend").expect("Warder's Mend in spells.toml");
+        assert_eq!(s.target_type, "PET_HEAL");
+        assert!((s.heal_amount - 60.0).abs() < 0.01);
+        assert_eq!(s.classes, vec!["Beast Master".to_string()]);
+        assert_eq!(s.min_level, 1);
+    }
+
     #[test]
     fn fireball_resolves() {
         let s = lookup("Fireball").expect("Fireball in table");

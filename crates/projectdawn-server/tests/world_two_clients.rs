@@ -2278,6 +2278,45 @@ async fn beast_master_auto_summons_warder() {
     }
 }
 
+/// Warder's Mend was the one client-only pet spell: the server had no PET_HEAL
+/// arm and refused it as "no effect yet" (playtest 2026-10-07; the tester asked
+/// for no client-only pet spells). It now mends the caster's own pet, whatever
+/// is targeted. Fails on the previous code: no HealthUpdate for the warder
+/// ever arrives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warders_mend_heals_the_beast_masters_own_warder() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "mender", "Mendra", "Human", "Beast Master").await;
+    set_char_level(&h.db_url, a_char_id, 22).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    let pet_spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+        })
+        .await
+        .expect("the warder auto-summons");
+    let pet_id: u64 = match pet_spawn {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    // No target at all: the spell finds the caster's own pet.
+    a.send_cast_start("Warder's Mend", 1.5);
+    a.pump_for(Duration::from_millis(1700)).await;
+    a.send_cast_spell("Warder's Mend", None);
+    let mended = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == pet_id)
+        })
+        .await;
+    let Some(ServerWorldMsg::HealthUpdate { hp, max_hp, .. }) = mended else {
+        panic!("the server mends the warder and fans its health");
+    };
+    assert!((hp - max_hp).abs() < 0.01, "an unhurt warder stays at full, got {hp}/{max_hp}");
+}
+
 /// Track 12 Piece B â€” non-Beast-Master classes do NOT get an
 /// auto-summoned warder. Counter-test to make sure the class check
 /// is wired correctly.

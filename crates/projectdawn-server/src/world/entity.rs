@@ -378,6 +378,16 @@ impl Entity {
         self.transition(EnemyState::Chase, now);
     }
 
+    /// Nobody to hate (the charmer logged out): the returned mob walks home
+    /// like one that lost its target, rather than standing wherever the pet
+    /// happened to be (playtest 2026-10-07, the walk-away and quit cases
+    /// should look the same). Already home, it stays idle.
+    pub fn go_home(&mut self, now: Instant) {
+        if self.pos.distance_to(self.spawn_pos) >= LEASH_HOME_TOLERANCE {
+            self.transition(EnemyState::Leash, now);
+        }
+    }
+
     /// Track 13 — add a stat buff's deltas to the pet's live stats +
     /// max_hp. Mirror of `buffs::apply_stat_deltas` for a connection.
     /// `max_mp_delta` is ignored — pets have no mana pool.
@@ -945,7 +955,6 @@ impl Entity {
     }
 
     fn tick_leash(&mut self, dt: f32, now: Instant) {
-        const LEASH_HOME_TOLERANCE: f32 = 1.0;
         let dist = self.pos.distance_to(self.spawn_pos);
         if dist < LEASH_HOME_TOLERANCE {
             self.hp = self.max_hp;
@@ -1024,6 +1033,10 @@ fn nearest_target_within(
 fn target_pos(targets: &[(EntityId, Vec3f)], id: EntityId) -> Option<Vec3f> {
     targets.iter().find(|(p, _)| *p == id).map(|(_, pos)| *pos)
 }
+
+/// How close to its spawn position a leashing mob must get before it counts
+/// as home (and resets: full HP, threat and aggro cleared, back to Idle).
+pub const LEASH_HOME_TOLERANCE: f32 = 1.0;
 
 /// Monotonic enemy-id counter. Starts at `ENEMY_ID_BASE` and increments
 /// for each spawn — never reused even after death, so a stale client
@@ -1383,5 +1396,16 @@ mod tests {
         assert!(matches!(back.state, EnemyState::Chase));
         assert!(back.threat.get(&42).copied().unwrap_or(0.0) > 0.0);
         assert!(back.aggro.is_empty(), "no damage dealt, no aggro ledger");
+
+        // Nobody to hate: it walks home from where the pet stood (3.6 m off),
+        // and a mob already at home just stands.
+        let mut orphan = Entity::released_from_charm(&pet, now);
+        orphan.go_home(now);
+        assert!(matches!(orphan.state, EnemyState::Leash), "away from home: walk back");
+        assert_eq!(orphan.target, None);
+        pet.pos = home;
+        let mut at_home = Entity::released_from_charm(&pet, now);
+        at_home.go_home(now);
+        assert!(matches!(at_home.state, EnemyState::Idle), "already home: stay");
     }
 }

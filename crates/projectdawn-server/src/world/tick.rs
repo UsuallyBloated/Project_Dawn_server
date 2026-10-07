@@ -1042,7 +1042,7 @@ async fn write_gm_audit(pool: &SqlitePool, rows: &[db::GmActionRow]) {
 /// Despawn the pet(s) owned by `owner_entity`: fan EntityDespawn to the AOI
 /// peers who could see each pet, then drop it from the grid and the enemies
 /// map. A charmed mob is not dropped but handed back (`return_charmed_mob`),
-/// with nobody to turn on since the charmer is gone. Idempotent — a second
+/// walking home since the charmer is gone. Idempotent — a second
 /// call after the pets are already gone is a no-op. Called both when a player
 /// goes linkdead (the body lingers but the pet can't be commanded) and from
 /// the final reap.
@@ -1091,8 +1091,8 @@ fn despawn_owned_pets(
 /// taken out of `enemies` by the caller) is despawned for everyone who saw it,
 /// and the mob it was comes back in its place, into the camp slot the charm
 /// carried, at the pet's position with the pet's HP (EQ's rule, user call
-/// 2026-10-06). With `turn_on` set it comes straight for its former charmer.
-/// Returns the new enemy id.
+/// 2026-10-06). With `turn_on` set it comes straight for its former charmer;
+/// with nobody to hate it walks home. Returns the new enemy id.
 fn return_charmed_mob(
     server: &mut RenetServer,
     aoi: &mut AoiGrid,
@@ -1109,8 +1109,9 @@ fn return_charmed_mob(
         handlers::send_entity_despawn(server, recipient, pet.id);
     }
     let mut mob = Entity::released_from_charm(&pet, now);
-    if let Some(charmer) = turn_on {
-        mob.turn_on(charmer, now);
+    match turn_on {
+        Some(charmer) => mob.turn_on(charmer, now),
+        None => mob.go_home(now),
     }
     let mob_id = mob.id;
     aoi.insert(mob_id, cell);

@@ -6241,6 +6241,81 @@ async fn a_charmed_mob_is_released_in_place_when_its_charmer_gates() {
     assert!(mob_back, "the mob is back as a hostile where it stood");
 }
 
+/// Spell batch step 3 (user call of 2026-10-05): a cast that a HIT interrupts
+/// costs the spell's mana in proportion to how far the bar had run, and the
+/// caster is told the true mana and the amount. Two dummies walk in and beat
+/// on a Cleric 10 casting Bind Affinity (30 mana, 3 s); the interrupt is a
+/// real ~70% roll per hit, so the bar is retried until one lands (four hits
+/// per attempt, three attempts: the odds of none are below one in a
+/// million). On the previous code the CastFail arrived with no charge and
+/// no line, and the mana stayed full.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_interrupted_cast_costs_mana_in_proportion() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "channel", "Channa", "Human", "Cleric").await;
+    set_char_level(&h.db_url, a_char_id, 10).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "channel", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    // Two that walk in (3 m/s), notice the caster (aggro 10) and hit for 5.
+    for _ in 0..2 {
+        a.send_dev_spawn("Charm Dummy", 1, 500.0, 5, 3.0, 10.0);
+        a.pump_for(Duration::from_millis(150)).await;
+    }
+
+    let mut interrupted = false;
+    let mut charged: Option<i32> = None;
+    let mut settled: Option<(f32, f32)> = None;
+    'attempts: for _ in 0..3 {
+        a.send_cast_start("Bind Affinity", 3.0);
+        let end = Instant::now() + Duration::from_millis(3_400);
+        while Instant::now() < end {
+            tick_one(&mut a.client, &mut a.transport);
+            while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
+                let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) else {
+                    continue;
+                };
+                match msg {
+                    ServerWorldMsg::CastFail { caster, reason }
+                        if caster == a_char_id as u64 && reason.contains("interrupted") =>
+                    {
+                        interrupted = true;
+                    }
+                    ServerWorldMsg::ChatMessage { text, .. } if text.contains("concentration breaks") => {
+                        let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+                        charged = digits.parse().ok();
+                    }
+                    ServerWorldMsg::ManaUpdate { id, mp, max_mp }
+                        if id == a_char_id as u64 && interrupted && settled.is_none() =>
+                    {
+                        settled = Some((mp, max_mp));
+                    }
+                    _ => {}
+                }
+            }
+            if interrupted && charged.is_some() && settled.is_some() {
+                break 'attempts;
+            }
+            tokio::time::sleep(TICK_DT).await;
+        }
+        if interrupted {
+            break;
+        }
+    }
+    assert!(interrupted, "a hit during the bar interrupts the cast");
+    let n = charged.expect("the caster is told what the interrupt cost");
+    assert!((1..=30).contains(&n), "the charge is a fraction of Bind Affinity's 30 mana, got {n}");
+    let (mp, max_mp) = settled.expect("the true mana follows the CastFail");
+    assert!(
+        ((max_mp - mp) - n as f32).abs() < 1.5,
+        "the mana bar lands the charge below full: max {max_mp}, now {mp}, charged {n}"
+    );
+}
+
 /// A spell ported from the client's definitions on 2026-10-05 actually lands.
 /// Bloodfire (Sorcerer, level 4, instant) had no entry in spells.toml, so the
 /// server refused it as unknown and a Sorcerer's second nuke did nothing

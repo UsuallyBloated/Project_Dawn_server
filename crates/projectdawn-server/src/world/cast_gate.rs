@@ -52,10 +52,50 @@ pub fn beaten_by_interrupt(interrupted_at: Option<Instant>, bar_began_at: Option
     }
 }
 
+/// What an interrupted cast costs (spell batch step 3, user call of
+/// 2026-10-05): the spell's mana in proportion to how far the bar had run,
+/// capped at what the caster has. A hit that did no damage (absorbed, or a
+/// zero roll) charges nothing, or a damage shield and a zero-damage swing
+/// would be mana-drain weapons; a deliberate cancel never reaches the server
+/// and so costs nothing either. `cast_time_s` is the server's own cast time
+/// for the spell, never the client's bar length: a forged long bar would
+/// otherwise shrink the fraction to nothing. An instant cast has no bar to
+/// interrupt.
+pub fn interrupt_charge(
+    mana_cost: f32,
+    cast_time_s: f32,
+    elapsed_ms: Option<u128>,
+    damage_applied: i32,
+    mp_now: f32,
+) -> f32 {
+    if damage_applied <= 0 || cast_time_s <= 0.0 || mana_cost <= 0.0 {
+        return 0.0;
+    }
+    let Some(elapsed_ms) = elapsed_ms else {
+        return 0.0;
+    };
+    let fraction = (elapsed_ms as f32 / (cast_time_s * 1000.0)).clamp(0.0, 1.0);
+    (mana_cost * fraction).min(mp_now).max(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn an_interrupt_charges_mana_in_proportion_to_the_bar() {
+        // A 40 mana, 4 s spell.
+        assert_eq!(interrupt_charge(40.0, 4.0, Some(2_000), 7, 100.0), 20.0, "half way, half the mana");
+        assert_eq!(interrupt_charge(40.0, 4.0, Some(1_000), 7, 100.0), 10.0, "a quarter in");
+        assert_eq!(interrupt_charge(40.0, 4.0, Some(9_000), 7, 100.0), 40.0, "past the end: the whole cost, never more");
+        assert_eq!(interrupt_charge(40.0, 4.0, Some(2_000), 0, 100.0), 0.0, "a zero-damage hit charges nothing");
+        assert_eq!(interrupt_charge(40.0, 4.0, Some(2_000), -3, 100.0), 0.0, "an absorbed hit charges nothing");
+        assert_eq!(interrupt_charge(40.0, 4.0, None, 7, 100.0), 0.0, "no bar on file");
+        assert_eq!(interrupt_charge(40.0, 0.0, Some(2_000), 7, 100.0), 0.0, "an instant cast has no bar");
+        assert_eq!(interrupt_charge(40.0, 4.0, Some(2_000), 7, 12.5), 12.5, "capped at the mana held");
+        assert_eq!(interrupt_charge(40.0, 4.0, Some(2_000), 7, 0.0), 0.0, "an empty bar stays at zero");
+    }
 
     #[test]
     fn a_cast_is_ready_only_inside_its_window() {

@@ -195,6 +195,12 @@ pub const FRIENDLY_SPELL_RANGE: f32 = 30.0;
 /// 1.5 to 2.25 s across eras.)
 pub const GLOBAL_COOLDOWN: Duration = Duration::from_millis(2_000);
 
+/// How often a damage-over-time spell ticks on a mob, a pet or a player
+/// (spell batch step 5, decided 2026-10-05): every three seconds, dealing
+/// `dps x 3` per tick, EQ's cadence. The client's own DoT model ticks at the
+/// same rate, so the numbers on screen match the server's.
+pub const DOT_TICK_SECS: f32 = 3.0;
+
 /// How far apart (metres) two players may be for `InspectPlayer` to return a
 /// paperdoll. Paperdoll slots are public and bags are excluded, so reading
 /// one from across the world was only a minor disclosure (exploit audit

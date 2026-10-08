@@ -1029,6 +1029,38 @@ classes = ["Beast Master"]
 # arrival point; Evacuate brings the alive group members within friendly reach.
 # Numbers are the client's. Gate's class list is the Bind Affinity list (user
 # call D6, 2026-10-05: the nine pure casters plus Bard).
+# ── Damage over time (spell batch step 5, 2026-10-08) ─────────────────────
+# The direct hit lands with the cast; the DoT then ticks every DOT_TICK_SECS
+# (3 s, `world/mod.rs`) for `dot_duration`, dps x 3 per tick, credited to the
+# caster. Numbers are the client's, unchanged.
+[[spell]]
+name = "Entangle"
+target_type = "ENEMY"
+damage_type = "NATURE"
+base_damage = 10.0
+heal_amount = 0.0
+mana_cost = 18.0
+cast_time = 0.0
+cooldown = 18.0
+dot_dps = 5.0
+dot_duration = 18.0
+min_level = 6
+classes = ["Druid"]
+
+[[spell]]
+name = "Dark Decay"
+target_type = "ENEMY"
+damage_type = "SHADOW"
+base_damage = 20.0
+heal_amount = 0.0
+mana_cost = 40.0
+cast_time = 2.0
+cooldown = 24.0
+dot_dps = 7.0
+dot_duration = 24.0
+min_level = 10
+classes = ["Necromancer"]
+
 [[spell]]
 name = "Gate"
 target_type = "PORT"

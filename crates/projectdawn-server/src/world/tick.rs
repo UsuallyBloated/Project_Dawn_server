@@ -468,15 +468,17 @@ fn fan_out_server_buff_snapshot(
     }
 }
 
-/// Track 13 — fan a BuffSnapshot for a pet's active buffs under the pet
+/// Track 13 — fan a BuffSnapshot for a pet's or a mob's status under its
 /// id, so the owner + bystanders render its buff bar (the client routes
 /// the snapshot by id partition). Mirror of `fan_out_server_buff_snapshot`.
+/// Since spell batch step 5 the payload is `Entity::status_pairs`: buffs,
+/// DoTs and crowd control, so a mob's target frame shows what is on it.
 fn fan_out_pet_buff_snapshot(
     server: &mut renet::RenetServer,
     recipients: &[renet::ClientId],
     pet: &Entity,
 ) {
-    let payload = buffs::snapshot_pairs(&pet.active_buffs);
+    let payload = pet.status_pairs();
     let msg = protocol::world::ServerWorldMsg::BuffSnapshot {
         target: pet.id,
         buffs: payload,
@@ -618,6 +620,123 @@ fn award_kill(
     );
 }
 
+/// The one kill step for a mob or pet brought to 0 HP by anything other
+/// than a melee swing (spell batch step 5): a direct spell hit, a DoT tick,
+/// a damage shield. Marks it dead, fans EntityDied, credits the kill to
+/// whoever holds the most aggro (XP, the group split, quest credit),
+/// schedules a warder's return, and drops the loot. Idempotent on an
+/// entity that is already dead or gone. Before this existed the spell arm
+/// carried the sequence inline and the two damage-shield sites skipped it,
+/// so a mob finished off by Thorns paid nothing.
+/// `source` names the killing blow in the log ("spell kill", "reflect
+/// kill", ...), so a scan for one kind keeps working.
+#[allow(clippy::too_many_arguments)]
+fn kill_enemy(
+    server: &mut RenetServer,
+    in_world_recipients: &[ClientId],
+    connections: &mut HashMap<ClientId, PerConnection>,
+    enemies: &mut HashMap<EntityId, Entity>,
+    loot_bags: &mut HashMap<EntityId, LootBag>,
+    aoi: &mut AoiGrid,
+    group_manager: &groups::GroupManager,
+    entity_id: EntityId,
+    source: &str,
+    now: Instant,
+) {
+    let (credit_id_opt, mob_xp, mob_level, death_pos, mob_name, warder_owner_opt, victim_owned) = {
+        let Some(entity) = enemies.get_mut(&entity_id) else {
+            return;
+        };
+        if !entity.is_alive() {
+            return;
+        }
+        entity.transition(EnemyState::Dead, now);
+        handlers::fan_out_entity_died(server, in_world_recipients, entity_id);
+        let credit_id_opt = entity
+            .aggro
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(&id, _)| id);
+        // EQ quadratic per-kill award, derived from the mob's level (not the
+        // legacy flat mob.xp constant). See progression::kill_xp.
+        let mob_xp = super::progression::kill_xp(entity.mob.level as i32, super::progression::ZEM_NORMAL);
+        let warder_owner_opt: Option<EntityId> =
+            if super::pet_templates::is_warder_template(&entity.mob.name) {
+                entity.owner
+            } else {
+                None
+            };
+        // Owned victims (pets, charmed mobs) must not grant quest kill
+        // credit — the warder is literally named "Wolf", so a respawning
+        // PvP warder would farm the wolf quest otherwise.
+        let victim_owned = entity.owner.is_some();
+        (credit_id_opt, mob_xp, entity.mob.level, entity.pos, entity.mob.name.clone(), warder_owner_opt, victim_owned)
+    };
+
+    // Warder respawn — mirrors the melee path. If the dying entity is a
+    // Beast Master warder, schedule the owner's warder_respawn_at so the
+    // warder-respawn sweep brings it back.
+    if let Some(owner_id) = warder_owner_opt {
+        const WARDER_RETREAT_SECS: f32 = 15.0;
+        let due = now + std::time::Duration::from_secs_f32(WARDER_RETREAT_SECS);
+        let owner_cid = owner_id as ClientId;
+        if let Some(conn) = connections.get_mut(&owner_cid) {
+            conn.warder_respawn_at = Some(due);
+            tracing::info!(
+                owner = owner_cid as u64,
+                killer = ?credit_id_opt,
+                retreat_secs = WARDER_RETREAT_SECS,
+                "warder retreating after kill",
+            );
+        }
+    }
+    if let Some(credit_id) = credit_id_opt {
+        // Every kill uses the same group XP split + quest credit as a melee
+        // kill (EQ semantics: the split is method-agnostic).
+        award_kill(
+            server,
+            connections,
+            group_manager,
+            credit_id,
+            mob_xp,
+            &mob_name,
+            victim_owned,
+            death_pos,
+        );
+    }
+    // An owned victim (a pet, a charmed mob) drops nothing, as it pays no
+    // XP: a warder is "Wolf" with a wolf's loot table and returns free every
+    // 15 s, so two flagged accounts could farm its bag (the review of step 5
+    // found the melee path had always rolled it).
+    if victim_owned {
+        return;
+    }
+    let loot_items = loot::roll_for_mob(&mob_name).unwrap_or_default();
+    let loot_coins = loot::roll_coin_for_mob(&mob_name, mob_level);
+    if !loot_items.is_empty() || loot_coins != protocol::world::Coins::ZERO {
+        // Loot ownership: the kill-creditor owns the corpse; their group
+        // shares rights, resolved at loot time.
+        let owner_cid_opt = credit_id_opt
+            .filter(|&id| id < protocol::world::ENEMY_ID_BASE)
+            .map(|id| id as ClientId);
+        let bag = LootBag::new(death_pos, loot_items, loot_coins, mob_name.clone(), owner_cid_opt, now);
+        let bag_id = bag.id;
+        let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
+        aoi.insert(bag_id, bag_cell);
+        let visible = aoi.entities_visible_from(bag_cell);
+        let bag_recipients: Vec<ClientId> = in_world_recipients
+            .iter()
+            .copied()
+            .filter(|id| visible.contains(id))
+            .collect();
+        if !bag_recipients.is_empty() {
+            handlers::fan_out_loot_bag_spawn(server, &bag_recipients, &bag);
+        }
+        loot_bags.insert(bag.id, bag);
+        tracing::info!(mob = %mob_name, bag_id, "loot bag spawned ({source})");
+    }
+}
+
 /// Track 9 — apply a single spell hit to one enemy. Shared by the
 /// single-target ENEMY arm and the AOE fan-out so the damage / death /
 /// kill-credit / loot / CC sequence stays in one place. Caller is
@@ -641,7 +760,7 @@ fn apply_spell_damage_to_enemy(
     dmg_type: DamageType,
     now: Instant,
 ) -> bool {
-    let (died, credit_id_opt, mob_xp, mob_level, death_pos, mob_name, damage_done, warder_owner_opt, victim_owned) = {
+    let (died, damage_done) = {
         let Some(entity) = enemies.get_mut(&target_id) else {
             return false;
         };
@@ -679,36 +798,24 @@ fn apply_spell_damage_to_enemy(
         );
 
         if died {
-            entity.transition(EnemyState::Dead, now);
-            handlers::fan_out_entity_died(server, in_world_recipients, entity_id);
-            let credit_id_opt = entity
-                .aggro
-                .iter()
-                .max_by(|a, b| {
-                    a.1.partial_cmp(b.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .map(|(&id, _)| id);
-            // EQ quadratic per-kill award, derived from the mob's level (not the
-            // legacy flat mob.xp constant). See progression::kill_xp.
-            let mob_xp = super::progression::kill_xp(entity.mob.level as i32, super::progression::ZEM_NORMAL);
-            let mob_level = entity.mob.level;
-            let death_pos = entity.pos;
-            let mob_name = entity.mob.name.clone();
-            let warder_owner_opt: Option<EntityId> =
-                if super::pet_templates::is_warder_template(&entity.mob.name) {
-                    entity.owner
-                } else {
-                    None
-                };
-            // Owned victims (pets, charmed mobs) must not grant quest kill
-            // credit — the warder is literally named "Wolf", so a respawning
-            // PvP warder would farm the wolf quest otherwise.
-            let victim_owned = entity.owner.is_some();
-            (true, credit_id_opt, mob_xp, mob_level, death_pos, mob_name, damage_done, warder_owner_opt, victim_owned)
+            (true, damage_done)
         } else {
             if dmg > 0 {
                 entity.clear_mez();
+            }
+            // Damage over time (spell batch step 5): the direct hit above
+            // is the cast's own; the DoT ticks from here, credited to the
+            // caster, replacing an earlier cast of the same spell.
+            if spell.dot_dps > 0.0 && spell.dot_duration > 0.0 {
+                entity.apply_dot(entity::ActiveDot {
+                    name: spell.name.clone(),
+                    caster: caster_id,
+                    dps: spell.dot_dps,
+                    dmg_type,
+                    remaining: spell.dot_duration,
+                    tick_acc: 0.0,
+                    ticks_left: 0,
+                });
             }
             if spell.cc_duration > 0.0 {
                 entity.apply_cc(ActiveCc::new_mez(spell.cc_duration));
@@ -725,7 +832,7 @@ fn apply_spell_damage_to_enemy(
                     spell.attack_slow_duration,
                 ));
             }
-            (false, None, 0, 0, entity.pos, String::new(), damage_done, None, false)
+            (false, damage_done)
         }
     };
 
@@ -754,65 +861,18 @@ fn apply_spell_damage_to_enemy(
     }
 
     if died {
-        // Warder respawn — mirrors the melee path. If the dying entity
-        // is a Beast Master warder, schedule the owner's
-        // warder_respawn_at so the warder-respawn sweep brings it back.
-        if let Some(owner_id) = warder_owner_opt {
-            const WARDER_RETREAT_SECS: f32 = 15.0;
-            let due = now + std::time::Duration::from_secs_f32(WARDER_RETREAT_SECS);
-            let owner_cid = owner_id as ClientId;
-            if let Some(conn) = connections.get_mut(&owner_cid) {
-                conn.warder_respawn_at = Some(due);
-                tracing::info!(
-                    owner = owner_cid as u64,
-                    killer = caster_id,
-                    retreat_secs = WARDER_RETREAT_SECS,
-                    "warder retreating after spell kill",
-                );
-            }
-        }
-        if let Some(credit_id) = credit_id_opt {
-            // Spell kills use the same group XP split + quest credit as melee
-            // kills (EQ semantics: the split is method-agnostic).
-            award_kill(
-                server,
-                connections,
-                group_manager,
-                credit_id,
-                mob_xp,
-                &mob_name,
-                victim_owned,
-                death_pos,
-            );
-        }
-        let loot_items = loot::roll_for_mob(&mob_name).unwrap_or_default();
-        let loot_coins = loot::roll_coin_for_mob(&mob_name, mob_level);
-        if !loot_items.is_empty() || loot_coins != protocol::world::Coins::ZERO {
-            // Loot ownership: the spell kill-creditor owns the corpse;
-            // their group shares rights, resolved at loot time.
-            let owner_cid_opt = credit_id_opt
-                .filter(|&id| id < protocol::world::ENEMY_ID_BASE)
-                .map(|id| id as ClientId);
-            let bag = LootBag::new(death_pos, loot_items, loot_coins, mob_name.clone(), owner_cid_opt, now);
-            let bag_id = bag.id;
-            let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
-            aoi.insert(bag_id, bag_cell);
-            let visible = aoi.entities_visible_from(bag_cell);
-            let bag_recipients: Vec<ClientId> = in_world_recipients
-                .iter()
-                .copied()
-                .filter(|id| visible.contains(id))
-                .collect();
-            if !bag_recipients.is_empty() {
-                handlers::fan_out_loot_bag_spawn(server, &bag_recipients, &bag);
-            }
-            loot_bags.insert(bag.id, bag);
-            tracing::info!(
-                mob = %mob_name,
-                bag_id,
-                "loot bag spawned (spell kill)"
-            );
-        }
+        kill_enemy(
+            server,
+            in_world_recipients,
+            connections,
+            enemies,
+            loot_bags,
+            aoi,
+            group_manager,
+            target_id,
+            "spell kill",
+            now,
+        );
     }
 
     true
@@ -1181,6 +1241,26 @@ async fn reap_connection(
         }
         // Despawn any pet still alive (no-op if linkdead already dropped it).
         despawn_owned_pets(server, connections, aoi, enemies, entity_id, client_id, now);
+        // Their DoTs end with them (spell batch step 5): a logout pays
+        // nothing for what was left ticking. A linkdead body keeps its DoTs
+        // for the linger, since it is still in the world to be killed.
+        for entity in enemies.values_mut() {
+            entity.clear_dots_from(entity_id);
+        }
+        // And any PvP DoT they left on a player.
+        let bearers = clear_player_dots_from(connections, &[entity_id]);
+        if !bearers.is_empty() {
+            let recipients: Vec<ClientId> = connections
+                .iter()
+                .filter(|(id, c)| **id != client_id && c.in_world)
+                .map(|(id, _)| *id)
+                .collect();
+            for bearer in bearers {
+                if let Some(conn) = connections.get(&bearer) {
+                    fan_out_server_buff_snapshot(server, &recipients, conn);
+                }
+            }
+        }
     }
 
     // Track 6 sub-task 5 — remove the leaver from their group. If the group
@@ -3943,9 +4023,22 @@ pub async fn run(
                         .map(|(&id, _)| id)
                         .filter(|&id| id < protocol::world::ENEMY_ID_BASE)
                         .map(|id| id as ClientId);
-                    let loot_items = loot::roll_for_mob(&entity.mob.name).unwrap_or_default();
-                    let loot_coins =
-                        loot::roll_coin_for_mob(&entity.mob.name, entity.mob.level);
+                    // An owned victim (a pet, a charmed mob) drops nothing,
+                    // as it pays no XP: a warder is "Wolf" with a wolf's
+                    // table and returns free every 15 s, so two flagged
+                    // accounts could farm its bag (review of spell batch
+                    // step 5; this path had always rolled it).
+                    let owned_victim = entity.owner.is_some();
+                    let loot_items = if owned_victim {
+                        Vec::new()
+                    } else {
+                        loot::roll_for_mob(&entity.mob.name).unwrap_or_default()
+                    };
+                    let loot_coins = if owned_victim {
+                        protocol::world::Coins::ZERO
+                    } else {
+                        loot::roll_coin_for_mob(&entity.mob.name, entity.mob.level)
+                    };
                     if !loot_items.is_empty() || loot_coins != protocol::world::Coins::ZERO {
                         let stacks_for_log = loot_items.len();
                         let bag = LootBag::new(
@@ -5065,6 +5158,24 @@ pub async fn run(
                             // semantics (same-name re-cast renews
                             // duration via apply_buff).
                             let mut cc_changed = false;
+                            // A PvP DoT rides the same buff list (spell
+                            // batch step 5), ticking in the buff sweep.
+                            if spell.dot_dps > 0.0 && spell.dot_duration > 0.0 {
+                                if let Some(tc) = connections.get_mut(&target_cid) {
+                                    apply_buff(
+                                        tc,
+                                        ActiveBuff::new_dot(
+                                            spell.name.clone(),
+                                            spell.dot_dps,
+                                            intent.caster,
+                                            dmg_type,
+                                            spell.dot_duration,
+                                            now,
+                                        ),
+                                    );
+                                    cc_changed = true;
+                                }
+                            }
                             if spell.cc_duration > 0.0 {
                                 if let Some(tc) = connections.get_mut(&target_cid) {
                                     apply_buff(tc, ActiveBuff::new_mez(spell.name.clone(), spell.cc_duration, now));
@@ -5742,6 +5853,11 @@ pub async fn run(
                                 mob_id,
                                 None,
                             );
+                        }
+                        for bearer in clear_player_dots_from(&mut connections, &mover_ids) {
+                            if let Some(conn) = connections.get(&bearer) {
+                                fan_out_server_buff_snapshot(&mut server, &in_world_recipients_now, conn);
+                            }
                         }
                         for &m in &movers {
                             if let Some(c) = connections.get_mut(&m) {
@@ -8510,6 +8626,18 @@ pub async fn run(
             }
             let mut target_changes: Vec<(EntityId, Option<EntityId>)> = Vec::new();
             let mut enemy_hits: Vec<(EntityId, HitIntent)> = Vec::new();
+            // DoT ticks dealt this sweep (spell batch step 5): the entity,
+            // the tick, its hp and max_hp after, and whether it died of it.
+            // Fanned and, on a kill, rewarded after the loop, since the kill
+            // step needs the whole enemies map.
+            let mut dot_ticks: Vec<(EntityId, entity::DotTick, f32, f32, bool)> = Vec::new();
+            // Entities whose status set (buffs, DoTs, CC) changed this sweep;
+            // their BuffSnapshot re-fans after the loop so the target frame
+            // shows what is on a mob (spell batch step 5).
+            let mut status_changed: Vec<EntityId> = Vec::new();
+            // Alive-by-state bodies found at 0 HP with no DoT tick to blame
+            // this sweep: killed properly after the loop, never left standing.
+            let mut zero_hp_strays: Vec<EntityId> = Vec::new();
             // Collect enemy and pet cell changes so the aoi grid stays
             // current (player cell-change fan-outs read it to find what is
             // now visible) AND so each crossing can fan its own spawn /
@@ -8540,6 +8668,29 @@ pub async fn run(
                         );
                     }
                 }
+                // Damage over time ticks (spell batch step 5), before the AI
+                // step: a tick builds the caster's aggro and threat like a
+                // hit (so an idle mob turns on them), and a tick that kills
+                // is handled after the loop, with nothing below running on
+                // the body this tick.
+                let mut killed_by_dot = false;
+                for tick in entity.tick_dots(dt) {
+                    entity.hp = (entity.hp - tick.amount as f32).max(0.0);
+                    *entity.aggro.entry(tick.caster).or_insert(0.0) += tick.amount as f32;
+                    *entity.threat.entry(tick.caster).or_insert(0.0) += tick.amount as f32;
+                    let died = entity.hp <= 0.0;
+                    dot_ticks.push((entity.id, tick, entity.hp, entity.max_hp, died));
+                    if died {
+                        killed_by_dot = true;
+                        break;
+                    }
+                }
+                if entity.hp <= 0.0 {
+                    if !killed_by_dot {
+                        zero_hp_strays.push(entity.id);
+                    }
+                    continue;
+                }
                 let old_enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
                 let events = entity.tick_ai(&targets_for_enemy_ai, &enemy_target_snapshots, dt, now);
                 if let Some(new_target) = events.target_changed {
@@ -8547,6 +8698,20 @@ pub async fn run(
                 }
                 if let Some(hit) = events.hit {
                     enemy_hits.push((entity.id, hit));
+                }
+                // Re-fan the status snapshot when the set of names on the
+                // entity changed (a DoT or CC landing or running out).
+                // The signature carries whole seconds, so a same-name refresh
+                // (a re-cast DoT, a stronger snare) re-fans too, once a
+                // second while anything is on the mob and never otherwise.
+                let signature: Vec<String> = entity
+                    .status_pairs()
+                    .into_iter()
+                    .map(|(n, secs)| format!("{n}:{}", secs.max(0.0) as u32))
+                    .collect();
+                if signature != entity.last_status_fanned {
+                    entity.last_status_fanned = signature;
+                    status_changed.push(entity.id);
                 }
                 let new_enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
                 if new_enemy_cell != old_enemy_cell {
@@ -8566,6 +8731,93 @@ pub async fn run(
                     id,
                     target,
                 );
+            }
+            // DoT ticks (spell batch step 5): everyone sees the hit and the
+            // bar; the caster alone gets the named "<spell> for N" line (the
+            // proc message, which the client already renders); a tick that
+            // killed goes through the one kill step, so a DoT kill pays
+            // exactly what a direct hit would.
+            for (entity_id, tick, hp_after, max_hp, died) in dot_ticks {
+                handlers::fan_out_hit(
+                    &mut server,
+                    &in_world_recipients_now,
+                    tick.caster,
+                    entity_id,
+                    tick.amount,
+                    false,
+                    tick.dmg_type,
+                );
+                handlers::fan_out_health_update(
+                    &mut server,
+                    &in_world_recipients_now,
+                    entity_id,
+                    hp_after,
+                    max_hp,
+                );
+                let caster_cid = tick.caster as ClientId;
+                if connections.get(&caster_cid).is_some_and(|c| c.in_world) {
+                    handlers::fan_out_proc_triggered(
+                        &mut server,
+                        &[caster_cid],
+                        tick.caster,
+                        entity_id,
+                        tick.name.clone(),
+                        tick.amount,
+                        false,
+                        tick.dmg_type,
+                    );
+                }
+                if died {
+                    tracing::info!(
+                        entity_id,
+                        caster = tick.caster,
+                        spell = %tick.name,
+                        "enemy killed by a damage-over-time tick"
+                    );
+                    kill_enemy(
+                        &mut server,
+                        &in_world_recipients_now,
+                        &mut connections,
+                        &mut enemies,
+                        &mut loot_bags,
+                        &mut aoi,
+                        &group_manager,
+                        entity_id,
+                        "damage-over-time kill",
+                        now,
+                    );
+                }
+            }
+            // A body at 0 HP that nothing killed this sweep (no path leaves
+            // one today; this keeps it from standing invisible to the AI,
+            // alive by state, forever).
+            for entity_id in zero_hp_strays {
+                kill_enemy(
+                    &mut server,
+                    &in_world_recipients_now,
+                    &mut connections,
+                    &mut enemies,
+                    &mut loot_bags,
+                    &mut aoi,
+                    &group_manager,
+                    entity_id,
+                    "stray kill",
+                    now,
+                );
+            }
+            // Status snapshots go to the players who can see the mob, as the
+            // pet buff sweep's do, not to everyone in the world.
+            for entity_id in status_changed {
+                if let Some(entity) = enemies.get(&entity_id) {
+                    let cell = aoi::cell_for(entity.pos.x, entity.pos.z);
+                    let visible = aoi.entities_visible_from(cell);
+                    let audience: Vec<ClientId> = in_world_recipients_now
+                        .iter()
+                        .copied()
+                        .filter(|cid| visible.contains(cid))
+                        .collect();
+                    fan_out_pet_buff_snapshot(&mut server, &audience, entity);
+                }
             }
             for (attacker, hit) in enemy_hits {
                 // Track 11.4 — enemy → pet. Mirror of the enemy →
@@ -8671,13 +8923,21 @@ pub async fn run(
                     }
                     // Track 13 — Thorns reflect on a pet: the enemy that
                     // struck a shielded pet takes the shield damage back.
-                    // Mirrors the enemy→player reflect; a reflect-kill just
-                    // drops the enemy (no XP/loot, same as the player path).
+                    // Mirrors the enemy→player reflect. The reflect counts as
+                    // the pet owner's damage (aggro), so a reflect kill pays
+                    // them like any other (spell batch step 5; it used to pay
+                    // nothing).
                     if pet_shield > 0.0 {
+                        let pet_owner = enemies.get(&hit.target).and_then(|p| p.owner);
+                        let mut reflect_killed = false;
                         if let Some(att_entity) = enemies.get_mut(&attacker) {
                             if att_entity.is_alive() {
                                 let dmg = pet_shield as i32;
                                 att_entity.hp = (att_entity.hp - dmg as f32).max(0.0);
+                                if let Some(owner) = pet_owner {
+                                    *att_entity.aggro.entry(owner).or_insert(0.0) += dmg as f32;
+                                    *att_entity.threat.entry(owner).or_insert(0.0) += dmg as f32;
+                                }
                                 handlers::fan_out_health_update(
                                     &mut server,
                                     &in_world_recipients_now,
@@ -8695,15 +8955,22 @@ pub async fn run(
                                         name.clone(),
                                     );
                                 }
-                                if att_entity.hp <= 0.0 {
-                                    att_entity.transition(EnemyState::Dead, now);
-                                    handlers::fan_out_entity_died(
-                                        &mut server,
-                                        &in_world_recipients_now,
-                                        attacker,
-                                    );
-                                }
+                                reflect_killed = att_entity.hp <= 0.0;
                             }
+                        }
+                        if reflect_killed {
+                            kill_enemy(
+                                &mut server,
+                                &in_world_recipients_now,
+                                &mut connections,
+                                &mut enemies,
+                                &mut loot_bags,
+                                &mut aoi,
+                                &group_manager,
+                                attacker,
+                                "reflect kill",
+                                now,
+                            );
                         }
                     }
                     continue;
@@ -8854,7 +9121,8 @@ pub async fn run(
                                     );
                                 }
                             }
-                            if let Some(mob_name) = mob_name_dead.as_ref() {
+                            // An owned victim drops nothing (see kill_enemy).
+                            if let Some(mob_name) = mob_name_dead.as_ref().filter(|_| !victim_owned) {
                                 let loot_items =
                                     loot::roll_for_mob(mob_name).unwrap_or_default();
                                 let loot_coins =
@@ -9084,10 +9352,18 @@ pub async fn run(
                 // Look up by attacker id in the enemies map; if not
                 // present (attacker died this tick), skip silently.
                 if shield_to_attacker > 0.0 {
+                    let mut reflect_killed = false;
                     if let Some(att_entity) = enemies.get_mut(&attacker) {
                         if att_entity.is_alive() {
                             let dmg = shield_to_attacker as i32;
                             att_entity.hp = (att_entity.hp - dmg as f32).max(0.0);
+                            // The reflect is the defender's damage (aggro), so
+                            // a reflect kill pays them like any other (spell
+                            // batch step 5; it used to pay nothing).
+                            if let Some(defender) = damaged_player {
+                                *att_entity.aggro.entry(defender).or_insert(0.0) += dmg as f32;
+                                *att_entity.threat.entry(defender).or_insert(0.0) += dmg as f32;
+                            }
                             handlers::fan_out_health_update(
                                 &mut server,
                                 &in_world_recipients_now,
@@ -9105,15 +9381,22 @@ pub async fn run(
                                     name.clone(),
                                 );
                             }
-                            if att_entity.hp <= 0.0 {
-                                att_entity.transition(EnemyState::Dead, now);
-                                handlers::fan_out_entity_died(
-                                    &mut server,
-                                    &in_world_recipients_now,
-                                    attacker,
-                                );
-                            }
+                            reflect_killed = att_entity.hp <= 0.0;
                         }
+                    }
+                    if reflect_killed {
+                        kill_enemy(
+                            &mut server,
+                            &in_world_recipients_now,
+                            &mut connections,
+                            &mut enemies,
+                            &mut loot_bags,
+                            &mut aoi,
+                            &group_manager,
+                            attacker,
+                            "reflect kill",
+                            now,
+                        );
                     }
                 }
                 handlers::fan_out_hit(
@@ -10388,6 +10671,9 @@ pub async fn run(
         //     the regen-driven HealthUpdate fan-out — one ManaUpdate
         //     / HealthUpdate per affected resource per tick at most.
         let mut buff_snapshot_dirty: Vec<u64> = Vec::new();
+        // PvP DoT ticks dealt this pass: (bearer, caster, spell, amount,
+        // dmg_type, hp after, max_hp), fanned once the borrow ends.
+        let mut pvp_dot_ticks: Vec<(u64, u64, String, i32, DamageType, f32, f32)> = Vec::new();
         for conn in connections.values_mut().filter(|c| c.ready) {
             let mut snapshot_changed = false;
             let mut i = 0;
@@ -10406,6 +10692,41 @@ pub async fn run(
                                 buff.tick_acc -= heal;
                                 conn.hp = (conn.hp + heal).min(conn.max_hp);
                                 regen::mark_dirty(conn);
+                            }
+                        }
+                    }
+                    // A PvP DoT (spell batch step 5): whole ticks of dps x
+                    // DOT_TICK_SECS, the same cadence as a mob's. The hit
+                    // and the caster's line fan after the loop; the death
+                    // sweep below handles a bearer brought to 0.
+                    // Ticks are counted off the elapsed time (`tick_acc`
+                    // holds the count), so the last one lands on the frame
+                    // the buff expires, whichever accumulator crosses first.
+                    buffs::BuffEffect::Dot { dps, caster, dmg_type, duration } => {
+                        if dps > 0.0 && conn.hp > 0.0 && !conn.death_processed {
+                            let total = (duration / super::DOT_TICK_SECS).floor();
+                            let elapsed = (duration - buff.remaining.max(0.0)).max(0.0);
+                            let due = (elapsed / super::DOT_TICK_SECS).floor().min(total);
+                            if buff.tick_acc < due {
+                                buff.tick_acc += 1.0;
+                                let amount = (dps * super::DOT_TICK_SECS).round().max(0.0) as i32;
+                                // The buff borrow ends here; the bearer is
+                                // mutated below.
+                                let name = buff.name.clone();
+                                if amount > 0 {
+                                    conn.hp = (conn.hp - amount as f32).max(0.0);
+                                    conn.note_damage_taken(now);
+                                    regen::mark_dirty(conn);
+                                    pvp_dot_ticks.push((
+                                        conn.char_id as u64,
+                                        caster,
+                                        name,
+                                        amount,
+                                        dmg_type,
+                                        conn.hp,
+                                        conn.max_hp,
+                                    ));
+                                }
                             }
                         }
                     }
@@ -10497,6 +10818,32 @@ pub async fn run(
             }
             if snapshot_changed {
                 buff_snapshot_dirty.push(conn.char_id as u64);
+            }
+        }
+        // PvP DoT ticks: everyone sees the hit and the bar, the caster
+        // alone gets the named line (spell batch step 5).
+        if !pvp_dot_ticks.is_empty() {
+            let recipients: Vec<ClientId> = connections
+                .iter()
+                .filter(|(_, c)| c.in_world)
+                .map(|(id, _)| *id)
+                .collect();
+            for (bearer, caster, name, amount, dmg_type, hp_after, max_hp) in pvp_dot_ticks {
+                handlers::fan_out_hit(&mut server, &recipients, caster, bearer, amount, false, dmg_type);
+                handlers::fan_out_health_update(&mut server, &recipients, bearer, hp_after, max_hp);
+                let caster_cid = caster as ClientId;
+                if connections.get(&caster_cid).is_some_and(|c| c.in_world) {
+                    handlers::fan_out_proc_triggered(
+                        &mut server,
+                        &[caster_cid],
+                        caster,
+                        bearer,
+                        name,
+                        amount,
+                        false,
+                        dmg_type,
+                    );
+                }
             }
         }
         // Fan BuffSnapshot for any connection whose buff set changed
@@ -10620,6 +10967,11 @@ pub async fn run(
         if !newly_dead.is_empty() {
             for mob_id in wipe_hate(&mut enemies, &newly_dead) {
                 handlers::fan_out_entity_target(&mut server, &in_world_recipients_now, mob_id, None);
+            }
+            for bearer in clear_player_dots_from(&mut connections, &newly_dead) {
+                if let Some(conn) = connections.get(&bearer) {
+                    fan_out_server_buff_snapshot(&mut server, &in_world_recipients_now, conn);
+                }
             }
         }
 
@@ -11235,6 +11587,25 @@ fn cast_target_refusal(
     }
 }
 
+/// End every PvP DoT these casters have on any player (spell batch step 5):
+/// the ledger rule that your DoTs end when you die, port or log out holds
+/// for a flagged player's bar too, or a caster could DoT someone and log
+/// out with no counterplay. Returns the bearers whose buff set changed, for
+/// the caller to re-fan.
+fn clear_player_dots_from(connections: &mut HashMap<ClientId, PerConnection>, casters: &[EntityId]) -> Vec<ClientId> {
+    let mut changed = Vec::new();
+    for (cid, conn) in connections.iter_mut() {
+        let before = conn.active_buffs.len();
+        conn.active_buffs.retain(|b| {
+            !matches!(b.effect, buffs::BuffEffect::Dot { caster, .. } if casters.contains(&caster))
+        });
+        if conn.active_buffs.len() != before {
+            changed.push(*cid);
+        }
+    }
+    changed
+}
+
 /// Remove these players from every mob's aggro and threat tables and from any
 /// mob's target. A mob that loses its target leashes home and heals to full
 /// (`entity.rs::tick_leash`). Shared by the death sweep and the port arm: a
@@ -11250,6 +11621,10 @@ fn wipe_hate(enemies: &mut HashMap<EntityId, Entity>, players: &[EntityId]) -> V
         for id in players {
             entity.aggro.remove(id);
             entity.threat.remove(id);
+            // Their DoTs end with their hate (spell batch step 5): a
+            // player who died or ported is paid nothing by what they left
+            // ticking.
+            entity.clear_dots_from(*id);
             if entity.target == Some(*id) {
                 entity.target = None;
                 dropped.push(entity.id);

@@ -137,6 +137,14 @@ pub struct Spell {
     #[serde(default)]
     pub is_song: bool,
 
+    // Damage over time (spell batch step 5): `dot_dps` per second for
+    // `dot_duration` seconds after the direct hit, dealt in whole ticks of
+    // `DOT_TICK_SECS`. Mirrors the client's `dot_dps` / `dot_duration`.
+    #[serde(default)]
+    pub dot_dps: f32,
+    #[serde(default)]
+    pub dot_duration: f32,
+
     // Track 12 Piece C — generic duration field (currently used by
     // PET_CHARM spells for how long the target stays charmed; future
     // mechanics with a single duration knob can reuse). Distinct

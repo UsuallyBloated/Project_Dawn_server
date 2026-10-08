@@ -39,6 +39,36 @@ pub struct ActiveCc {
     pub remaining: f32,
 }
 
+/// A damage-over-time spell on a mob or pet (spell batch step 5). Damage is
+/// dealt in whole ticks of `dps x DOT_TICK_SECS`, the first one
+/// `DOT_TICK_SECS` after it lands (the direct hit is the cast's own).
+#[derive(Debug, Clone)]
+pub struct ActiveDot {
+    /// The spell's name: one DoT per name on a target, the newer replacing
+    /// the older, so re-casting refreshes rather than stacks.
+    pub name: String,
+    /// Who gets the aggro, the threat and the kill credit.
+    pub caster: EntityId,
+    pub dps: f32,
+    pub dmg_type: protocol::world::DamageType,
+    pub remaining: f32,
+    /// Seconds accumulated towards the next tick.
+    pub tick_acc: f32,
+    /// Whole ticks still to deal, set by `apply_dot` from the duration.
+    /// The DoT lives until they are dealt, so float drift between
+    /// `remaining` and `tick_acc` can never lose the last one.
+    pub ticks_left: u32,
+}
+
+/// One DoT tick the AI sweep dealt, for the tick loop to fan and to credit.
+#[derive(Debug, Clone)]
+pub struct DotTick {
+    pub name: String,
+    pub caster: EntityId,
+    pub amount: i32,
+    pub dmg_type: protocol::world::DamageType,
+}
+
 impl ActiveCc {
     pub fn new_mez(duration: f32) -> Self {
         Self { kind: CcKind::Mez, remaining: duration }
@@ -145,6 +175,18 @@ pub struct Entity {
     /// Active crowd-control effects. Ticked every AI frame; empty is the
     /// common case (no per-tick allocation cost when idle).
     pub active_cc: Vec<ActiveCc>,
+    /// Damage over time on this mob or pet (spell batch step 5): one entry
+    /// per spell name, the newer cast replacing the older. Ticks every
+    /// `DOT_TICK_SECS` in the AI sweep, builds aggro and threat for its
+    /// caster, breaks mez, and kills with the same rewards as a direct hit.
+    /// Cleared the moment the mob starts leashing home, and when its caster
+    /// dies, ports or logs out, so nothing can be tagged and left to die
+    /// from safety.
+    pub active_dots: Vec<ActiveDot>,
+    /// The status names (buffs, DoTs, CC) last fanned as this entity's
+    /// BuffSnapshot; the AI sweep re-fans when the set changes, so the
+    /// target frame shows what is on a mob (spell batch step 5).
+    pub last_status_fanned: Vec<String>,
 
     /// Track 11 — player-owned pet. `None` for world-spawned enemies
     /// (the default); `Some(owner_char_id)` for pets summoned via
@@ -271,6 +313,8 @@ impl Entity {
             last_bcast_yaw: 0.0,
             last_bcast_at: None,
             active_cc: Vec::new(),
+            active_dots: Vec::new(),
+            last_status_fanned: Vec::new(),
             owner: None,
             command_at: None,
             charm_expires_at: None,
@@ -336,6 +380,8 @@ impl Entity {
             last_bcast_yaw: 0.0,
             last_bcast_at: None,
             active_cc: Vec::new(),
+            active_dots: Vec::new(),
+            last_status_fanned: Vec::new(),
             owner: Some(owner),
             command_at: None,
             charm_expires_at: None,
@@ -506,6 +552,13 @@ impl Entity {
         if self.state == new_state {
             return;
         }
+        // A mob that starts walking home sheds every DoT on it (spell batch
+        // step 5): tagging a mob and letting it leash to death from safety
+        // would otherwise pay full rewards for no risk. A dead one has
+        // nothing left to tick.
+        if matches!(new_state, EnemyState::Leash | EnemyState::Dead) {
+            self.active_dots.clear();
+        }
         self.state = new_state;
         self.state_entered_at = now;
     }
@@ -663,6 +716,85 @@ impl Entity {
     /// Clear all mez effects (called when the enemy takes damage).
     pub fn clear_mez(&mut self) {
         self.active_cc.retain(|c| !matches!(c.kind, CcKind::Mez));
+    }
+
+    /// Put a DoT on this entity, replacing an earlier one of the same spell
+    /// (a re-cast refreshes, never stacks). A DoT breaks mez like any damage.
+    pub fn apply_dot(&mut self, mut dot: ActiveDot) {
+        // A mob walking home takes no DoT: it heals and forgets at the door
+        // and, idle there, cannot acquire a caster beyond its leash, so a
+        // DoT landed on the walk would pay for a kill with no fight.
+        if matches!(self.state, EnemyState::Leash) {
+            return;
+        }
+        dot.ticks_left = (dot.remaining / super::DOT_TICK_SECS).floor().max(0.0) as u32;
+        dot.tick_acc = 0.0;
+        self.active_dots.retain(|d| d.name != dot.name);
+        self.active_dots.push(dot);
+        self.clear_mez();
+    }
+
+    /// Advance every DoT by `dt`, dealing a tick of `dps x DOT_TICK_SECS`
+    /// whenever one's accumulator crosses the tick length, and dropping the
+    /// ones whose ticks are all dealt. Returns the ticks dealt, for the
+    /// caller to fan, credit and, on a kill, reward. Damage comes in whole
+    /// ticks only: a duration that is not a multiple of the tick length
+    /// deals its floor and the remainder is never dealt.
+    pub fn tick_dots(&mut self, dt: f32) -> Vec<DotTick> {
+        let mut ticks = Vec::new();
+        if self.active_dots.is_empty() || !self.is_alive() {
+            return ticks;
+        }
+        let tick_len = super::DOT_TICK_SECS;
+        for dot in self.active_dots.iter_mut() {
+            dot.remaining -= dt;
+            dot.tick_acc += dt;
+            if dot.tick_acc >= tick_len && dot.ticks_left > 0 {
+                dot.tick_acc -= tick_len;
+                dot.ticks_left -= 1;
+                let amount = (dot.dps * tick_len).round().max(0.0) as i32;
+                if amount > 0 {
+                    ticks.push(DotTick {
+                        name: dot.name.clone(),
+                        caster: dot.caster,
+                        amount,
+                        dmg_type: dot.dmg_type,
+                    });
+                }
+            }
+        }
+        self.active_dots.retain(|d| d.ticks_left > 0);
+        if !ticks.is_empty() {
+            self.clear_mez();
+        }
+        ticks
+    }
+
+    /// Every DoT this caster has on the entity ends: they died, ported or
+    /// logged out, so nothing they left behind keeps paying them.
+    pub fn clear_dots_from(&mut self, caster: EntityId) {
+        self.active_dots.retain(|d| d.caster != caster);
+    }
+
+    /// Everything on this entity that a target frame shows, as the
+    /// BuffSnapshot pairs (name, seconds left): its buffs, its DoTs, and its
+    /// crowd control under plain labels. The AI sweep fans it whenever the
+    /// set of names changes (spell batch step 5).
+    pub fn status_pairs(&self) -> Vec<(String, f32)> {
+        let mut pairs = super::buffs::snapshot_pairs(&self.active_buffs);
+        for d in &self.active_dots {
+            pairs.push((d.name.clone(), d.remaining.max(0.0)));
+        }
+        for cc in &self.active_cc {
+            let label = match cc.kind {
+                CcKind::Mez => "Mesmerized",
+                CcKind::Root => "Rooted",
+                CcKind::Snare { .. } => "Snared",
+                CcKind::AttackSlow { .. } => "Slowed",
+            };
+            pairs.push((label.to_string(), cc.remaining.max(0.0)));
+        }
+        pairs
     }
 
     pub fn is_mezzed(&self) -> bool {
@@ -986,6 +1118,9 @@ impl Entity {
             // the next engagement.
             self.threat.clear();
             self.aggro.clear();
+            // A DoT cast on the way home would otherwise tick on an idle
+            // mob that cannot acquire its caster (spell batch step 5).
+            self.active_dots.clear();
             self.transition(EnemyState::Idle, now);
             return;
         }
@@ -1450,5 +1585,72 @@ mod tests {
         assert_eq!(e.attack_slow_pct(), 35, "a stronger slow takes over");
         e.apply_cc(ActiveCc::new_root(3.0));
         assert_eq!(e.active_cc.len(), 2, "a root sits beside the slow");
+    }
+
+    /// Spell batch step 5: a DoT deals whole ticks of dps x 3 every three
+    /// seconds, a re-cast refreshes rather than stacks, the last partial
+    /// tick is never dealt, a tick breaks mez, and the DoTs end the moment
+    /// the mob walks home or their caster leaves.
+    #[test]
+    fn a_dot_ticks_every_three_seconds_refreshes_and_ends_with_the_leash() {
+        let now = Instant::now();
+        let mut e = Entity::from_spawn(0, Vec3f::ZERO, template(), now);
+        let dot = |dps: f32, dur: f32| ActiveDot {
+            name: "Entangle".into(),
+            caster: 1,
+            dps,
+            dmg_type: protocol::world::DamageType::Physical,
+            remaining: dur,
+            tick_acc: 0.0,
+            ticks_left: 0,
+        };
+        e.apply_dot(dot(5.0, 7.0));
+        assert!(e.tick_dots(1.0).is_empty(), "no tick in the first second");
+        assert!(e.tick_dots(1.9).is_empty(), "nor at 2.9 s");
+        let t = e.tick_dots(0.1);
+        assert_eq!(t.len(), 1, "one tick at 3 s");
+        assert_eq!(t[0].amount, 15, "dps x 3");
+        assert_eq!(t[0].caster, 1);
+        e.apply_dot(dot(5.0, 7.0));
+        assert_eq!(e.active_dots.len(), 1, "a re-cast refreshes, never stacks");
+        assert_eq!(e.tick_dots(3.0).len(), 1, "the refreshed dot ticks three seconds in");
+        assert_eq!(e.tick_dots(3.0).len(), 1, "and again at six");
+        assert!(e.tick_dots(1.0).is_empty(), "seven seconds: no partial tick");
+        assert!(e.active_dots.is_empty(), "and the dot is gone");
+        e.apply_cc(ActiveCc::new_mez(10.0));
+        e.apply_dot(dot(5.0, 30.0));
+        assert!(!e.is_mezzed(), "a dot landing breaks mez like any damage");
+        e.transition(EnemyState::Leash, now);
+        assert!(e.active_dots.is_empty(), "a mob walking home sheds its dots");
+        e.apply_dot(dot(5.0, 30.0));
+        assert!(e.active_dots.is_empty(), "and takes none on the way (the review's walk-home farm)");
+        e.transition(EnemyState::Idle, now);
+        e.apply_dot(dot(5.0, 30.0));
+        e.clear_dots_from(1);
+        assert!(e.active_dots.is_empty(), "the caster leaving ends their dots");
+    }
+
+    /// At the real tick rate (20 Hz, dt 0.05) an 18 s Entangle deals exactly
+    /// six ticks, the last one included: the count, not float drift between
+    /// the two accumulators, decides when the DoT is spent.
+    #[test]
+    fn a_dot_at_the_real_tick_rate_deals_every_whole_tick() {
+        let now = Instant::now();
+        let mut e = Entity::from_spawn(0, Vec3f::ZERO, template(), now);
+        e.apply_dot(ActiveDot {
+            name: "Entangle".into(),
+            caster: 1,
+            dps: 5.0,
+            dmg_type: protocol::world::DamageType::Physical,
+            remaining: 18.0,
+            tick_acc: 0.0,
+            ticks_left: 0,
+        });
+        let mut dealt = 0;
+        for _ in 0..(20 * 18 + 40) {
+            dealt += e.tick_dots(0.05).len();
+        }
+        assert_eq!(dealt, 6, "18 s at 5 dps is six whole ticks");
+        assert!(e.active_dots.is_empty(), "and the dot is gone once they are dealt");
     }
 }

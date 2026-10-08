@@ -6173,6 +6173,220 @@ async fn bard_songs_ignore_the_global_cooldown() {
     assert!(mana_dips >= 2, "the songs were accepted and paid for (saw {mana_dips} dips)");
 }
 
+/// Spell batch step 5: a DoT ticks on the server every three seconds, the
+/// caster sees each tick as a named line, and a tick that kills pays exactly
+/// what a direct hit would (XP through the one kill step). Druid 6's Entangle:
+/// 10 direct, then 15 per tick (5 dps x 3 s). A 40 HP dummy: 30 after the
+/// hit, 15 at three seconds, dead at six. On the previous code Entangle was
+/// an unknown spell.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dot_kills_with_the_same_rewards_as_a_hit() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "dotter", "Vinessa", "Human", "Druid").await;
+    set_char_level(&h.db_url, a_char_id, 6).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "dotter", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    a.send_dev_spawn("Charm Dummy", 1, 40.0, 0, 0.0, 1.0);
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let dummy: u64 = match spawn {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    a.send_cast_spell("Entangle", Some(dummy));
+
+    let end = Instant::now() + Duration::from_secs(9);
+    let (mut ticks_seen, mut died, mut xp) = (0, false, 0i64);
+    while Instant::now() < end && !(died && xp > 0) {
+        tick_one(&mut a.client, &mut a.transport);
+        while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
+            let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) else {
+                continue;
+            };
+            match msg {
+                ServerWorldMsg::ProcTriggered { target, proc_name, amount, .. }
+                    if target == dummy && proc_name == "Entangle" =>
+                {
+                    assert_eq!(amount, 15, "a tick is dps x 3");
+                    ticks_seen += 1;
+                }
+                ServerWorldMsg::EntityDied { id } if id == dummy => died = true,
+                ServerWorldMsg::XpGained { amount, .. } if amount > 0 => xp += amount as i64,
+                _ => {}
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    assert!(ticks_seen >= 2, "the caster saw the ticks as named lines (saw {ticks_seen})");
+    assert!(died, "the second tick kills the dummy");
+    assert!(xp > 0, "a DoT kill pays XP like a direct hit");
+}
+
+/// Ledger rule: your DoTs end when you Gate. Druid 8 (Gate at 8) tags a
+/// 500 HP dummy 15 m from the spawn and Gates home; after the Teleport no
+/// further tick of theirs lands on it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dot_ends_when_its_caster_gates() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "dotgate", "Rowan", "Human", "Druid").await;
+    set_char_level(&h.db_url, a_char_id, 8).await;
+    set_char_pos(&h.db_url, a_char_id, 15.0, 0.0).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "dotgate", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    a.send_dev_spawn("Charm Dummy", 1, 500.0, 0, 0.0, 1.0);
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let dummy: u64 = match spawn {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    a.send_cast_spell("Entangle", Some(dummy));
+    let first_tick = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::ProcTriggered { target, proc_name, .. }
+                if *target == dummy && proc_name == "Entangle")
+        })
+        .await;
+    assert!(first_tick.is_some(), "the DoT is ticking before the Gate");
+
+    a.send_cast_start("Gate", 5.0);
+    a.pump_for(Duration::from_millis(5_200)).await;
+    a.send_cast_spell("Gate", None);
+    let tp = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| matches!(m, ServerWorldMsg::Teleport { .. }))
+        .await;
+    assert!(tp.is_some(), "Gate teleports the caster");
+    // Entangle runs 18 s; eight more seconds would hold two more ticks.
+    let late = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(8), |m| {
+            matches!(m, ServerWorldMsg::ProcTriggered { target, proc_name, .. }
+                if *target == dummy && proc_name == "Entangle")
+        })
+        .await;
+    assert!(late.is_none(), "no tick lands after the caster Gated");
+}
+
+/// Ledger rule: a mob that starts leashing home sheds its DoTs. A chasing
+/// dummy (aggro 10, 2 m/s) is tagged and the caster runs 40 m east at
+/// 7.5 m/s; past the 30 m leash the mob turns home and the DoT is gone,
+/// so no tick lands in the eight seconds after the run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dot_ends_when_the_mob_leashes() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "dotleash", "Fern", "Human", "Druid").await;
+    set_char_level(&h.db_url, a_char_id, 6).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "dotleash", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+    let mut seq: u32 = 1;
+
+    // Slow (1 m/s) so the gap opens past the 30 m leash inside five seconds.
+    a.send_dev_spawn("Charm Dummy", 1, 500.0, 0, 1.0, 10.0);
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let dummy: u64 = match spawn {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    a.send_cast_spell("Entangle", Some(dummy));
+    a.pump_for(Duration::from_millis(300)).await;
+    // 50 m west at 7.5 m/s (the west side of the z = 0 line is clear of
+    // camps; east past x = 28 is the gnoll camp): about 7 s. The first tick,
+    // at three seconds, lands on the way out and is queued; drain it before
+    // watching, so only ticks after the leash count.
+    walk_dir(&mut a, &mut seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 }, 50.0).await;
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_millis(200), |_| false).await;
+    let late = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(8), |m| {
+            matches!(m, ServerWorldMsg::ProcTriggered { target, proc_name, .. }
+                if *target == dummy && proc_name == "Entangle")
+        })
+        .await;
+    assert!(late.is_none(), "a mob walking home carries no DoT: no tick after the leash");
+}
+
+/// Design review item (f): a mob finished off by a damage shield paid
+/// nothing. Druid 10 wears Thorns (8 per hit); a 7 HP dummy walks in,
+/// swings once, and the reflect kills it through the one kill step, so XP
+/// arrives. On the previous code the reflect marked it dead and nothing
+/// else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_damage_shield_kill_pays_like_any_other() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "thorny", "Bramble", "Human", "Druid").await;
+    set_char_level(&h.db_url, a_char_id, 10).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "thorny", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    a.send_cast_start("Thorns", 1.5);
+    a.pump_for(Duration::from_millis(1_700)).await;
+    a.send_cast_spell("Thorns", None);
+    let shielded = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::BuffSnapshot { target, buffs }
+                if *target == a_char_id as u64 && buffs.iter().any(|(n, _)| n == "Thorns"))
+        })
+        .await;
+    assert!(shielded.is_some(), "Thorns is up");
+
+    // Walks in at 2 m/s, notices at 10 m, hits for a point: the reflect does 8.
+    a.send_dev_spawn("Charm Dummy", 1, 7.0, 1, 2.0, 10.0);
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let dummy: u64 = match spawn {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    let end = Instant::now() + Duration::from_secs(10);
+    let (mut died, mut xp) = (false, 0i64);
+    while Instant::now() < end && !(died && xp > 0) {
+        tick_one(&mut a.client, &mut a.transport);
+        while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
+            match bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) {
+                Ok((ServerWorldMsg::EntityDied { id }, _)) if id == dummy => died = true,
+                Ok((ServerWorldMsg::XpGained { amount, .. }, _)) if amount > 0 => xp += amount as i64,
+                _ => {}
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    assert!(died, "the reflect kills the dummy");
+    assert!(xp > 0, "and the kill pays XP");
+}
+
 /// A spell ported from the client's definitions on 2026-10-05 actually lands.
 /// Bloodfire (Sorcerer, level 4, instant) had no entry in spells.toml, so the
 /// server refused it as unknown and a Sorcerer's second nuke did nothing

@@ -21,6 +21,10 @@ use std::time::Instant;
 pub enum BuffEffect {
     /// Heal-over-time. `hps` HP restored per second to the bearer.
     Hot { hps: f32 },
+    /// Damage-over-time on a PLAYER (spell batch step 5; mobs and pets
+    /// carry theirs on `Entity::active_dots`). `dps` dealt in whole ticks
+    /// of `DOT_TICK_SECS`, named for `caster`'s "<spell> for N" line.
+    Dot { dps: f32, caster: u64, dmg_type: protocol::world::DamageType, duration: f32 },
     /// Mana-over-time. `mps` MP restored per second.
     MpRegen { mps: f32 },
     /// Lich Form toggle. Disables natural HP regen, grants
@@ -115,6 +119,23 @@ impl ActiveBuff {
         Self {
             name,
             effect: BuffEffect::Hot { hps },
+            remaining: duration,
+            tick_acc: 0.0,
+            applied_at: now,
+        }
+    }
+
+    pub fn new_dot(
+        name: String,
+        dps: f32,
+        caster: u64,
+        dmg_type: protocol::world::DamageType,
+        duration: f32,
+        now: Instant,
+    ) -> Self {
+        Self {
+            name,
+            effect: BuffEffect::Dot { dps, caster, dmg_type, duration },
             remaining: duration,
             tick_acc: 0.0,
             applied_at: now,

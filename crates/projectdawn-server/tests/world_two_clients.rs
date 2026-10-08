@@ -2317,6 +2317,154 @@ async fn warders_mend_heals_the_beast_masters_own_warder() {
     assert!((hp - max_hp).abs() < 0.01, "an unhurt warder stays at full, got {hp}/{max_hp}");
 }
 
+/// Spell batch step 0: a corpse casts nothing. The dead-state gate at message
+/// arrival already refuses a cast once the death SWEEP has run, so the window
+/// is the tick in which hp hits zero: a hit or dev damage lands before the
+/// cast step, the death sweep runs after it, and a cast queued in between
+/// completed. Here a GM Cleric sends the dev DamageSelf and a Smite in the
+/// same batch. The server refuses the Smite privately ("You are dead.") and
+/// the dummy is never hit. On the previous code the Smite landed; a self-heal
+/// in that gap would have revived the caster past the death penalty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dead_caster_casts_nothing() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "deadcaster", "Morbid", "Human", "Cleric").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "deadcaster", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    a.send_dev_spawn("Charm Dummy", 1, 500.0, 0, 0.0, 0.0);
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let dummy: u64 = match spawn {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    // Same batch, no tick between: both arrive in one message drain, the
+    // damage first.
+    a.send_damage_self(1_000_000);
+    a.send_cast_spell("Smite", Some(dummy));
+    let refused = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64 && reason.contains("dead"))
+        })
+        .await;
+    assert!(refused.is_some(), "a dead caster is told so");
+    let hit = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(1), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
+                if *attacker == a_char_id as u64 && *target == dummy)
+        })
+        .await;
+    assert!(hit.is_none(), "and the dummy is never hit");
+}
+
+/// Spell batch step 0: a finished cast cannot be held. Healing Light's bar
+/// (1.2 s) is started, then released 4 s later: refused as lapsed. Released
+/// on time it lands and costs its mana. On the previous code the late release
+/// healed: the gate only asked "long enough?", never "too long?".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_finished_cast_cannot_be_held() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "holder", "Holdred", "Human", "Cleric").await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    a.send_cast_start("Healing Light", 1.2);
+    a.pump_for(Duration::from_millis(4_000)).await; // 1.2 s bar, 2 s grace, margin
+    a.send_cast_spell("Healing Light", None);
+    let lapsed = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64 && reason.contains("lapsed"))
+        })
+        .await;
+    assert!(lapsed.is_some(), "a bar held 4 s past a 1.2 s cast is refused");
+
+    // Released on time, the same cast lands: a ManaUpdate carrying the spend.
+    a.send_cast_start("Healing Light", 1.2);
+    a.pump_for(Duration::from_millis(1_400)).await;
+    a.send_cast_spell("Healing Light", None);
+    let charged = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ManaUpdate { id, mp, max_mp }
+                if *id == a_char_id as u64 && *mp < *max_mp)
+        })
+        .await;
+    assert!(charged.is_some(), "released in time, the cast lands and costs mana");
+}
+
+/// Spell batch step 0: a refusal reaches only the caster and carries the
+/// server's mana. A casts Smite twice inside its 3 s cooldown: A gets the
+/// cooldown CastFail and then a ManaUpdate; B, in the world beside A, gets no
+/// CastFail for A at all. On the previous code B received it too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refusal_reaches_only_the_caster_with_the_true_mana() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "private", "Privy", "Human", "Cleric").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "bystander", "Bystan", "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "private", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+    b.pump_for(Duration::from_millis(300)).await;
+
+    a.send_dev_spawn("Charm Dummy", 1, 500.0, 0, 0.0, 0.0);
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let dummy: u64 = match spawn {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    a.send_cast_spell("Smite", Some(dummy));
+    let landed = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
+                if *attacker == a_char_id as u64 && *target == dummy)
+        })
+        .await;
+    assert!(landed.is_some(), "the first Smite lands");
+    a.send_cast_spell("Smite", Some(dummy));
+    let refused = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64 && reason.contains("cooldown"))
+        })
+        .await;
+    assert!(refused.is_some(), "the second, inside the cooldown, is refused to the caster");
+    let settled = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == a_char_id as u64)
+        })
+        .await;
+    assert!(settled.is_some(), "and the refusal carries the caster's true mana");
+
+    let leaked = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(1), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64)
+        })
+        .await;
+    assert!(leaked.is_none(), "a bystander hears nothing of another player's refusal");
+}
+
 /// Track 12 Piece B â€” non-Beast-Master classes do NOT get an
 /// auto-summoned warder. Counter-test to make sure the class check
 /// is wired correctly.

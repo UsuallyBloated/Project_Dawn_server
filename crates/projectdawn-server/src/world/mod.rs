@@ -15,6 +15,7 @@
 
 mod aoi;
 mod buffs;
+mod cast_gate;
 mod clock;
 mod combat;
 mod connection;

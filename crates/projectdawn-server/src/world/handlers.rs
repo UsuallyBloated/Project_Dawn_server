@@ -669,6 +669,9 @@ pub fn handle_message(
             // Track 17.2 — snapshot the caster's position so the
             // CastSpell gate can reject movement-during-cast forgeries.
             conn.cast_start_pos = conn.pos;
+            // Casting stands you, as a swing does (spell batch step 0): the
+            // seated regen rate does not run under a cast bar.
+            conn.is_sitting = false;
             Outcome::CastStartFanOut { spell_name, duration }
         }
 
@@ -1358,21 +1361,29 @@ pub fn handle_message(
             // Track 6 sub-task 4d — Silence and Mez gate CastSpell. Fan
             // a CastFail back so the caster's client can log "Silenced!"
             // and the local Spells cooldown / mana doesn't sit stuck.
-            if super::buffs::is_silenced(&conn.active_buffs) {
+            // The fan-out goes to every peer BUT the sender (it cancels the
+            // bar they drew), so the caster gets a private copy here with the
+            // mana they really have; without it a silenced or mesmerized
+            // caster was never told and their bar sat spent (spell batch
+            // step 0).
+            let cc_reason = if super::buffs::is_silenced(&conn.active_buffs) {
+                Some("Silenced.")
+            } else if super::buffs::is_mezzed(&conn.active_buffs) {
+                Some("Mesmerized.")
+            } else {
+                None
+            };
+            if let Some(reason) = cc_reason {
                 tracing::info!(
                     caster = conn.char_id,
                     spell = %spell_name,
-                    "cast rejected — silenced"
+                    reason,
+                    "cast rejected — crowd control"
                 );
-                return Outcome::CastFailFanOut { reason: "Silenced.".to_string() };
-            }
-            if super::buffs::is_mezzed(&conn.active_buffs) {
-                tracing::info!(
-                    caster = conn.char_id,
-                    spell = %spell_name,
-                    "cast rejected — mezzed"
-                );
-                return Outcome::CastFailFanOut { reason: "Mesmerized.".to_string() };
+                let caster = conn.char_id as u64;
+                fan_out_cast_fail(server, &[client_id], caster, reason.to_string());
+                fan_out_mana_update(server, &[client_id], caster, conn.mp, conn.max_mp);
+                return Outcome::CastFailFanOut { reason: reason.to_string() };
             }
             // Track 10 — snapshot the cast cache state *now*, before
             // any CastCompleteBroadcast in the same batch wipes it.

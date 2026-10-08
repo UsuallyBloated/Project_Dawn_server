@@ -150,7 +150,7 @@ enum InterruptOutcome {
 /// just took damage. Mirrors GDScript `Spells.try_interrupt_cast` +
 /// `_finish_cast`'s "advance on survival" path. Mutates the conn's
 /// cast cache + channeling score in place; caller handles fan-out.
-fn roll_cast_interrupt(conn: &mut PerConnection) -> InterruptOutcome {
+fn roll_cast_interrupt(conn: &mut PerConnection, now: Instant) -> InterruptOutcome {
     if conn.cast_spell_name.is_empty() || conn.cast_set_at.is_none() {
         return InterruptOutcome::NotCasting;
     }
@@ -167,6 +167,9 @@ fn roll_cast_interrupt(conn: &mut PerConnection) -> InterruptOutcome {
         conn.cast_spell_name.clear();
         conn.cast_total_duration = 0.0;
         conn.cast_set_at = None;
+        // Stamped so a CastSpell for this bar that is already in the tick's
+        // queue is refused too (`cast_gate::beaten_by_interrupt`).
+        conn.cast_interrupted_at = Some(now);
         InterruptOutcome::Interrupted { spell_name }
     } else {
         let advanced_to = skills::try_advance(conn, skills::Skill::Casting, "channeling");
@@ -3467,7 +3470,7 @@ pub async fn run(
                                 // interrupts an in-flight cast. Classic
                                 // EQ: any incoming damage rolls the
                                 // channeling check, regardless of source.
-                                let outcome = roll_cast_interrupt(att);
+                                let outcome = roll_cast_interrupt(att, now);
                                 match &outcome {
                                     InterruptOutcome::Interrupted { spell_name } => {
                                         handlers::fan_out_cast_fail(
@@ -3512,7 +3515,7 @@ pub async fn run(
                     // Re-borrow target_conn now that the damage block
                     // has released it; same helper as the enemy arm.
                     if let Some(tc) = connections.get_mut(&target_cid) {
-                        let interrupt_outcome = roll_cast_interrupt(tc);
+                        let interrupt_outcome = roll_cast_interrupt(tc, now);
                         match &interrupt_outcome {
                             InterruptOutcome::Interrupted { spell_name } => {
                                 handlers::fan_out_cast_fail(
@@ -3959,6 +3962,23 @@ pub async fn run(
                     );
                     continue;
                 };
+                // Spell batch step 0: a corpse casts nothing. The death sweep
+                // runs after this step in the tick, so a cast whose bar ended
+                // in the tick the caster's hp hit zero used to complete: a
+                // self-heal would have revived them past the death penalty,
+                // and Gate would have moved the corpse.
+                if connections
+                    .get(&caster_cid)
+                    .map_or(true, |c| c.hp <= 0.0 || c.death_processed)
+                {
+                    tracing::info!(
+                        caster = intent.caster,
+                        spell = %spell.name,
+                        "CastSpell rejected — caster is dead"
+                    );
+                    refuse_cast(&mut server, &connections, caster_cid, intent.caster, "You are dead.");
+                    continue;
+                }
                 // Phase 1 exploit gate — class/level eligibility. Any cast that
                 // reaches here names a real spell; verify the caster's class is in
                 // the spell's `classes` and the caster meets `min_level`. A legit
@@ -3997,12 +4017,7 @@ pub async fn run(
                             class_ok,
                             "CastSpell rejected — class/level not eligible"
                         );
-                        handlers::fan_out_cast_fail(
-                            &mut server,
-                            &in_world_recipients_now,
-                            intent.caster,
-                            reason.to_string(),
-                        );
+                        refuse_cast(&mut server, &connections, caster_cid, intent.caster, reason);
                         continue;
                     }
                 }
@@ -4014,30 +4029,66 @@ pub async fn run(
                 // ending, but a forged CastSpell sent the same tick as
                 // CastStart will fall well short.
                 if spell.cast_time > 0.0 {
-                    const CAST_TOLERANCE_MS: u128 = 100;
+                    use super::cast_gate::{self, CastTiming};
                     let required_ms = (spell.cast_time * 1000.0) as u128;
                     let name_matches = intent.cast_name_at_dispatch == spell.name;
-                    let elapsed_ok = intent
+                    let elapsed_ms = intent
                         .cast_set_at_at_dispatch
-                        .map(|set_at| {
-                            now.duration_since(set_at).as_millis() + CAST_TOLERANCE_MS
-                                >= required_ms
-                        })
-                        .unwrap_or(false);
-                    if !(name_matches && elapsed_ok) {
+                        .map(|set_at| now.duration_since(set_at).as_millis());
+                    let timing = if name_matches {
+                        cast_gate::cast_timing(elapsed_ms, required_ms)
+                    } else {
+                        CastTiming::NotReady
+                    };
+                    match timing {
+                        CastTiming::Ready => {}
+                        CastTiming::NotReady => {
+                            tracing::info!(
+                                caster = intent.caster,
+                                spell = %spell.name,
+                                cast_time = spell.cast_time,
+                                in_flight = %intent.cast_name_at_dispatch,
+                                "CastSpell rejected — cast-time gate (no matching CastStart or too early)"
+                            );
+                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, "cast not ready");
+                            continue;
+                        }
+                        CastTiming::Held => {
+                            // Spell batch step 0: a finished bar kept in hand
+                            // and released later (a pre-cast heal fired the
+                            // instant it is needed) is refused, and the stale
+                            // bar is dropped so the next cast starts clean.
+                            tracing::info!(
+                                caster = intent.caster,
+                                spell = %spell.name,
+                                elapsed_ms = elapsed_ms.unwrap_or(0),
+                                "CastSpell rejected — held past the bar"
+                            );
+                            if let Some(cc) = connections.get_mut(&caster_cid) {
+                                cc.cast_spell_name.clear();
+                                cc.cast_total_duration = 0.0;
+                                cc.cast_set_at = None;
+                            }
+                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, "That cast has lapsed.");
+                            continue;
+                        }
+                    }
+                    // Spell batch step 0: an interrupt that landed after this
+                    // bar began beats the cast, even in the same tick. The
+                    // gate above reads the cache as it was at dispatch, which
+                    // also meant a hit processed earlier in this tick had
+                    // already cleared the live cache and fanned "interrupted",
+                    // and the cast still went through: both won.
+                    let interrupted_at = connections
+                        .get(&caster_cid)
+                        .and_then(|c| c.cast_interrupted_at);
+                    if cast_gate::beaten_by_interrupt(interrupted_at, intent.cast_set_at_at_dispatch) {
                         tracing::info!(
                             caster = intent.caster,
                             spell = %spell.name,
-                            cast_time = spell.cast_time,
-                            in_flight = %intent.cast_name_at_dispatch,
-                            "CastSpell rejected — cast-time gate (no matching CastStart or too early)"
+                            "CastSpell rejected — interrupted after the bar began"
                         );
-                        handlers::fan_out_cast_fail(
-                            &mut server,
-                            &in_world_recipients_now,
-                            intent.caster,
-                            "cast not ready".to_string(),
-                        );
+                        refuse_cast(&mut server, &connections, caster_cid, intent.caster, "interrupted (hit during cast)");
                         continue;
                     }
                     // Track 17.2 — movement-during-cast gate. Compare
@@ -4081,12 +4132,7 @@ pub async fn run(
                                 cc.cast_total_duration = 0.0;
                                 cc.cast_set_at = None;
                             }
-                            handlers::fan_out_cast_fail(
-                                &mut server,
-                                &in_world_recipients_now,
-                                intent.caster,
-                                "interrupted (moved)".to_string(),
-                            );
+                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, "interrupted (moved)");
                             continue;
                         }
                     }
@@ -4105,12 +4151,7 @@ pub async fn run(
                                 remaining_secs = remaining,
                                 "CastSpell rejected — on cooldown"
                             );
-                            handlers::fan_out_cast_fail(
-                                &mut server,
-                                &in_world_recipients_now,
-                                intent.caster,
-                                "Spell is on cooldown.".to_string(),
-                            );
+                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, "Spell is on cooldown.");
                             continue;
                         }
                     }
@@ -4131,13 +4172,8 @@ pub async fn run(
                     );
                     // Tell the caster so they see "Cast failed: Not enough
                     // mana." instead of a silent no-op behind the optimistic
-                    // local "You cast X" line.
-                    handlers::fan_out_cast_fail(
-                        &mut server,
-                        &in_world_recipients_now,
-                        intent.caster,
-                        "Not enough mana.".to_string(),
-                    );
+                    // local "You cast X" line, with the mana they really have.
+                    refuse_cast(&mut server, &connections, caster_cid, intent.caster, "Not enough mana.");
                     continue;
                 }
                 let caster_pos = caster_conn.pos;
@@ -4217,6 +4253,10 @@ pub async fn run(
                     if hp_cost > 0.0 {
                         cc.hp = (cc.hp - hp_cost).max(0.0);
                     }
+                    // Casting stands you, as a swing does (spell batch step 0):
+                    // no seated regen through an instant cast. A timed cast
+                    // already stood at its CastStart.
+                    cc.is_sitting = false;
                     cc.cast_spell_name.clear();
                     cc.cast_total_duration = 0.0;
                     cc.cast_set_at = None;
@@ -4275,7 +4315,7 @@ pub async fn run(
                         // (consistent with the rest of the cast pipeline).
                         let Some(corpse_id) = intent.target_id else {
                             tracing::info!(caster = intent.caster, spell = %spell.name, "resurrection rejected — no corpse targeted (target_id 0)");
-                            handlers::fan_out_cast_fail(&mut server, &in_world_recipients_now, intent.caster, "No corpse targeted.".to_string());
+                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, "No corpse targeted.");
                             continue;
                         };
                         tracing::info!(caster = intent.caster, spell = %spell.name, corpse_id, "resurrection cast received");
@@ -4291,7 +4331,7 @@ pub async fn run(
                             if let Some((class, level)) = &caster_class_level {
                                 tracing::info!(caster = intent.caster, spell = %spell.name, class = %class, level, required = spell.min_level, "resurrection rejected — caster class/level");
                             }
-                            handlers::fan_out_cast_fail(&mut server, &in_world_recipients_now, intent.caster, "You cannot cast that.".to_string());
+                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, "You cannot cast that.");
                             continue;
                         }
                         // Validate the corpse: exists, in range, not already rezzed.
@@ -4304,14 +4344,14 @@ pub async fn run(
                         };
                         if let Some(r) = reason {
                             tracing::info!(caster = intent.caster, corpse_id, reason = r, "resurrection rejected — corpse");
-                            handlers::fan_out_cast_fail(&mut server, &in_world_recipients_now, intent.caster, r.to_string());
+                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, r);
                             continue;
                         }
                         // The owner must be in-world to receive + accept the offer.
                         let owner_cid = corpse_owner as ClientId;
                         if !connections.get(&owner_cid).map(|c| c.in_world).unwrap_or(false) {
                             tracing::info!(caster = intent.caster, corpse_id, owner = corpse_owner, "resurrection rejected — owner not in world");
-                            handlers::fan_out_cast_fail(&mut server, &in_world_recipients_now, intent.caster, "Their spirit is not present.".to_string());
+                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, "Their spirit is not present.");
                             continue;
                         }
                         let xp_percent = spell.res_xp_percent.round() as u32;
@@ -4845,7 +4885,7 @@ pub async fn run(
                             // the target's cast (mirror of the PvP
                             // melee interrupt wired in Track 19A).
                             if let Some(tc) = connections.get_mut(&target_cid) {
-                                let outcome = roll_cast_interrupt(tc);
+                                let outcome = roll_cast_interrupt(tc, now);
                                 match &outcome {
                                     InterruptOutcome::Interrupted { spell_name } => {
                                         handlers::fan_out_cast_fail(
@@ -4913,7 +4953,7 @@ pub async fn run(
                                         // here for the case where a
                                         // future spell type leaves
                                         // the cache populated.
-                                        let outcome = roll_cast_interrupt(att);
+                                        let outcome = roll_cast_interrupt(att, now);
                                         if let InterruptOutcome::Interrupted { spell_name } = &outcome {
                                             handlers::fan_out_cast_fail(
                                                 &mut server,
@@ -8106,7 +8146,7 @@ pub async fn run(
                             // mutates the cast cache + channeling score;
                             // we fan CastFail / SkillProgressUpdate
                             // based on the outcome.
-                            let interrupt_outcome = roll_cast_interrupt(target_conn);
+                            let interrupt_outcome = roll_cast_interrupt(target_conn, now);
                             match &interrupt_outcome {
                                 InterruptOutcome::Interrupted { spell_name } => {
                                     handlers::fan_out_cast_fail(
@@ -10280,6 +10320,27 @@ fn cast_target_refusal(
         "SELF" => None,
         // No arm exists for anything else (BIND, PORT, ...).
         _ => no_effect(),
+    }
+}
+
+/// Refuse a cast privately and hand the caster the server's true mana. The
+/// client spent its mana and started a cooldown when it sent the cast, so the
+/// CastFail is its signal to undo that and the ManaUpdate the value to settle
+/// on. Nobody else is told: a refusal is the caster's business, and peers'
+/// copies of a refused bar run out on their own (accepted 2026-10-02). The
+/// three ways a RUNNING cast ends that peers can see (an interrupt, silence,
+/// mez) keep their fan to peers so the bar they drew cancels; they reach the
+/// caster too. Spell batch step 0.
+fn refuse_cast(
+    server: &mut RenetServer,
+    connections: &HashMap<ClientId, PerConnection>,
+    caster_cid: ClientId,
+    caster_id: u64,
+    line: &str,
+) {
+    handlers::fan_out_cast_fail(server, &[caster_cid], caster_id, line.to_string());
+    if let Some(c) = connections.get(&caster_cid) {
+        handlers::fan_out_mana_update(server, &[caster_cid], caster_id, c.mp, c.max_mp);
     }
 }
 

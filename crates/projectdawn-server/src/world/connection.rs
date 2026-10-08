@@ -380,6 +380,12 @@ pub struct PerConnection {
     /// "forged client casts while running" hole the cast-time gate
     /// alone couldn't catch.
     pub cast_start_pos: Vec3f,
+    /// When the last on-hit channeling roll interrupted a cast. The CastSpell
+    /// gate refuses a completion whose bar began at or before this instant,
+    /// so a hit and a finished cast in the same tick cannot both win (the
+    /// gate otherwise reads the cache as it was at dispatch, before the hit
+    /// cleared it). Spell batch step 0.
+    pub cast_interrupted_at: Option<Instant>,
 
     /// Track 17.2 — per-spell cooldown map. CastSpell rejects a cast
     /// whose entry is in the future; a successful cast writes the
@@ -597,6 +603,7 @@ impl PerConnection {
             cast_total_duration: 0.0,
             cast_set_at: None,
             cast_start_pos: Vec3f::ZERO,
+            cast_interrupted_at: None,
             spell_cooldowns: HashMap::new(),
             buff_snapshot: Vec::new(),
             buff_snapshot_set: false,

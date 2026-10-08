@@ -1,0 +1,15 @@
+# Safe areas (spell batch step 2, 2026-10-08). Where a caster may bind a GROUP
+# MEMBER (a self-bind works anywhere, as in EQ), and where Succor and Evacuate
+# arrive. Circles in world space (y is up); `arrival` is where a port lands.
+#
+# The unit test in world/safe_areas.rs refuses any circle that a camp spawn's
+# aggro radius (plus the 3 m spawn jitter) can reach into, so nobody is ever
+# bound or evacuated into a mob's reach. Town NPCs sit on the z = 5 row out to
+# x = 14; the rat warren east of them is why the circle is the square around
+# the starter spawn and not the whole row.
+
+[[area]]
+name = "Town square"
+center = [0.0, 0.0, 0.0]
+radius = 10.0
+arrival = [0.0, 0.0, 0.0]

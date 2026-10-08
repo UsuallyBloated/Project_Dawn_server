@@ -120,6 +120,17 @@ pub struct Spell {
     #[serde(default)]
     pub pet_type: String,
 
+    // Spell batch step 2 — what a PORT spell does: "bind" returns the caster
+    // to their bind point (Gate), "safe" lands at the nearest safe area's
+    // arrival point (Succor, Evacuate). `port_group` moves the caster's
+    // alive group members in reach along with them (Evacuate). The
+    // destination is never the client's: CastSpell carries a name and a
+    // target id and nothing else.
+    #[serde(default)]
+    pub port: String,
+    #[serde(default)]
+    pub port_group: bool,
+
     // Track 12 Piece C — generic duration field (currently used by
     // PET_CHARM spells for how long the target stays charmed; future
     // mechanics with a single duration knob can reuse). Distinct

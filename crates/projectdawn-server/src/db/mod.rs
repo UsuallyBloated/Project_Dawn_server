@@ -330,6 +330,10 @@ pub async fn create_character(
     // class, level=1)`.
     let computed = crate::char_data::compute(race, class, 1);
 
+    // Bound from birth (user call 2026-10-05, spell batch step 1): every
+    // character starts bound at the starter spawn, so Gate always has
+    // somewhere to go and a bind is only ever replaced, never absent.
+    let birth_bind = crate::world::STARTER_SPAWN;
     let res = sqlx::query(
         "INSERT INTO characters (
             account_id, name, race, class, level, xp_to_next,
@@ -337,12 +341,14 @@ pub async fn create_character(
             base_intelligence, base_wisdom, base_charisma,
             base_constitution,
             base_max_hp, base_max_mp, base_max_stamina,
-            hp, mp, stamina
+            hp, mp, stamina,
+            bind_x, bind_y, bind_z
          ) VALUES (
             ?1, ?2, ?3, ?4, 1, ?5,
             ?6, ?7, ?8, ?9, ?10, ?11, ?12,
             ?13, ?14, ?15,
-            ?16, ?17, ?18
+            ?16, ?17, ?18,
+            ?19, ?20, ?21
          )",
     )
     .bind(account_id)
@@ -363,6 +369,9 @@ pub async fn create_character(
     .bind(computed.max_hp)
     .bind(computed.max_mp)
     .bind(computed.max_stamina)
+    .bind(birth_bind.x)
+    .bind(birth_bind.y)
+    .bind(birth_bind.z)
     .execute(pool)
     .await;
 
@@ -1750,6 +1759,26 @@ mod test_support {
         let pool = open(&url).await.expect("open");
         migrate(&pool).await.expect("migrate");
         (pool, tmp)
+    }
+
+    /// Bound from birth (spell batch step 1): a new character loads with a
+    /// bind at the starter spawn, never with none.
+    #[tokio::test]
+    async fn a_new_character_is_bound_at_the_starter_spawn() {
+        let (pool, _tmp) = fresh_pool().await;
+        let account = create_account(&pool, "newborn", "password123", None)
+            .await
+            .expect("account");
+        let char_id = create_character(&pool, account, "Newborn", "Human", "Warrior")
+            .await
+            .expect("char");
+        let spawn = load_character(&pool, char_id).await.expect("load");
+        let s = crate::world::STARTER_SPAWN;
+        assert_eq!(
+            spawn.bind.map(|b| b.pos),
+            Some((s.x, s.y, s.z)),
+            "a fresh character is bound where it spawns"
+        );
     }
 }
 

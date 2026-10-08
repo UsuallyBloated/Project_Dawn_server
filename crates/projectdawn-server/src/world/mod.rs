@@ -170,12 +170,18 @@ pub const LOOT_BAG_LINGER_SECS: f32 = 120.0;
 /// can't trip this check by accident.
 pub const LOOT_PICKUP_RANGE: f32 = 6.0;
 
-/// How close (metres from the corpse) a group member must be to share in
-/// an auto-split coin drop — and, since the dead-XP decision (2026-09-19),
-/// in a kill's XP/quest-credit split too (which adds an alive filter on
-/// top; see `award_kill`). Members further out (e.g. back in town) are
-/// excluded. See docs/design/group_loot_and_coin.md.
-pub const GROUP_COIN_SHARE_RANGE: f32 = 30.0;
+/// How close (metres) a group member must be to the kill to share in it: the
+/// XP split, the quest journal tick, and an auto-split coin drop (measured
+/// from the corpse). An alive filter sits on top for XP and journal credit
+/// (see `award_kill`). 30 m until 2026-10-05, when the user set it to 200 m
+/// for all three, knowing the trade-off: a group-mate in town shares from the
+/// camps nearest town. See docs/design/group_loot_and_coin.md.
+pub const GROUP_SHARE_RANGE: f32 = 200.0;
+
+/// How far a friendly spell (ALLY: heals and buffs on a player or a pet;
+/// PET_HEAL) reaches, metres. Hostile spells keep `RANGED_ATTACK_RANGE`.
+/// Decided 2026-10-05 (user: 30 m); the client checks one metre inside it.
+pub const FRIENDLY_SPELL_RANGE: f32 = 30.0;
 
 /// How far apart (metres) two players may be for `InspectPlayer` to return a
 /// paperdoll. Paperdoll slots are public and bags are excluded, so reading

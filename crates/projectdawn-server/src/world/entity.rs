@@ -633,9 +633,31 @@ impl Entity {
     /// Apply a CC effect, replacing any existing instance of the same kind
     /// (re-cast refreshes duration rather than stacking).
     pub fn apply_cc(&mut self, cc: ActiveCc) {
+        // One attack slow at a time, strongest wins (user call 2026-10-05): a
+        // weaker or equal slow never replaces a stronger one that still
+        // holds. Every other kind replaces its own kind as before.
+        if let CcKind::AttackSlow { factor_pct } = cc.kind {
+            if self.attack_slow_pct() > factor_pct {
+                return;
+            }
+        }
         let kind_disc = std::mem::discriminant(&cc.kind);
         self.active_cc.retain(|c| std::mem::discriminant(&c.kind) != kind_disc);
         self.active_cc.push(cc);
+    }
+
+    /// The attack slow holding this entity, as the percentage the spell
+    /// data carries (0 when none). The pre-flight reads it to refuse a
+    /// weaker slow before any cost.
+    pub fn attack_slow_pct(&self) -> u8 {
+        self.active_cc
+            .iter()
+            .filter_map(|c| match c.kind {
+                CcKind::AttackSlow { factor_pct } => Some(factor_pct),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     /// Clear all mez effects (called when the enemy takes damage).
@@ -1407,5 +1429,26 @@ mod tests {
         let mut at_home = Entity::released_from_charm(&pet, now);
         at_home.go_home(now);
         assert!(matches!(at_home.state, EnemyState::Idle), "already home: stay");
+    }
+
+    /// One attack slow at a time, strongest wins: a weaker slow never
+    /// replaces a stronger one that still holds; a stronger one replaces a
+    /// weaker; an equal one refreshes. Other kinds are untouched.
+    #[test]
+    fn a_weaker_attack_slow_never_replaces_a_stronger_one() {
+        let now = Instant::now();
+        let mut e = Entity::from_spawn(0, Vec3f::ZERO, template(), now);
+        assert_eq!(e.attack_slow_pct(), 0);
+        e.apply_cc(ActiveCc::new_attack_slow(0.10, 60.0)); // Torpor
+        assert_eq!(e.attack_slow_pct(), 10);
+        e.apply_cc(ActiveCc::new_attack_slow(0.05, 30.0)); // Slow, weaker
+        assert_eq!(e.attack_slow_pct(), 10, "the weaker slow is ignored");
+        assert_eq!(e.active_cc.len(), 1, "and never stacks beside it");
+        e.apply_cc(ActiveCc::new_attack_slow(0.10, 5.0)); // equal: refresh
+        assert!((e.active_cc[0].remaining - 5.0).abs() < 1e-6, "an equal slow refreshes");
+        e.apply_cc(ActiveCc::new_attack_slow(0.35, 10.0)); // stronger
+        assert_eq!(e.attack_slow_pct(), 35, "a stronger slow takes over");
+        e.apply_cc(ActiveCc::new_root(3.0));
+        assert_eq!(e.active_cc.len(), 2, "a root sits beside the slow");
     }
 }

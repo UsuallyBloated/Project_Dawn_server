@@ -532,13 +532,30 @@ target_type = "ENEMY"
 damage_type = "SPIRIT"
 base_damage = 0.0
 heal_amount = 0.0
-mana_cost = 35.0
+mana_cost = 10.0
 cast_time = 1.0
-cooldown = 30.0
-attack_slow_amount = 0.7
+cooldown = 0.0
+attack_slow_amount = 0.05
 attack_slow_duration = 30.0
 min_level = 8
 classes = ["Shaman", "Enchanter"]
+
+# Spell batch step 1 (user numbers, 2026-10-05): Slow 5% for 30 s, Torpor 10% for a
+# minute, no heal, neither with a cooldown of its own (the global cooldown is step 4).
+# One attack slow holds a target at a time, strongest wins.
+[[spell]]
+name = "Torpor"
+target_type = "ENEMY"
+damage_type = "SPIRIT"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 20.0
+cast_time = 1.5
+cooldown = 0.0
+attack_slow_amount = 0.10
+attack_slow_duration = 60.0
+min_level = 20
+classes = ["Shaman"]
 
 [[spell]]
 name = "Spellbreak"
@@ -855,6 +872,11 @@ heal_amount = 0.0
 mana_cost = 10.0
 cast_time = 0.0
 cooldown = 0.5
+# 8% (user 2026-10-07: "on par with Slow and Torpor; 35% is a nutty slow"). The
+# song's pulses are still client-side, so the server applies this once per cast,
+# for Slow's 30 s.
+attack_slow_amount = 0.08
+attack_slow_duration = 30.0
 min_level = 16
 classes = ["Bard"]
 

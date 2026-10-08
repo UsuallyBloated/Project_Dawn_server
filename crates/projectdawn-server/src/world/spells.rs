@@ -247,6 +247,32 @@ mod tests {
         }
     }
 
+    /// Spell batch step 1 (user numbers, 2026-10-05 and 10-07): Slow 5% for
+    /// 30 s at 10 mana, Torpor 10% for a minute at 20 mana with no heal,
+    /// neither with a cooldown of its own; Aria of Dismay 8%.
+    #[test]
+    fn the_attack_slows_carry_the_decided_numbers() {
+        let slow = lookup("Slow").expect("Slow");
+        assert!((slow.attack_slow_amount - 0.05).abs() < 1e-6);
+        assert!((slow.attack_slow_duration - 30.0).abs() < 1e-6);
+        assert!((slow.mana_cost - 10.0).abs() < 1e-6);
+        assert!((slow.cast_time - 1.0).abs() < 1e-6);
+        assert_eq!(slow.cooldown, 0.0, "no cooldown of its own");
+        let torpor = lookup("Torpor").expect("Torpor is on the server now");
+        assert_eq!(torpor.target_type, "ENEMY");
+        assert!((torpor.attack_slow_amount - 0.10).abs() < 1e-6);
+        assert!((torpor.attack_slow_duration - 60.0).abs() < 1e-6);
+        assert!((torpor.mana_cost - 20.0).abs() < 1e-6);
+        assert!((torpor.cast_time - 1.5).abs() < 1e-6);
+        assert_eq!(torpor.cooldown, 0.0);
+        assert_eq!(torpor.heal_amount, 0.0, "no heal");
+        assert_eq!(torpor.min_level, 20);
+        assert_eq!(torpor.classes, vec!["Shaman".to_string()]);
+        let aria = lookup("Aria of Dismay").expect("Aria");
+        assert!((aria.attack_slow_amount - 0.08).abs() < 1e-6);
+        assert!(aria.attack_slow_duration > 0.0, "the server applies it for a while");
+    }
+
     /// Warder's Mend, the one client-only pet spell, resolves (2026-10-07).
     #[test]
     fn warders_mend_resolves_as_a_pet_heal() {

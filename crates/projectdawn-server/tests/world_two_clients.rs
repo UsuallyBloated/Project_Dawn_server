@@ -2424,6 +2424,196 @@ async fn a_refusal_reaches_only_the_caster_with_the_true_mana() {
     assert!(leaked.is_none(), "a bystander hears nothing of another player's refusal");
 }
 
+/// Shared setup for the share-range tests: A (a GM Cleric at spawn) and B (a
+/// Warrior seeded `b_x` metres east) grouped, and a one-Smite dummy beside A.
+/// Returns the clients and the dummy's id.
+async fn grouped_pair_with_dummy(
+    h: &Harness,
+    a_user: &str,
+    b_user: &str,
+    b_x: f32,
+) -> (WorldClient, WorldClient, u64, i64) {
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, a_user, "Sharer", "Human", "Cleric").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, b_user, "Farmate", "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, a_user, true).await.expect("set is_gm");
+    set_char_pos(&h.db_url, b_char_id, b_x, 0.0).await;
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+    b.pump_for(Duration::from_millis(300)).await;
+
+    a.send_group_invite("Farmate");
+    a.pump_for(Duration::from_millis(300)).await;
+    b.pump_for(Duration::from_millis(300)).await;
+    b.send_group_accept(a_char_id as u64);
+    a.pump_for(Duration::from_millis(400)).await;
+    b.pump_for(Duration::from_millis(400)).await;
+
+    // 30 hp: one Smite (35) kills it.
+    a.send_dev_spawn("Charm Dummy", 1, 30.0, 0, 0.0, 0.0);
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let dummy: u64 = match spawn {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    (a, b, dummy, b_char_id)
+}
+
+/// Spell batch step 1: the group share range is 200 m. A group-mate 150 m
+/// from the kill gets an XP share. On the previous code (30 m) B got nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_xp_share_reaches_a_group_mate_150_m_away() {
+    let h = start_both().await;
+    let (mut a, mut b, dummy, _b_id) =
+        grouped_pair_with_dummy(&h, "sharer150", "mate150", 150.0).await;
+    a.send_cast_spell("Smite", Some(dummy));
+    // `amount > 0`: the server also seeds each client's xp state on entering
+    // the world as an XpGained of 0, which is not a share.
+    let a_gain = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
+        })
+        .await;
+    assert!(a_gain.is_some(), "the killer is paid");
+    let b_gain = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
+        })
+        .await;
+    assert!(b_gain.is_some(), "a group-mate 150 m away shares the kill");
+}
+
+/// Spell batch step 1: the group share range is 200 m, not more. A group-mate
+/// 250 m from the kill gets nothing, the killer the full amount.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_xp_share_stops_past_200_m() {
+    let h = start_both().await;
+    let (mut a, mut b, dummy, _b_id) =
+        grouped_pair_with_dummy(&h, "sharer250", "mate250", 250.0).await;
+    a.send_cast_spell("Smite", Some(dummy));
+    let a_gain = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
+        })
+        .await;
+    assert!(a_gain.is_some(), "the killer is paid");
+    let b_gain = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
+        })
+        .await;
+    assert!(b_gain.is_none(), "a group-mate 250 m away shares nothing");
+}
+
+/// Spell batch step 1: friendly spells reach 30 m. A Cleric heals a player
+/// 28 m away (the cast lands and costs mana); the same player walked out to
+/// about 34 m is refused as too far. On the previous code 28 m was already
+/// past the one 25 m reach.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn heals_reach_30_m_and_not_past_it() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "healer30", "Mendy", "Human", "Cleric").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "patient30", "Patient", "Human", "Warrior").await;
+    set_char_pos(&h.db_url, b_char_id, 28.0, 0.0).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+    b.pump_for(Duration::from_millis(300)).await;
+
+    a.send_cast_start("Healing Light", 1.2);
+    a.pump_for(Duration::from_millis(1_400)).await;
+    a.send_cast_spell("Healing Light", Some(b_char_id as u64));
+    let landed = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ManaUpdate { id, mp, max_mp }
+                if *id == a_char_id as u64 && *mp < *max_mp)
+        })
+        .await;
+    assert!(landed.is_some(), "a heal at 28 m lands and costs its mana");
+
+    // B walks 6 m further east: about 34 m. Healing Light's own cooldown is
+    // 5 s, so the second cast waits it out.
+    let mut seq: u32 = 1;
+    for _ in 0..16 {
+        b.send_move(seq, Vec3 { x: 1.0, y: 0.0, z: 0.0 });
+        seq += 1;
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    a.pump_for(Duration::from_millis(5_200)).await;
+    b.pump_for(Duration::from_millis(100)).await;
+    a.send_cast_start("Healing Light", 1.2);
+    a.pump_for(Duration::from_millis(1_400)).await;
+    a.send_cast_spell("Healing Light", Some(b_char_id as u64));
+    let refused = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64 && reason.contains("too far"))
+        })
+        .await;
+    assert!(refused.is_some(), "a heal at about 34 m is refused as too far");
+}
+
+/// Spell batch step 1: one attack slow at a time, strongest wins. A Shaman
+/// lands Torpor (10%) on a dummy, then Slow (5%) is refused at no cost. On the
+/// previous code the weaker slow replaced the stronger one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_weaker_slow_is_refused_while_a_stronger_one_holds() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "slower", "Torpid", "Human", "Shaman").await;
+    set_char_level(&h.db_url, a_char_id, 20).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "slower", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    a.send_dev_spawn("Charm Dummy", 1, 500.0, 0, 0.0, 0.0);
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let dummy: u64 = match spawn {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    a.send_cast_start("Torpor", 1.5);
+    a.pump_for(Duration::from_millis(1_700)).await;
+    a.send_cast_spell("Torpor", Some(dummy));
+    let landed = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ManaUpdate { id, mp, max_mp }
+                if *id == a_char_id as u64 && *mp < *max_mp)
+        })
+        .await;
+    assert!(landed.is_some(), "Torpor lands and costs its mana");
+
+    a.send_cast_start("Slow", 1.0);
+    a.pump_for(Duration::from_millis(1_200)).await;
+    a.send_cast_spell("Slow", Some(dummy));
+    let refused = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64 && reason.contains("stronger"))
+        })
+        .await;
+    assert!(refused.is_some(), "Slow is refused while Torpor holds the target");
+}
+
 /// Track 12 Piece B â€” non-Beast-Master classes do NOT get an
 /// auto-summoned warder. Counter-test to make sure the class check
 /// is wired correctly.

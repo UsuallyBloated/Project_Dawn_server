@@ -22,7 +22,7 @@ use super::{
     spells,
     ATTACK_RANGE_TOLERANCE, BAN_SWEEP_INTERVAL, CAMP_SECS, CHANNEL_POSITION, CHANNEL_SYSTEM,
     CHECKPOINT_INTERVAL, ENEMY_FAN_REPORT_INTERVAL,
-    ENEMY_DESPAWN_LINGER_SECS, GROUP_COIN_SHARE_RANGE, INSPECT_RANGE, KICK_FLUSH_GRACE,
+    ENEMY_DESPAWN_LINGER_SECS, GROUP_SHARE_RANGE, INSPECT_RANGE, KICK_FLUSH_GRACE,
     LINKDEAD_SECS,
     LOOT_BAG_LINGER_SECS,
     LOOT_PICKUP_RANGE, MAX_MOVE_SPEED,
@@ -485,7 +485,7 @@ fn fan_out_pet_buff_snapshot(
 /// nothing.
 ///
 /// Eligibility (decided 2026-09-19): an XP share goes only to members who
-/// are online, ALIVE, and within `GROUP_COIN_SHARE_RANGE` of the dying
+/// are online, ALIVE, and within `GROUP_SHARE_RANGE` of the dying
 /// enemy — the coin split's range rule, plus the alive filter, because a
 /// corpse lying beside the mob would otherwise still collect under pure
 /// proximity, and classic EQ pays a corpse nothing. Alive means
@@ -496,11 +496,10 @@ fn fan_out_pet_buff_snapshot(
 /// kill from afar, and the coin analogue — the looter — always collects),
 /// never from the alive half. The pool divides among eligible members only.
 ///
-/// Quest kill-credit takes the ALIVE filter but deliberately NOT the range
-/// gate: the decided item covered XP shares, and range-gating journal
-/// ticks would silently change quest play (a member chasing a runner 31 m
-/// out would lose credit they always had). If that gate is ever wanted, it
-/// is a design call, not a default.
+/// Quest kill-credit takes the same alive-and-in-range test since
+/// 2026-10-05 (user: "Change the XP/journal credit distance to 200m"): at
+/// 200 m the gate no longer costs a member chasing a runner their credit,
+/// which was the reason journal ticks had stayed unranged at 30 m.
 fn award_kill(
     server: &mut RenetServer,
     connections: &mut HashMap<ClientId, PerConnection>,
@@ -530,7 +529,7 @@ fn award_kill(
     let xp_eligible = |cid: ClientId, c: &PerConnection| -> bool {
         alive(c)
             && (cid == credit_cid
-                || c.pos.distance_to(victim_pos) <= GROUP_COIN_SHARE_RANGE)
+                || c.pos.distance_to(victim_pos) <= GROUP_SHARE_RANGE)
     };
     // The candidate set: the group, or the solo creditor. Liveness check on
     // the solo killer too — they may have disconnected (or died to a last
@@ -544,12 +543,8 @@ fn award_kill(
         .filter(|&&m| connections.get(&m).map(|c| xp_eligible(m, c)).unwrap_or(false))
         .copied()
         .collect();
-    // Quest kill-credit: alive filter only, no range gate (see doc comment).
-    let quest_members: Vec<ClientId> = group_members
-        .iter()
-        .filter(|&&m| connections.get(&m).map(|c| alive(c)).unwrap_or(false))
-        .copied()
-        .collect();
+    // Quest kill-credit: the same alive-and-in-range test (see doc comment).
+    let quest_members: Vec<ClientId> = xp_members.clone();
     if xp_members.is_empty() && quest_members.is_empty() {
         return;
     }
@@ -8915,7 +8910,7 @@ pub async fn run(
                         bag.assigned_looter = group_manager.next_loot_turn(owner_cid, |cand| {
                             connections
                                 .get(&cand)
-                                .map(|c| c.pos.distance_to(bag_pos) <= GROUP_COIN_SHARE_RANGE)
+                                .map(|c| c.pos.distance_to(bag_pos) <= GROUP_SHARE_RANGE)
                                 .unwrap_or(false)
                         });
                     }
@@ -8962,7 +8957,7 @@ pub async fn run(
                 // then zeroed. Unified rule (group_loot_and_coin.md): the
                 // looter alone gets it if the group is Free-for-all or the
                 // looter has /autosplit off; otherwise it splits evenly
-                // among online group members within GROUP_COIN_SHARE_RANGE
+                // among online group members within GROUP_SHARE_RANGE
                 // of the corpse, remainder copper to the looter.
                 if bag.coins != protocol::world::Coins::ZERO {
                     let pot = bag.coins.total_copper();
@@ -8985,7 +8980,7 @@ pub async fn run(
                         if let Some(g) = group {
                             for &m in &g.members {
                                 if let Some(c) = connections.get(&m) {
-                                    if c.pos.distance_to(bag_pos) <= GROUP_COIN_SHARE_RANGE {
+                                    if c.pos.distance_to(bag_pos) <= GROUP_SHARE_RANGE {
                                         recipients.push(m);
                                     }
                                 }
@@ -9191,7 +9186,7 @@ pub async fn run(
                                         .get(&cand)
                                         .map(|c| {
                                             c.pos.distance_to(bag_pos)
-                                                <= GROUP_COIN_SHARE_RANGE
+                                                <= GROUP_SHARE_RANGE
                                         })
                                         .unwrap_or(false)
                                 });
@@ -10169,7 +10164,12 @@ fn cast_target_refusal(
 ) -> Option<String> {
     use protocol::world::{ENEMY_ID_BASE, LOOT_BAG_ID_BASE, PET_ID_BASE};
     let caster = connections.get(&caster_cid)?;
-    let in_reach = |pos: Vec3f| pos.distance_to(caster_pos) <= RANGED_ATTACK_RANGE;
+    // Friendly spells reach further than hostile ones (spell batch step 1).
+    let reach = match spell.target_type.as_str() {
+        "ALLY" | "PET_HEAL" => super::FRIENDLY_SPELL_RANGE,
+        _ => RANGED_ATTACK_RANGE,
+    };
+    let in_reach = |pos: Vec3f| pos.distance_to(caster_pos) <= reach;
     let unreachable = || Some(TARGET_UNREACHABLE.to_string());
     let no_effect = || Some(NO_EFFECT_YET.to_string());
     let player_in_reach =
@@ -10214,6 +10214,14 @@ fn cast_target_refusal(
                 if !allowed {
                     return Some("You cannot attack that pet.".to_string());
                 }
+            }
+            // One attack slow at a time, strongest wins (spell batch step 1):
+            // a weaker slow on a target that already carries a stronger one
+            // is refused here, at no cost, rather than replacing it.
+            if spell.attack_slow_amount > 0.0
+                && e.attack_slow_pct() > (spell.attack_slow_amount.clamp(0.0, 1.0) * 100.0) as u8
+            {
+                return Some("A stronger slow already holds that target.".to_string());
             }
             None
         }

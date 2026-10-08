@@ -142,7 +142,9 @@ fn swing_too_fast(last: Option<Instant>, now: Instant, min_interval: f32) -> boo
 /// `NotCasting` skips both.
 enum InterruptOutcome {
     NotCasting,
-    Interrupted { spell_name: String },
+    /// The cast cache was cleared; `mana_charged` is what the interrupt
+    /// cost (spell batch step 3), already taken off the caster.
+    Interrupted { spell_name: String, mana_charged: f32 },
     Survived { advanced_to: Option<i32> },
 }
 
@@ -150,7 +152,11 @@ enum InterruptOutcome {
 /// just took damage. Mirrors GDScript `Spells.try_interrupt_cast` +
 /// `_finish_cast`'s "advance on survival" path. Mutates the conn's
 /// cast cache + channeling score in place; caller handles fan-out.
-fn roll_cast_interrupt(conn: &mut PerConnection, now: Instant) -> InterruptOutcome {
+/// `damage_applied` is what the hit really took off the caster: an
+/// interrupt charges the spell's mana in proportion to how far the bar
+/// had run (`cast_gate::interrupt_charge`), and a hit that did nothing
+/// charges nothing.
+fn roll_cast_interrupt(conn: &mut PerConnection, now: Instant, damage_applied: i32) -> InterruptOutcome {
     if conn.cast_spell_name.is_empty() || conn.cast_set_at.is_none() {
         return InterruptOutcome::NotCasting;
     }
@@ -164,13 +170,23 @@ fn roll_cast_interrupt(conn: &mut PerConnection, now: Instant) -> InterruptOutco
     let chance = skills::channeling_interrupt_chance(score, cap);
     if rand::thread_rng().gen::<f32>() < chance {
         let spell_name = conn.cast_spell_name.clone();
+        // The server's cast time, never the client's bar length: the
+        // fraction is elapsed over the spell's own duration.
+        let elapsed_ms = conn.cast_set_at.map(|t| now.duration_since(t).as_millis());
+        let mana_charged = spells::lookup(&spell_name)
+            .map(|s| super::cast_gate::interrupt_charge(s.mana_cost, s.cast_time, elapsed_ms, damage_applied, conn.mp))
+            .unwrap_or(0.0);
+        if mana_charged > 0.0 {
+            conn.mp = (conn.mp - mana_charged).max(0.0);
+            regen::mark_dirty(conn);
+        }
         conn.cast_spell_name.clear();
         conn.cast_total_duration = 0.0;
         conn.cast_set_at = None;
         // Stamped so a CastSpell for this bar that is already in the tick's
         // queue is refused too (`cast_gate::beaten_by_interrupt`).
         conn.cast_interrupted_at = Some(now);
-        InterruptOutcome::Interrupted { spell_name }
+        InterruptOutcome::Interrupted { spell_name, mana_charged }
     } else {
         let advanced_to = skills::try_advance(conn, skills::Skill::Casting, "channeling");
         InterruptOutcome::Survived { advanced_to }
@@ -3465,18 +3481,21 @@ pub async fn run(
                                 // interrupts an in-flight cast. Classic
                                 // EQ: any incoming damage rolls the
                                 // channeling check, regardless of source.
-                                let outcome = roll_cast_interrupt(att, now);
+                                let outcome = roll_cast_interrupt(att, now, reflect_dmg);
+                                let (att_mp, att_max_mp) = (att.mp, att.max_mp);
                                 match &outcome {
-                                    InterruptOutcome::Interrupted { spell_name } => {
+                                    InterruptOutcome::Interrupted { spell_name, mana_charged } => {
                                         handlers::fan_out_cast_fail(
                                             &mut server,
                                             &in_world_recipients_now,
                                             intent.attacker,
                                             "interrupted (hit during cast)".to_string(),
                                         );
+                                        tell_interrupt_charge(&mut server, attacker_cid, intent.attacker, att_mp, att_max_mp, *mana_charged);
                                         tracing::info!(
                                             caster = intent.attacker,
                                             spell = %spell_name,
+                                            mana_charged,
                                             "PvP cast interrupted by damage shield reflect"
                                         );
                                     }
@@ -3510,18 +3529,21 @@ pub async fn run(
                     // Re-borrow target_conn now that the damage block
                     // has released it; same helper as the enemy arm.
                     if let Some(tc) = connections.get_mut(&target_cid) {
-                        let interrupt_outcome = roll_cast_interrupt(tc, now);
+                        let interrupt_outcome = roll_cast_interrupt(tc, now, amount as i32);
+                        let (tc_mp, tc_max_mp) = (tc.mp, tc.max_mp);
                         match &interrupt_outcome {
-                            InterruptOutcome::Interrupted { spell_name } => {
+                            InterruptOutcome::Interrupted { spell_name, mana_charged } => {
                                 handlers::fan_out_cast_fail(
                                     &mut server,
                                     &in_world_recipients_now,
                                     intent.target_id,
                                     "interrupted (hit during cast)".to_string(),
                                 );
+                                tell_interrupt_charge(&mut server, target_cid, intent.target_id, tc_mp, tc_max_mp, *mana_charged);
                                 tracing::info!(
                                     caster = intent.target_id,
                                     spell = %spell_name,
+                                    mana_charged,
                                     "PvP cast interrupted by incoming damage"
                                 );
                             }
@@ -4880,18 +4902,21 @@ pub async fn run(
                             // the target's cast (mirror of the PvP
                             // melee interrupt wired in Track 19A).
                             if let Some(tc) = connections.get_mut(&target_cid) {
-                                let outcome = roll_cast_interrupt(tc, now);
+                                let outcome = roll_cast_interrupt(tc, now, applied);
+                                let (tc_mp, tc_max_mp) = (tc.mp, tc.max_mp);
                                 match &outcome {
-                                    InterruptOutcome::Interrupted { spell_name } => {
+                                    InterruptOutcome::Interrupted { spell_name, mana_charged } => {
                                         handlers::fan_out_cast_fail(
                                             &mut server,
                                             &in_world_recipients_now,
                                             target_id,
                                             "interrupted (hit during cast)".to_string(),
                                         );
+                                        tell_interrupt_charge(&mut server, target_cid, target_id, tc_mp, tc_max_mp, *mana_charged);
                                         tracing::info!(
                                             caster = target_id,
                                             spell = %spell_name,
+                                            mana_charged,
                                             "PvP cast interrupted by incoming spell damage"
                                         );
                                     }
@@ -4948,17 +4973,20 @@ pub async fn run(
                                         // here for the case where a
                                         // future spell type leaves
                                         // the cache populated.
-                                        let outcome = roll_cast_interrupt(att, now);
-                                        if let InterruptOutcome::Interrupted { spell_name } = &outcome {
+                                        let outcome = roll_cast_interrupt(att, now, reflect_dmg);
+                                        let (att_mp, att_max_mp) = (att.mp, att.max_mp);
+                                        if let InterruptOutcome::Interrupted { spell_name, mana_charged } = &outcome {
                                             handlers::fan_out_cast_fail(
                                                 &mut server,
                                                 &in_world_recipients_now,
                                                 intent.caster,
                                                 "interrupted (hit during cast)".to_string(),
                                             );
+                                            tell_interrupt_charge(&mut server, caster_cid, intent.caster, att_mp, att_max_mp, *mana_charged);
                                             tracing::info!(
                                                 caster = intent.caster,
                                                 spell = %spell_name,
+                                                mana_charged,
                                                 "PvP caster interrupted by own shield reflect"
                                             );
                                         }
@@ -8295,18 +8323,21 @@ pub async fn run(
                             // mutates the cast cache + channeling score;
                             // we fan CastFail / SkillProgressUpdate
                             // based on the outcome.
-                            let interrupt_outcome = roll_cast_interrupt(target_conn, now);
+                            let interrupt_outcome = roll_cast_interrupt(target_conn, now, reduced);
+                            let (target_mp, target_max_mp) = (target_conn.mp, target_conn.max_mp);
                             match &interrupt_outcome {
-                                InterruptOutcome::Interrupted { spell_name } => {
+                                InterruptOutcome::Interrupted { spell_name, mana_charged } => {
                                     handlers::fan_out_cast_fail(
                                         &mut server,
                                         &in_world_recipients_now,
                                         hit.target,
                                         "interrupted (hit during cast)".to_string(),
                                     );
+                                    tell_interrupt_charge(&mut server, target_cid, hit.target, target_mp, target_max_mp, *mana_charged);
                                     tracing::info!(
                                         caster = hit.target,
                                         spell = %spell_name,
+                                        mana_charged,
                                         "cast interrupted by incoming damage"
                                     );
                                 }
@@ -10538,6 +10569,29 @@ fn wipe_hate(enemies: &mut HashMap<EntityId, Entity>, players: &[EntityId]) -> V
         }
     }
     dropped
+}
+
+/// Tell an interrupted caster what the interrupt cost (spell batch step 3):
+/// their true mana, privately, right behind the CastFail their client
+/// answers with a local refund, so the bar settles on the charged value; and
+/// one line saying how much. Nothing is sent when nothing was charged.
+fn tell_interrupt_charge(
+    server: &mut RenetServer,
+    caster_cid: ClientId,
+    caster_id: u64,
+    mp: f32,
+    max_mp: f32,
+    mana_charged: f32,
+) {
+    if mana_charged <= 0.0 {
+        return;
+    }
+    handlers::fan_out_mana_update(server, &[caster_cid], caster_id, mp, max_mp);
+    handlers::send_system_line(
+        server,
+        caster_cid,
+        &format!("Your concentration breaks: {} mana lost.", mana_charged.round() as i32),
+    );
 }
 
 /// Refuse a cast privately and hand the caster the server's true mana. The

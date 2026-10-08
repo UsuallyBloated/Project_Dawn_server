@@ -1017,6 +1017,52 @@ cooldown = 4.0
 min_level = 1
 classes = ["Beast Master"]
 
+# ── Ports (spell batch step 2, 2026-10-08) ─────────────────────────────────
+# Gate returns you to your bind point (every character is bound from birth, so
+# it always has one). Succor and Evacuate land at the nearest safe area's
+# arrival point; Evacuate brings the alive group members within friendly reach.
+# Numbers are the client's. Gate's class list is the Bind Affinity list (user
+# call D6, 2026-10-05: the nine pure casters plus Bard).
+[[spell]]
+name = "Gate"
+target_type = "PORT"
+damage_type = "NONE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 50.0
+cast_time = 5.0
+cooldown = 300.0
+port = "bind"
+min_level = 8
+classes = ["Wizard", "Druid", "Cleric", "Shaman", "Necromancer", "Magician", "Sorcerer", "Enchanter", "Blood Mage", "Bard"]
+
+[[spell]]
+name = "Succor"
+target_type = "PORT"
+damage_type = "NONE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 80.0
+cast_time = 3.0
+cooldown = 60.0
+port = "safe"
+min_level = 12
+classes = ["Druid", "Wizard"]
+
+[[spell]]
+name = "Evacuate"
+target_type = "PORT"
+damage_type = "NONE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 120.0
+cast_time = 5.0
+cooldown = 60.0
+port = "safe"
+port_group = true
+min_level = 16
+classes = ["Druid"]
+
 # Mends the caster's OWN pet, whatever is targeted (ported 2026-10-07; it was
 # the one client-only pet spell). Values are the client's, unchanged.
 [[spell]]

@@ -5614,6 +5614,127 @@ pub async fn run(
                             );
                         }
                     }
+                    "BIND" => {
+                        // Spell batch step 2: bind the target (self, or the
+                        // group member the pre-flight admitted) where THEY
+                        // stand, and persist it like the Soul Binder does.
+                        let raw = intent.target_id.unwrap_or(0);
+                        let bound_cid: ClientId =
+                            if raw == 0 || raw == intent.caster || raw >= protocol::world::ENEMY_ID_BASE {
+                                caster_cid
+                            } else {
+                                raw as ClientId
+                            };
+                        let Some(bc) = connections.get_mut(&bound_cid) else {
+                            continue;
+                        };
+                        let pos = bc.pos.into_tuple();
+                        bc.bind = Some(crate::db::BindPoint { pos });
+                        bind_intents.push((bc.char_id, bc.zone.clone(), pos));
+                        tracing::info!(
+                            caster = intent.caster,
+                            bound = bound_cid as u64,
+                            x = pos.0, y = pos.1, z = pos.2,
+                            "BIND applied"
+                        );
+                        handlers::send_refusal(&mut server, bound_cid, "Your soul is bound to this place.");
+                        if bound_cid != caster_cid {
+                            handlers::send_refusal(&mut server, caster_cid, "Their soul is bound to this place.");
+                        }
+                    }
+                    "PORT" => {
+                        // Spell batch step 2: the destination is the server's
+                        // (the caster's bind, or the nearest safe area's
+                        // arrival), never the client's. Evacuate also moves the
+                        // caster's alive, present group members within friendly
+                        // reach; a corpse or a linkdead body stays. Everyone
+                        // moved is wiped from every mob's tables first, so no
+                        // train follows them, and their pets come along.
+                        let caster_pos_now = connections
+                            .get(&caster_cid)
+                            .map(|c| c.pos)
+                            .unwrap_or(caster_pos);
+                        let dest = match spell.port.as_str() {
+                            "bind" => connections
+                                .get(&caster_cid)
+                                .and_then(|c| c.bind)
+                                .map(|b| Vec3f::from_tuple(b.pos))
+                                .unwrap_or(super::STARTER_SPAWN),
+                            _ => super::safe_areas::nearest_arrival(caster_pos_now)
+                                .unwrap_or(super::STARTER_SPAWN),
+                        };
+                        let mut movers: Vec<ClientId> = vec![caster_cid];
+                        if spell.port_group {
+                            if let Some(g) = group_manager.group_of(caster_cid) {
+                                for &m in &g.members {
+                                    if m == caster_cid {
+                                        continue;
+                                    }
+                                    let eligible = connections.get(&m).is_some_and(|c| {
+                                        c.in_world
+                                            && c.linkdead_since.is_none()
+                                            && c.hp > 0.0
+                                            && !c.death_processed
+                                            && c.pos.distance_to(caster_pos_now) <= super::FRIENDLY_SPELL_RANGE
+                                    });
+                                    if eligible {
+                                        movers.push(m);
+                                    }
+                                }
+                            }
+                        }
+                        let mover_ids: Vec<EntityId> = movers.iter().map(|m| *m as EntityId).collect();
+                        for mob_id in wipe_hate(&mut enemies, &mover_ids) {
+                            handlers::fan_out_entity_target(
+                                &mut server,
+                                &in_world_recipients_now,
+                                mob_id,
+                                None,
+                            );
+                        }
+                        for &m in &movers {
+                            if let Some(c) = connections.get_mut(&m) {
+                                c.pos = dest;
+                                regen::mark_dirty(c);
+                            }
+                            handlers::send_teleport(&mut server, m, dest);
+                            // The mover's pets come along (user call D4), set
+                            // to follow so a parked one does not stand alone
+                            // across the zone. Their AOI cell changes right
+                            // here, so the players who gain or lose sight of
+                            // them are told now rather than never.
+                            let pets: Vec<EntityId> = enemies
+                                .iter()
+                                .filter(|(_, e)| e.owner == Some(m as EntityId) && e.is_alive())
+                                .map(|(id, _)| *id)
+                                .collect();
+                            for pet_id in pets {
+                                let (old_cell, new_cell) = {
+                                    let Some(pet) = enemies.get_mut(&pet_id) else { continue };
+                                    let old_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
+                                    pet.pos = Vec3f { x: dest.x + 1.5, y: dest.y, z: dest.z };
+                                    pet.last_bcast_pos = pet.pos;
+                                    pet.target = None;
+                                    pet.stance = entity::PetStance::Follow;
+                                    (old_cell, aoi::cell_for(pet.pos.x, pet.pos.z))
+                                };
+                                if new_cell != old_cell {
+                                    let (gained, lost) = aoi.update(pet_id, old_cell, new_cell);
+                                    if let Some(pet) = enemies.get(&pet_id) {
+                                        fan_entity_cell_crossing(&mut server, &aoi, &connections, pet, &gained, &lost);
+                                    }
+                                }
+                            }
+                        }
+                        tracing::info!(
+                            caster = intent.caster,
+                            spell = %spell.name,
+                            port = %spell.port,
+                            moved = movers.len(),
+                            x = dest.x, z = dest.z,
+                            "PORT applied"
+                        );
+                    }
                     "NONE" | _ => {
                         // port / bind — not yet applied server-side.
                         // Mana already deducted; the client-local
@@ -10410,14 +10531,8 @@ pub async fn run(
         // corpse. Also keeps a dead player from skewing kill credit on a mob
         // someone else finishes.
         if !newly_dead.is_empty() {
-            for entity in enemies.values_mut() {
-                for id in &newly_dead {
-                    entity.aggro.remove(id);
-                    entity.threat.remove(id);
-                    if entity.target == Some(*id) {
-                        entity.target = None;
-                    }
-                }
+            for mob_id in wipe_hate(&mut enemies, &newly_dead) {
+                handlers::fan_out_entity_target(&mut server, &in_world_recipients_now, mob_id, None);
             }
         }
 
@@ -10977,6 +11092,42 @@ fn cast_target_refusal(
                 no_effect()
             }
         }
+        "BIND" => {
+            // Spell batch step 2 (user calls D1, D2 of 2026-10-05): a caster
+            // binds THEMSELVES anywhere; a GROUP MEMBER only while that member
+            // stands in a safe area. No target, a self target or a mob target
+            // all mean "myself". The bind written is always the target's own
+            // position, never a client value.
+            let raw = target_id.unwrap_or(0);
+            if raw == 0 || raw == caster_id || raw >= ENEMY_ID_BASE {
+                return None;
+            }
+            let target_cid = raw as ClientId;
+            if !group_manager.same_group(caster_cid, target_cid) {
+                return Some("You can only bind yourself or a group member.".to_string());
+            }
+            let Some(t) = player_in_reach(target_cid) else {
+                return unreachable();
+            };
+            if t.hp <= 0.0 || t.death_processed {
+                return Some("That target is no longer here.".to_string());
+            }
+            if super::safe_areas::containing(t.pos).is_none() {
+                return Some("You can only bind another in a safe place, such as the town.".to_string());
+            }
+            None
+        }
+        "PORT" => {
+            // Gate (port = "bind") always has somewhere to go, since every
+            // character is bound from birth; a safe-area port needs one safe
+            // area to exist. Anything else is a port the server has no
+            // destination for (the zone ports) and costs nothing.
+            match spell.port.as_str() {
+                "bind" => None,
+                "safe" if super::safe_areas::nearest_arrival(caster_pos).is_some() => None,
+                _ => no_effect(),
+            }
+        }
         "PET_HEAL" => {
             // The caster's own pet, whatever is targeted (the spell names it).
             // Having no pet says nothing about anyone else, so it can be
@@ -10994,6 +11145,30 @@ fn cast_target_refusal(
         // No arm exists for anything else (BIND, PORT, ...).
         _ => no_effect(),
     }
+}
+
+/// Remove these players from every mob's aggro and threat tables and from any
+/// mob's target. A mob that loses its target leashes home and heals to full
+/// (`entity.rs::tick_leash`). Shared by the death sweep and the port arm: a
+/// player who Gates must not drag a train into town, and a mob that lost its
+/// target pays nothing to "tag it, Gate out, let the damage finish it".
+/// Returns the mobs whose target was cleared, for the caller to fan as
+/// `EntityTarget`: the AI pass only reports a change it made itself
+/// (`tick_ai` compares against the target it started with), so a wipe
+/// here is invisible to clients unless the caller says so.
+fn wipe_hate(enemies: &mut HashMap<EntityId, Entity>, players: &[EntityId]) -> Vec<EntityId> {
+    let mut dropped = Vec::new();
+    for entity in enemies.values_mut() {
+        for id in players {
+            entity.aggro.remove(id);
+            entity.threat.remove(id);
+            if entity.target == Some(*id) {
+                entity.target = None;
+                dropped.push(entity.id);
+            }
+        }
+    }
+    dropped
 }
 
 /// Refuse a cast privately and hand the caster the server's true mana. The

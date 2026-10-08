@@ -2655,6 +2655,265 @@ async fn a_weaker_slow_is_refused_while_a_stronger_one_holds() {
     assert!(refused.is_some(), "Slow is refused while Torpor holds the target");
 }
 
+/// Walk `metres` east in 7.5 m/s Moves, then let the park settle.
+async fn walk_east(c: &mut WorldClient, seq: &mut u32, metres: f32) {
+    let moves = (metres / (world::MAX_MOVE_SPEED * 0.05)).ceil() as u32;
+    for _ in 0..moves {
+        c.send_move(*seq, Vec3 { x: 1.0, y: 0.0, z: 0.0 });
+        *seq += 1;
+        tick_one(&mut c.client, &mut c.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    c.pump_for(Duration::from_millis(600)).await;
+}
+
+/// Spell batch step 2, the exploit ledger's items 1, 3 and 6: the destination
+/// is the server's (bind here, walk on, Gate: the server puts you at the
+/// bind); a second Gate inside its cooldown is refused and moves nobody; a
+/// mob holding the caster as its target drops them when they Gate. Cleric 8
+/// has Gate now (the Bind Affinity list). On the previous code Gate was an
+/// unknown spell and Bind Affinity had no arm.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gate_returns_the_caster_to_their_bind_and_wipes_hate() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "gater", "Gatrix", "Human", "Cleric").await;
+    set_char_level(&h.db_url, a_char_id, 8).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "gater", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+    let mut seq: u32 = 1;
+
+    // Bind about 10 m east of the spawn. The whole test stays on the clear
+    // stretch of the +X axis (x under 28): past it the Gnoll Raider camp's
+    // aggro reaches z = 0, and four gnolls on the caster interrupt a 5 s bar
+    // every time (the channeling roll is real).
+    walk_east(&mut a, &mut seq, 10.0).await;
+    let bind_pos = own_position(&mut a, a_char_id).await.expect("the caster's own Position");
+    a.send_cast_start("Bind Affinity", 3.0);
+    a.pump_for(Duration::from_millis(3_200)).await;
+    a.send_cast_spell("Bind Affinity", None);
+    let bound = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("bound"))
+        })
+        .await;
+    assert!(bound.is_some(), "Bind Affinity binds the caster where they stand");
+
+    // Walk on, and provoke a mob so it holds the caster as its target. The
+    // dummy cannot move or hit (speed 0, dmg 0), so the bar is never
+    // interrupted; its hate is the only thing being tested.
+    walk_east(&mut a, &mut seq, 10.0).await;
+    let far_pos = own_position(&mut a, a_char_id).await.expect("the caster's own Position");
+    assert!(
+        far_pos.x - bind_pos.x > 7.0,
+        "the caster walked on from the bind ({} to {})",
+        bind_pos.x, far_pos.x
+    );
+    a.send_dev_spawn("Charm Dummy", 1, 500.0, 0, 0.0, 1.0);
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let dummy: u64 = match spawn {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    a.send_cast_spell("Smite", Some(dummy));
+    let provoked = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(t) }
+                if *id == dummy && *t == a_char_id as u64)
+        })
+        .await;
+    assert!(provoked.is_some(), "the dummy turns on the caster");
+
+    // Gate: a 5 s bar, then the server moves the caster to the bind and the
+    // dummy drops them. The two messages land in the same tick in either
+    // order (wait_for discards what it skips), so take them as they come.
+    a.send_cast_start("Gate", 5.0);
+    a.pump_for(Duration::from_millis(5_200)).await;
+    a.send_cast_spell("Gate", None);
+    let mut landed: Option<Vec3> = None;
+    let mut dropped = false;
+    for _ in 0..2 {
+        let msg = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::Teleport { .. })
+                    || matches!(m, ServerWorldMsg::EntityTarget { id, target: None } if *id == dummy)
+            })
+            .await;
+        match msg {
+            Some(ServerWorldMsg::Teleport { pos }) => landed = Some(pos),
+            Some(ServerWorldMsg::EntityTarget { .. }) => dropped = true,
+            _ => break,
+        }
+    }
+    let Some(pos) = landed else {
+        panic!("Gate teleports the caster");
+    };
+    assert!(
+        (pos.x - bind_pos.x).abs() < 1.0 && (pos.z - bind_pos.z).abs() < 1.0,
+        "Gate lands at the bind ({}, {}), got ({}, {})",
+        bind_pos.x, bind_pos.z, pos.x, pos.z
+    );
+    assert!(dropped, "the mob drops the caster as its target: no train");
+
+    // A second Gate inside the 300 s cooldown is refused.
+    a.send_cast_start("Gate", 5.0);
+    a.pump_for(Duration::from_millis(5_200)).await;
+    a.send_cast_spell("Gate", None);
+    let refused = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64 && reason.contains("cooldown"))
+        })
+        .await;
+    assert!(refused.is_some(), "a second Gate inside the cooldown is refused");
+}
+
+/// Ledger item 2: the class gate. A Warrior naming Gate is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_warrior_cannot_gate() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "nogate", "Grunt", "Human", "Warrior").await;
+    set_char_level(&h.db_url, a_char_id, 10).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+    a.send_cast_start("Gate", 5.0);
+    a.pump_for(Duration::from_millis(5_200)).await;
+    a.send_cast_spell("Gate", None);
+    let refused = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64 && reason.contains("class"))
+        })
+        .await;
+    assert!(refused.is_some(), "a Warrior cannot cast Gate");
+}
+
+/// Ledger item 4 (user call D2): a caster may bind a GROUP MEMBER only while
+/// that member stands in a safe area. B, grouped and 20 m out, is refused;
+/// C, grouped and in the town square, is bound where they stand.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_group_member_is_bound_only_in_a_safe_area() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "binder", "Bindra", "Human", "Cleric").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "farbound", "Farwell", "Human", "Warrior").await;
+    let (c_session, c_char_id, c_token) =
+        provision_client(&h.auth_url, "nearbound", "Nearby", "Human", "Warrior").await;
+    set_char_pos(&h.db_url, b_char_id, 20.0, 0.0).await;
+    set_char_pos(&h.db_url, c_char_id, 3.0, 0.0).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    let mut c = WorldClient::start(c_token, &c_session, c_char_id).await;
+    for cl in [&mut a, &mut b, &mut c] {
+        cl.pump_for(Duration::from_millis(300)).await;
+    }
+    a.send_group_invite("Farwell");
+    a.pump_for(Duration::from_millis(300)).await;
+    b.pump_for(Duration::from_millis(300)).await;
+    b.send_group_accept(a_char_id as u64);
+    a.send_group_invite("Nearby");
+    a.pump_for(Duration::from_millis(300)).await;
+    c.pump_for(Duration::from_millis(300)).await;
+    c.send_group_accept(a_char_id as u64);
+    for cl in [&mut a, &mut b, &mut c] {
+        cl.pump_for(Duration::from_millis(400)).await;
+    }
+
+    a.send_cast_start("Bind Affinity", 3.0);
+    pump_all_for(&mut [&mut a, &mut b, &mut c], Duration::from_millis(3_200)).await;
+    a.send_cast_spell("Bind Affinity", Some(b_char_id as u64));
+    let refused = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64 && reason.contains("safe place"))
+        })
+        .await;
+    assert!(refused.is_some(), "a group member outside the safe area cannot be bound");
+
+    a.send_cast_start("Bind Affinity", 3.0);
+    pump_all_for(&mut [&mut a, &mut b, &mut c], Duration::from_millis(3_200)).await;
+    a.send_cast_spell("Bind Affinity", Some(c_char_id as u64));
+    // A send only queues; the caster's transport has to be serviced for the
+    // message to leave before another seat is watched for the answer.
+    a.pump_for(Duration::from_millis(300)).await;
+    let bound = c
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("bound"))
+        })
+        .await;
+    assert!(bound.is_some(), "a group member in the town square is bound where they stand");
+}
+
+/// Ledger item 12 (user call D5): Evacuate moves the caster and the alive
+/// group members within friendly reach to the safe area's arrival point, and
+/// nobody else. B (grouped, 10 m off) arrives with A; C (not grouped, 5 m off)
+/// stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evacuate_moves_the_group_in_reach_and_nobody_else() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "evac", "Evalyn", "Human", "Druid").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "evacmate", "Mateo", "Human", "Warrior").await;
+    let (c_session, c_char_id, c_token) =
+        provision_client(&h.auth_url, "evacstranger", "Stray", "Human", "Warrior").await;
+    set_char_level(&h.db_url, a_char_id, 16).await;
+    // West of the square on the z = 0 line, which every camp keeps clear
+    // (the Bonepile's nearest spawn is 12 m off it); the +X side past x = 28
+    // is the Gnoll Raider camp, and a mob on the caster interrupts the bar.
+    set_char_pos(&h.db_url, a_char_id, -15.0, 0.0).await;
+    set_char_pos(&h.db_url, b_char_id, -25.0, 0.0).await;
+    set_char_pos(&h.db_url, c_char_id, -20.0, 0.0).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    let mut c = WorldClient::start(c_token, &c_session, c_char_id).await;
+    for cl in [&mut a, &mut b, &mut c] {
+        cl.pump_for(Duration::from_millis(300)).await;
+    }
+    a.send_group_invite("Mateo");
+    a.pump_for(Duration::from_millis(300)).await;
+    b.pump_for(Duration::from_millis(300)).await;
+    b.send_group_accept(a_char_id as u64);
+    for cl in [&mut a, &mut b, &mut c] {
+        cl.pump_for(Duration::from_millis(400)).await;
+    }
+
+    a.send_cast_start("Evacuate", 5.0);
+    pump_all_for(&mut [&mut a, &mut b, &mut c], Duration::from_millis(5_200)).await;
+    a.send_cast_spell("Evacuate", None);
+    let a_tp = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::Teleport { .. })
+        })
+        .await;
+    let Some(ServerWorldMsg::Teleport { pos }) = a_tp else {
+        panic!("Evacuate moves the caster");
+    };
+    assert!(pos.x.abs() < 1.0 && pos.z.abs() < 1.0, "to the town square, got ({}, {})", pos.x, pos.z);
+    let b_tp = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::Teleport { .. })
+        })
+        .await;
+    assert!(b_tp.is_some(), "the grouped member in reach comes along");
+    let c_tp = c
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(1), |m| {
+            matches!(m, ServerWorldMsg::Teleport { .. })
+        })
+        .await;
+    assert!(c_tp.is_none(), "a stranger standing beside them stays");
+}
+
 /// Track 12 Piece B â€” non-Beast-Master classes do NOT get an
 /// auto-summoned warder. Counter-test to make sure the class check
 /// is wired correctly.
@@ -4729,6 +4988,42 @@ async fn pump_both_for(a: &mut WorldClient, b: &mut WorldClient, d: Duration) {
     }
 }
 
+/// `pump_both_for` for any number of seats: a three-client test whose
+/// caster holds a 5 s bar twice would otherwise run the silent seats past
+/// the 10 s app-layer heartbeat timeout.
+async fn pump_all_for(clients: &mut [&mut WorldClient], d: Duration) {
+    for c in clients.iter_mut() {
+        c.send_heartbeat();
+    }
+    let end = Instant::now() + d;
+    while Instant::now() < end {
+        for c in clients.iter_mut() {
+            tick_one(&mut c.client, &mut c.transport);
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+}
+
+/// The newest Position the server has fanned for the client's own
+/// character, read over about a second of pumping; None if none arrives.
+async fn own_position(c: &mut WorldClient, char_id: i64) -> Option<Vec3> {
+    let deadline = Instant::now() + Duration::from_millis(1_000);
+    let mut last = None;
+    while Instant::now() < deadline {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match c
+            .wait_for(CHANNEL_POSITION, left, |m| {
+                matches!(m, ServerWorldMsg::Position { id, .. } if *id == char_id as u64)
+            })
+            .await
+        {
+            Some(ServerWorldMsg::Position { pos, .. }) => last = Some(pos),
+            _ => break,
+        }
+    }
+    last
+}
+
 /// Send `ticks` Moves along `dir` from `who` while pumping `other`, then
 /// stop; the server parks the mover after STALE_MOVE_THRESHOLD.
 async fn walk_pumping(
@@ -5657,23 +5952,30 @@ async fn banned_account_is_kicked_out_of_the_world() {
 }
 
 
-/// A cast the server was always going to refuse must cost NOTHING. Bind
-/// Affinity has no server arm (the bind sprint is still ahead), so the cast
-/// used to take 30 mana, roll the caster's Alteration skill, and then refund
-/// the mana: a free skill-up attempt every three seconds from an honest
-/// hotbar. The pre-flight refuses it before any of that, so the mana never
-/// dips at all.
+/// A cast the server was always going to refuse must cost NOTHING. Until the
+/// bind sprint, Bind Affinity had no server arm and the cast took 30 mana,
+/// rolled the caster's Alteration skill, and then refunded the mana: a free
+/// skill-up attempt every three seconds from an honest hotbar. The pre-flight
+/// refuses before any of that. Bind Affinity has an arm now, so the refusal
+/// exercised here is the bind rule itself (user call D2, 2026-10-05): a
+/// STRANGER cannot be bound, even one standing in the town square; the one
+/// line answers absent and ungrouped targets alike, so it is no is-online
+/// oracle. The mana never dips at all.
 #[tokio::test]
-async fn a_spell_with_no_server_effect_costs_nothing() {
+async fn binding_a_stranger_is_refused_and_costs_nothing() {
     let h = start_both().await;
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "binder", "Binder", "Human", "Cleric").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "stranger", "Passerby", "Human", "Warrior").await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
+    b.pump_for(Duration::from_millis(300)).await;
 
     a.send_cast_start("Bind Affinity", 3.0);
-    a.pump_for(Duration::from_millis(3150)).await;
-    a.send_cast_spell("Bind Affinity", None);
+    pump_both_for(&mut a, &mut b, Duration::from_millis(3150)).await;
+    a.send_cast_spell("Bind Affinity", Some(b_char_id as u64));
 
     // Watch everything that follows the cast for a second: the refusal must
     // arrive, and no ManaUpdate for the caster may show less than full.
@@ -5685,7 +5987,7 @@ async fn a_spell_with_no_server_effect_costs_nothing() {
         while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
             match bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) {
                 Ok((ServerWorldMsg::CastFail { reason, .. }, _))
-                    if reason.contains("no effect here yet") =>
+                    if reason.contains("yourself or a group member") =>
                 {
                     refused = true;
                 }
@@ -5699,7 +6001,7 @@ async fn a_spell_with_no_server_effect_costs_nothing() {
         }
         tokio::time::sleep(TICK_DT).await;
     }
-    assert!(refused, "a spell with no server arm is refused with the line");
+    assert!(refused, "binding a stranger is refused with the line");
     assert!(
         dip.is_none(),
         "it is refused BEFORE the mana comes off, not deducted and refunded (saw {dip:?})"

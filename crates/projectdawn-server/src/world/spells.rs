@@ -131,6 +131,12 @@ pub struct Spell {
     #[serde(default)]
     pub port_group: bool,
 
+    // A Bard song (spell batch step 4). Songs neither start nor honour the
+    // global cooldown, or twisting (songs cast back to back) stops working.
+    // Mirrors the client's `is_song`; the lockstep check compares it.
+    #[serde(default)]
+    pub is_song: bool,
+
     // Track 12 Piece C — generic duration field (currently used by
     // PET_CHARM spells for how long the target stays charmed; future
     // mechanics with a single duration knob can reuse). Distinct
@@ -292,6 +298,32 @@ mod tests {
         assert!((s.heal_amount - 60.0).abs() < 0.01);
         assert_eq!(s.classes, vec!["Beast Master".to_string()]);
         assert_eq!(s.min_level, 1);
+    }
+
+    /// Spell batch step 4: the six Bard songs are the only spells exempt from
+    /// the global cooldown, so `is_song` must be set on exactly them (the
+    /// client's `spell_definitions.gd` carries the same six; the lockstep
+    /// check compares the flag).
+    #[test]
+    fn exactly_the_six_bard_songs_are_songs() {
+        let mut songs: Vec<&str> = spells()
+            .values()
+            .filter(|s| s.is_song)
+            .map(|s| s.name.as_str())
+            .collect();
+        songs.sort_unstable();
+        assert_eq!(
+            songs,
+            vec![
+                "Anthem of the Hunt",
+                "Aria of Dismay",
+                "Mana Weave",
+                "Poet's Mending",
+                "Selos' Melody",
+                "Wanderer's Chord",
+            ]
+        );
+        assert!(!lookup("Chorus of Misery").unwrap().is_song, "a Bard nuke is not a song");
     }
 
     #[test]

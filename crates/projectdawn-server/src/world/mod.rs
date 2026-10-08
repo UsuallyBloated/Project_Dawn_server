@@ -184,6 +184,17 @@ pub const GROUP_SHARE_RANGE: f32 = 200.0;
 /// Decided 2026-10-05 (user: 30 m); the client checks one metre inside it.
 pub const FRIENDLY_SPELL_RANGE: f32 = 30.0;
 
+/// The global cooldown (spell batch step 4, decided 2026-10-05): after any
+/// accepted cast, no spell may START for this long, Bard songs excepted on
+/// both sides (twisting is casting songs back to back). Checked at CastStart
+/// for a timed cast, so a refused caster loses no cast time, and at CastSpell
+/// for an instant one. The client greys every gem for 2.25 s; the server's
+/// limit sits a quarter second inside that so an honest fast player with
+/// ordinary latency is never refused, while a modified client gains at most
+/// that quarter second over an honest one. (EQ's gem refresh is quoted at
+/// 1.5 to 2.25 s across eras.)
+pub const GLOBAL_COOLDOWN: Duration = Duration::from_millis(2_000);
+
 /// How far apart (metres) two players may be for `InspectPlayer` to return a
 /// paperdoll. Paperdoll slots are public and bags are excluded, so reading
 /// one from across the world was only a minor disclosure (exploit audit

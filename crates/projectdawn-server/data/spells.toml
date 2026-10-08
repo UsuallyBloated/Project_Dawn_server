@@ -805,6 +805,7 @@ classes = ["Bard"]
 # and heal_amount stay 0 here.
 [[spell]]
 name = "Selos' Melody"
+is_song = true
 target_type = "SELF"
 damage_type = "ARCANE"
 base_damage = 0.0
@@ -817,6 +818,7 @@ classes = ["Bard"]
 
 [[spell]]
 name = "Anthem of the Hunt"
+is_song = true
 target_type = "SELF"
 damage_type = "SPIRIT"
 base_damage = 0.0
@@ -829,6 +831,7 @@ classes = ["Bard"]
 
 [[spell]]
 name = "Poet's Mending"
+is_song = true
 target_type = "SELF"
 damage_type = "SPIRIT"
 base_damage = 0.0
@@ -841,6 +844,7 @@ classes = ["Bard"]
 
 [[spell]]
 name = "Wanderer's Chord"
+is_song = true
 target_type = "SELF"
 damage_type = "SPIRIT"
 base_damage = 0.0
@@ -853,6 +857,7 @@ classes = ["Bard"]
 
 [[spell]]
 name = "Mana Weave"
+is_song = true
 target_type = "SELF"
 damage_type = "ARCANE"
 base_damage = 0.0
@@ -865,6 +870,7 @@ classes = ["Bard"]
 
 [[spell]]
 name = "Aria of Dismay"
+is_song = true
 target_type = "ENEMY"
 damage_type = "ARCANE"
 base_damage = 0.0

@@ -663,6 +663,30 @@ pub fn handle_message(
             if !conn.ready {
                 return Outcome::Continue;
             }
+            // The global cooldown (spell batch step 4): a timed cast that
+            // would START inside it is refused here, before any bar runs,
+            // so the caster loses no cast time; nothing is cached, so a
+            // CastSpell sent anyway fails the cast-time gate. Private: no
+            // peer has drawn a bar yet. The client spent its mana at the
+            // start, so the true value goes with the refusal. Songs are
+            // exempt; an unknown spell is left to the CastSpell gate.
+            let song = super::spells::lookup(&spell_name).is_some_and(|s| s.is_song);
+            if !song {
+                if let Some(until) = conn.gcd_until {
+                    if now < until {
+                        tracing::info!(
+                            caster = conn.char_id,
+                            spell = %spell_name,
+                            remaining_ms = until.duration_since(now).as_millis(),
+                            "CastStart refused — inside the global cooldown"
+                        );
+                        let caster = conn.char_id as u64;
+                        fan_out_cast_fail(server, &[client_id], caster, "You cannot cast again yet.".to_string());
+                        fan_out_mana_update(server, &[client_id], caster, conn.mp, conn.max_mp);
+                        return Outcome::Continue;
+                    }
+                }
+            }
             conn.cast_spell_name = spell_name.clone();
             conn.cast_total_duration = duration;
             conn.cast_set_at = Some(now);

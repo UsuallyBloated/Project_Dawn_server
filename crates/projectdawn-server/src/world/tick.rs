@@ -4214,6 +4214,24 @@ pub async fn run(
                             continue;
                         }
                     }
+                    // The global cooldown (spell batch step 4). A timed cast
+                    // was already refused at its CastStart; this is the
+                    // instant cast's gate, and the backstop for a forged
+                    // CastSpell with no bar. Songs are exempt.
+                    if !spell.is_song {
+                        if let Some(until) = caster_conn_now.gcd_until {
+                            if now < until {
+                                tracing::info!(
+                                    caster = intent.caster,
+                                    spell = %spell.name,
+                                    remaining_ms = until.duration_since(now).as_millis(),
+                                    "CastSpell rejected — inside the global cooldown"
+                                );
+                                refuse_cast(&mut server, &connections, caster_cid, intent.caster, "You cannot cast again yet.");
+                                continue;
+                            }
+                        }
+                    }
                 }
                 // Resolve caster's snapshot (immutable) — we need pos
                 // for range / AOE. mp deduction lands later under a
@@ -4324,6 +4342,11 @@ pub async fn run(
                             spell.name.clone(),
                             now + Duration::from_secs_f32(spell.cooldown),
                         );
+                    }
+                    // The global cooldown starts when a cast is accepted
+                    // (spell batch step 4); a song starts none.
+                    if !spell.is_song {
+                        cc.gcd_until = Some(now + super::GLOBAL_COOLDOWN);
                     }
                     regen::mark_dirty(cc);
                     (cc.mp, cc.hp, cc.max_hp)

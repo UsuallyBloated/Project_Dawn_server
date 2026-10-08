@@ -394,6 +394,13 @@ pub struct PerConnection {
     /// `connections.remove(&cid)`.
     pub spell_cooldowns: HashMap<String, Instant>,
 
+    /// The global cooldown (spell batch step 4): no spell may START inside
+    /// `GLOBAL_COOLDOWN` of the last accepted cast, Bard songs excepted on
+    /// both sides (twisting is casting songs back to back). Stamped when a
+    /// CastSpell is accepted, checked at CastStart (a timed cast) and at
+    /// CastSpell (an instant one).
+    pub gcd_until: Option<Instant>,
+
     /// Track 4 sub-task 3 — last buff snapshot the client broadcast.
     /// Used to seed new joiners; live updates fan out via the
     /// BuffSnapshotFanOut outcome. Empty Vec = "no active buffs".
@@ -605,6 +612,7 @@ impl PerConnection {
             cast_start_pos: Vec3f::ZERO,
             cast_interrupted_at: None,
             spell_cooldowns: HashMap::new(),
+            gcd_until: None,
             buff_snapshot: Vec::new(),
             buff_snapshot_set: false,
             active_buffs: Vec::new(),

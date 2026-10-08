@@ -2643,6 +2643,8 @@ async fn a_weaker_slow_is_refused_while_a_stronger_one_holds() {
         .await;
     assert!(landed.is_some(), "Torpor lands and costs its mana");
 
+    // Past the global cooldown, so the refusal below is the slow rule's.
+    a.pump_for(Duration::from_millis(2_100)).await;
     a.send_cast_start("Slow", 1.0);
     a.pump_for(Duration::from_millis(1_200)).await;
     a.send_cast_spell("Slow", Some(dummy));
@@ -2743,6 +2745,8 @@ async fn gate_returns_the_caster_to_their_bind_and_wipes_hate() {
     // Gate: a 5 s bar, then the server moves the caster to the bind and the
     // dummy drops them. The two messages land in the same tick in either
     // order (wait_for discards what it skips), so take them as they come.
+    // The Smite started the global cooldown; let it pass first.
+    a.pump_for(Duration::from_millis(2_100)).await;
     a.send_cast_start("Gate", 5.0);
     a.pump_for(Duration::from_millis(5_200)).await;
     a.send_cast_spell("Gate", None);
@@ -2771,7 +2775,9 @@ async fn gate_returns_the_caster_to_their_bind_and_wipes_hate() {
     );
     assert!(dropped, "the mob drops the caster as its target: no train");
 
-    // A second Gate inside the 300 s cooldown is refused.
+    // A second Gate inside the 300 s cooldown is refused (past the global
+    // cooldown, so the refusal is the spell's own).
+    a.pump_for(Duration::from_millis(2_100)).await;
     a.send_cast_start("Gate", 5.0);
     a.pump_for(Duration::from_millis(5_200)).await;
     a.send_cast_spell("Gate", None);
@@ -3885,6 +3891,10 @@ async fn cast_spell_rejected_during_cooldown() {
         })
         .await
         .expect("first Healing Wave cast lands");
+
+    // The global cooldown (2 s) has to pass, or the second start itself is
+    // refused and the per-spell cooldown is never reached.
+    a.pump_for(Duration::from_millis(2_100)).await;
 
     // Second cast â€” same full flow, fired well inside the 6 s
     // cooldown window. Should be rejected with the cooldown reason.
@@ -6118,7 +6128,9 @@ async fn a_pet_stays_with_its_owner_after_gate() {
         .await;
     assert!(engaged.is_some(), "the pet inherits the owner's target and closes on the dummy");
 
-    // Gate home. The dummy cannot interrupt (no damage, no legs).
+    // Gate home. The dummy cannot interrupt (no damage, no legs). The summon
+    // started the global cooldown; let it pass first.
+    a.pump_for(Duration::from_millis(2_100)).await;
     a.send_cast_start("Gate", 5.0);
     a.pump_for(Duration::from_millis(5_200)).await;
     a.send_cast_spell("Gate", None);
@@ -6203,6 +6215,8 @@ async fn a_charmed_mob_is_released_in_place_when_its_charmer_gates() {
         _ => unreachable!(),
     };
 
+    // The charm started the global cooldown; let it pass before the Gate.
+    a.pump_for(Duration::from_millis(2_100)).await;
     a.send_cast_start("Gate", 5.0);
     a.pump_for(Duration::from_millis(5_200)).await;
     a.send_cast_spell("Gate", None);
@@ -6314,6 +6328,131 @@ async fn an_interrupted_cast_costs_mana_in_proportion() {
         ((max_mp - mp) - n as f32).abs() < 1.5,
         "the mana bar lands the charge below full: max {max_mp}, now {mp}, charged {n}"
     );
+}
+
+/// Spell batch step 4 (user call of 2026-10-05): the global cooldown. After
+/// an accepted cast no spell may START for GLOBAL_COOLDOWN (2 s). A timed
+/// cast is refused at its CastStart, privately and with the true mana, and
+/// nothing is cached, so its CastSpell fails the cast-time gate too; an
+/// instant cast is refused at its CastSpell. Once the cooldown has run, the
+/// same casts go through. Cleric 8: Smite (instant) then Bind Affinity
+/// (3 s). On the previous code every cast here lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cast_inside_the_global_cooldown_is_refused_at_its_start() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "gcd", "Hasty", "Human", "Cleric").await;
+    set_char_level(&h.db_url, a_char_id, 8).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "gcd", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    // Something to Smite: a passive dummy 3 m off.
+    a.send_dev_spawn("Charm Dummy", 1, 500.0, 0, 0.0, 0.0);
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let dummy: u64 = match spawn {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    a.send_cast_spell("Smite", Some(dummy));
+    let hit = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == dummy)
+        })
+        .await;
+    assert!(hit.is_some(), "the first Smite lands");
+
+    // A timed cast started 300 ms later: refused at its start.
+    a.pump_for(Duration::from_millis(300)).await;
+    a.send_cast_start("Bind Affinity", 3.0);
+    let refused = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64 && reason.contains("cannot cast again yet"))
+        })
+        .await;
+    assert!(refused.is_some(), "a cast started inside the global cooldown is refused at its start");
+    // The client that sends the CastSpell anyway finds no bar on file.
+    a.pump_for(Duration::from_millis(3_200)).await;
+    a.send_cast_spell("Bind Affinity", None);
+    let no_bar = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64 && reason.contains("not ready"))
+        })
+        .await;
+    assert!(no_bar.is_some(), "with nothing cached the release fails the cast-time gate");
+
+    // Past the cooldown (the Smite was over 3.5 s ago) the same cast lands.
+    a.send_cast_start("Bind Affinity", 3.0);
+    a.pump_for(Duration::from_millis(3_200)).await;
+    a.send_cast_spell("Bind Affinity", None);
+    let bound = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("bound"))
+        })
+        .await;
+    assert!(bound.is_some(), "after the cooldown the cast goes through");
+
+    // And an instant cast inside the cooldown is refused at its CastSpell:
+    // Smite again right behind the bind (Smite's own 3 s cooldown is long
+    // past), 200 ms later.
+    a.pump_for(Duration::from_millis(200)).await;
+    a.send_cast_spell("Smite", Some(dummy));
+    let instant_refused = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64 && reason.contains("cannot cast again yet"))
+        })
+        .await;
+    assert!(instant_refused.is_some(), "an instant cast inside the global cooldown is refused");
+}
+
+/// Bard songs neither start nor honour the global cooldown, or twisting
+/// (songs cast back to back) would stop working. A Bard 10 sings Poet's
+/// Mending and Selos' Melody 100 ms apart, then Mana Weave, and all three
+/// are accepted (each spends its mana).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bard_songs_ignore_the_global_cooldown() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "twist", "Lyric", "Human", "Bard").await;
+    set_char_level(&h.db_url, a_char_id, 10).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    let mut refusals = 0;
+    let mut mana_dips = 0;
+    for song in ["Poet's Mending", "Selos' Melody", "Mana Weave"] {
+        a.send_cast_spell(song, None);
+        let end = Instant::now() + Duration::from_millis(400);
+        while Instant::now() < end {
+            tick_one(&mut a.client, &mut a.transport);
+            while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
+                match bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) {
+                    Ok((ServerWorldMsg::CastFail { caster, .. }, _)) if caster == a_char_id as u64 => {
+                        refusals += 1;
+                    }
+                    Ok((ServerWorldMsg::ManaUpdate { id, mp, max_mp }, _))
+                        if id == a_char_id as u64 && mp < max_mp - 0.5 =>
+                    {
+                        mana_dips += 1;
+                    }
+                    _ => {}
+                }
+            }
+            tokio::time::sleep(TICK_DT).await;
+        }
+    }
+    assert_eq!(refusals, 0, "no song is refused for the global cooldown");
+    assert!(mana_dips >= 2, "the songs were accepted and paid for (saw {mana_dips} dips)");
 }
 
 /// A spell ported from the client's definitions on 2026-10-05 actually lands.

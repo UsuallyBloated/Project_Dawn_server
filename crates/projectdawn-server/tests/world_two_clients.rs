@@ -2616,9 +2616,17 @@ async fn a_weaker_slow_is_refused_while_a_stronger_one_holds() {
 
 /// Walk `metres` east in 7.5 m/s Moves, then let the park settle.
 async fn walk_east(c: &mut WorldClient, seq: &mut u32, metres: f32) {
+    walk_dir(c, seq, Vec3 { x: 1.0, y: 0.0, z: 0.0 }, metres).await;
+}
+
+/// Walk about `metres` along the unit direction `dir`, one Move per tick,
+/// then let the server park the mover. Lands a little long (the server
+/// integrates its own dt), so read the arrival off the Position fan when it
+/// matters.
+async fn walk_dir(c: &mut WorldClient, seq: &mut u32, dir: Vec3, metres: f32) {
     let moves = (metres / (world::MAX_MOVE_SPEED * 0.05)).ceil() as u32;
     for _ in 0..moves {
-        c.send_move(*seq, Vec3 { x: 1.0, y: 0.0, z: 0.0 });
+        c.send_move(*seq, dir);
         *seq += 1;
         tick_one(&mut c.client, &mut c.transport);
         tokio::time::sleep(TICK_DT).await;
@@ -2768,6 +2776,10 @@ async fn a_group_member_is_bound_only_in_a_safe_area() {
         provision_client(&h.auth_url, "farbound", "Farwell", "Human", "Warrior").await;
     let (c_session, c_char_id, c_token) =
         provision_client(&h.auth_url, "nearbound", "Nearby", "Human", "Warrior").await;
+    // A stands at -4 (inside the square, away from the spawn and from C), so
+    // a bind written from the CASTER's position would read as -4 and one left
+    // at birth as 0: the DB check below tells all three apart.
+    set_char_pos(&h.db_url, a_char_id, -4.0, 0.0).await;
     set_char_pos(&h.db_url, b_char_id, 20.0, 0.0).await;
     set_char_pos(&h.db_url, c_char_id, 3.0, 0.0).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
@@ -2811,6 +2823,30 @@ async fn a_group_member_is_bound_only_in_a_safe_area() {
         })
         .await;
     assert!(bound.is_some(), "a group member in the town square is bound where they stand");
+
+    // The bind written is C's OWN position, persisted; B's was never touched.
+    pump_all_for(&mut [&mut a, &mut b, &mut c], Duration::from_millis(600)).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    let c_bind = db::load_character(&pool, c_char_id)
+        .await
+        .expect("load C")
+        .bind
+        .expect("C is bound")
+        .pos;
+    assert!(
+        (c_bind.0 - 3.0).abs() < 0.5 && c_bind.2.abs() < 0.5,
+        "C is bound where C stood (3, 0), not at the caster (-4, 0) or the spawn: got {c_bind:?}"
+    );
+    let b_bind = db::load_character(&pool, b_char_id)
+        .await
+        .expect("load B")
+        .bind
+        .expect("B is bound from birth")
+        .pos;
+    assert!(
+        b_bind.0.abs() < 0.5 && b_bind.2.abs() < 0.5,
+        "the refused bind left B at the birth bind: got {b_bind:?}"
+    );
 }
 
 /// Ledger item 12 (user call D5): Evacuate moves the caster and the alive
@@ -2826,29 +2862,38 @@ async fn evacuate_moves_the_group_in_reach_and_nobody_else() {
         provision_client(&h.auth_url, "evacmate", "Mateo", "Human", "Warrior").await;
     let (c_session, c_char_id, c_token) =
         provision_client(&h.auth_url, "evacstranger", "Stray", "Human", "Warrior").await;
+    let (d_session, d_char_id, d_token) =
+        provision_client(&h.auth_url, "evacfar", "Farrow", "Human", "Warrior").await;
     set_char_level(&h.db_url, a_char_id, 16).await;
     // West of the square on the z = 0 line, which every camp keeps clear
     // (the Bonepile's nearest spawn is 12 m off it); the +X side past x = 28
     // is the Gnoll Raider camp, and a mob on the caster interrupts the bar.
+    // D is grouped but 40 m out, past the 30 m friendly reach.
     set_char_pos(&h.db_url, a_char_id, -15.0, 0.0).await;
     set_char_pos(&h.db_url, b_char_id, -25.0, 0.0).await;
     set_char_pos(&h.db_url, c_char_id, -20.0, 0.0).await;
+    set_char_pos(&h.db_url, d_char_id, -55.0, 0.0).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
     let mut c = WorldClient::start(c_token, &c_session, c_char_id).await;
-    for cl in [&mut a, &mut b, &mut c] {
+    let mut d = WorldClient::start(d_token, &d_session, d_char_id).await;
+    for cl in [&mut a, &mut b, &mut c, &mut d] {
         cl.pump_for(Duration::from_millis(300)).await;
     }
     a.send_group_invite("Mateo");
     a.pump_for(Duration::from_millis(300)).await;
     b.pump_for(Duration::from_millis(300)).await;
     b.send_group_accept(a_char_id as u64);
-    for cl in [&mut a, &mut b, &mut c] {
+    a.send_group_invite("Farrow");
+    a.pump_for(Duration::from_millis(300)).await;
+    d.pump_for(Duration::from_millis(300)).await;
+    d.send_group_accept(a_char_id as u64);
+    for cl in [&mut a, &mut b, &mut c, &mut d] {
         cl.pump_for(Duration::from_millis(400)).await;
     }
 
     a.send_cast_start("Evacuate", 5.0);
-    pump_all_for(&mut [&mut a, &mut b, &mut c], Duration::from_millis(5_200)).await;
+    pump_all_for(&mut [&mut a, &mut b, &mut c, &mut d], Duration::from_millis(5_200)).await;
     a.send_cast_spell("Evacuate", None);
     let a_tp = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
@@ -2871,6 +2916,12 @@ async fn evacuate_moves_the_group_in_reach_and_nobody_else() {
         })
         .await;
     assert!(c_tp.is_none(), "a stranger standing beside them stays");
+    let d_tp = d
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(1), |m| {
+            matches!(m, ServerWorldMsg::Teleport { .. })
+        })
+        .await;
+    assert!(d_tp.is_none(), "a grouped member 40 m out, past friendly reach, stays");
 }
 
 /// Track 12 Piece B â€” non-Beast-Master classes do NOT get an
@@ -5724,6 +5775,188 @@ async fn binding_a_stranger_is_refused_and_costs_nothing() {
         dip.is_none(),
         "it is refused BEFORE the mana comes off, not deducted and refunded (saw {dip:?})"
     );
+}
+
+/// User call D4 (2026-10-05): the pet comes along on Gate and STAYS. The
+/// review of the first cut found the port arm cleared the pet's target but
+/// not the owner's `last_attacked_enemy`, so the pet pre-pass re-inherited
+/// the mob within 10 s and the pet walked straight back out of town to it,
+/// fighting unsupervised (and a pet kill credits the owner). Necromancer 8
+/// (Summon Skeleton at 6, Gate at 8), born bound at the spawn, starts 15 m
+/// out; the dummy cannot move or hit, so only the pet engages.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pet_stays_with_its_owner_after_gate() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "petgate", "Morrow", "Human", "Necromancer").await;
+    set_char_level(&h.db_url, a_char_id, 8).await;
+    set_char_pos(&h.db_url, a_char_id, 15.0, 0.0).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "petgate", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    a.send_cast_start("Summon Skeleton", 3.0);
+    a.pump_for(Duration::from_millis(3_200)).await;
+    a.send_cast_spell("Summon Skeleton", None);
+    let pet_spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+        })
+        .await
+        .expect("the skeleton is summoned");
+    let pet_id: u64 = match pet_spawn {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    // A dummy 3 m ahead; one swing from the owner and the pet inherits it.
+    a.send_dev_spawn("Charm Dummy", 1, 500.0, 0, 0.0, 1.0);
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let (dummy, dummy_pos) = match spawn {
+        ServerWorldMsg::EnemySpawn { id, pos, .. } => (id, pos),
+        _ => unreachable!(),
+    };
+    // Bare-handed reach is 2.7 m and the dummy lands 3 m off: step in.
+    let mut seq: u32 = 1;
+    walk_dir(&mut a, &mut seq, Vec3 { x: 0.0, y: 0.0, z: -1.0 }, 1.5).await;
+    a.send_attack(dummy, "", false, DamageType::Physical);
+    let engaged = a
+        .wait_for(CHANNEL_POSITION, Duration::from_secs(4), |m| {
+            matches!(m, ServerWorldMsg::Position { id, pos, .. }
+                if *id == pet_id && pos.x.is_finite()
+                    && ((pos.x - dummy_pos.x).powi(2) + (pos.z - dummy_pos.z).powi(2)).sqrt() < 3.0)
+        })
+        .await;
+    assert!(engaged.is_some(), "the pet inherits the owner's target and closes on the dummy");
+
+    // Gate home. The dummy cannot interrupt (no damage, no legs).
+    a.send_cast_start("Gate", 5.0);
+    a.pump_for(Duration::from_millis(5_200)).await;
+    a.send_cast_spell("Gate", None);
+    let tp = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| matches!(m, ServerWorldMsg::Teleport { .. }))
+        .await;
+    let Some(ServerWorldMsg::Teleport { pos: dest }) = tp else {
+        panic!("Gate teleports the owner");
+    };
+    assert!(dest.x.abs() < 1.0 && dest.z.abs() < 1.0, "to the birth bind at the spawn, got ({}, {})", dest.x, dest.z);
+
+    // For the next three seconds every Position of the pet stays beside the
+    // owner. On the previous code it is walking back to the dummy at 3 m/s,
+    // past 6 m inside two seconds. The position channel is unreliable and
+    // unordered against the system channel, so a Position fanned just
+    // before the port can be read after the Teleport: the first 400 ms are
+    // let through.
+    let ported_at = Instant::now();
+    let end = ported_at + Duration::from_secs(3);
+    let mut pet_positions = 0;
+    while Instant::now() < end {
+        let left = end.saturating_duration_since(Instant::now());
+        let Some(ServerWorldMsg::Position { pos, .. }) = a
+            .wait_for(CHANNEL_POSITION, left, |m| {
+                matches!(m, ServerWorldMsg::Position { id, .. } if *id == pet_id)
+            })
+            .await
+        else {
+            break;
+        };
+        if ported_at.elapsed() < Duration::from_millis(400) {
+            continue;
+        }
+        pet_positions += 1;
+        let off = ((pos.x - dest.x).powi(2) + (pos.z - dest.z).powi(2)).sqrt();
+        assert!(off < 6.0, "the pet stays with its owner after Gate; it was {off:.1} m away");
+    }
+    assert!(pet_positions > 0, "the pet's position is still fanned to its owner after the port");
+}
+
+/// The review's other find: a CHARMED mob rode Gate into the town square and,
+/// when the charm ended, stood there hostile beside the spawn (a named mob,
+/// even). A charmed mob is not carried: it is released where it stands and
+/// walks home, as when its charmer logs out. Bard 14 (Siren's Song, Gate at
+/// 8) charms a dummy 15 m out and Gates to the spawn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_charmed_mob_is_released_in_place_when_its_charmer_gates() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "charmgate", "Lirael", "Human", "Bard").await;
+    set_char_level(&h.db_url, a_char_id, 14).await;
+    set_char_pos(&h.db_url, a_char_id, 15.0, 0.0).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "charmgate", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    // Aggro 1 m so it never notices the bard before the charm lands.
+    a.send_dev_spawn("Charm Dummy", 1, 500.0, 5, 2.0, 1.0);
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let dummy: u64 = match spawn {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    a.send_cast_start("Siren's Song", 1.5);
+    a.pump_for(Duration::from_millis(1_700)).await;
+    a.send_cast_spell("Siren's Song", Some(dummy));
+    let pet_spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+        })
+        .await
+        .expect("the charm lands");
+    let pet_id: u64 = match pet_spawn {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    a.send_cast_start("Gate", 5.0);
+    a.pump_for(Duration::from_millis(5_200)).await;
+    a.send_cast_spell("Gate", None);
+    // The Teleport, the charmed pet's despawn and the mob's return land in
+    // the same tick; take them in whatever order they come.
+    let end = Instant::now() + Duration::from_secs(3);
+    let (mut teleported, mut pet_gone, mut mob_back) = (false, false, false);
+    while Instant::now() < end && !(teleported && pet_gone && mob_back) {
+        let left = end.saturating_duration_since(Instant::now());
+        match a
+            .wait_for(CHANNEL_SYSTEM, left, |m| {
+                matches!(m, ServerWorldMsg::Teleport { .. })
+                    || matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == pet_id)
+                    || matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
+            })
+            .await
+        {
+            Some(ServerWorldMsg::Teleport { pos }) => {
+                assert!(pos.x.abs() < 1.0 && pos.z.abs() < 1.0, "Gate lands at the spawn");
+                teleported = true;
+            }
+            Some(ServerWorldMsg::EntityDespawn { .. }) => pet_gone = true,
+            Some(ServerWorldMsg::EnemySpawn { pos, .. }) => {
+                assert!(
+                    (pos.x - 15.0).abs() < 4.0 && pos.z > -8.0 && pos.z < 2.0,
+                    "the mob comes back where it stood, 15 m out, not in the square: got ({}, {})",
+                    pos.x, pos.z
+                );
+                mob_back = true;
+            }
+            _ => break,
+        }
+    }
+    assert!(teleported, "Gate teleports the charmer");
+    assert!(pet_gone, "the charmed pet is despawned for its charmer");
+    assert!(mob_back, "the mob is back as a hostile where it stood");
 }
 
 /// A spell ported from the client's definitions on 2026-10-05 actually lands.

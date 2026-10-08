@@ -5595,9 +5595,9 @@ pub async fn run(
                             x = pos.0, y = pos.1, z = pos.2,
                             "BIND applied"
                         );
-                        handlers::send_refusal(&mut server, bound_cid, "Your soul is bound to this place.");
+                        handlers::send_system_line(&mut server, bound_cid, "Your soul is bound to this place.");
                         if bound_cid != caster_cid {
-                            handlers::send_refusal(&mut server, caster_cid, "Their soul is bound to this place.");
+                            handlers::send_system_line(&mut server, caster_cid, "Their soul is bound to this place.");
                         }
                     }
                     "PORT" => {
@@ -5653,25 +5653,58 @@ pub async fn run(
                         for &m in &movers {
                             if let Some(c) = connections.get_mut(&m) {
                                 c.pos = dest;
+                                // The fight is over for the mover: without this
+                                // the pet pre-pass (step 4i) re-inherits the
+                                // owner's last target for up to 10 s and the
+                                // pet walks straight back out of town to it.
+                                c.last_attacked_enemy = None;
+                                c.last_attacked_at = None;
                                 regen::mark_dirty(c);
                             }
                             handlers::send_teleport(&mut server, m, dest);
-                            // The mover's pets come along (user call D4), set
-                            // to follow so a parked one does not stand alone
-                            // across the zone. Their AOI cell changes right
-                            // here, so the players who gain or lose sight of
-                            // them are told now rather than never.
+                            // The mover's summoned pets come along (user call
+                            // D4), set to follow so a parked one does not stand
+                            // alone across the zone. Their AOI cell changes
+                            // right here, so the players who gain or lose sight
+                            // of them are told now rather than never. A CHARMED
+                            // mob is not a pet the mover owns: it is released
+                            // where it stands and walks home, as when its
+                            // charmer logs out. Carrying it would put a camp
+                            // mob (a named one, even) inside the safe area to
+                            // turn hostile when the charm ends.
                             let pets: Vec<EntityId> = enemies
                                 .iter()
                                 .filter(|(_, e)| e.owner == Some(m as EntityId) && e.is_alive())
                                 .map(|(id, _)| *id)
                                 .collect();
                             for pet_id in pets {
+                                if enemies.get(&pet_id).is_some_and(|e| e.charm_expires_at.is_some()) {
+                                    if let Some(pet) = enemies.remove(&pet_id) {
+                                        let mob_id = return_charmed_mob(
+                                            &mut server,
+                                            &mut aoi,
+                                            &mut enemies,
+                                            &in_world_recipients_now,
+                                            pet,
+                                            None,
+                                            now,
+                                        );
+                                        tracing::info!(
+                                            owner = m,
+                                            pet_id,
+                                            mob_id,
+                                            "charm broken by the owner porting away — mob returned"
+                                        );
+                                    }
+                                    continue;
+                                }
                                 let (old_cell, new_cell) = {
                                     let Some(pet) = enemies.get_mut(&pet_id) else { continue };
                                     let old_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
                                     pet.pos = Vec3f { x: dest.x + 1.5, y: dest.y, z: dest.z };
-                                    pet.last_bcast_pos = pet.pos;
+                                    // last_bcast_pos is left where it was, so the
+                                    // move fans on the next tick instead of
+                                    // waiting for the keepalive.
                                     pet.target = None;
                                     pet.stance = entity::PetStance::Follow;
                                     (old_cell, aoi::cell_for(pet.pos.x, pet.pos.z))
@@ -5694,22 +5727,22 @@ pub async fn run(
                         );
                     }
                     "NONE" | _ => {
-                        // port / bind — not yet applied server-side.
-                        // Mana already deducted; the client-local
-                        // handler covers the rest until a later
-                        // track lifts that authority.
+                        // A target type with no arm. Every type in today's
+                        // spells.toml has one (BIND and PORT gained theirs in
+                        // spell batch step 2), and the pre-flight refuses an
+                        // unknown type before the mana comes off, so this is
+                        // reached only by a new type added to the data ahead of
+                        // its arm. Mana is gone and nothing happens, which is
+                        // indistinguishable from a bug. Say so, and give the cost
+                        // back. Raised to info! as well: a player-visible
+                        // failure should not be invisible at the default log
+                        // level.
                         tracing::info!(
                             caster = intent.caster,
                             spell = %spell.name,
                             target_type = %spell.target_type,
                             "spell target_type not yet processed server-side; mana deducted only"
                         );
-                        // The ~9 PORT / gate / evac spells land here, plus BIND.
-                        // Mana is gone and nothing happens, which is
-                        // indistinguishable from a bug. Say so, and give the cost
-                        // back, until the target types are implemented. Raised to
-                        // info! as well: a player-visible failure should not be
-                        // invisible at the default log level.
                         refund_spell_cost(
                             &mut server,
                             &mut connections,
@@ -10279,9 +10312,10 @@ fn cast_target_refusal(
 ) -> Option<String> {
     use protocol::world::{ENEMY_ID_BASE, LOOT_BAG_ID_BASE, PET_ID_BASE};
     let caster = connections.get(&caster_cid)?;
-    // Friendly spells reach further than hostile ones (spell batch step 1).
+    // Friendly spells reach further than hostile ones (spell batch step 1);
+    // binding a group member is a friendly cast too.
     let reach = match spell.target_type.as_str() {
-        "ALLY" | "PET_HEAL" => super::FRIENDLY_SPELL_RANGE,
+        "ALLY" | "PET_HEAL" | "BIND" => super::FRIENDLY_SPELL_RANGE,
         _ => RANGED_ATTACK_RANGE,
     };
     let in_reach = |pos: Vec3f| pos.distance_to(caster_pos) <= reach;
@@ -10477,7 +10511,7 @@ fn cast_target_refusal(
             }
         }
         "SELF" => None,
-        // No arm exists for anything else (BIND, PORT, ...).
+        // No arm exists for anything else: a target type new to the data.
         _ => no_effect(),
     }
 }

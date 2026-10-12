@@ -27,6 +27,9 @@ async fn main() -> anyhow::Result<()> {
     // Same shape as dev_cmds: a dangerous env toggle belongs on the boot line so
     // it is never ambiguous which posture the process is running in.
     let rate_limit = std::env::var("PD_NO_RATE_LIMIT").as_deref() != Ok("1");
+    // The auth socket's public-port posture (invite-gated registration and the
+    // socket limits); `require_invite` joins the boot line for the same reason.
+    let auth_policy = auth::AuthPolicy::from_env();
     tracing::info!(
         build = env!("PD_BUILD_COMMIT"),
         auth_bind = %cfg.auth_bind,
@@ -36,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
         min_client = %cfg.min_client_version,
         dev_cmds,
         rate_limit,
+        require_invite = auth_policy.require_invite,
         "starting projectdawn-server"
     );
     if dev_cmds {
@@ -48,6 +52,11 @@ async fn main() -> anyhow::Result<()> {
             "PD_NO_RATE_LIMIT=1: auth rate limiting is DISABLED — login and register are unthrottled and open to brute force. Acceptable only on a private tailnet; unset this before any public exposure"
         );
     }
+    if !auth_policy.require_invite {
+        tracing::warn!(
+            "PROJECTDAWN_REQUIRE_INVITE is not 1: anyone who can reach the auth port can register an account. Fine on a dev box or a private tailnet; set it before any public exposure"
+        );
+    }
 
     let pool = db::open(&cfg.database_url).await?;
     db::migrate(&pool).await?;
@@ -58,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
     // For graceful shutdown we'd intercept Ctrl-C and tell both to drain;
     // alpha-stage is fine with abrupt termination since DB writes are
     // per-mutation atomic and the 60 s checkpoint bounds position loss.
-    let auth_fut = auth::serve(cfg_arc.clone(), pool.clone());
+    let auth_fut = auth::serve_with_policy(cfg_arc.clone(), pool.clone(), auth_policy);
     let world_fut = world::serve(cfg_arc, pool);
     tokio::try_join!(auth_fut, world_fut)?;
     Ok(())

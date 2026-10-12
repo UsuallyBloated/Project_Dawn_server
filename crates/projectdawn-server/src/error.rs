@@ -24,6 +24,10 @@ pub enum AuthError {
     InvalidInput(String),
     #[error("not found")]
     NotFound,
+    /// Register without a usable invite code. The string is the whole
+    /// user-facing line (no prefix), like `RateLimited`.
+    #[error("{0}")]
+    InviteInvalid(String),
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -41,6 +45,7 @@ impl AuthError {
             Self::Banned(_) => ErrorCode::Banned,
             Self::InvalidInput(_) => ErrorCode::InvalidInput,
             Self::NotFound => ErrorCode::NotFound,
+            Self::InviteInvalid(_) => ErrorCode::InviteInvalid,
             Self::Internal(_) => ErrorCode::Internal,
         }
     }

@@ -15,6 +15,13 @@ pub enum ClientAuthMsg {
         password: String,
         #[serde(default)]
         email: Option<String>,
+        /// An invite code minted by the operator (the `invite` bin). Required
+        /// when the server runs with `PROJECTDAWN_REQUIRE_INVITE=1` (a public
+        /// host); optional otherwise, and burned when given. An old launcher
+        /// that omits it gets `ErrorCode::InviteInvalid` with a line saying
+        /// one is required.
+        #[serde(default)]
+        invite: Option<String>,
     },
     Login {
         username: String,
@@ -116,6 +123,9 @@ pub enum ErrorCode {
     NotFound,
     /// Unhandled server error — bug to fix.
     Internal,
+    /// Register needs an invite code, or the one given is unknown, spent or
+    /// revoked. One code for every case: the message carries the detail.
+    InviteInvalid,
 }
 
 #[cfg(test)]

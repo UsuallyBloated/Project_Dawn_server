@@ -66,12 +66,7 @@ pub async fn create_account(
 ) -> AuthResult<i64> {
     validate_username(username)?;
     validate_password(password)?;
-
-    let salt = SaltString::generate(&mut OsRng);
-    let argon = Argon2::default();
-    let hash = argon
-        .hash_password(password.as_bytes(), &salt)?
-        .to_string();
+    let hash = hash_password(password)?;
 
     let res = sqlx::query("INSERT INTO accounts (username, password_hash, email) VALUES (?1, ?2, ?3)")
         .bind(username)
@@ -85,6 +80,197 @@ pub async fn create_account(
         Err(sqlx::Error::Database(dbe)) if dbe.is_unique_violation() => Err(AuthError::NameTaken),
         Err(e) => Err(AuthError::from(e)),
     }
+}
+
+fn hash_password(password: &str) -> AuthResult<String> {
+    let salt = SaltString::generate(&mut OsRng);
+    Ok(Argon2::default()
+        .hash_password(password.as_bytes(), &salt)?
+        .to_string())
+}
+
+// ─── Invite codes ────────────────────────────────────────────────────────
+// The public hosting plan, slice 1: on a public port anyone can reach the
+// auth service, so a registration can be made to need a code the operator
+// minted (`PROJECTDAWN_REQUIRE_INVITE=1`; the `invite` bin mints them).
+
+/// Random bytes in a code: 128 bits, shown as 32 lowercase hex characters.
+pub const INVITE_CODE_BYTES: usize = 16;
+
+/// The one line every bad code gets (unknown, spent, revoked, malformed), so
+/// a reply never says which: a spent code is a valid one someone used.
+pub const INVITE_REFUSAL: &str = "That invite code is not valid.";
+
+/// A row of the `invites` table for the operator listing.
+#[derive(Debug, Clone)]
+pub struct InviteRow {
+    pub code: String,
+    pub created_at: String,
+    pub note: Option<String>,
+    pub redeemed_by: Option<String>,
+    pub redeemed_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+/// What `revoke_invite` found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokeOutcome {
+    Revoked,
+    AlreadyRevoked,
+    AlreadyRedeemed,
+    NoSuchCode,
+}
+
+/// A code as typed, to the stored form: dashes and spaces dropped, lowercase,
+/// and it must then be exactly the hex the mint produces. Anything else is
+/// refused before the database is asked.
+pub fn normalize_invite(raw: &str) -> AuthResult<String> {
+    let code: String = raw
+        .chars()
+        .filter(|c| !matches!(c, '-' | ' '))
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    if code.len() != INVITE_CODE_BYTES * 2 || !code.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AuthError::InviteInvalid(INVITE_REFUSAL.into()));
+    }
+    Ok(code)
+}
+
+/// Mint `count` codes with an optional operator memo, in one transaction.
+/// Returned once; the table holds them, but the listing is for the operator.
+pub async fn create_invites(
+    pool: &SqlitePool,
+    count: u32,
+    note: Option<&str>,
+) -> AuthResult<Vec<String>> {
+    let mut codes = Vec::with_capacity(count as usize);
+    let mut tx = pool.begin().await?;
+    for _ in 0..count {
+        let mut bytes = [0u8; INVITE_CODE_BYTES];
+        OsRng.fill_bytes(&mut bytes);
+        let code = hex::encode(bytes);
+        sqlx::query("INSERT INTO invites (code, note) VALUES (?1, ?2)")
+            .bind(&code)
+            .bind(note)
+            .execute(&mut *tx)
+            .await?;
+        codes.push(code);
+    }
+    tx.commit().await?;
+    Ok(codes)
+}
+
+pub async fn list_invites(pool: &SqlitePool) -> AuthResult<Vec<InviteRow>> {
+    let rows = sqlx::query(
+        "SELECT i.code, i.created_at, i.note, i.redeemed_at, i.revoked_at,
+                a.username AS redeemed_by
+         FROM invites i LEFT JOIN accounts a ON a.id = i.redeemed_by
+         ORDER BY i.created_at, i.code",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| InviteRow {
+            code: r.get("code"),
+            created_at: r.get("created_at"),
+            note: r.get("note"),
+            redeemed_by: r.get("redeemed_by"),
+            redeemed_at: r.get("redeemed_at"),
+            revoked_at: r.get("revoked_at"),
+        })
+        .collect())
+}
+
+/// Stop an unredeemed code working. A redeemed code is left alone: the
+/// account it made exists, and that is a ban's job.
+pub async fn revoke_invite(pool: &SqlitePool, raw: &str) -> AuthResult<RevokeOutcome> {
+    let Ok(code) = normalize_invite(raw) else {
+        return Ok(RevokeOutcome::NoSuchCode);
+    };
+    let row = sqlx::query("SELECT redeemed_at, revoked_at FROM invites WHERE code = ?1")
+        .bind(&code)
+        .fetch_optional(pool)
+        .await?;
+    let Some(row) = row else {
+        return Ok(RevokeOutcome::NoSuchCode);
+    };
+    if row.get::<Option<DateTime<Utc>>, _>("redeemed_at").is_some() {
+        return Ok(RevokeOutcome::AlreadyRedeemed);
+    }
+    if row.get::<Option<DateTime<Utc>>, _>("revoked_at").is_some() {
+        return Ok(RevokeOutcome::AlreadyRevoked);
+    }
+    // The guard in the WHERE keeps a registration that lands between the read
+    // above and this write from being revoked after the fact.
+    let changed = sqlx::query(
+        "UPDATE invites SET revoked_at = ?1
+         WHERE code = ?2 AND redeemed_at IS NULL AND revoked_at IS NULL",
+    )
+    .bind(Utc::now())
+    .bind(&code)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(if changed == 1 {
+        RevokeOutcome::Revoked
+    } else {
+        RevokeOutcome::AlreadyRedeemed
+    })
+}
+
+/// `create_account` gated by an invite code: the code is burned and the
+/// account inserted in ONE transaction. The burn is a guarded UPDATE (unused
+/// and unrevoked), so of two registrations racing on one code the second
+/// finds it spent; and a refused name rolls the burn back, so the code is
+/// still good for the retry. The validators run first, so a bad password
+/// never touches the code either.
+pub async fn create_account_with_invite(
+    pool: &SqlitePool,
+    username: &str,
+    password: &str,
+    email: Option<&str>,
+    invite_code: &str,
+) -> AuthResult<i64> {
+    validate_username(username)?;
+    validate_password(password)?;
+    let code = normalize_invite(invite_code)?;
+    let hash = hash_password(password)?;
+
+    let mut tx = pool.begin().await?;
+    let burned = sqlx::query(
+        "UPDATE invites SET redeemed_at = ?1
+         WHERE code = ?2 AND redeemed_at IS NULL AND revoked_at IS NULL",
+    )
+    .bind(Utc::now())
+    .bind(&code)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if burned != 1 {
+        // Dropping `tx` rolls back; nothing was written.
+        return Err(AuthError::InviteInvalid(INVITE_REFUSAL.into()));
+    }
+    let res = sqlx::query("INSERT INTO accounts (username, password_hash, email) VALUES (?1, ?2, ?3)")
+        .bind(username)
+        .bind(&hash)
+        .bind(email)
+        .execute(&mut *tx)
+        .await;
+    let id = match res {
+        Ok(out) => out.last_insert_rowid(),
+        Err(sqlx::Error::Database(dbe)) if dbe.is_unique_violation() => {
+            return Err(AuthError::NameTaken);
+        }
+        Err(e) => return Err(AuthError::from(e)),
+    };
+    sqlx::query("UPDATE invites SET redeemed_by = ?1 WHERE code = ?2")
+        .bind(id)
+        .bind(&code)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(id)
 }
 
 // ─── Login & sessions ────────────────────────────────────────────────────
@@ -155,16 +341,21 @@ pub async fn verify_login(
             return Err(AuthError::AuthFailed);
         }
     };
-    if row.is_banned {
-        return Err(AuthError::Banned(row.ban_reason.unwrap_or_default()));
-    }
-
     let parsed = PasswordHash::new(&row.password_hash)?;
     if Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_err()
     {
         return Err(AuthError::AuthFailed);
+    }
+    // The ban answers only AFTER the password is right. Answering before the
+    // verify made a banned account distinguishable from a wrong password by
+    // both its error code and its speed (no Argon2), which is an oracle for
+    // "this account exists" that costs nothing to query. Now a stranger sees
+    // AuthFailed at full cost whatever the account's state, and only its
+    // owner, who knows the password, is told it is banned.
+    if row.is_banned {
+        return Err(AuthError::Banned(row.ban_reason.unwrap_or_default()));
     }
 
     let token = issue_session(pool, row.id).await?;
@@ -1729,6 +1920,98 @@ mod test_support {
 }
 
 #[cfg(test)]
+mod invite_tests {
+    //! One code makes one account, in the same transaction; a refused name
+    //! leaves the code unspent; revoked and malformed codes are refused.
+    use super::test_support::fresh_pool;
+    use super::*;
+
+    #[tokio::test]
+    async fn an_invite_makes_one_account_and_is_spent_by_it() {
+        let (pool, _tmp) = fresh_pool().await;
+        let codes = create_invites(&pool, 2, Some("for Sam")).await.expect("mint");
+        assert_eq!(codes.len(), 2);
+        assert!(codes[0].len() == INVITE_CODE_BYTES * 2 && codes[0] != codes[1]);
+
+        // Typed with dashes and capitals: still the same code.
+        let typed = format!("{}-{}", &codes[0][..16].to_uppercase(), &codes[0][16..]);
+        let id = create_account_with_invite(&pool, "sam", "longpassword", None, &typed)
+            .await
+            .expect("register with a fresh code");
+        assert!(id > 0);
+
+        // The same code again: spent.
+        assert!(
+            matches!(
+                create_account_with_invite(&pool, "sam2", "longpassword", None, &codes[0]).await,
+                Err(AuthError::InviteInvalid(m)) if m == INVITE_REFUSAL
+            ),
+            "a spent code registers nobody else"
+        );
+        // Its row says who spent it.
+        let rows = list_invites(&pool).await.expect("list");
+        let spent = rows.iter().find(|r| r.code == codes[0]).expect("row");
+        assert_eq!(spent.redeemed_by.as_deref(), Some("sam"));
+        assert!(spent.redeemed_at.is_some() && spent.revoked_at.is_none());
+        assert_eq!(spent.note.as_deref(), Some("for Sam"));
+        // Revoking a spent code does nothing.
+        assert_eq!(
+            revoke_invite(&pool, &codes[0]).await.expect("revoke"),
+            RevokeOutcome::AlreadyRedeemed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_name_leaves_the_code_unspent() {
+        let (pool, _tmp) = fresh_pool().await;
+        create_account(&pool, "taken", "longpassword", None).await.expect("existing");
+        let code = create_invites(&pool, 1, None).await.expect("mint").remove(0);
+        assert!(
+            matches!(
+                create_account_with_invite(&pool, "TAKEN", "longpassword", None, &code).await,
+                Err(AuthError::NameTaken)
+            ),
+            "the name refusal comes through"
+        );
+        // A bad password is refused before the code is touched at all.
+        assert!(matches!(
+            create_account_with_invite(&pool, "fresh", "short", None, &code).await,
+            Err(AuthError::InvalidInput(_))
+        ));
+        // And the code still works for the retry.
+        create_account_with_invite(&pool, "fresh", "longpassword", None, &code)
+            .await
+            .expect("the code survived the refused attempts");
+    }
+
+    #[tokio::test]
+    async fn revoked_unknown_and_malformed_codes_are_refused() {
+        let (pool, _tmp) = fresh_pool().await;
+        let code = create_invites(&pool, 1, None).await.expect("mint").remove(0);
+        assert_eq!(revoke_invite(&pool, &code).await.expect("revoke"), RevokeOutcome::Revoked);
+        assert_eq!(
+            revoke_invite(&pool, &code).await.expect("revoke again"),
+            RevokeOutcome::AlreadyRevoked
+        );
+        for bad in [code.as_str(), "00000000000000000000000000000000", "not-a-code", ""] {
+            assert!(
+                matches!(
+                    create_account_with_invite(&pool, "nobody", "longpassword", None, bad).await,
+                    Err(AuthError::InviteInvalid(m)) if m == INVITE_REFUSAL
+                ),
+                "refused with the one line: {bad:?}"
+            );
+        }
+        assert_eq!(
+            revoke_invite(&pool, "not-a-code").await.expect("revoke"),
+            RevokeOutcome::NoSuchCode
+        );
+        // Nothing was created along the way.
+        assert!(verify_login(&pool, "nobody", "longpassword").await.is_err());
+    }
+}
+
+#[cfg(test)]
 mod ban_tests {
     //! The operator ban: login is refused with the reason, every session dies
     //! in the same transaction, and an unban restores the account cleanly.
@@ -1752,6 +2035,14 @@ mod ban_tests {
         assert!(!out.was_banned);
         assert_eq!(out.sessions_purged, 1);
 
+        assert!(
+            matches!(
+                verify_login(&pool, "griefer", "wrongpassword").await,
+                Err(AuthError::AuthFailed)
+            ),
+            "a banned account with the WRONG password answers like any wrong password \
+             (the ban is never an account-existence oracle)"
+        );
         assert!(
             matches!(
                 verify_login(&pool, "griefer", "longpassword").await,

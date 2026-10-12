@@ -6634,12 +6634,12 @@ pub async fn run(
                         // is online (the inspect and cast refusals' rule).
                         // Written keep-only-when-in-reach, so a non-finite
                         // distance refuses.
-                        let in_reach = target_state.as_ref().is_some_and(|(tpos, _)| {
+                        let in_reach = target_state.filter(|(tpos, _)| {
                             connections
                                 .get(&rcid)
                                 .is_some_and(|r| r.pos.distance_to(*tpos) <= super::trade::TRADE_RANGE)
                         });
-                        let (true, Some((_, tname))) = (in_reach, target_state) else {
+                        let Some((_, tname)) = in_reach else {
                             handlers::send_refusal(&mut server, rcid, "There is no one here to trade with.");
                             continue;
                         };
@@ -6899,36 +6899,52 @@ pub async fn run(
                         // Snapshot verification: every offered slot must still
                         // hold exactly the item and count the partner was
                         // shown. Locks stop a slot (and the bag around it)
-                        // moving, but a loot or purchase top-up can still grow
-                        // the stack, and the item check makes any other drift
-                        // fail shut instead of handing over something else.
-                        // An offered bag must also still be empty: loot can
-                        // land in it. A mismatch refuses and re-opens.
-                        let offers_match = |cid: ClientId, side: &super::trade::TradeSide| {
-                            connections
-                                .get(&cid)
-                                .map(|conn| {
-                                    side.offered_slots().all(|o| {
-                                        let same = conn
-                                            .inventory
-                                            .peek_at(&o.location, o.slot)
-                                            .map(|(p, c)| p == o.item_path && c == o.count)
-                                            .unwrap_or(false);
-                                        let bag_still_empty = o.location != "base"
-                                            || !conn.inventory.bag_key_is_nonempty(o.slot as u8);
-                                        same && bag_still_empty
-                                    })
+                        // moving, but the placer (loot, purchases, grants,
+                        // withdrawals) ignores locks and can top up an offered
+                        // stack or drop something into an offered bag, and the
+                        // item check makes any other drift fail shut instead
+                        // of handing over something else. A changed offer
+                        // leaves the window, which also unlocks it, so the
+                        // owner sees what happened and can offer it again;
+                        // leaving it in would refuse every later accept with
+                        // nothing visibly wrong.
+                        let changed = |cid: ClientId, side: &super::trade::TradeSide| -> Vec<usize> {
+                            let Some(conn) = connections.get(&cid) else {
+                                return (0..super::trade::TRADE_SLOTS).collect();
+                            };
+                            side.offers
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(i, offer)| {
+                                    let o = offer.as_ref()?;
+                                    let same = conn
+                                        .inventory
+                                        .peek_at(&o.location, o.slot)
+                                        .map(|(p, c)| p == o.item_path && c == o.count)
+                                        .unwrap_or(false);
+                                    let bag_still_empty = o.location != "base"
+                                        || !conn.inventory.bag_key_is_nonempty(o.slot as u8);
+                                    (!(same && bag_still_empty)).then_some(i)
                                 })
-                                .unwrap_or(false)
+                                .collect()
                         };
-                        if !offers_match(acid, &session.a) || !offers_match(bcid, &session.b) {
+                        let a_changed = changed(acid, &session.a);
+                        let b_changed = changed(bcid, &session.b);
+                        if !a_changed.is_empty() || !b_changed.is_empty() {
+                            for (owner, slots) in [(acid, &a_changed), (bcid, &b_changed)] {
+                                for &i in slots {
+                                    // An empty window slot just reports empty.
+                                    let _ = trade_manager.retrieve_item(owner, i);
+                                }
+                            }
                             trade_manager.clear_accepts_of(acid);
-                            for c in [acid, bcid] {
-                                handlers::send_refusal(
-                                    &mut server,
-                                    c,
-                                    "An offered item changed. Check the window and accept again.",
-                                );
+                            for (c, mine) in [(acid, !a_changed.is_empty()), (bcid, !b_changed.is_empty())] {
+                                let text = if mine {
+                                    "An item you offered changed, so it was taken out of the trade."
+                                } else {
+                                    "Their offer changed. Check the window before accepting again."
+                                };
+                                handlers::send_refusal(&mut server, c, text);
                             }
                             if let Some(s) = trade_manager.session_of(acid) {
                                 fan_trade_state(&mut server, s);

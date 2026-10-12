@@ -147,9 +147,9 @@ impl TradeManager {
         self.sessions.get_mut(self.by_cid.get(&cid)?)
     }
 
-    /// Record an offer (validation of the referenced item — existence,
-    /// bag-emptiness, cursor parking — happens in tick.rs BEFORE this call,
-    /// which also takes the item and count snapshot). Refuses a
+    /// Record an offer. Validation of the referenced item (existence,
+    /// bag-emptiness, cursor parking) happens in tick.rs BEFORE this call,
+    /// which also takes the item and count snapshot. Refuses a
     /// `(location, slot)` that is already offered by this player in any
     /// window slot: one reference, one offer.
     pub fn offer_item(
@@ -257,15 +257,18 @@ impl TradeManager {
     /// slot). So an offer inside `bag_<k>` locks base slot `k` (moving or
     /// swapping that bag would re-point the offer at another bag's item),
     /// and an offered empty bag at base `k` locks every `bag_<k>` slot
-    /// (filling it would hand over a bag that is no longer empty).
+    /// against the player's own moves. The placer (loot, purchases, grants)
+    /// does not consult locks, so the commit re-checks every offer anyway.
     pub fn is_locked(&self, cid: ClientId, location: &str, slot: u32) -> bool {
+        let bag_key = |loc: &str| loc.strip_prefix("bag_").and_then(|k| k.parse::<u32>().ok());
+        let asked_bag = bag_key(location);
         self.session_of(cid)
             .and_then(|s| s.side_of(cid))
             .map(|side| {
                 side.offered_slots().any(|o| {
                     (o.location == location && o.slot == slot)
-                        || (location == "base" && o.location == format!("bag_{slot}"))
-                        || (o.location == "base" && location == format!("bag_{}", o.slot))
+                        || (location == "base" && bag_key(&o.location) == Some(slot))
+                        || (o.location == "base" && asked_bag == Some(o.slot))
                 })
             })
             .unwrap_or(false)

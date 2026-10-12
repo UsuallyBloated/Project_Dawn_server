@@ -4998,6 +4998,91 @@ async fn trade_locks_the_bag_holding_an_offered_item() {
     assert!(got_junk, "B receives the junk sword it was shown");
 }
 
+/// Review 2026-10-12: loot, purchases and grants place through the server's
+/// placer, which can top up an offered stack. The commit then refuses, but the
+/// window kept showing the old snapshot and the stack stayed locked, so every
+/// later accept failed the same way with nothing visibly wrong. A changed
+/// offer now leaves the window (which unlocks it); offering it again commits.
+/// Fails on the previous code at "the changed offer leaves A's window".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trade_drops_an_offer_that_changed_so_the_trade_can_go_on() {
+    let h = start_both().await;
+    let (mut a, _a_char_id, mut b, b_char_id, bread_loc, bread_slot) =
+        trade_pair(&h, "tradei", "Tradeira", "tradej", "Tradejon").await;
+    macro_rules! pump {
+        ($c:expr) => {{
+            for _ in 0..4 {
+                tick_one(&mut $c.client, &mut $c.transport);
+                tokio::time::sleep(TICK_DT).await;
+            }
+        }};
+    }
+
+    a.send_trade_request(b_char_id as u64);
+    pump!(a);
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { .. })
+    })
+    .await
+    .expect("B's window opens");
+    a.send_trade_offer_item(0, &bread_loc, bread_slot);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOfferUpdate { mine: true, slots, .. }
+            if slots.first().map(|(p, c)| p.contains("bread") && *c == 3).unwrap_or(false))
+    })
+    .await
+    .expect("A offers 3 bread");
+
+    // A grant tops the offered stack up to 4 through the placer.
+    a.send_gm_command("give Bread Loaf 1");
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, slot, count: 4, .. }
+            if *location == bread_loc && *slot == bread_slot)
+    })
+    .await
+    .expect("the grant merges into the offered stack");
+
+    b.send_trade_accept();
+    pump!(b);
+    a.send_trade_accept();
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("changed"))
+    })
+    .await
+    .expect("the commit refuses the changed offer, with a line");
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOfferUpdate { mine: true, slots, .. }
+            if slots.first().map(|(p, _)| p.is_empty()).unwrap_or(false))
+    })
+    .await
+    .expect("the changed offer leaves A's window");
+
+    // Offered again, the trade goes through with what B now sees.
+    a.send_trade_offer_item(0, &bread_loc, bread_slot);
+    pump!(a);
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOfferUpdate { mine: false, slots, .. }
+            if slots.first().map(|(p, c)| p.contains("bread") && *c == 4).unwrap_or(false))
+    })
+    .await
+    .expect("B sees the re-offer at 4");
+    b.send_trade_accept();
+    pump!(b);
+    a.send_trade_accept();
+    pump!(a);
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), count: 4, .. }
+            if p.contains("bread"))
+    })
+    .await
+    .expect("B receives all 4");
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeClosed { committed: true, .. })
+    })
+    .await
+    .expect("the trade commits");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn trade_refuses_self_and_coin_overdraft() {
     let h = start_both().await;

@@ -240,7 +240,7 @@ impl NetClient {
         yaw: f32,
     );
 
-    /// PD_W0028 — the spawn just emitted (`enemy_spawn` / `pet_spawn`) is the
+    /// PD_W0028: the spawn just emitted (`enemy_spawn` / `pet_spawn`) is the
     /// creature that was `old_id`, under a new id: a charm landing or ending.
     /// A separate signal so the spawn signals keep their arity; emitted
     /// right after the spawn, so the new node already exists.

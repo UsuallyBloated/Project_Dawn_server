@@ -10,14 +10,18 @@ First time on a clean clone (Windows / PowerShell or any POSIX shell):
 ```sh
 cd F:\Projects\server
 cp .env.example .env
+# Set PROJECTDAWN_NETCODE_KEY in .env: 64 hex chars, e.g. `openssl rand -hex 32`
+# (PowerShell: (1..32 | ForEach { '{0:x2}' -f (Get-Random -Max 256) }) -join '').
+# The server refuses to start without it.
 cargo run -p projectdawn-server
 ```
 
-That's it — `rustup` auto-installs the pinned 1.95.0 toolchain on first
-build, `sqlx` auto-applies migrations on first boot, and the auth
-service starts listening on `0.0.0.0:8765`.
+`rustup` auto-installs the pinned 1.95.0 toolchain on first build, `sqlx`
+auto-applies migrations on first boot, and the auth service starts listening
+on `0.0.0.0:8765`. For a playtest with the Test Panel's dev tools, run with
+`PD_DEV_CMDS=1` (see the client repo's `CLAUDE.md`, "Commands").
 
-To run the test suite (~230 unit + ~48 integration, ~30 s including build):
+To run the test suite (~260 unit + ~90 integration, under a minute including build):
 
 ```sh
 cargo test

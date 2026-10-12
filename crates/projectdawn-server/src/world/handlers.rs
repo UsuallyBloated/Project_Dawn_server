@@ -2259,11 +2259,13 @@ pub fn send_inspect_result(
 /// Fan out `EnemySpawn` for `entity` to every recipient. Encoded once and
 /// cloned per recipient. Used for live spawns (new mob appears → broadcast
 /// to all in_world clients) and late-joiner seed (new client enters world
-/// → server sends every living enemy).
+/// → server sends every living enemy). `replaces` names the id this mob
+/// takes over (a charm ending), `None` otherwise.
 pub fn fan_out_enemy_spawn(
     server: &mut RenetServer,
     recipients: &[ClientId],
     entity: &Entity,
+    replaces: Option<protocol::world::EntityId>,
 ) {
     if recipients.is_empty() {
         return;
@@ -2276,6 +2278,7 @@ pub fn fan_out_enemy_spawn(
         hp: entity.hp,
         pos: Vec3 { x: entity.pos.x, y: entity.pos.y, z: entity.pos.z },
         yaw: entity.yaw,
+        replaces,
     };
     let Some(bytes) = encode(&msg) else {
         return;
@@ -2324,11 +2327,13 @@ pub fn send_inventory_delta(
 /// Track 11 — fan out `PetSpawn` for a freshly summoned pet. Same
 /// pattern as `fan_out_enemy_spawn`; the variant carries the owner's
 /// char_id so the client can route the pet under the right player.
-/// Caller is responsible for `entity.owner.is_some()`.
+/// Caller is responsible for `entity.owner.is_some()`. `replaces` names the
+/// enemy id a charm just converted, `None` for a summon.
 pub fn fan_out_pet_spawn(
     server: &mut RenetServer,
     recipients: &[ClientId],
     entity: &Entity,
+    replaces: Option<protocol::world::EntityId>,
 ) {
     if recipients.is_empty() {
         return;
@@ -2346,6 +2351,7 @@ pub fn fan_out_pet_spawn(
         hp: entity.hp,
         pos: Vec3 { x: entity.pos.x, y: entity.pos.y, z: entity.pos.z },
         yaw: entity.yaw,
+        replaces,
     };
     let Some(bytes) = encode(&msg) else {
         return;
@@ -2366,9 +2372,9 @@ pub fn fan_out_entity_spawn(
     entity: &Entity,
 ) {
     if entity.is_pet() {
-        fan_out_pet_spawn(server, recipients, entity);
+        fan_out_pet_spawn(server, recipients, entity, None);
     } else {
-        fan_out_enemy_spawn(server, recipients, entity);
+        fan_out_enemy_spawn(server, recipients, entity, None);
     }
 }
 

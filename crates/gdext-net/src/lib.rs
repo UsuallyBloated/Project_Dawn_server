@@ -240,6 +240,13 @@ impl NetClient {
         yaw: f32,
     );
 
+    /// PD_W0028 — the spawn just emitted (`enemy_spawn` / `pet_spawn`) is the
+    /// creature that was `old_id`, under a new id: a charm landing or ending.
+    /// A separate signal so the spawn signals keep their arity; emitted
+    /// right after the spawn, so the new node already exists.
+    #[signal]
+    fn entity_replaced(old_id: i64, new_id: i64);
+
     /// Track 13.2 — full inventory snapshot privately seeded to the
     /// owning client on EnterWorld. Parallel arrays: locations[i] /
     /// slots[i] / item_paths[i] / counts[i] all describe the same
@@ -1574,6 +1581,7 @@ enum Incoming {
         hp: f32,
         pos: WireVec3,
         yaw: f32,
+        replaces: Option<i64>,
     },
     EntityTarget {
         id: i64,
@@ -1588,6 +1596,7 @@ enum Incoming {
         hp: f32,
         pos: WireVec3,
         yaw: f32,
+        replaces: Option<i64>,
     },
     InventorySnapshot {
         entries: Vec<(String, u32, String, u32)>,
@@ -2090,6 +2099,7 @@ impl NetClient {
                     hp,
                     pos,
                     yaw,
+                    replaces,
                 } => {
                     self.base_mut().emit_signal(
                         "enemy_spawn",
@@ -2103,6 +2113,12 @@ impl NetClient {
                             yaw.to_variant(),
                         ],
                     );
+                    if let Some(old_id) = replaces {
+                        self.base_mut().emit_signal(
+                            "entity_replaced",
+                            &[old_id.to_variant(), id.to_variant()],
+                        );
+                    }
                 }
                 Incoming::PetSpawn {
                     id,
@@ -2113,6 +2129,7 @@ impl NetClient {
                     hp,
                     pos,
                     yaw,
+                    replaces,
                 } => {
                     self.base_mut().emit_signal(
                         "pet_spawn",
@@ -2127,6 +2144,12 @@ impl NetClient {
                             yaw.to_variant(),
                         ],
                     );
+                    if let Some(old_id) = replaces {
+                        self.base_mut().emit_signal(
+                            "entity_replaced",
+                            &[old_id.to_variant(), id.to_variant()],
+                        );
+                    }
                 }
                 Incoming::InventorySnapshot { entries } => {
                     let mut locations = PackedStringArray::new();
@@ -2701,6 +2724,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             hp,
             pos,
             yaw,
+            replaces,
         } => Incoming::EnemySpawn {
             id: id as i64,
             mob_name,
@@ -2709,6 +2733,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             hp,
             pos,
             yaw,
+            replaces: replaces.map(|r| r as i64),
         },
         ServerWorldMsg::EntityTarget { id, target } => Incoming::EntityTarget {
             id: id as i64,
@@ -2723,6 +2748,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             hp,
             pos,
             yaw,
+            replaces,
         } => Incoming::PetSpawn {
             id: id as i64,
             owner: owner as i64,
@@ -2732,6 +2758,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             hp,
             pos,
             yaw,
+            replaces: replaces.map(|r| r as i64),
         },
         ServerWorldMsg::InventorySnapshot { entries } => {
             Incoming::InventorySnapshot { entries }

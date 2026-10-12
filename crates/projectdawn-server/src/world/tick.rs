@@ -966,7 +966,7 @@ fn summon_pet_for_owner(
         .filter(|id| visible.contains(id))
         .collect();
     if !pet_recipients.is_empty() {
-        handlers::fan_out_pet_spawn(server, &pet_recipients, &pet);
+        handlers::fan_out_pet_spawn(server, &pet_recipients, &pet, None);
     }
     enemies.insert(pet_id, pet);
     pet_id
@@ -1194,7 +1194,8 @@ fn return_charmed_mob(
         .copied()
         .filter(|cid| visible.contains(cid))
         .collect();
-    handlers::fan_out_enemy_spawn(server, &audience, &mob);
+    // `replaces` lets a client that had the pet targeted keep the mob targeted.
+    handlers::fan_out_enemy_spawn(server, &audience, &mob, Some(pet.id));
     if let Some(charmer) = turn_on {
         handlers::fan_out_entity_target(server, in_world, mob_id, Some(charmer));
     }
@@ -2704,6 +2705,7 @@ pub async fn run(
                     &mut server,
                     std::slice::from_ref(new_id),
                     entity,
+                    None,
                 );
                 tracing::debug!(
                     new_client = *new_id as u64,
@@ -2801,6 +2803,7 @@ pub async fn run(
                         &mut server,
                         std::slice::from_ref(new_id),
                         entity,
+                        None,
                     );
                 }
             }
@@ -3160,6 +3163,7 @@ pub async fn run(
                                 &mut server,
                                 &aoi_recipients,
                                 &entity,
+                                None,
                             );
                         }
                     }
@@ -3190,7 +3194,7 @@ pub async fn run(
                         .filter(|id| visible.contains(id))
                         .collect();
                     if !aoi_recipients.is_empty() {
-                        handlers::fan_out_enemy_spawn(&mut server, &aoi_recipients, &entity);
+                        handlers::fan_out_enemy_spawn(&mut server, &aoi_recipients, &entity, None);
                     }
                 }
                 enemies.insert(entity.id, entity);
@@ -5722,7 +5726,8 @@ pub async fn run(
                             .filter(|id| spawn_visible.contains(id))
                             .collect();
                         if !pet_recipients.is_empty() {
-                            handlers::fan_out_pet_spawn(&mut server, &pet_recipients, &pet);
+                            // Same creature, new id: the caster keeps it targeted.
+                            handlers::fan_out_pet_spawn(&mut server, &pet_recipients, &pet, Some(target_id));
                         }
                         enemies.insert(pet_id, pet);
                         tracing::info!(

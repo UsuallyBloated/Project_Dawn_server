@@ -2180,7 +2180,10 @@ async fn an_expired_charm_hands_the_mob_back_and_it_turns_on_the_charmer() {
         .await
         .expect("the dummy spawns");
     let enemy_id: u64 = match spawn_evt {
-        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        ServerWorldMsg::EnemySpawn { id, replaces, .. } => {
+            assert_eq!(replaces, None, "an ordinary spawn replaces nothing");
+            id
+        }
         _ => unreachable!(),
     };
 
@@ -2193,8 +2196,13 @@ async fn an_expired_charm_hands_the_mob_back_and_it_turns_on_the_charmer() {
         })
         .await
         .expect("the charm lands");
+    // One creature throughout (EQ): the pet names the enemy it was, so a
+    // client that had the mob targeted keeps it targeted.
     let pet_id: u64 = match pet_spawn {
-        ServerWorldMsg::PetSpawn { id, .. } => id,
+        ServerWorldMsg::PetSpawn { id, replaces, .. } => {
+            assert_eq!(replaces, Some(enemy_id), "the charmed pet replaces the enemy id");
+            id
+        }
         _ => unreachable!(),
     };
 
@@ -2219,7 +2227,10 @@ async fn an_expired_charm_hands_the_mob_back_and_it_turns_on_the_charmer() {
         .await
         .expect("the mob comes back as an enemy where the pet stood");
     let (mob_id, hp) = match back {
-        ServerWorldMsg::EnemySpawn { id, hp, .. } => (id, hp),
+        ServerWorldMsg::EnemySpawn { id, hp, replaces, .. } => {
+            assert_eq!(replaces, Some(pet_id), "the returned mob replaces the pet id");
+            (id, hp)
+        }
         _ => unreachable!(),
     };
     assert_ne!(mob_id, enemy_id, "a fresh enemy id; the old one is never reused");

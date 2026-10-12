@@ -130,6 +130,10 @@ use serde::{Deserialize, Serialize};
 /// `ServerWorldMsg`. Escrow is by LOCKING: offered items never leave the
 /// owner's inventory until the single-transaction commit, and every offer
 /// edit clears both accepts server-side. Both sides deploy together.
+/// The same bump also gives `EnemySpawn` and `PetSpawn` a trailing
+/// `replaces: Option<EntityId>`, so a charm landing or ending can say which
+/// id the new one takes over and the client keeps its target (EQ's one
+/// entity throughout).
 pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3238; // "PD_W0028"
 
 pub type EntityId = u64;
@@ -1213,6 +1217,10 @@ pub enum ServerWorldMsg {
         hp: f32,
         pos: Vec3,
         yaw: f32,
+        /// The id this entity takes over, when it is the same creature under
+        /// a new id: a charmed pet handed back as an enemy. `None` for every
+        /// ordinary spawn. The client moves its target across on a match.
+        replaces: Option<EntityId>,
     },
     /// Server-authoritative aggro replication. Broadcast on target switch
     /// only (not per tick) — enough for "the mob turned on the healer!"
@@ -1308,6 +1316,9 @@ pub enum ServerWorldMsg {
         hp: f32,
         pos: Vec3,
         yaw: f32,
+        /// The id this pet takes over: the enemy a charm just converted.
+        /// `None` for a summon. See `EnemySpawn::replaces`.
+        replaces: Option<EntityId>,
     },
 
     /// Track 13.2 — full inventory snapshot. Fanned privately to the

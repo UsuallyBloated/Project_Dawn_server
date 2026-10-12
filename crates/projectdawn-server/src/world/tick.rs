@@ -6629,18 +6629,20 @@ pub async fn run(
                                 None
                             }
                         });
-                        let Some((tpos, tname)) = target_state else {
-                            handlers::send_refusal(&mut server, rcid, "They are not here to trade.");
+                        // Absent, dead and too far share ONE line, so a request
+                        // by id cannot tell from anywhere whether a character
+                        // is online (the inspect and cast refusals' rule).
+                        // Written keep-only-when-in-reach, so a non-finite
+                        // distance refuses.
+                        let in_reach = target_state.as_ref().is_some_and(|(tpos, _)| {
+                            connections
+                                .get(&rcid)
+                                .is_some_and(|r| r.pos.distance_to(*tpos) <= super::trade::TRADE_RANGE)
+                        });
+                        let (true, Some((_, tname))) = (in_reach, target_state) else {
+                            handlers::send_refusal(&mut server, rcid, "There is no one here to trade with.");
                             continue;
                         };
-                        let dist = connections
-                            .get(&rcid)
-                            .map(|r| r.pos.distance_to(tpos))
-                            .unwrap_or(f32::MAX);
-                        if dist > super::trade::TRADE_RANGE {
-                            handlers::send_refusal(&mut server, rcid, "They are too far away to trade.");
-                            continue;
-                        }
                         let rname = connections
                             .get(&rcid)
                             .map(|c| c.name.clone())
@@ -6744,13 +6746,16 @@ pub async fn run(
                         match trade_manager.offer_item(
                             cid,
                             window_slot as usize,
-                            loc,
-                            slot,
-                            offer_count,
+                            super::trade::Offer {
+                                location: loc,
+                                slot,
+                                item_path: path,
+                                count: offer_count,
+                            },
                         ) {
                             Ok(()) => {
                                 if let Some(session) = trade_manager.session_of(cid) {
-                                    fan_trade_state(&mut server, &connections, session);
+                                    fan_trade_state(&mut server, session);
                                 }
                             }
                             Err(e) => handlers::send_refusal(&mut server, cid, e),
@@ -6761,7 +6766,7 @@ pub async fn run(
                         match trade_manager.retrieve_item(cid, window_slot as usize) {
                             Ok(()) => {
                                 if let Some(session) = trade_manager.session_of(cid) {
-                                    fan_trade_state(&mut server, &connections, session);
+                                    fan_trade_state(&mut server, session);
                                 }
                             }
                             Err(e) => handlers::send_refusal(&mut server, cid, e),
@@ -6796,14 +6801,14 @@ pub async fn run(
                             // fields snap back to what the server holds
                             // instead of displaying the refused amount.
                             if let Some(session) = trade_manager.session_of(cid) {
-                                fan_trade_state(&mut server, &connections, session);
+                                fan_trade_state(&mut server, session);
                             }
                             continue;
                         }
                         match trade_manager.offer_coins(cid, coins) {
                             Ok(()) => {
                                 if let Some(session) = trade_manager.session_of(cid) {
-                                    fan_trade_state(&mut server, &connections, session);
+                                    fan_trade_state(&mut server, session);
                                 }
                             }
                             Err(e) => handlers::send_refusal(&mut server, cid, e),
@@ -6828,7 +6833,7 @@ pub async fn run(
                         };
                         if !both {
                             if let Some(session) = trade_manager.session_of(cid) {
-                                fan_trade_state(&mut server, &connections, session);
+                                fan_trade_state(&mut server, session);
                             }
                             continue;
                         }
@@ -6887,39 +6892,46 @@ pub async fn run(
                                 );
                             }
                             if let Some(s) = trade_manager.session_of(acid) {
-                                fan_trade_state(&mut server, &connections, s);
+                                fan_trade_state(&mut server, s);
                             }
                             continue;
                         }
-                        // Count verification: locks stop a slot moving, but
-                        // external growth (a loot or purchase top-up merging
-                        // into the offered stack) would raise what changes
-                        // hands after both accepts. The offer snapshotted its
-                        // count; a live mismatch refuses and re-opens.
-                        let counts_match = |cid: ClientId, side: &super::trade::TradeSide| {
+                        // Snapshot verification: every offered slot must still
+                        // hold exactly the item and count the partner was
+                        // shown. Locks stop a slot (and the bag around it)
+                        // moving, but a loot or purchase top-up can still grow
+                        // the stack, and the item check makes any other drift
+                        // fail shut instead of handing over something else.
+                        // An offered bag must also still be empty: loot can
+                        // land in it. A mismatch refuses and re-opens.
+                        let offers_match = |cid: ClientId, side: &super::trade::TradeSide| {
                             connections
                                 .get(&cid)
                                 .map(|conn| {
-                                    side.offered_slots().all(|(l, s, offered)| {
-                                        conn.inventory
-                                            .peek_at(l, *s)
-                                            .map(|(_, live)| live == *offered)
-                                            .unwrap_or(false)
+                                    side.offered_slots().all(|o| {
+                                        let same = conn
+                                            .inventory
+                                            .peek_at(&o.location, o.slot)
+                                            .map(|(p, c)| p == o.item_path && c == o.count)
+                                            .unwrap_or(false);
+                                        let bag_still_empty = o.location != "base"
+                                            || !conn.inventory.bag_key_is_nonempty(o.slot as u8);
+                                        same && bag_still_empty
                                     })
                                 })
                                 .unwrap_or(false)
                         };
-                        if !counts_match(acid, &session.a) || !counts_match(bcid, &session.b) {
+                        if !offers_match(acid, &session.a) || !offers_match(bcid, &session.b) {
                             trade_manager.clear_accepts_of(acid);
                             for c in [acid, bcid] {
                                 handlers::send_refusal(
                                     &mut server,
                                     c,
-                                    "An offered stack changed — check the window and retry.",
+                                    "An offered item changed. Check the window and accept again.",
                                 );
                             }
                             if let Some(s) = trade_manager.session_of(acid) {
-                                fan_trade_state(&mut server, &connections, s);
+                                fan_trade_state(&mut server, s);
                             }
                             continue;
                         }
@@ -6930,10 +6942,10 @@ pub async fn run(
                         let resolve = |cid: ClientId, side: &super::trade::TradeSide| {
                             let conn = connections.get(&cid)?;
                             side.offered_slots()
-                                .map(|(l, s, _)| {
+                                .map(|o| {
                                     conn.inventory
-                                        .peek_at(l, *s)
-                                        .map(|(p, c)| (l.clone(), *s, p, c))
+                                        .peek_at(&o.location, o.slot)
+                                        .map(|(p, c)| (o.location.clone(), o.slot, p, c))
                                 })
                                 .collect::<Option<Vec<(String, u32, String, u32)>>>()
                         };
@@ -6982,7 +6994,7 @@ pub async fn run(
                                 handlers::send_refusal(&mut server, c, text);
                             }
                             if let Some(s) = trade_manager.session_of(acid) {
-                                fan_trade_state(&mut server, &connections, s);
+                                fan_trade_state(&mut server, s);
                             }
                             continue;
                         }
@@ -11721,23 +11733,17 @@ fn refund_spell_cost(
 
 // ── PD_W0028 — trade helpers (docs/design/trade_window.md). ──
 
-/// Project one trade side's offers into the wire payload by re-reading each
-/// referenced slot from the OWNER's live inventory (escrow-by-locking: the
-/// session stores references, never item copies).
+/// Project one trade side's offers into the wire payload: the item and count
+/// snapshotted at offer time, which is exactly what the commit verifies
+/// against the live slot and hands over (escrow-by-locking: the session
+/// stores references and a snapshot, never the item itself).
 fn trade_side_payload(
-    connections: &HashMap<ClientId, PerConnection>,
     side: &super::trade::TradeSide,
 ) -> (Vec<(String, u32)>, protocol::world::Coins) {
     let mut slots = vec![(String::new(), 0u32); super::trade::TRADE_SLOTS];
-    if let Some(conn) = connections.get(&side.cid) {
-        for (i, offer) in side.offers.iter().enumerate() {
-            if let Some((loc, slot, offered_count)) = offer {
-                // Path from the live slot; count from the OFFER snapshot —
-                // what is displayed is what commit will verify and hand over.
-                if let Some((path, _)) = conn.inventory.peek_at(loc, *slot) {
-                    slots[i] = (path, *offered_count);
-                }
-            }
+    for (i, offer) in side.offers.iter().enumerate() {
+        if let Some(o) = offer {
+            slots[i] = (o.item_path.clone(), o.count);
         }
     }
     (slots, side.coins)
@@ -11748,12 +11754,11 @@ fn trade_side_payload(
 /// no desync class.
 fn fan_trade_state(
     server: &mut RenetServer,
-    connections: &HashMap<ClientId, PerConnection>,
     session: &super::trade::TradeSession,
 ) {
     for (me, them) in [(&session.a, &session.b), (&session.b, &session.a)] {
-        let (my_slots, my_coins) = trade_side_payload(connections, me);
-        let (their_slots, their_coins) = trade_side_payload(connections, them);
+        let (my_slots, my_coins) = trade_side_payload(me);
+        let (their_slots, their_coins) = trade_side_payload(them);
         handlers::send_trade_offer_update(server, me.cid, true, my_slots, my_coins);
         handlers::send_trade_offer_update(server, me.cid, false, their_slots, their_coins);
         handlers::send_trade_accept_state(server, me.cid, me.accepted, them.accepted);

@@ -24,16 +24,25 @@ pub const TRADE_SLOTS: usize = 8;
 /// probably downward toward the 6 m UI-interact feel).
 pub const TRADE_RANGE: f32 = 10.0;
 
+/// One offered stack: a reference into the OWNER's inventory plus a
+/// snapshot of what was there at offer time. The partner is shown the
+/// snapshot, and the commit hands over the live slot only if it still holds
+/// exactly that item and count: locks stop the slot being moved or consumed,
+/// but loot or a purchase top-up can still merge into the same stack, and a
+/// reference could in principle come to name something else. Either would
+/// change what moves after both accepts, a bait-and-switch nobody clicked.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Offer {
+    pub location: String,
+    pub slot: u32,
+    pub item_path: String,
+    pub count: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct TradeSide {
     pub cid: ClientId,
-    /// Offered stacks as `(location, slot, count)` references into the
-    /// OWNER's inventory. The count is snapshotted AT OFFER TIME and
-    /// re-verified at commit: locks stop the slot being moved/consumed,
-    /// but external growth (loot or purchase top-ups merging into the
-    /// same stack) would otherwise silently raise what changes hands
-    /// after both accepts — a bait-and-switch nobody clicked.
-    pub offers: [Option<(String, u32, u32)>; TRADE_SLOTS],
+    pub offers: [Option<Offer>; TRADE_SLOTS],
     pub coins: Coins,
     pub accepted: bool,
 }
@@ -48,7 +57,7 @@ impl TradeSide {
         }
     }
 
-    pub fn offered_slots(&self) -> impl Iterator<Item = &(String, u32, u32)> {
+    pub fn offered_slots(&self) -> impl Iterator<Item = &Offer> {
         self.offers.iter().flatten()
     }
 }
@@ -138,17 +147,16 @@ impl TradeManager {
         self.sessions.get_mut(self.by_cid.get(&cid)?)
     }
 
-    /// Record an offer reference (validation of the referenced item —
-    /// existence, bag-emptiness, cursor parking — happens in tick.rs BEFORE
-    /// this call). Refuses a `(location, slot)` that is already offered by
-    /// this player in any window slot: one reference, one offer.
+    /// Record an offer (validation of the referenced item — existence,
+    /// bag-emptiness, cursor parking — happens in tick.rs BEFORE this call,
+    /// which also takes the item and count snapshot). Refuses a
+    /// `(location, slot)` that is already offered by this player in any
+    /// window slot: one reference, one offer.
     pub fn offer_item(
         &mut self,
         cid: ClientId,
         window_slot: usize,
-        location: String,
-        slot: u32,
-        count: u32,
+        offer: Offer,
     ) -> Result<(), &'static str> {
         let session = self
             .sessions
@@ -160,14 +168,14 @@ impl TradeManager {
         let side = session.side_of_mut(cid).ok_or("you are not trading")?;
         if side
             .offered_slots()
-            .any(|(l, s, _)| *l == location && *s == slot)
+            .any(|o| o.location == offer.location && o.slot == offer.slot)
         {
             return Err("that item is already offered");
         }
         if side.offers[window_slot].is_some() {
             return Err("that trade slot is taken");
         }
-        side.offers[window_slot] = Some((location, slot, count));
+        side.offers[window_slot] = Some(offer);
         session.clear_accepts();
         Ok(())
     }
@@ -242,13 +250,23 @@ impl TradeManager {
     }
 
     /// Is `(location, slot)` of `cid`'s inventory locked by an open trade?
-    /// The lock set IS the offer set — no second copy to drift.
+    /// The lock set is derived from the offer set, no second copy to drift.
+    /// Besides each offered slot it covers the bag around it: a bag's
+    /// contents live under `bag_<k>`, keyed by the base slot `k` holding the
+    /// bag, and a full bag moves with its contents (re-keyed to its new
+    /// slot). So an offer inside `bag_<k>` locks base slot `k` (moving or
+    /// swapping that bag would re-point the offer at another bag's item),
+    /// and an offered empty bag at base `k` locks every `bag_<k>` slot
+    /// (filling it would hand over a bag that is no longer empty).
     pub fn is_locked(&self, cid: ClientId, location: &str, slot: u32) -> bool {
         self.session_of(cid)
             .and_then(|s| s.side_of(cid))
             .map(|side| {
-                side.offered_slots()
-                    .any(|(l, sl, _)| l == location && *sl == slot)
+                side.offered_slots().any(|o| {
+                    (o.location == location && o.slot == slot)
+                        || (location == "base" && o.location == format!("bag_{slot}"))
+                        || (o.location == "base" && location == format!("bag_{}", o.slot))
+                })
             })
             .unwrap_or(false)
     }
@@ -263,6 +281,15 @@ impl TradeManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn offer(location: &str, slot: u32, count: u32) -> Offer {
+        Offer {
+            location: location.into(),
+            slot,
+            item_path: "res://x.tres".into(),
+            count,
+        }
+    }
 
     #[test]
     fn open_refuses_self_and_busy() {
@@ -290,7 +317,7 @@ mod tests {
             );
         };
         both_accepted_then(&mut tm);
-        tm.offer_item(1, 0, "base".into(), 0, 1).unwrap();
+        tm.offer_item(1, 0, offer("base", 0, 1)).unwrap();
         assert_cleared(&tm, "offer_item");
         both_accepted_then(&mut tm);
         tm.offer_coins(2, Coins { platinum: 0, gold: 1, silver: 0, copper: 0 })
@@ -305,9 +332,9 @@ mod tests {
     fn same_inventory_slot_cannot_be_offered_twice() {
         let mut tm = TradeManager::new();
         tm.open(1, 2).unwrap();
-        tm.offer_item(1, 0, "base".into(), 3, 5).unwrap();
+        tm.offer_item(1, 0, offer("base", 3, 5)).unwrap();
         assert_eq!(
-            tm.offer_item(1, 1, "base".into(), 3, 5).unwrap_err(),
+            tm.offer_item(1, 1, offer("base", 3, 5)).unwrap_err(),
             "that item is already offered"
         );
     }
@@ -316,13 +343,13 @@ mod tests {
     fn locks_are_derived_from_offers_and_die_with_the_session() {
         let mut tm = TradeManager::new();
         tm.open(1, 2).unwrap();
-        tm.offer_item(1, 0, "bag_2".into(), 4, 2).unwrap();
+        tm.offer_item(1, 0, offer("bag_2", 4, 2)).unwrap();
         assert!(tm.is_locked(1, "bag_2", 4));
         assert!(!tm.is_locked(1, "bag_2", 5));
         assert!(!tm.is_locked(2, "bag_2", 4), "locks are per-owner");
         tm.retrieve_item(1, 0).unwrap();
         assert!(!tm.is_locked(1, "bag_2", 4), "retrieve unlocks");
-        tm.offer_item(1, 0, "bag_2".into(), 4, 2).unwrap();
+        tm.offer_item(1, 0, offer("bag_2", 4, 2)).unwrap();
         let closed = tm.close(2).expect("close by either party");
         assert!(
             (closed.a.cid == 1 && closed.b.cid == 2)
@@ -331,6 +358,23 @@ mod tests {
         );
         assert!(!tm.is_locked(1, "bag_2", 4), "a closed session holds nothing");
         assert!(tm.session_of(1).is_none() && tm.session_of(2).is_none());
+    }
+
+    #[test]
+    fn an_offer_locks_the_bag_around_it() {
+        let mut tm = TradeManager::new();
+        tm.open(1, 2).unwrap();
+        // An item inside the bag at base 2: the bag itself may not move.
+        tm.offer_item(1, 0, offer("bag_2", 0, 1)).unwrap();
+        assert!(tm.is_locked(1, "base", 2), "the parent bag is locked");
+        assert!(!tm.is_locked(1, "base", 3), "other base slots are free");
+        assert!(!tm.is_locked(1, "bag_2", 1), "the bag's other slots are free");
+        // An empty bag at base 5: nothing may be put into it.
+        tm.offer_item(1, 1, offer("base", 5, 1)).unwrap();
+        assert!(tm.is_locked(1, "bag_5", 0), "an offered bag's slots are locked");
+        assert!(tm.is_locked(1, "bag_5", 3));
+        assert!(!tm.is_locked(1, "bag_6", 0));
+        assert!(!tm.is_locked(2, "base", 2), "locks are per-owner");
     }
 
     #[test]

@@ -4870,6 +4870,134 @@ async fn trade_edits_clear_accepts_and_locks_hold() {
     );
 }
 
+/// Review 2026-10-12: an offer is a reference to `bag_<k>` slot `s`, and a
+/// full bag moves with its contents (re-keyed to its new base slot) since
+/// 2026-09-27. Swapping the PARENT bag was not locked, so after B accepted,
+/// A could swap two pouches and the reference would name the other pouch's
+/// item: the count still matched (1 = 1) and B's window never refreshed.
+/// The scam offers the good sword and swaps in the junk; this test runs the
+/// mirror (junk shown, so receiving the good sword proves the re-point). The
+/// parent bag's base slot is locked now, and the commit checks the item too.
+/// Fails on the previous code at the refusal, and without that assertion,
+/// B receives the good sword.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trade_locks_the_bag_holding_an_offered_item() {
+    let h = start_both().await;
+    let (mut a, _a_char_id, mut b, b_char_id, _bread_loc, _bread_slot) =
+        trade_pair(&h, "tradeg", "Tradegan", "tradeh", "Tradehal").await;
+
+    macro_rules! pump_a {
+        () => {{
+            for _ in 0..4 {
+                tick_one(&mut a.client, &mut a.transport);
+                tokio::time::sleep(TICK_DT).await;
+            }
+        }};
+    }
+    // Wait for one item to land and return its (location, slot).
+    async fn landed(c: &mut WorldClient, needle: &str) -> (String, u32) {
+        match c
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. }
+                    if p.contains(needle))
+            })
+            .await
+            .expect("the item lands")
+        {
+            ServerWorldMsg::InventoryDelta { location, slot, .. } => (location, slot),
+            _ => unreachable!(),
+        }
+    }
+
+    // Two pouches in base slots, a junk sword in one, a good sword in the other.
+    a.send_gm_command("give Small Pouch");
+    let (_, p1) = landed(&mut a, "small_pouch").await;
+    a.send_gm_command("give Small Pouch");
+    let (_, p2) = landed(&mut a, "small_pouch").await;
+    a.send_gm_command("give Rusty Short Sword");
+    let (jl, js) = landed(&mut a, "rusty_short_sword").await;
+    a.send_gm_command("give Iron Short Sword");
+    let (gl, gs) = landed(&mut a, "iron_short_sword").await;
+    let junk_bag = format!("bag_{p1}");
+    let good_bag = format!("bag_{p2}");
+    a.send_move_item(&jl, js, &junk_bag, 0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, slot: 0, item_path: Some(p), .. }
+            if *location == junk_bag && p.contains("rusty_short_sword"))
+    })
+    .await
+    .expect("the junk sword goes into the first pouch");
+    a.send_move_item(&gl, gs, &good_bag, 0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, slot: 0, item_path: Some(p), .. }
+            if *location == good_bag && p.contains("iron_short_sword"))
+    })
+    .await
+    .expect("the good sword goes into the second pouch");
+
+    // A offers the junk sword; B sees it and accepts.
+    a.send_trade_request(b_char_id as u64);
+    pump_a!();
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { .. })
+    })
+    .await
+    .expect("B's window opens");
+    a.send_trade_offer_item(0, &junk_bag, 0);
+    pump_a!();
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOfferUpdate { mine: false, slots, .. }
+            if slots.first().map(|(p, c)| p.contains("rusty_short_sword") && *c == 1).unwrap_or(false))
+    })
+    .await
+    .expect("B sees the junk sword offered");
+    b.send_trade_accept();
+    for _ in 0..4 {
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // The switch: swap the two pouches. The pouch holding the offer is locked.
+    a.send_move_item("base", p1, "base", p2);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+            if text.contains("offered in a trade"))
+    })
+    .await
+    .expect("moving the bag that holds an offered item is refused");
+
+    // A accepts; B gets exactly what B saw, never the good sword.
+    a.send_trade_accept();
+    pump_a!();
+    let mut got_junk = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let Some(m) = b
+            .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
+                matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(_), .. }
+                    | ServerWorldMsg::TradeClosed { .. })
+            })
+            .await
+        else {
+            continue;
+        };
+        match m {
+            ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } => {
+                assert!(!p.contains("iron_short_sword"), "B must never receive the good sword");
+                if p.contains("rusty_short_sword") {
+                    got_junk = true;
+                }
+            }
+            ServerWorldMsg::TradeClosed { committed, .. } => {
+                assert!(committed, "the trade commits");
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(got_junk, "B receives the junk sword it was shown");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn trade_refuses_self_and_coin_overdraft() {
     let h = start_both().await;

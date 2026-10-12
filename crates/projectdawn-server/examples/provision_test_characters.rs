@@ -62,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
         username: username.clone(),
         password: password.clone(),
         email: None,
+        invite: None,
     })
     .await?
     {

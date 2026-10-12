@@ -2974,10 +2974,17 @@ pub async fn run(
             handlers::fan_out_entity_died(&mut server, &recipients, entity_id);
         }
 
-        // Track 22.H — player target fan-out. Fan an EntityTarget per
-        // queued SetTarget intent, skipping the sender (they already
-        // know their own choice) and clients flagged for disconnect.
+        // Track 22.H: player target fan-out, for the target-of-target frame.
+        // Only the LATEST target per sender per tick goes out (a burst of
+        // retargets is one message, not one per player per retarget), and
+        // only to players who can see the sender: nobody else has a frame
+        // to draw it in, and a world-wide fan told everyone who was fighting
+        // what. The sender and clients flagged for disconnect are skipped.
+        let mut latest_target: HashMap<ClientId, Option<EntityId>> = HashMap::new();
         for (sender_id, target) in player_target_fanouts.drain(..) {
+            latest_target.insert(sender_id, target);
+        }
+        for (sender_id, target) in latest_target {
             if to_disconnect.contains(&sender_id) {
                 continue;
             }
@@ -2985,9 +2992,10 @@ pub async fn run(
                 continue;
             };
             let entity_id = sender.char_id as u64;
+            let visible = aoi.entities_visible_from(sender.aoi_cell);
             let recipients: Vec<ClientId> = in_world_recipients
                 .iter()
-                .filter(|id| **id != sender_id)
+                .filter(|id| **id != sender_id && visible.contains(*id))
                 .copied()
                 .collect();
             handlers::fan_out_entity_target(&mut server, &recipients, entity_id, target);

@@ -5083,6 +5083,65 @@ async fn trade_drops_an_offer_that_changed_so_the_trade_can_go_on() {
     .expect("the trade commits");
 }
 
+/// The player target broadcast (target-of-target) was dead on the client
+/// from 2026-05-29 to 2026-10-12, so the server path was never exercised in
+/// play. Reviving it, the server fanned every SetTarget to EVERY player in the
+/// world, once per message: a modified client could amplify a burst to the
+/// whole server, and anyone anywhere learned who was fighting what. It now
+/// goes only to players who can see the sender, at most once per tick (the
+/// latest). Fails on the previous code: the far player receives it, and the
+/// near one receives the whole burst.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_player_target_reaches_only_those_who_can_see_them_once_per_tick() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "tgta", "Targeta", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "tgtb", "Targetb", "Human", "Warrior").await;
+    let (c_session, c_char_id, c_token) =
+        provision_client(&h.auth_url, "tgtc", "Targetc", "Human", "Warrior").await;
+    // C two cells east of spawn: outside A's 3x3, so C cannot see A.
+    set_char_pos(&h.db_url, c_char_id, 248.0, 0.0).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    let mut c = WorldClient::start(c_token, &c_session, c_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+    b.pump_for(Duration::from_millis(300)).await;
+    c.pump_for(Duration::from_millis(300)).await;
+
+    // A burst of five retargets in one go; the last names B.
+    for t in [9001u64, 9002, 9003, 9004, b_char_id as u64] {
+        send_msg(&mut a.client, CHANNEL_SYSTEM, &ClientWorldMsg::SetTarget { target_id: Some(t) });
+    }
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // B (beside A) hears A's target exactly once, and it is the last one.
+    let mut seen: Vec<Option<u64>> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if let Some(ServerWorldMsg::EntityTarget { target, .. }) = b
+            .wait_for(CHANNEL_SYSTEM, Duration::from_millis(300), |m| {
+                matches!(m, ServerWorldMsg::EntityTarget { id, .. } if *id == a_char_id as u64)
+            })
+            .await
+        {
+            seen.push(target);
+        }
+    }
+    assert_eq!(seen, vec![Some(b_char_id as u64)], "B gets the latest target, once");
+
+    // C (two cells away) hears nothing about A.
+    let far = c
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(800), |m| {
+            matches!(m, ServerWorldMsg::EntityTarget { id, .. } if *id == a_char_id as u64)
+        })
+        .await;
+    assert!(far.is_none(), "a player who cannot see A must not learn A's target");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn trade_refuses_self_and_coin_overdraft() {
     let h = start_both().await;

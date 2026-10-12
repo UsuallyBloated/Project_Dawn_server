@@ -37,6 +37,10 @@ struct Harness {
     db_url: String,
     _world_addr: SocketAddr,
     _tmp: TempDir,
+    /// Raise it to make the world loop checkpoint everyone, tell them, and
+    /// exit (what the address watch does when the public name moves).
+    restart: Arc<world::RestartSignal>,
+    world_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
 
 async fn start_both() -> Harness {
@@ -75,9 +79,15 @@ async fn start_both() -> Harness {
     let pool = db::open(&url).await.expect("open pool");
     db::migrate(&pool).await.expect("migrate");
 
-    let _world_handle = world::serve_with_socket(cfg.clone(), pool.clone(), world_socket)
-        .await
-        .expect("world serve_with_socket");
+    let restart = Arc::new(world::RestartSignal::default());
+    let world_handle = world::serve_with_socket_restartable(
+        cfg.clone(),
+        pool.clone(),
+        world_socket,
+        restart.clone(),
+    )
+    .await
+    .expect("world serve_with_socket");
     let (auth_addr, _auth_handle) = auth::serve_bound(cfg, pool).await.expect("auth bind");
 
     Harness {
@@ -85,7 +95,108 @@ async fn start_both() -> Harness {
         db_url: url,
         _world_addr: world_addr,
         _tmp: tmp,
+        restart,
+        world_handle,
     }
+}
+
+// ── The public hosting plan, slice 2 ──────────────────────────────────────
+
+/// A home IP change restarts the server (netcode takes its public address
+/// once). The restart must lose nothing: everyone is told, everyone is
+/// checkpointed, the kick carries the reason, and the loop exits with an
+/// error so the process ends non-zero for systemd.
+#[tokio::test]
+async fn a_restart_request_checkpoints_everyone_tells_them_and_exits() {
+    let h = start_both().await;
+    let (session, char_id, _) =
+        provision_client(&h.auth_url, "mover", "Mover", "Human", "Warrior").await;
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    // Walk west so there is unsaved position to lose (the -X axis is clear).
+    let mut seq = 1u32;
+    walk_dir(&mut a, &mut seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 }, 6.0).await;
+    let moved = own_position(&mut a, char_id).await.expect("a position after the walk");
+    assert!(moved.x < -4.0, "walked west: x = {}", moved.x);
+
+    h.restart.request(world::RESTART_FOR_ADDRESS_CHANGE);
+
+    let told = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("Restarting"))
+        })
+        .await;
+    assert!(told.is_some(), "everyone is told why, in chat");
+    let kicked = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::Kick { code: protocol::world::KickCode::Restart, .. })
+        })
+        .await;
+    assert!(kicked.is_some(), "the kick carries the Restart code");
+
+    let exit = tokio::time::timeout(Duration::from_secs(5), h.world_handle)
+        .await
+        .expect("the world loop exits within seconds")
+        .expect("the loop task joined");
+    assert!(exit.is_err(), "the loop ends with an error so the process exits non-zero");
+
+    // And the walk was written before the exit: the character loads where
+    // it stood, not at the spawn.
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    let spawn = db::load_character(&pool, char_id).await.expect("load");
+    assert!(
+        (spawn.pos.0 - moved.x).abs() < 1.0,
+        "checkpointed x {} should match the walked x {}",
+        spawn.pos.0,
+        moved.x
+    );
+}
+
+/// The cosmetic broadcasts are fan-outs a forged client can put on every
+/// peer's screen at will; past a per-connection burst they are dropped, and
+/// an honest client's two swings a second never come near it.
+#[tokio::test]
+async fn a_flood_of_cosmetic_broadcasts_is_capped_per_connection() {
+    let h = start_both().await;
+    let (a_session, a_char, _) =
+        provision_client(&h.auth_url, "flooder", "Flooder", "Human", "Warrior").await;
+    let (b_session, b_char, _) =
+        provision_client(&h.auth_url, "watcher", "Watcher", "Human", "Warrior").await;
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char).await;
+    let b_token = request_world_token(&h.auth_url, &b_session, b_char).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char).await;
+    pump_all_for(&mut [&mut a, &mut b], Duration::from_millis(400)).await;
+
+    // 200 misses "against" the watcher in one frame: a cosmetic fan-out with
+    // no state behind it.
+    for _ in 0..200 {
+        send_msg(
+            &mut a.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::MissBroadcast { target: b_char as u64 },
+        );
+    }
+    let mut seen = 0u32;
+    let end = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < end {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        while let Some(bytes) = b.client.receive_message(CHANNEL_SYSTEM) {
+            if let Ok((ServerWorldMsg::Miss { attacker, .. }, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
+                if attacker == a_char as u64 {
+                    seen += 1;
+                }
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    // The burst gets through; the rest is held to the refill. Two seconds of
+    // refill at 20/s is at most 40 more, and the flood was 200.
+    assert!(seen >= 30, "the burst reaches the watcher: saw {seen}");
+    assert!(seen <= 90, "the flood is capped: saw {seen} of 200");
 }
 
 /// Register + login + char-create + request-token for one client. Returns

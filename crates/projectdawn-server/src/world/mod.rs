@@ -50,7 +50,15 @@ use renet_netcode::{
     ConnectToken, NetcodeServerTransport, ServerAuthentication, ServerConfig,
 };
 use sqlx::SqlitePool;
-use std::{net::UdpSocket, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::{SocketAddr, ToSocketAddrs, UdpSocket},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
+    time::Duration,
+};
 use tokio::task::JoinHandle;
 
 /// 20 Hz simulation tick.
@@ -62,6 +70,123 @@ pub const MAX_CLIENTS: usize = 64;
 /// own keepalive; this catches clients that stop sending app messages
 /// (frozen game window) without the transport noticing.
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often the address watch re-resolves `PROJECTDAWN_WORLD_ENDPOINT` when
+/// it is a name (a DDNS name on the public host, whose home IP can change).
+/// Five minutes is the DDNS updater's own cadence; a tighter watch would only
+/// find the old address again.
+pub const ADDRESS_WATCH_INTERVAL: Duration = Duration::from_secs(300);
+
+// ── The advertised world address ──────────────────────────────────────────
+// `PROJECTDAWN_WORLD_ENDPOINT` names where clients aim their UDP: `ip:port`,
+// or on the public host `host:port` (a DDNS name). renet's netcode takes its
+// public address ONCE, at construction, and refuses a connect token naming
+// any other, so the name is resolved at boot and that address is what both
+// the transport and every token carry. If the name later moves (the home IP
+// changed), the address watch asks the world loop to checkpoint everyone and
+// exit; systemd restarts the process on the new address, and the ~minute of
+// reconnecting is the whole cost. The tokens never chase DNS on their own:
+// one that named a new address while the old transport still ran would be
+// refused for everyone.
+
+/// Resolve the advertised endpoint to the one address clients are told. A
+/// name with several addresses resolves to its first IPv4 one: the public
+/// host's port forward is IPv4, and a token naming an IPv6 address the
+/// router does not forward would fail for exactly the players whose DNS
+/// returns IPv6 first.
+pub fn resolve_world_endpoint(endpoint: &str) -> anyhow::Result<SocketAddr> {
+    if let Ok(addr) = endpoint.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    let addrs: Vec<SocketAddr> = endpoint
+        .to_socket_addrs()
+        .with_context(|| {
+            format!("world_endpoint '{endpoint}' is neither ip:port nor a resolvable host:port")
+        })?
+        .collect();
+    addrs
+        .iter()
+        .copied()
+        .find(|a| a.is_ipv4())
+        .or_else(|| addrs.first().copied())
+        .with_context(|| format!("world_endpoint '{endpoint}' resolved to no address"))
+}
+
+/// The address each running world was built with, by its endpoint string
+/// (several worlds share a test process, each on its own port).
+static BOOT_ADDRS: OnceLock<Mutex<HashMap<String, SocketAddr>>> = OnceLock::new();
+
+fn boot_addrs() -> &'static Mutex<HashMap<String, SocketAddr>> {
+    BOOT_ADDRS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The address a connect token for `endpoint` must name: the running world's
+/// boot address, or, when no world in this process serves that endpoint (the
+/// auth-only tests), a fresh resolve.
+pub fn world_public_addr(endpoint: &str) -> anyhow::Result<SocketAddr> {
+    if let Some(addr) = boot_addrs()
+        .lock()
+        .expect("boot addrs poisoned")
+        .get(endpoint)
+    {
+        return Ok(*addr);
+    }
+    resolve_world_endpoint(endpoint)
+}
+
+/// A request for the world loop to finish the tick, tell everyone, write
+/// everyone and exit non-zero (systemd runs `Restart=on-failure`). Raised by
+/// the address watch; a test raises it by hand.
+#[derive(Default)]
+pub struct RestartSignal {
+    requested: AtomicBool,
+    reason: Mutex<String>,
+}
+
+impl RestartSignal {
+    pub fn request(&self, reason: &str) {
+        *self.reason.lock().expect("restart reason poisoned") = reason.to_string();
+        self.requested.store(true, Ordering::SeqCst);
+    }
+
+    pub fn requested(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+    }
+
+    pub fn reason(&self) -> String {
+        self.reason.lock().expect("restart reason poisoned").clone()
+    }
+}
+
+/// What every player is told when the address watch restarts the server.
+pub const RESTART_FOR_ADDRESS_CHANGE: &str =
+    "The server's network address changed. Restarting now; your character is saved. Log back in in about a minute.";
+
+/// Re-resolve `endpoint` every `ADDRESS_WATCH_INTERVAL` and ask for a restart
+/// the first time it stops resolving to `boot`. A failed lookup keeps the
+/// boot address (the name may be briefly unavailable; the transport is not).
+async fn address_watch(endpoint: String, boot: SocketAddr, signal: Arc<RestartSignal>) {
+    loop {
+        tokio::time::sleep(ADDRESS_WATCH_INTERVAL).await;
+        let name = endpoint.clone();
+        // DNS blocks; keep it off the runtime's worker threads.
+        match tokio::task::spawn_blocking(move || resolve_world_endpoint(&name)).await {
+            Ok(Ok(addr)) if addr != boot => {
+                tracing::warn!(
+                    %boot,
+                    now = %addr,
+                    "world address changed — restarting so connect tokens name the new address"
+                );
+                signal.request(RESTART_FOR_ADDRESS_CHANGE);
+                return;
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "address watch: resolve failed; keeping the boot address")
+            }
+            Err(e) => tracing::warn!(error = %e, "address watch: resolver task failed"),
+        }
+    }
+}
 /// How long an UNCLEAN disconnect (crash, killed client, network drop)
 /// leaves the character lingering in the world before it reaps. The body
 /// stays targetable and killable for this window (the EverQuest "linkdead"
@@ -267,9 +392,7 @@ pub fn mint_connect_token(
     account_id: i64,
     is_gm: bool,
 ) -> anyhow::Result<(Vec<u8>, i64)> {
-    let server_addr = advertised_endpoint
-        .parse()
-        .with_context(|| format!("world_endpoint not a valid SocketAddr: {advertised_endpoint}"))?;
+    let server_addr = world_public_addr(advertised_endpoint)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .context("system clock before UNIX epoch")?;
@@ -316,8 +439,13 @@ pub async fn serve(cfg: Arc<Config>, pool: SqlitePool) -> anyhow::Result<()> {
         "world UDP listening (renet 2.0, Secure)"
     );
     let handle = serve_with_socket(cfg, pool, socket).await?;
-    handle.await?;
-    Ok(())
+    // The loop returns only on an error or on a restart request, and either
+    // way the process should end: `main`'s try_join finishes, the exit is
+    // non-zero, and systemd brings the server back (`Restart=on-failure`).
+    match handle.await? {
+        Ok(()) => Err(anyhow::anyhow!("world tick loop exited")),
+        Err(e) => Err(e),
+    }
 }
 
 /// Test / advanced entry — caller pre-binds the socket (e.g. on ephemeral
@@ -327,13 +455,29 @@ pub async fn serve_with_socket(
     cfg: Arc<Config>,
     pool: SqlitePool,
     socket: UdpSocket,
-) -> anyhow::Result<JoinHandle<()>> {
-    let public_addr = cfg
-        .world_endpoint
-        .parse()
-        .with_context(|| {
-            format!("world_endpoint not a valid SocketAddr: {}", cfg.world_endpoint)
-        })?;
+) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
+    serve_with_socket_restartable(cfg, pool, socket, Arc::new(RestartSignal::default())).await
+}
+
+/// `serve_with_socket` with the restart signal supplied by the caller, so a
+/// test can raise it and watch the loop checkpoint, tell everyone and exit.
+pub async fn serve_with_socket_restartable(
+    cfg: Arc<Config>,
+    pool: SqlitePool,
+    socket: UdpSocket,
+    restart: Arc<RestartSignal>,
+) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
+    let public_addr = resolve_world_endpoint(&cfg.world_endpoint)
+        .with_context(|| format!("resolving world_endpoint '{}'", cfg.world_endpoint))?;
+    boot_addrs()
+        .lock()
+        .expect("boot addrs poisoned")
+        .insert(cfg.world_endpoint.clone(), public_addr);
+    tracing::info!(
+        advertised = %cfg.world_endpoint,
+        resolved = %public_addr,
+        "world address resolved; connect tokens will name it"
+    );
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -353,10 +497,44 @@ pub async fn serve_with_socket(
         .context("constructing NetcodeServerTransport")?;
     let server = RenetServer::new(connection_config());
 
+    // Only a NAME can move; a literal address is watched by nobody.
+    if cfg.world_endpoint.parse::<SocketAddr>().is_err() {
+        let endpoint = cfg.world_endpoint.clone();
+        let signal = restart.clone();
+        tokio::spawn(async move { address_watch(endpoint, public_addr, signal).await });
+    }
+
     let handle = tokio::spawn(async move {
-        if let Err(e) = tick::run(cfg, pool, server, transport).await {
-            tracing::error!(error = %e, "world tick loop exited with error");
+        let result = tick::run(cfg, pool, server, transport, restart).await;
+        if let Err(e) = &result {
+            tracing::error!(error = %e, "world tick loop exited");
         }
+        result
     });
     Ok(handle)
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn a_literal_address_resolves_to_itself_and_a_name_to_an_address() {
+        let lit = resolve_world_endpoint("203.0.113.9:7777").expect("literal");
+        assert_eq!(lit.to_string(), "203.0.113.9:7777");
+        // `localhost` resolves everywhere without DNS; the port rides along.
+        let local = resolve_world_endpoint("localhost:7777").expect("localhost");
+        assert!(local.ip().is_loopback() && local.port() == 7777);
+        assert!(resolve_world_endpoint("no.such.host.invalid:7777").is_err());
+        assert!(resolve_world_endpoint("not an endpoint").is_err());
+    }
+
+    #[test]
+    fn a_restart_signal_carries_its_reason() {
+        let s = RestartSignal::default();
+        assert!(!s.requested() && s.reason().is_empty());
+        s.request("moving house");
+        assert!(s.requested());
+        assert_eq!(s.reason(), "moving house");
+    }
 }

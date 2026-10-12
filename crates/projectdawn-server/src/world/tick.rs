@@ -1471,6 +1471,7 @@ pub async fn run(
     pool: SqlitePool,
     mut server: RenetServer,
     mut transport: NetcodeServerTransport,
+    restart: Arc<super::RestartSignal>,
 ) -> anyhow::Result<()> {
     let _ = cfg; // Reserved for future config-driven tuning (max_clients live-reload, etc.).
 
@@ -1554,6 +1555,51 @@ pub async fn run(
     loop {
         interval.tick().await;
         let now = Instant::now();
+
+        // 0. A restart was asked for (the address watch: the advertised name
+        //    no longer resolves to the address netcode was built with, so a
+        //    new connect token would name an address this process does not
+        //    serve). Tell everyone why, write everyone, kick with Restart so
+        //    the client shows the reason, and leave with an error: the process
+        //    exits non-zero and systemd brings it back on the new address.
+        //    This IS the checkpoint, run now, so a home IP change loses no
+        //    progress; the only cost is the minute of logging back in.
+        if restart.requested() {
+            let reason = restart.reason();
+            let in_world: Vec<ClientId> = connections
+                .iter()
+                .filter(|(_, c)| c.in_world)
+                .map(|(id, _)| *id)
+                .collect();
+            handlers::fan_out_chat_message(
+                &mut server,
+                &in_world,
+                "",
+                protocol::world::ChatChannel::System,
+                &reason,
+            );
+            let mut dirty: Vec<&mut PerConnection> = connections.values_mut().collect();
+            persistence::checkpoint_dirty(&pool, &mut dirty).await;
+            let mut audit_rows: Vec<db::GmActionRow> = Vec::new();
+            for conn in connections.values_mut() {
+                collect_gm_audit(conn, now, true, &mut audit_rows);
+            }
+            write_gm_audit(&pool, &audit_rows).await;
+            let everyone: Vec<ClientId> = connections.keys().copied().collect();
+            for client_id in everyone {
+                handlers::send_kick(&mut server, client_id, KickCode::Restart, &reason);
+            }
+            // Let the line and the kicks leave before the socket goes.
+            transport.send_packets(&mut server);
+            tokio::time::sleep(KICK_FLUSH_GRACE).await;
+            transport.send_packets(&mut server);
+            tracing::warn!(
+                players = in_world.len(),
+                reason,
+                "restart requested — everyone checkpointed and told; exiting for systemd to restart"
+            );
+            return Err(anyhow::anyhow!("restart requested: {reason}"));
+        }
 
         // 1. Advance the transport (reads UDP packets, processes netcode handshakes).
         if let Err(e) = transport.update(TICK_DT, &mut server) {

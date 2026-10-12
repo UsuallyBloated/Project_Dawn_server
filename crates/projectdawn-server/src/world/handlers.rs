@@ -3,7 +3,7 @@
 //! and may queue replies on the renet server for the next packet flush.
 
 use super::{
-    connection::{DevCmdAuth, PerConnection, Vec3f},
+    connection::{DevCmdAuth, IntentClass, PerConnection, Vec3f},
     entity::Entity,
     loot::LootBag,
     CHANNEL_POSITION, CHANNEL_SYSTEM,
@@ -452,6 +452,45 @@ fn dev_cmd_allowed(
     }
 }
 
+/// Which budget an intent draws on, or none: movement, combat, casts, quests,
+/// the group and the lifecycle messages have gates of their own (the swing
+/// rate limit, one cast per tick, the dead-state gate).
+pub fn intent_class(msg: &ClientWorldMsg) -> Option<IntentClass> {
+    use ClientWorldMsg as M;
+    match msg {
+        M::MoveItem { .. }
+        | M::SplitStack { .. }
+        | M::DropItem { .. }
+        | M::DestroyItem { .. }
+        | M::EquipItem { .. }
+        | M::UnequipItem { .. }
+        | M::UseConsumable { .. }
+        | M::StackAll { .. }
+        | M::LootItem { .. }
+        | M::LootAll { .. }
+        | M::LootToCursor { .. }
+        | M::BuyItem { .. }
+        | M::SellItem { .. }
+        | M::BankDepositCoins { .. }
+        | M::BankWithdrawCoins { .. }
+        | M::BankExchange { .. }
+        | M::BankStoreItem { .. }
+        | M::BankWithdrawItem { .. } => Some(IntentClass::Inventory),
+        M::CastStartBroadcast { .. }
+        | M::CastCompleteBroadcast { .. }
+        | M::CastFailBroadcast { .. }
+        | M::BuffSnapshotBroadcast { .. }
+        | M::HitBroadcast { .. }
+        | M::MissBroadcast { .. }
+        | M::EvadeBroadcast { .. }
+        | M::DeathBroadcast { .. }
+        | M::EquipUpdate { .. }
+        | M::Chat { .. }
+        | M::InspectPlayer { .. } => Some(IntentClass::Cosmetic),
+        _ => None,
+    }
+}
+
 pub fn handle_message(
     server: &mut RenetServer,
     conn: &mut PerConnection,
@@ -466,6 +505,24 @@ pub fn handle_message(
     // accomplice or reshuffling its group.
     if conn.kicked_at.is_some() {
         return Outcome::Continue;
+    }
+    // The intent budgets (public hosting slice 2): the inventory family and
+    // the cosmetic broadcasts each draw on a per-connection bucket and are
+    // dropped past it. Only a forged client reaches a burst, so the drop is
+    // silent (a chat line per packet would be a flood of its own) and the
+    // log carries the count once a second.
+    if let Some(class) = intent_class(&msg) {
+        if !conn.take_intent_token(class, now) {
+            if let Some(dropped) = conn.take_drop_report(now) {
+                tracing::info!(
+                    char_id = conn.char_id,
+                    ?class,
+                    dropped,
+                    "intents dropped — over the per-connection budget"
+                );
+            }
+            return Outcome::Continue;
+        }
     }
     conn.touch(now);
     // ── The dead-state gate (playtest 2026-09-23) ────────────────────────

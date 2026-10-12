@@ -33,6 +33,29 @@ pub struct GmAuditEntry {
 pub const GM_CMD_BURST: f32 = 128.0;
 pub const GM_CMD_REFILL_PER_SEC: f32 = 8.0;
 
+// The intent budgets (the public hosting plan, slice 2). Two kinds of message
+// are worth a forged client's flooding: the inventory family (each one a
+// validated write) and the cosmetic broadcasts (each one a fan-out onto every
+// peer's screen). Both draw on a per-connection token bucket shaped like the
+// GM command budget and are dropped past it. The bursts are sized so an
+// honest client never meets them: a Stack All across every bag fires one
+// MoveItem per slot in a single frame (under 64), and a dual-wielding fighter
+// reports two swings a second.
+/// Inventory intents allowed in a burst, and the refill rate after it.
+pub const INVENTORY_OPS_BURST: f32 = 64.0;
+pub const INVENTORY_OPS_PER_SEC: f32 = 16.0;
+/// Cosmetic broadcasts (hits, misses, evades, cast bars, buff snapshots,
+/// equipment, chat, inspect) allowed in a burst, and the refill rate.
+pub const COSMETIC_BURST: f32 = 40.0;
+pub const COSMETIC_PER_SEC: f32 = 20.0;
+
+/// Which intent budget a message draws on (`handlers::intent_class`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntentClass {
+    Inventory,
+    Cosmetic,
+}
+
 /// What `PerConnection::authorize_dev_cmd` decided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DevCmdAuth {
@@ -334,6 +357,17 @@ pub struct PerConnection {
     pub gm_overflow_row_at: Option<Instant>,
     pub gm_rate_notice_at: Option<Instant>,
 
+    /// The intent budgets (`INVENTORY_OPS_BURST`, `COSMETIC_BURST`): tokens
+    /// left and the last refill, per class; intents dropped over budget since
+    /// the last log line, and when that line was last written (at most once
+    /// a second per connection).
+    pub inventory_tokens: f32,
+    pub inventory_refill_at: Instant,
+    pub cosmetic_tokens: f32,
+    pub cosmetic_refill_at: Instant,
+    pub intents_dropped: u32,
+    pub intents_dropped_logged_at: Option<Instant>,
+
     /// Set when the server has sent this connection a Kick (the ban sweep).
     /// The tick drops the transport `KICK_FLUSH_GRACE` later; from there the
     /// character leaves by the ordinary unclean-exit path.
@@ -597,6 +631,12 @@ impl PerConnection {
             gm_cmd_refused: 0,
             gm_overflow_row_at: None,
             gm_rate_notice_at: None,
+            inventory_tokens: INVENTORY_OPS_BURST,
+            inventory_refill_at: now,
+            cosmetic_tokens: COSMETIC_BURST,
+            cosmetic_refill_at: now,
+            intents_dropped: 0,
+            intents_dropped_logged_at: None,
             kicked_at: None,
             aoi_cell: (0, 0), // tick.rs sets the real cell from aoi::cell_for after construction
             regen_hp_acc: 0.0,
@@ -658,6 +698,51 @@ impl PerConnection {
     /// account, `dev` for a `PD_DEV_CMDS` server, `gm+dev` for both. On a
     /// hosted server every row should read plain `via=gm`; anything with
     /// `dev` in it means the process ran with dev commands on for everyone.
+    /// Take one token from `class`'s budget; `false` means the intent is over
+    /// budget and is dropped. Same shape as the GM command bucket: time
+    /// refills it, the burst is the ceiling.
+    pub fn take_intent_token(&mut self, class: IntentClass, now: Instant) -> bool {
+        let (tokens, refill_at, burst, per_sec) = match class {
+            IntentClass::Inventory => (
+                &mut self.inventory_tokens,
+                &mut self.inventory_refill_at,
+                INVENTORY_OPS_BURST,
+                INVENTORY_OPS_PER_SEC,
+            ),
+            IntentClass::Cosmetic => (
+                &mut self.cosmetic_tokens,
+                &mut self.cosmetic_refill_at,
+                COSMETIC_BURST,
+                COSMETIC_PER_SEC,
+            ),
+        };
+        let elapsed = now.saturating_duration_since(*refill_at).as_secs_f32();
+        *tokens = (*tokens + elapsed * per_sec).min(burst);
+        *refill_at = now;
+        if *tokens < 1.0 {
+            self.intents_dropped = self.intents_dropped.saturating_add(1);
+            return false;
+        }
+        *tokens -= 1.0;
+        true
+    }
+
+    /// The count of intents dropped since the last report, when a report is
+    /// due (at most one a second), resetting it. `None` otherwise.
+    pub fn take_drop_report(&mut self, now: Instant) -> Option<u32> {
+        if self.intents_dropped == 0 {
+            return None;
+        }
+        let due = self
+            .intents_dropped_logged_at
+            .is_none_or(|t| now.saturating_duration_since(t).as_secs_f32() >= 1.0);
+        if !due {
+            return None;
+        }
+        self.intents_dropped_logged_at = Some(now);
+        Some(std::mem::take(&mut self.intents_dropped))
+    }
+
     pub fn authorize_dev_cmd(
         &mut self,
         now: Instant,
@@ -928,6 +1013,43 @@ mod tests {
 
     // The budget: a burst the size of the Test Panel's biggest batch passes
     // whole, a flood is REFUSED (not run unrecorded), and time refills it.
+    /// The two intent budgets are separate buckets: a flood of one leaves the
+    /// other whole, the burst is the ceiling, time refills at the class rate,
+    /// and the drop report comes once a second with the count.
+    #[test]
+    fn intent_budgets_hold_a_burst_then_refill_at_their_rate() {
+        let t0 = Instant::now();
+        let mut conn = PerConnection::from_spawn(test_spawn(), t0);
+        for i in 0..COSMETIC_BURST as u32 {
+            assert!(conn.take_intent_token(IntentClass::Cosmetic, t0), "cosmetic {i} in the burst");
+        }
+        assert!(!conn.take_intent_token(IntentClass::Cosmetic, t0), "the burst is the ceiling");
+        assert!(
+            conn.take_intent_token(IntentClass::Inventory, t0),
+            "the inventory bucket is untouched by a cosmetic flood"
+        );
+        assert_eq!(conn.take_drop_report(t0), Some(1), "one drop, reported");
+        assert!(!conn.take_intent_token(IntentClass::Cosmetic, t0));
+        assert_eq!(conn.take_drop_report(t0), None, "not again inside the second");
+        assert_eq!(
+            conn.take_drop_report(t0 + Duration::from_millis(1100)),
+            Some(1),
+            "the next second's report carries what was dropped since"
+        );
+        // Half a second later the refill has bought COSMETIC_PER_SEC / 2 more.
+        let t1 = t0 + Duration::from_millis(500);
+        let bought = (COSMETIC_PER_SEC / 2.0) as u32;
+        for i in 0..bought {
+            assert!(conn.take_intent_token(IntentClass::Cosmetic, t1), "refilled {i}");
+        }
+        assert!(!conn.take_intent_token(IntentClass::Cosmetic, t1));
+        // A Stack All across every bag fits the inventory burst in one frame.
+        for i in 1..INVENTORY_OPS_BURST as u32 {
+            assert!(conn.take_intent_token(IntentClass::Inventory, t0), "move {i}");
+        }
+        assert!(!conn.take_intent_token(IntentClass::Inventory, t0));
+    }
+
     #[test]
     fn authorize_dev_cmd_refuses_over_budget_instead_of_running_unrecorded() {
         let t0 = Instant::now();

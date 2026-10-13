@@ -324,6 +324,33 @@ fn default_level_gain() -> LevelGain {
 /// (and writes to the characters row at create time). Unknown races / classes
 /// fall back to the all-10 BASE block with no class bonus — defensive, since
 /// `create_character` already validates the inputs.
+/// The races a character may be CREATED as: the client's creation list
+/// (`data/character_data.gd`), and nothing else. `Revenant` has a stat block
+/// below because the transformation needs one, but it is not a birth race;
+/// `db::create_character` refuses anything off this list, so a modified
+/// launcher cannot pick a block the creation screen never offers (the review
+/// of 2026-10-13 found the Revenant's starvation immunity reachable that way).
+pub const CREATION_RACES: [&str; 16] = [
+    "Human", "Elf", "Dark Elf", "Wood Elf", "Gnome", "Halfling", "Dwarf", "Half-Elf",
+    "Ogre", "Troll", "Kel`varath", "Minotaur", "Fae", "Felhari", "Kobold", "Half-Ogre",
+];
+
+/// The classes a character may be created as (the eighteen; Assassin and
+/// Warlock are planned, not here).
+pub const PLAYABLE_CLASSES: [&str; 18] = [
+    "Warrior", "Paladin", "Shadow Knight", "Cleric", "Druid", "Shaman", "Beast Master",
+    "Rogue", "Monk", "Ranger", "Witch Hunter", "Bard", "Magician", "Wizard", "Sorcerer",
+    "Enchanter", "Necromancer", "Blood Mage",
+];
+
+pub fn is_creation_race(race: &str) -> bool {
+    CREATION_RACES.contains(&race)
+}
+
+pub fn is_playable_class(class: &str) -> bool {
+    PLAYABLE_CLASSES.contains(&class)
+}
+
 pub fn compute(race: &str, class: &str, level: i32) -> ComputedCharacter {
     let mut stats = StatBlock::flat(BASE);
     if let Some(r) = races().get(race) {
@@ -456,6 +483,23 @@ mod tests {
         // Hell level 30 and the level-60 cap match the P99 table exactly.
         assert_eq!(xp_to_next_for(30), 5_311_000); // 1.1 hell-mod kicks in
         assert_eq!(xp_to_next_for(60), 53_463_000); // 669.6M total - 616.137M
+    }
+
+    /// Every creation race and playable class has a stat block of its own,
+    /// and the Revenant (a transformation with a block) is not a birth race.
+    #[test]
+    fn creation_lists_match_the_stat_blocks() {
+        for race in CREATION_RACES {
+            assert!(is_creation_race(race));
+            assert!(races().contains_key(race), "{race} has no stat block");
+        }
+        for class in PLAYABLE_CLASSES {
+            assert!(is_playable_class(class));
+            assert!(classes().contains_key(class), "{class} has no class block");
+        }
+        assert!(races().contains_key("Revenant") && !is_creation_race("Revenant"),
+            "the Revenant has a block for the transformation and is not a birth race");
+        assert!(!is_creation_race("revenant") && !is_playable_class("warrior"), "exact names only");
     }
 
     #[test]

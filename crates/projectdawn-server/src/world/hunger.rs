@@ -60,14 +60,15 @@ pub fn stage_of(secs: f32) -> Stage {
 /// From the sources: a Human reaches the final stage after about 3 hours
 /// without a meal, a Halfling after about 90 minutes (the P99 wiki). The rest
 /// start at the Human rate; Ogre, Troll and Half-Ogre at 1.5 and the Fae at
-/// 0.75 are this project's own calls, flagged for the user. The Revenant is
-/// immune to starvation by its own design note (`transformations/revenant.md`).
+/// 0.75 are this project's own calls, flagged for the user. The Revenant's
+/// starvation immunity (`transformations/revenant.md`) is NOT keyed here: it
+/// belongs to the transformation when that is server-side, not to a race
+/// string a client could send at creation (the 2026-10-13 review).
 pub fn race_drain_multiplier(race: &str) -> f32 {
     match race {
         "Halfling" => 2.0,
         "Ogre" | "Troll" | "Half-Ogre" => 1.5,
         "Fae" => 0.75,
-        "Revenant" => 0.0,
         _ => 1.0,
     }
 }
@@ -112,15 +113,27 @@ pub fn feed(conn: &mut PerConnection, need: Need, amount: f32) -> f32 {
     after - before
 }
 
+/// The line for a stage, or none for Fed.
+pub fn stage_line(need: Need, stage: Stage) -> Option<&'static str> {
+    match (need, stage) {
+        (Need::Food, Stage::Hungry) => Some("You are hungry."),
+        (Need::Food, Stage::Out) => Some("You are out of food."),
+        (Need::Drink, Stage::Hungry) => Some("You are thirsty."),
+        (Need::Drink, Stage::Out) => Some("You are out of water."),
+        (_, Stage::Fed) => None,
+    }
+}
+
 /// Run both counters down for `dt` real seconds at the race's rate. Returns
-/// the stage lines that became due, at most one per need: a line is told when
-/// a stage is entered on the way down, never per tick, and nothing is said on
-/// the way back up (the eat line says it).
-pub fn drain(conn: &mut PerConnection, dt: f32) -> Vec<&'static str> {
-    let mut lines = Vec::new();
+/// the stages entered on the way down, at most one per need, with their
+/// lines: a stage is told when it is entered, never per tick, and nothing is
+/// said on the way back up (the eat line says it). The caller decides whether
+/// to say "out of food": not when it eats something the same tick.
+pub fn drain(conn: &mut PerConnection, dt: f32) -> Vec<(Need, Stage, &'static str)> {
+    let mut entered = Vec::new();
     let mult = race_drain_multiplier(&conn.race);
     if mult <= 0.0 || dt <= 0.0 {
-        return lines;
+        return entered;
     }
     for need in [Need::Food, Need::Drink] {
         let before = counter(conn, need);
@@ -128,16 +141,22 @@ pub fn drain(conn: &mut PerConnection, dt: f32) -> Vec<&'static str> {
         set_counter(conn, need, after);
         let (was, now) = (stage_of(before), stage_of(after));
         if now != was {
-            match (need, now) {
-                (Need::Food, Stage::Hungry) => lines.push("You are hungry."),
-                (Need::Food, Stage::Out) => lines.push("You are out of food."),
-                (Need::Drink, Stage::Hungry) => lines.push("You are thirsty."),
-                (Need::Drink, Stage::Out) => lines.push("You are out of water."),
-                (_, Stage::Fed) => {}
+            if let Some(line) = stage_line(need, now) {
+                entered.push((need, now, line));
             }
         }
     }
-    lines
+    entered
+}
+
+/// The lines for the stages a character is ALREADY in: told once when it
+/// enters the world, since `drain` reports only transitions and a character
+/// can log in hungry or out (the counters do not move offline).
+pub fn current_stage_lines(conn: &PerConnection) -> Vec<&'static str> {
+    [Need::Food, Need::Drink]
+        .into_iter()
+        .filter_map(|need| stage_line(need, stage_of(counter(conn, need))))
+        .collect()
 }
 
 fn matches(item: &Item, need: Need) -> bool {
@@ -236,16 +255,18 @@ mod tests {
     }
 
     #[test]
-    fn the_counters_drain_by_race_and_the_revenant_never_does() {
+    fn the_counters_drain_by_race_and_an_unknown_race_at_the_human_rate() {
         let mut human = conn("Human");
         let mut halfling = conn("Halfling");
-        let mut revenant = conn("Revenant");
-        for c in [&mut human, &mut halfling, &mut revenant] {
+        let mut odd = conn("Revenant");
+        for c in [&mut human, &mut halfling, &mut odd] {
             drain(c, 60.0);
         }
         assert!((human.hunger_secs - (FULLNESS_CAP_SECS - 60.0)).abs() < 0.01);
         assert!((halfling.hunger_secs - (FULLNESS_CAP_SECS - 120.0)).abs() < 0.01);
-        assert_eq!(revenant.hunger_secs, FULLNESS_CAP_SECS);
+        // No race string buys immunity; the transformation will, when it is
+        // server-side.
+        assert!((odd.hunger_secs - (FULLNESS_CAP_SECS - 60.0)).abs() < 0.01);
         assert!((human.thirst_secs - (FULLNESS_CAP_SECS - 60.0)).abs() < 0.01);
     }
 
@@ -255,16 +276,23 @@ mod tests {
         c.hunger_secs = HUNGRY_AT_SECS + 1.0;
         c.thirst_secs = HUNGRY_AT_SECS + 1.0;
         assert!(drain(&mut c, 0.5).is_empty(), "still fed");
-        assert_eq!(drain(&mut c, 1.0), vec!["You are hungry.", "You are thirsty."]);
+        let lines: Vec<&str> = drain(&mut c, 1.0).into_iter().map(|(_, _, l)| l).collect();
+        assert_eq!(lines, vec!["You are hungry.", "You are thirsty."]);
         assert!(drain(&mut c, 1.0).is_empty(), "hungry is told once");
-        assert_eq!(drain(&mut c, HUNGRY_AT_SECS), vec!["You are out of food.", "You are out of water."]);
+        let out = drain(&mut c, HUNGRY_AT_SECS);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|(_, stage, _)| *stage == Stage::Out));
+        assert_eq!(out[0].2, "You are out of food.");
         assert!(drain(&mut c, 100.0).is_empty(), "out is told once, and the counter floors at zero");
         assert_eq!(c.hunger_secs, 0.0);
         assert!(is_famished(&c, Need::Food) && is_famished(&c, Need::Drink));
+        // The character is still out: the login announcement names both.
+        assert_eq!(current_stage_lines(&c), vec!["You are out of food.", "You are out of water."]);
         // Fed again: no line, the eat line says it.
         feed(&mut c, Need::Food, 2880.0);
-        assert!(drain(&mut c, 1.0).iter().all(|l| !l.contains("hungry")));
+        assert!(drain(&mut c, 1.0).is_empty());
         assert_eq!(stage_of(c.hunger_secs), Stage::Fed);
+        assert_eq!(current_stage_lines(&c), vec!["You are out of water."]);
     }
 
     #[test]

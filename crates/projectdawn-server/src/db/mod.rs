@@ -306,6 +306,17 @@ pub async fn create_character(
     race: &str,
     class: &str,
 ) -> AuthResult<i64> {
+    // The wire carries the race and class as strings; only the creation
+    // screen's own lists are accepted, so a modified launcher cannot be born
+    // as a transformation (the Revenant has a stat block, and under the food
+    // model it would have been starvation-immune for life) or as a class
+    // that does not exist.
+    if !crate::char_data::is_creation_race(race) {
+        return Err(AuthError::InvalidInput("unknown race".into()));
+    }
+    if !crate::char_data::is_playable_class(class) {
+        return Err(AuthError::InvalidInput("unknown class".into()));
+    }
     let trimmed = name.trim();
     if trimmed.len() < CHAR_NAME_MIN || trimmed.len() > CHAR_NAME_MAX {
         return Err(AuthError::InvalidInput(format!(

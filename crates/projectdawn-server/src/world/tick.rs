@@ -7116,9 +7116,11 @@ pub async fn run(
                 // more, a fed character simply regenerates.
                 if is_food && food_dur > 0.0 {
                     hunger::feed(conn, hunger::Need::Food, food_dur * hunger::HAND_EAT_FRACTION);
+                    handlers::send_system_line(&mut server, owner_cid, &format!("You eat a {}.", item.name));
                 }
                 if is_drink && food_dur > 0.0 {
                     hunger::feed(conn, hunger::Need::Drink, food_dur * hunger::HAND_EAT_FRACTION);
+                    handlers::send_system_line(&mut server, owner_cid, &format!("You drink a {}.", item.name));
                 }
                 tracing::info!(
                     owner = intent.owner,
@@ -10399,10 +10401,18 @@ pub async fn run(
             // EQ checks about every 46 s; checking every tick only trims the
             // lag, the rule is the same. The dead and the lobby do not drain.
             if conn.in_world && conn.hp > 0.0 && !conn.death_processed {
-                for line in hunger::drain(conn, dt) {
-                    handlers::send_system_line(&mut server, *client_id, line);
+                // A character can log in hungry or out: say so once.
+                if !conn.appetite_announced {
+                    conn.appetite_announced = true;
+                    for line in hunger::current_stage_lines(conn) {
+                        handlers::send_system_line(&mut server, *client_id, line);
+                    }
                 }
-                for need in [hunger::Need::Food, hunger::Need::Drink] {
+                let entered = hunger::drain(conn, dt);
+                // Eat before speaking: a character that runs out WITH bread in
+                // the bags eats this tick and is never told it is out of food.
+                let mut fed_now = [false, false];
+                for (i, need) in [hunger::Need::Food, hunger::Need::Drink].into_iter().enumerate() {
                     if !hunger::is_famished(conn, need) {
                         continue;
                     }
@@ -10420,6 +10430,7 @@ pub async fn run(
                     };
                     handlers::send_inventory_delta(&mut server, *client_id, loc.clone(), slot, path, count);
                     let added = hunger::feed(conn, need, hunger::fullness_of(item));
+                    fed_now[i] = true;
                     let verb = if need == hunger::Need::Food { "eat" } else { "drink" };
                     handlers::send_system_line(
                         &mut server,
@@ -10435,6 +10446,13 @@ pub async fn run(
                         "auto-{verb}: the first in slot order"
                     );
                 }
+                for (need, stage, line) in entered {
+                    let i = if need == hunger::Need::Food { 0 } else { 1 };
+                    if stage == hunger::Stage::Out && fed_now[i] {
+                        continue;
+                    }
+                    handlers::send_system_line(&mut server, *client_id, line);
+                }
             }
             let result = regen::tick_one(conn, dt, now);
             if result.hp_fanout || result.mp_fanout || result.stamina_fanout {
@@ -10446,7 +10464,13 @@ pub async fn run(
             // `last_meditate_at`. `try_advance` returns None for classes that can't
             // train it (cap 0), and drives the sitting MP regen in regen.rs. Fans
             // a private SkillProgressUpdate on a gain so the client mirror keeps up.
-            if conn.mp < conn.max_mp && regen::sitting_bonus_applies(conn, now) {
+            // No water, no meditate: the skill-up rides mana regeneration,
+            // which a thirsty character does not have (the 2026-10-13 review
+            // found a seated caster out of water rolling advances for ever).
+            if conn.mp < conn.max_mp
+                && regen::sitting_bonus_applies(conn, now)
+                && regen::natural_regen_allowed(conn.hunger_secs, conn.thirst_secs).1
+            {
                 let due = conn
                     .last_meditate_at
                     .map_or(true, |t| now.duration_since(t) >= Duration::from_secs(6));

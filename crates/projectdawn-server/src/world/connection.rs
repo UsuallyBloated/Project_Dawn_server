@@ -157,6 +157,9 @@ pub struct PerConnection {
     pub thirst_secs: f32,
     pub last_persisted_hunger: f32,
     pub last_persisted_thirst: f32,
+    /// Whether the character has been told the stage it logged in at (a
+    /// character can arrive hungry or out; `drain` reports transitions only).
+    pub appetite_announced: bool,
     /// Set after the application-layer Connect handshake completes. Until
     /// then we won't broadcast positions to this client.
     pub ready: bool,
@@ -555,6 +558,7 @@ impl PerConnection {
             thirst_secs: spawn.thirst.clamp(0.0, super::hunger::FULLNESS_CAP_SECS),
             last_persisted_hunger: spawn.hunger,
             last_persisted_thirst: spawn.thirst,
+            appetite_announced: false,
             last_persisted_xp: spawn.xp,
             last_persisted_level: spawn.level,
             ready: false,

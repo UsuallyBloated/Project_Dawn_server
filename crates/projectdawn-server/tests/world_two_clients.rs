@@ -6639,11 +6639,17 @@ async fn a_famished_character_eats_the_first_food_in_slot_order_and_regenerates_
         .await;
     assert!(line.is_some(), "the character is told what it ate");
     // Still out of water: HP regenerates (fed), stamina does not (needs both).
-    let rose = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(15), |m| {
-            matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp > 1.5)
-        })
-        .await;
+    // Heartbeats keep the app-layer timeout (10 s) off while we watch.
+    let end = Instant::now() + Duration::from_secs(15);
+    let mut rose = None;
+    while Instant::now() < end && rose.is_none() {
+        a.send_heartbeat();
+        rose = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp > 1.5)
+            })
+            .await;
+    }
     assert!(rose.is_some(), "fed again, HP regenerates");
 
     // The counters persist: leave, and the fullness is the loaf's size less the walk.
@@ -6687,14 +6693,21 @@ async fn out_of_food_means_no_hp_regen_and_the_dead_do_not_starve() {
         })
         .await;
     assert!(dead.is_some());
-    a.pump_for(Duration::from_secs(5)).await;
+    // Fifteen seconds dead, with heartbeats. Alive it drained about 15 s
+    // (to about 984); code that drained the dead would take 15 more (to
+    // about 969) and fail the lower bound below.
+    let end = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < end {
+        a.send_heartbeat();
+        a.pump_for(Duration::from_secs(3)).await;
+    }
     a.send_disconnect();
     a.pump_for(Duration::from_millis(500)).await;
     drop(a);
     tokio::time::sleep(Duration::from_millis(500)).await;
     let (_, thirst) = read_char_appetite(&h.db_url, char_id).await;
     assert!(thirst < 1000.0 - 10.0, "thirst ran while alive: {thirst}");
-    assert!(thirst > 1000.0 - 25.0, "and stopped at death (5 s dead would have taken 5 more): {thirst}");
+    assert!(thirst > 1000.0 - 25.0, "and stopped at death (15 s dead would have taken 15 more): {thirst}");
 }
 
 /// Eating by hand: refused with EQ's line when full (nothing taken), and an

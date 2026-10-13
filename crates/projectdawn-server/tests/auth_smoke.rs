@@ -193,3 +193,32 @@ async fn rejects_duplicate_username() {
     assert_eq!(resp["type"], "Error");
     assert_eq!(resp["code"], "name_taken");
 }
+
+/// A modified launcher sending a race or class the creation screen never
+/// offers (the Revenant has a stat block, for the transformation) is refused
+/// at creation; the sixteen races and eighteen classes still work.
+#[tokio::test]
+async fn character_creation_accepts_only_the_creation_lists() {
+    let (url, _tmp) = start_server().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+    let resp = rpc(&mut ws, serde_json::json!({
+        "type": "Register", "username": "picker", "password": "hunter2!",
+    })).await;
+    assert_eq!(resp["type"], "RegisterOk", "{resp}");
+    let resp = rpc(&mut ws, serde_json::json!({
+        "type": "Login", "username": "picker", "password": "hunter2!", "client_version": "0.1.0",
+    })).await;
+    let session = resp["session_token"].as_str().expect("session").to_string();
+    let resp = rpc(&mut ws, serde_json::json!({
+        "type": "CharCreate", "session_token": session, "name": "Revvy", "race": "Revenant", "class": "Warrior",
+    })).await;
+    assert_eq!(resp["code"], "invalid_input", "a transformation is not a birth race: {resp}");
+    let resp = rpc(&mut ws, serde_json::json!({
+        "type": "CharCreate", "session_token": session, "name": "Wardy", "race": "Human", "class": "Warlock",
+    })).await;
+    assert_eq!(resp["code"], "invalid_input", "a planned class is not playable yet: {resp}");
+    let resp = rpc(&mut ws, serde_json::json!({
+        "type": "CharCreate", "session_token": session, "name": "Halfy", "race": "Halfling", "class": "Rogue",
+    })).await;
+    assert_eq!(resp["type"], "CharCreated", "a real pair creates: {resp}");
+}

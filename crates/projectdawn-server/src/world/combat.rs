@@ -135,6 +135,8 @@ mod tests {
 
     fn make_attacker(str_val: i32, dex_val: i32) -> PerConnection {
         let spawn = CharacterSpawn {
+            hunger: 14400.0,
+            thirst: 14400.0,
             char_id: 1,
             account_id: 1,
             name: "Test".into(),

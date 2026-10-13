@@ -129,7 +129,7 @@ stack_size = 20
 vendor_price = 4
 is_food = true
 food_hp_regen = 4.0
-food_duration = 180.0
+food_duration = 2880.0
 
 [[item]]
 path = "res://data/loot/items/bronze_ingot.tres"
@@ -1372,7 +1372,7 @@ stack_size = 20
 vendor_price = 3
 is_drink = true
 food_mp_regen = 5.0
-food_duration = 180.0
+food_duration = 2160.0
 
 [[item]]
 path = "res://data/loot/items/wild_berries.tres"

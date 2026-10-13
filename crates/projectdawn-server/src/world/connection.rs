@@ -150,6 +150,16 @@ pub struct PerConnection {
     pub last_persisted_stamina: f32,
     pub last_persisted_xp: i32,
     pub last_persisted_level: i32,
+    /// Food and water (`world/hunger.rs`): seconds of fullness left, 0 to the
+    /// cap. They run down while alive in the world; at zero the server eats
+    /// the first food in slot order, and until then natural regen stops.
+    pub hunger_secs: f32,
+    pub thirst_secs: f32,
+    pub last_persisted_hunger: f32,
+    pub last_persisted_thirst: f32,
+    /// Whether the character has been told the stage it logged in at (a
+    /// character can arrive hungry or out; `drain` reports transitions only).
+    pub appetite_announced: bool,
     /// Set after the application-layer Connect handshake completes. Until
     /// then we won't broadcast positions to this client.
     pub ready: bool,
@@ -544,6 +554,11 @@ impl PerConnection {
             last_persisted_hp: spawn.hp,
             last_persisted_mp: spawn.mp,
             last_persisted_stamina: spawn.stamina,
+            hunger_secs: spawn.hunger.clamp(0.0, super::hunger::FULLNESS_CAP_SECS),
+            thirst_secs: spawn.thirst.clamp(0.0, super::hunger::FULLNESS_CAP_SECS),
+            last_persisted_hunger: spawn.hunger,
+            last_persisted_thirst: spawn.thirst,
+            appetite_announced: false,
             last_persisted_xp: spawn.xp,
             last_persisted_level: spawn.level,
             ready: false,
@@ -735,6 +750,10 @@ impl PerConnection {
             || self.stamina != self.last_persisted_stamina
             || self.xp != self.last_persisted_xp
             || self.level != self.last_persisted_level
+            // The counters move every tick while in the world; a second's
+            // worth is the threshold, so an idle lobby connection stays clean.
+            || (self.hunger_secs - self.last_persisted_hunger).abs() >= 1.0
+            || (self.thirst_secs - self.last_persisted_thirst).abs() >= 1.0
     }
 
     pub fn mark_resources_persisted(&mut self) {
@@ -743,6 +762,8 @@ impl PerConnection {
         self.last_persisted_stamina = self.stamina;
         self.last_persisted_xp = self.xp;
         self.last_persisted_level = self.level;
+        self.last_persisted_hunger = self.hunger_secs;
+        self.last_persisted_thirst = self.thirst_secs;
     }
 
     /// Camp + linkdead: true once a body that dropped uncleanly has lingered at
@@ -797,6 +818,8 @@ mod tests {
     /// only the lifecycle flags under test matter.
     fn test_spawn() -> crate::db::CharacterSpawn {
         crate::db::CharacterSpawn {
+            hunger: crate::world::hunger::FULLNESS_CAP_SECS,
+            thirst: crate::world::hunger::FULLNESS_CAP_SECS,
             char_id: 1,
             account_id: 1,
             name: "Tester".into(),

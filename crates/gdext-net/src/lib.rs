@@ -610,6 +610,29 @@ impl NetClient {
             .unwrap_or(false)
     }
 
+    /// Round trip to the world server in milliseconds: renet's own estimate,
+    /// taken off the acks of the packets the game actually sends and
+    /// smoothed (each new sample weighs an eighth), so it measures the UDP
+    /// path play runs on rather than an ICMP ping. 0.0 before the first ack
+    /// or with no client. Read by `Net.get_rtt_ms` for `/ping`.
+    #[func]
+    fn rtt_ms(&self) -> f64 {
+        self.client
+            .as_ref()
+            .map(|c| c.rtt() * 1000.0)
+            .unwrap_or(0.0)
+    }
+
+    /// Renet's packet-loss estimate for the world connection, 0.0 to 1.0,
+    /// over its recent window; 0.0 with no client.
+    #[func]
+    fn packet_loss(&self) -> f64 {
+        self.client
+            .as_ref()
+            .map(|c| c.packet_loss())
+            .unwrap_or(0.0)
+    }
+
     /// Pump renet for one frame. Call from `_process(delta)` in GDScript.
     #[func]
     fn poll(&mut self, delta: f64) {

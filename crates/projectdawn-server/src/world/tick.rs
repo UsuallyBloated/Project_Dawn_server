@@ -1559,6 +1559,22 @@ pub async fn run(
         if let Err(e) = transport.update(TICK_DT, &mut server) {
             tracing::warn!(error = %e, "transport update error");
         }
+        //    And renet itself: its reliable channels resend a lost packet only
+        //    when the connection's clock has moved past the resend time, and
+        //    that clock advances nowhere but here (the transport's update does
+        //    not call it). This call was missing until 2026-10-12, so a lost
+        //    reliable packet (an inventory delta, a chat line, a kick) was
+        //    never resent; invisible on a lossless tailnet, not on the
+        //    internet.
+        server.update(TICK_DT);
+        //    And renet itself: its reliable channels resend a lost packet only
+        //    when the connection's clock has moved past the resend time, and
+        //    that clock advances nowhere but here (the transport's update does
+        //    not call it). This call was missing until 2026-10-12, so a lost
+        //    reliable packet (an inventory delta, a chat line, a kick) was
+        //    never resent; invisible on a lossless tailnet, not on the
+        //    internet.
+        server.update(TICK_DT);
 
         // 2. Drain transport-level events (Connected/Disconnected).
         while let Some(event) = server.get_event() {

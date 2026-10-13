@@ -1589,10 +1589,17 @@ pub async fn run(
             for client_id in everyone {
                 handlers::send_kick(&mut server, client_id, KickCode::Restart, &reason);
             }
-            // Let the line and the kicks leave before the socket goes.
+            // Let the line and the kicks leave before the socket goes, and keep
+            // the clocks running meanwhile so a lost datagram is resent inside
+            // the grace (a sleep with one more send would resend nothing).
             transport.send_packets(&mut server);
-            tokio::time::sleep(KICK_FLUSH_GRACE).await;
-            transport.send_packets(&mut server);
+            let steps = (KICK_FLUSH_GRACE.as_millis() / TICK_DT.as_millis()).max(1);
+            for _ in 0..steps {
+                tokio::time::sleep(TICK_DT).await;
+                let _ = transport.update(TICK_DT, &mut server);
+                server.update(TICK_DT);
+                transport.send_packets(&mut server);
+            }
             tracing::warn!(
                 players = in_world.len(),
                 reason,
@@ -1605,6 +1612,14 @@ pub async fn run(
         if let Err(e) = transport.update(TICK_DT, &mut server) {
             tracing::warn!(error = %e, "transport update error");
         }
+        //    And renet itself: its reliable channels resend a lost packet only
+        //    when the connection's clock has moved past the resend time, and
+        //    that clock advances nowhere but here (the transport's update does
+        //    not call it). This call was missing until 2026-10-12, so a lost
+        //    reliable packet (an inventory delta, a chat line, a kick) was
+        //    never resent; invisible on a lossless tailnet, not on the
+        //    internet.
+        server.update(TICK_DT);
 
         // 2. Drain transport-level events (Connected/Disconnected).
         while let Some(event) = server.get_event() {

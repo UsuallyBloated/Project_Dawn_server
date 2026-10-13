@@ -88,14 +88,10 @@ pub const ADDRESS_WATCH_INTERVAL: Duration = Duration::from_secs(300);
 // one that named a new address while the old transport still ran would be
 // refused for everyone.
 
-/// Resolve the advertised endpoint to the one address clients are told. A
-/// name with several addresses resolves to its first IPv4 one: the public
-/// host's port forward is IPv4, and a token naming an IPv6 address the
-/// router does not forward would fail for exactly the players whose DNS
-/// returns IPv6 first.
-pub fn resolve_world_endpoint(endpoint: &str) -> anyhow::Result<SocketAddr> {
+/// Every address the advertised endpoint resolves to (one, for a literal).
+pub fn resolve_world_endpoint_all(endpoint: &str) -> anyhow::Result<Vec<SocketAddr>> {
     if let Ok(addr) = endpoint.parse::<SocketAddr>() {
-        return Ok(addr);
+        return Ok(vec![addr]);
     }
     let addrs: Vec<SocketAddr> = endpoint
         .to_socket_addrs()
@@ -103,12 +99,37 @@ pub fn resolve_world_endpoint(endpoint: &str) -> anyhow::Result<SocketAddr> {
             format!("world_endpoint '{endpoint}' is neither ip:port nor a resolvable host:port")
         })?
         .collect();
-    addrs
+    if addrs.is_empty() {
+        anyhow::bail!("world_endpoint '{endpoint}' resolved to no address");
+    }
+    Ok(addrs)
+}
+
+/// Resolve the advertised endpoint to the one address clients are told. A
+/// name with several addresses resolves to its first IPv4 one: the public
+/// host's port forward is IPv4, and a token naming an IPv6 address the
+/// router does not forward would fail for exactly the players whose DNS
+/// returns IPv6 first.
+pub fn resolve_world_endpoint(endpoint: &str) -> anyhow::Result<SocketAddr> {
+    let addrs = resolve_world_endpoint_all(endpoint)?;
+    Ok(addrs
         .iter()
         .copied()
         .find(|a| a.is_ipv4())
-        .or_else(|| addrs.first().copied())
-        .with_context(|| format!("world_endpoint '{endpoint}' resolved to no address"))
+        .unwrap_or(addrs[0]))
+}
+
+/// Resolve `endpoint` and record the result as the address every connect
+/// token for it names. `main` calls it before either service starts; the
+/// world calls it again at bind and gets the recorded address back.
+pub fn register_world_endpoint(endpoint: &str) -> anyhow::Result<SocketAddr> {
+    let mut map = boot_addrs().lock().expect("boot addrs poisoned");
+    if let Some(addr) = map.get(endpoint) {
+        return Ok(*addr);
+    }
+    let addr = resolve_world_endpoint(endpoint)?;
+    map.insert(endpoint.to_string(), addr);
+    Ok(addr)
 }
 
 /// The address each running world was built with, by its endpoint string
@@ -169,11 +190,13 @@ async fn address_watch(endpoint: String, boot: SocketAddr, signal: Arc<RestartSi
         tokio::time::sleep(ADDRESS_WATCH_INTERVAL).await;
         let name = endpoint.clone();
         // DNS blocks; keep it off the runtime's worker threads.
-        match tokio::task::spawn_blocking(move || resolve_world_endpoint(&name)).await {
-            Ok(Ok(addr)) if addr != boot => {
+        // The boot address merely has to remain among the name's addresses: a
+        // resolver that reorders two A records is not a move.
+        match tokio::task::spawn_blocking(move || resolve_world_endpoint_all(&name)).await {
+            Ok(Ok(addrs)) if !addrs.contains(&boot) => {
                 tracing::warn!(
                     %boot,
-                    now = %addr,
+                    now = ?addrs,
                     "world address changed — restarting so connect tokens name the new address"
                 );
                 signal.request(RESTART_FOR_ADDRESS_CHANGE);
@@ -467,12 +490,8 @@ pub async fn serve_with_socket_restartable(
     socket: UdpSocket,
     restart: Arc<RestartSignal>,
 ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
-    let public_addr = resolve_world_endpoint(&cfg.world_endpoint)
+    let public_addr = register_world_endpoint(&cfg.world_endpoint)
         .with_context(|| format!("resolving world_endpoint '{}'", cfg.world_endpoint))?;
-    boot_addrs()
-        .lock()
-        .expect("boot addrs poisoned")
-        .insert(cfg.world_endpoint.clone(), public_addr);
     tracing::info!(
         advertised = %cfg.world_endpoint,
         resolved = %public_addr,

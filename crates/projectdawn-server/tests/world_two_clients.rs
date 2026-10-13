@@ -152,6 +152,76 @@ async fn a_restart_request_checkpoints_everyone_tells_them_and_exits() {
     );
 }
 
+/// A character that leaves while dead (a crash, a window-X, a restart) loads
+/// at 0 HP; it used to die AGAIN on its first tick back (`death_processed`
+/// was false for every spawn), paying a second XP penalty and leaving a
+/// second, empty corpse. Found by the 2026-10-12 review of the restart path,
+/// which makes everyone dead at that moment pay it at once.
+#[tokio::test]
+async fn a_dead_character_stays_dead_on_relogin_and_pays_once() {
+    let h = start_both().await;
+    let (session, char_id, _) =
+        provision_client(&h.auth_url, "corpse", "Corpsey", "Human", "Warrior").await;
+    // Below the level floor there is no XP penalty to double; level 10 has one.
+    set_char_level(&h.db_url, char_id, 10).await;
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    let cid = char_id as u64;
+    a.send_death();
+    let dead = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp <= 0.01)
+        })
+        .await;
+    assert!(dead.is_some(), "the first death lands");
+    a.pump_for(Duration::from_millis(300)).await;
+    // Leave dead: the clean disconnect reaps at once and checkpoints 0 HP.
+    a.send_disconnect();
+    a.pump_for(Duration::from_millis(500)).await;
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    let after_first = db::load_character(&pool, char_id).await.expect("load");
+    assert!(after_first.hp <= 0.0, "left dead: hp {}", after_first.hp);
+    let corpses_after_first: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM corpses WHERE char_id = ?1")
+            .bind(char_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+    assert_eq!(corpses_after_first, 1, "one corpse from one death");
+
+    // Log back in dead, stand there, leave again (another checkpoint).
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut b = WorldClient::start(token, &session, char_id).await;
+    let seeded_dead = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp <= 0.01)
+        })
+        .await;
+    assert!(seeded_dead.is_some(), "the client is told it is dead by the HP seed");
+    b.pump_for(Duration::from_millis(600)).await;
+    b.send_disconnect();
+    b.pump_for(Duration::from_millis(500)).await;
+    drop(b);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let after_relog = db::load_character(&pool, char_id).await.expect("load");
+    assert_eq!(
+        (after_relog.level, after_relog.xp),
+        (after_first.level, after_first.xp),
+        "no second XP penalty on relogging dead"
+    );
+    let corpses_after_relog: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM corpses WHERE char_id = ?1")
+            .bind(char_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+    assert_eq!(corpses_after_relog, 1, "no second corpse either");
+}
+
 /// The cosmetic broadcasts are fan-outs a forged client can put on every
 /// peer's screen at will; past a per-connection burst they are dropped, and
 /// an honest client's two swings a second never come near it.

@@ -475,7 +475,11 @@ pub fn intent_class(msg: &ClientWorldMsg) -> Option<IntentClass> {
         | M::BankWithdrawCoins { .. }
         | M::BankExchange { .. }
         | M::BankStoreItem { .. }
-        | M::BankWithdrawItem { .. } => Some(IntentClass::Inventory),
+        | M::BankWithdrawItem { .. }
+        // Quest state is a write per message too (the per-tick flush).
+        | M::AcceptQuest { .. }
+        | M::AbandonQuest { .. }
+        | M::CompleteQuest { .. } => Some(IntentClass::Inventory),
         M::CastStartBroadcast { .. }
         | M::CastCompleteBroadcast { .. }
         | M::CastFailBroadcast { .. }
@@ -486,7 +490,23 @@ pub fn intent_class(msg: &ClientWorldMsg) -> Option<IntentClass> {
         | M::DeathBroadcast { .. }
         | M::EquipUpdate { .. }
         | M::Chat { .. }
-        | M::InspectPlayer { .. } => Some(IntentClass::Cosmetic),
+        | M::InspectPlayer { .. }
+        // Fan-outs to peers and handlers that write a log line per message.
+        | M::SetTarget { .. }
+        | M::Sit { .. }
+        | M::Stand { .. }
+        | M::GroupInvite { .. }
+        | M::GroupAcceptInvite { .. }
+        | M::GroupLeave { .. }
+        | M::GroupKick { .. }
+        | M::SetGroupLootMode { .. }
+        | M::SetAutosplit { .. }
+        | M::PassLeadership { .. }
+        | M::PetCommand { .. }
+        | M::PvpToggle { .. }
+        | M::BindAtCurrentLocation { .. }
+        | M::Camp { .. }
+        | M::CancelCamp { .. } => Some(IntentClass::Cosmetic),
         _ => None,
     }
 }
@@ -520,6 +540,16 @@ pub fn handle_message(
                     dropped,
                     "intents dropped — over the per-connection budget"
                 );
+                // The client applies an inventory move optimistically, so a
+                // dropped one leaves its view wrong until it is told; one
+                // line per report, not per packet.
+                if class == IntentClass::Inventory {
+                    send_refusal(
+                        server,
+                        client_id,
+                        "Too many inventory actions at once; some were ignored. If your bags look wrong, log out and back in.",
+                    );
+                }
             }
             return Outcome::Continue;
         }

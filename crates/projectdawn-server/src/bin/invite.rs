@@ -7,9 +7,13 @@
 //!
 //! Run from the directory that holds `world.db`:
 //!   cargo run -p projectdawn-server --bin invite
-//!       list every code: minted when, note, redeemed by whom, revoked
+//!       list every code: minted when, note, redeemed by whom, revoked. An
+//!       unused code is shown masked (its first six characters): the mint is
+//!       the only time a code is printed whole, so a lost one is revoked and
+//!       minted again, never recovered from the list.
 //!   cargo run -p projectdawn-server --bin invite -- new [n] [note...]
 //!       mint n codes (default 1) with an optional memo, e.g. `new 1 for Sam`
+//!       (a note that starts with a number needs the count first: `new 1 2024 cohort`)
 //!   cargo run -p projectdawn-server --bin invite -- revoke <code>
 //!       an unredeemed code stops working; a redeemed one cannot be revoked
 //!       (the account exists; ban it instead)
@@ -55,10 +59,11 @@ fn parse_args(args: &[String]) -> Action {
             }
         }
         Some("revoke") => {
-            if args.len() != 2 {
+            if args.len() < 2 {
                 usage();
             }
-            Action::Revoke { code: args[1].clone() }
+            // A code pasted with spaces or dashes arrives as several words.
+            Action::Revoke { code: args[1..].concat() }
         }
         Some(other) => {
             eprintln!("unknown subcommand '{other}'");
@@ -164,7 +169,13 @@ async fn list(pool: &sqlx::SqlitePool) -> Result<()> {
         } else {
             "unused".to_string()
         };
-        println!("  {}   minted {}   {state}", r.code, r.created_at);
+        // Shown once means once: an unused code is masked here.
+        let shown = if r.redeemed_at.is_none() && r.revoked_at.is_none() {
+            format!("{}{}", &r.code[..6.min(r.code.len())], "…".repeat(1))
+        } else {
+            r.code.clone()
+        };
+        println!("  {shown:<34} minted {}   {state}", r.created_at);
         if let Some(note) = r.note.filter(|n| !n.is_empty()) {
             println!("        note: {note}");
         }

@@ -146,12 +146,25 @@ async fn connections_per_address_are_capped() {
     // The first two still work.
     let resp = rpc(&mut a, serde_json::json!({"type": "CharList", "session_token": "00"})).await;
     assert_eq!(resp["type"], "Error");
-    // Closing one frees a slot for a new one.
+    // Closing one frees a slot for a new one (the slot drops when the server's
+    // task ends, so poll rather than guess the moment).
     a.close(None).await.expect("close a");
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let (mut d, _) = tokio_tungstenite::connect_async(&url).await.expect("fourth");
-    let resp = rpc(&mut d, serde_json::json!({"type": "CharList", "session_token": "00"})).await;
-    assert_eq!(resp["type"], "Error", "a freed slot admits a new connection");
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut admitted = false;
+    while std::time::Instant::now() < deadline && !admitted {
+        let (mut d, _) = tokio_tungstenite::connect_async(&url).await.expect("fourth");
+        // A refused connection closes without answering; an admitted one answers.
+        let _ = d
+            .send(Message::Text(
+                serde_json::json!({"type": "CharList", "session_token": "00"}).to_string(),
+            ))
+            .await;
+        admitted = next_or_closed(&mut d).await.is_some();
+        if !admitted {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    assert!(admitted, "a freed slot admits a new connection");
     let _ = b.close(None).await;
 }
 

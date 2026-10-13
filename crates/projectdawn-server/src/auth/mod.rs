@@ -101,17 +101,32 @@ impl AuthPolicy {
 const MAX_LOGIN_ATTEMPTS: u32 = 5;
 /// The rolling window for `MAX_LOGIN_ATTEMPTS` and `MAX_GLOBAL_ATTEMPTS`.
 const LOGIN_WINDOW: Duration = Duration::from_secs(60);
-/// Attempts allowed from ALL sources together, per kind, per `LOGIN_WINDOW`.
-/// Four friends logging in at once use a handful; a credential-stuffing run
-/// from a thousand addresses meets this wall.
-const MAX_GLOBAL_ATTEMPTS: u32 = 120;
+/// Login attempts allowed from ALL sources together per `LOGIN_WINDOW`: the
+/// ceiling on the Argon2 work the server will do for strangers (ten verifies
+/// a second is well under one core). A success refunds its slot, and a
+/// source that recently logged in to the account is exempt (below), so the
+/// cap can slow a credential-stuffing run without ever shutting a returning
+/// player out. The review of 2026-10-12 found the first cut (120) was a
+/// denial of service from two dozen addresses.
+const MAX_GLOBAL_LOGIN_ATTEMPTS: u32 = 600;
+/// Register attempts allowed from all sources together per `LOGIN_WINDOW`.
+/// Invite-gated and low value, so it stays tight.
+const MAX_GLOBAL_REGISTER_ATTEMPTS: u32 = 120;
 /// Login attempts allowed against ONE account per `ACCOUNT_WINDOW`, from
-/// anywhere. Deliberately loose: an attacker hammering a name can deny its
-/// owner for at most one window, and twenty wrong passwords in ten minutes
-/// is not an honest evening.
+/// anywhere. Twenty wrong passwords in ten minutes is not an honest evening;
+/// the owner is never caught by it from the source they last logged in from
+/// (`TRUSTED_SOURCE_TTL`), so a stranger guessing at their name cannot lock
+/// them out, only themselves.
 const MAX_ACCOUNT_ATTEMPTS: u32 = 20;
 /// The rolling window for `MAX_ACCOUNT_ATTEMPTS`.
 const ACCOUNT_WINDOW: Duration = Duration::from_secs(600);
+/// How long the source of an account's last successful login is exempt from
+/// the account and global caps. An attacker cannot forge a source from
+/// outside (the forwarded address is believed only from the proxy), so the
+/// exemption is worth exactly one thing: the owner, from their own network,
+/// gets in while their name is under attack. The owner on a brand-new network
+/// during an attack waits out the window like anyone else.
+const TRUSTED_SOURCE_TTL: Duration = Duration::from_secs(24 * 3600);
 /// Once this many keys are tracked in a map, drop expired windows on the next
 /// attempt so it can't grow without bound if an attacker cycles sources or
 /// names.
@@ -154,14 +169,20 @@ pub fn source_key(ip: IpAddr) -> IpAddr {
 /// the LAST entry is the one it vouches for. From any other peer the header
 /// is whatever the client chose to send, so it is ignored: a forged header
 /// from outside buys nothing. No header from loopback is the dev launcher on
-/// the same box, which keeps its loopback address.
+/// the same box, which keeps its loopback address. Addresses are made
+/// canonical first: on a dual-stack bind the proxy's IPv4 dial arrives as
+/// `::ffff:127.0.0.1`, which is loopback in every sense but `Ipv6Addr`'s,
+/// and left as is it would ignore the header and fold every player into
+/// one `::/64` budget.
 pub fn client_ip_for(peer: IpAddr, forwarded_for: Option<&str>) -> IpAddr {
+    let peer = peer.to_canonical();
     if !peer.is_loopback() {
         return peer;
     }
     forwarded_for
         .and_then(|h| h.rsplit(',').next())
         .and_then(|last| last.trim().parse::<IpAddr>().ok())
+        .map(|ip| ip.to_canonical())
         .unwrap_or(peer)
 }
 
@@ -209,6 +230,15 @@ struct Limits {
     sources: HashMap<(IpAddr, AuthKind), Window>,
     global: HashMap<AuthKind, Window>,
     accounts: HashMap<String, Window>,
+    /// Account -> the source key of its last successful login and when.
+    trusted: HashMap<String, (IpAddr, Instant)>,
+}
+
+fn global_cap(kind: AuthKind) -> u32 {
+    match kind {
+        AuthKind::Login => MAX_GLOBAL_LOGIN_ATTEMPTS,
+        AuthKind::Register => MAX_GLOBAL_REGISTER_ATTEMPTS,
+    }
 }
 
 pub struct LoginRateLimiter {
@@ -222,6 +252,7 @@ impl LoginRateLimiter {
                 sources: HashMap::new(),
                 global: HashMap::new(),
                 accounts: HashMap::new(),
+                trusted: HashMap::new(),
             }),
         }
     }
@@ -231,6 +262,10 @@ impl LoginRateLimiter {
     /// and then all three consumed under a SINGLE lock, so N concurrent
     /// attempts can never all pass before the counts are bumped (the TOCTOU a
     /// check-then-increment design would have). A refusal consumes nothing.
+    /// A source that logged in to `account` within `TRUSTED_SOURCE_TTL` is
+    /// held only to its own source budget: the account and global caps exist
+    /// to bound strangers, and must never be the thing that keeps the owner
+    /// out.
     fn try_acquire(
         &self,
         source: IpAddr,
@@ -254,6 +289,14 @@ impl LoginRateLimiter {
             l.accounts
                 .retain(|_, w| now.duration_since(w.start) < ACCOUNT_WINDOW);
         }
+        if l.trusted.len() >= RATE_LIMIT_PRUNE_AT {
+            l.trusted
+                .retain(|_, (_, t)| now.duration_since(*t) < TRUSTED_SOURCE_TTL);
+        }
+        let trusted = account_key
+            .as_ref()
+            .and_then(|a| l.trusted.get(a))
+            .is_some_and(|(k, t)| *k == key && now.duration_since(*t) < TRUSTED_SOURCE_TTL);
 
         let s = l
             .sources
@@ -263,48 +306,59 @@ impl LoginRateLimiter {
         if s.count >= MAX_LOGIN_ATTEMPTS {
             return Err(LimitHit::Source);
         }
-        let g = l.global.entry(kind).or_insert_with(|| Window::fresh(now));
-        g.roll(now, LOGIN_WINDOW);
-        if g.count >= MAX_GLOBAL_ATTEMPTS {
-            return Err(LimitHit::Global);
-        }
-        if let Some(name) = &account_key {
-            let a = l
-                .accounts
-                .entry(name.clone())
-                .or_insert_with(|| Window::fresh(now));
-            a.roll(now, ACCOUNT_WINDOW);
-            if a.count >= MAX_ACCOUNT_ATTEMPTS {
-                return Err(LimitHit::Account);
+        if !trusted {
+            let g = l.global.entry(kind).or_insert_with(|| Window::fresh(now));
+            g.roll(now, LOGIN_WINDOW);
+            if g.count >= global_cap(kind) {
+                return Err(LimitHit::Global);
+            }
+            if let Some(name) = &account_key {
+                let a = l
+                    .accounts
+                    .entry(name.clone())
+                    .or_insert_with(|| Window::fresh(now));
+                a.roll(now, ACCOUNT_WINDOW);
+                if a.count >= MAX_ACCOUNT_ATTEMPTS {
+                    return Err(LimitHit::Account);
+                }
             }
         }
 
-        // Every budget has room: consume one slot of each.
+        // Every budget has room: consume one slot of each that applies.
         if let Some(s) = l.sources.get_mut(&(key, kind)) {
             s.count += 1;
         }
-        if let Some(g) = l.global.get_mut(&kind) {
-            g.count += 1;
-        }
-        if let Some(name) = &account_key {
-            if let Some(a) = l.accounts.get_mut(name) {
-                a.count += 1;
+        if !trusted {
+            if let Some(g) = l.global.get_mut(&kind) {
+                g.count += 1;
+            }
+            if let Some(name) = &account_key {
+                if let Some(a) = l.accounts.get_mut(name) {
+                    a.count += 1;
+                }
             }
         }
         Ok(())
     }
 
     /// Clear `(source, kind)` and the account's budget after a success so a
-    /// legit user isn't penalized for earlier fumbles. Only ever called for
-    /// `Login` — a Register success must NOT clear (its budget is what
-    /// throttles enumeration), and clearing Login must not touch the Register
-    /// budget (hence the per-kind key). The global budget is never cleared:
-    /// it counts work done, not guilt.
+    /// legit user isn't penalized for earlier fumbles, hand the global slot
+    /// the attempt reserved back (honest logins never count toward the
+    /// ceiling), and remember the source as the account's trusted one. Only
+    /// ever called for `Login` — a Register success must NOT clear (its budget
+    /// is what throttles enumeration), and clearing Login must not touch the
+    /// Register budget (hence the per-kind key).
     fn clear(&self, source: IpAddr, kind: AuthKind, account: Option<&str>) {
+        let key = source_key(source);
         let mut l = self.inner.lock().expect("login limiter poisoned");
-        l.sources.remove(&(source_key(source), kind));
+        l.sources.remove(&(key, kind));
+        if let Some(g) = l.global.get_mut(&kind) {
+            g.count = g.count.saturating_sub(1);
+        }
         if let Some(a) = account {
-            l.accounts.remove(&a.trim().to_ascii_lowercase());
+            let name = a.trim().to_ascii_lowercase();
+            l.accounts.remove(&name);
+            l.trusted.insert(name, (key, Instant::now()));
         }
     }
 }
@@ -500,12 +554,14 @@ async fn handle_connection(
             max = policy.max_conns_per_ip,
             "auth connection refused — too many open connections from this address"
         );
-        let _ = write
-            .send(Message::Close(Some(CloseFrame {
+        let _ = tokio::time::timeout(
+            policy.idle_timeout,
+            write.send(Message::Close(Some(CloseFrame {
                 code: CloseCode::Policy,
                 reason: "too many connections".into(),
-            })))
-            .await;
+            }))),
+        )
+        .await;
         return Ok(());
     };
     tracing::debug!(%peer, ip = %client_ip, "ws upgraded");
@@ -514,12 +570,14 @@ async fn handle_connection(
         let frame = match tokio::time::timeout(policy.idle_timeout, read.next()).await {
             Err(_) => {
                 tracing::debug!(%peer, "ws idle timeout");
-                let _ = write
-                    .send(Message::Close(Some(CloseFrame {
+                let _ = tokio::time::timeout(
+                    policy.idle_timeout,
+                    write.send(Message::Close(Some(CloseFrame {
                         code: CloseCode::Normal,
                         reason: "idle".into(),
-                    })))
-                    .await;
+                    }))),
+                )
+                .await;
                 break;
             }
             Ok(None) => break,
@@ -543,7 +601,7 @@ async fn handle_connection(
                 continue;
             }
             Message::Ping(p) => {
-                write.send(Message::Pong(p)).await?;
+                send_bounded(&mut write, Message::Pong(p), policy.idle_timeout).await?;
                 continue;
             }
             Message::Close(_) => break,
@@ -575,13 +633,30 @@ async fn handle_connection(
             }
         };
 
-        write
-            .send(Message::Text(serde_json::to_string(&response)?))
-            .await?;
+        send_bounded(
+            &mut write,
+            Message::Text(serde_json::to_string(&response)?),
+            policy.idle_timeout,
+        )
+        .await?;
     }
 
     tracing::debug!(%peer, "connection closed");
     Ok(())
+}
+
+/// A send that gives up after `limit`. The idle timeout bounds the READ side;
+/// without this a client that stops reading (the proxy passes the
+/// backpressure through) parks the task in `flush` forever and keeps its
+/// connection slot.
+async fn send_bounded<S>(sink: &mut S, msg: Message, limit: Duration) -> anyhow::Result<()>
+where
+    S: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    match tokio::time::timeout(limit, sink.send(msg)).await {
+        Ok(r) => Ok(r?),
+        Err(_) => Err(anyhow::anyhow!("send timed out: the client stopped reading")),
+    }
 }
 
 /// INFO, not debug: a throttled source is the brute-force signal an operator
@@ -660,11 +735,20 @@ async fn dispatch(
             client_version,
         } => {
             // Version check first — an outdated client is not a credential guess,
-            // so it must not consume a rate-limit slot.
+            // so it must not consume a rate-limit slot. The echo is cut short:
+            // a reply must never mirror a client-sized string back.
             let cv = crate::config::semver::Version::parse(&client_version)
                 .ok_or_else(|| AuthError::InvalidInput(format!(
-                    "client_version is not semver: {client_version}"
+                    "client_version is not semver: {}",
+                    client_version.chars().take(32).collect::<String>()
                 )))?;
+            // A name no account could have is refused before it becomes a key
+            // in the account budget (the map is pruned by time, not size, and
+            // the string came from a stranger). A format check, not an
+            // existence oracle: every account name passed the same rule.
+            if username.len() > db::USERNAME_MAX {
+                return Err(AuthError::InvalidInput("username too long".into()));
+            }
             if !cv.at_least(&cfg.min_client_version) {
                 return Err(AuthError::VersionMismatch {
                     client: client_version,
@@ -859,13 +943,13 @@ mod tests {
     }
 
     /// A spread of sources, each under its own cap, still meets the global
-    /// ceiling; a success never clears it (it counts work done).
+    /// ceiling; a success hands its slot back, so honest logins never count.
     #[test]
     fn the_global_cap_refuses_a_spread_of_sources() {
         use AuthKind::Login;
         let lim = LoginRateLimiter::new();
         let t = Instant::now() + Duration::from_secs(3600);
-        for i in 0..MAX_GLOBAL_ATTEMPTS {
+        for i in 0..MAX_GLOBAL_LOGIN_ATTEMPTS {
             // One attempt per address: every source budget stays at 1 of 5.
             let ip: IpAddr = format!("10.{}.{}.{}", i / 65536, (i / 256) % 256, i % 256)
                 .parse()
@@ -874,18 +958,76 @@ mod tests {
         }
         let fresh: IpAddr = "192.0.2.1".parse().unwrap();
         assert_eq!(lim.try_acquire(fresh, Login, None, t), Err(LimitHit::Global));
-        lim.clear(fresh, Login, None);
-        assert_eq!(
-            lim.try_acquire(fresh, Login, None, t),
-            Err(LimitHit::Global),
-            "a clear frees a source and an account, never the global budget"
-        );
-        // Register has its own global budget.
-        assert!(lim.try_acquire(fresh, AuthKind::Register, None, t).is_ok());
+        // One of the earlier attempts succeeds: its slot comes back, and only its.
+        let earlier: IpAddr = "10.0.0.0".parse().unwrap();
+        lim.clear(earlier, Login, Some("someone"));
+        assert!(lim.try_acquire(fresh, Login, None, t).is_ok(), "the refunded slot");
+        assert_eq!(lim.try_acquire(fresh, Login, None, t), Err(LimitHit::Global));
+        // Register has its own, tighter global budget.
+        for i in 0..MAX_GLOBAL_REGISTER_ATTEMPTS {
+            let ip: IpAddr = format!("10.9.{}.{}", (i / 256) % 256, i % 256).parse().unwrap();
+            assert!(lim.try_acquire(ip, AuthKind::Register, None, t).is_ok(), "register {i}");
+        }
+        assert_eq!(lim.try_acquire(fresh, AuthKind::Register, None, t), Err(LimitHit::Global));
         // The window rolls over like the others.
         assert!(lim
             .try_acquire(fresh, Login, None, t + LOGIN_WINDOW + Duration::from_secs(1))
             .is_ok());
+    }
+
+    /// The account and global caps bound strangers; the owner, from the source
+    /// they last logged in from, is held only to their own source budget, so
+    /// a stranger guessing at their name (finding 1 of the 2026-10-12 review)
+    /// or a spread of strangers exhausting the global ceiling (finding 2)
+    /// cannot keep them out.
+    #[test]
+    fn a_recent_successful_source_is_exempt_from_the_account_and_global_caps() {
+        use AuthKind::Login;
+        let lim = LoginRateLimiter::new();
+        let t = Instant::now() + Duration::from_secs(3600);
+        let home: IpAddr = "198.51.100.9".parse().unwrap();
+        // The owner logged in from home.
+        assert!(lim.try_acquire(home, Login, Some("Victim"), t).is_ok());
+        lim.clear(home, Login, Some("Victim"));
+        // Strangers spend the account budget on the name.
+        for i in 0..MAX_ACCOUNT_ATTEMPTS {
+            let ip: IpAddr = format!("203.0.113.{}", i + 1).parse().unwrap();
+            assert!(lim.try_acquire(ip, Login, Some("victim"), t).is_ok(), "guess {i}");
+        }
+        let stranger: IpAddr = "203.0.113.200".parse().unwrap();
+        assert_eq!(lim.try_acquire(stranger, Login, Some("victim"), t), Err(LimitHit::Account));
+        // The owner from home still gets through.
+        assert!(lim.try_acquire(home, Login, Some("VICTIM"), t).is_ok());
+        // Even with the global ceiling spent by a crowd.
+        for i in 0..MAX_GLOBAL_LOGIN_ATTEMPTS {
+            let ip: IpAddr = format!("10.{}.{}.{}", i / 65536, (i / 256) % 256, i % 256)
+                .parse()
+                .unwrap();
+            let _ = lim.try_acquire(ip, Login, None, t);
+        }
+        assert_eq!(lim.try_acquire(stranger, Login, Some("bystander"), t), Err(LimitHit::Global));
+        assert!(lim.try_acquire(home, Login, Some("victim"), t).is_ok(), "home is exempt");
+        // The exemption is per account: home gets no pass on another name.
+        assert_eq!(
+            lim.try_acquire(home, Login, Some("bystander"), t),
+            Err(LimitHit::Global),
+            "trust is for the account that logged in from here, not for the address"
+        );
+        // But the owner's own source budget still applies to them.
+        for _ in 0..MAX_LOGIN_ATTEMPTS {
+            let _ = lim.try_acquire(home, Login, Some("victim"), t);
+        }
+        assert_eq!(lim.try_acquire(home, Login, Some("victim"), t), Err(LimitHit::Source));
+        // And it expires: a day on, with the global ceiling spent again by a
+        // crowd, home is held to it like anyone.
+        let stale = t + TRUSTED_SOURCE_TTL + Duration::from_secs(1);
+        for i in 0..MAX_GLOBAL_LOGIN_ATTEMPTS {
+            let ip: IpAddr = format!("10.{}.{}.{}", i / 65536, (i / 256) % 256, i % 256)
+                .parse()
+                .unwrap();
+            let _ = lim.try_acquire(ip, Login, None, stale);
+        }
+        assert_eq!(lim.try_acquire(home, Login, Some("victim"), stale), Err(LimitHit::Global));
     }
 
     /// Guesses at ONE account from many sources meet the account budget; the
@@ -906,22 +1048,27 @@ mod tests {
         assert_eq!(lim.try_acquire(next, Login, Some("VICTIM"), t), Err(LimitHit::Account));
         // Someone else's account is untouched.
         assert!(lim.try_acquire(next, Login, Some("bystander"), t).is_ok());
-        // The owner logs in (from anywhere): the account budget clears.
+        // The owner logs in (from anywhere): the account budget clears, and
+        // that source becomes the account's trusted one (exempt from the cap,
+        // tested on its own below).
         lim.clear(next, Login, Some("victim"));
         assert!(lim.try_acquire(next, Login, Some("victim"), t).is_ok());
-        // And the window is the long one.
+        // And the window is the long one: a minute later the source windows
+        // have rolled over, the account window has not.
         let later = t + LOGIN_WINDOW + Duration::from_secs(1);
-        for i in 0..MAX_ACCOUNT_ATTEMPTS - 1 {
+        // The trusted source consumed no account slot, so the strangers get the full twenty.
+        for i in 0..MAX_ACCOUNT_ATTEMPTS {
             let ip: IpAddr = format!("198.51.100.{}", i + 1).parse().unwrap();
             assert!(lim.try_acquire(ip, Login, Some("victim"), later).is_ok());
         }
+        let untrusted: IpAddr = "198.51.100.201".parse().unwrap();
         assert_eq!(
-            lim.try_acquire(next, Login, Some("victim"), later),
+            lim.try_acquire(untrusted, Login, Some("victim"), later),
             Err(LimitHit::Account),
             "the account window is longer than the source window"
         );
         assert!(lim
-            .try_acquire(next, Login, Some("victim"), t + ACCOUNT_WINDOW + Duration::from_secs(1))
+            .try_acquire(untrusted, Login, Some("victim"), later + ACCOUNT_WINDOW + Duration::from_secs(1))
             .is_ok());
     }
 
@@ -942,5 +1089,10 @@ mod tests {
         assert_eq!(client_ip_for(lo, None), lo);
         // From outside the header is whatever the client wrote: ignored.
         assert_eq!(client_ip_for(outside, Some("198.51.100.9")), outside);
+        // On a dual-stack bind the proxy's dial is IPv4-mapped loopback: still
+        // loopback, and the forwarded address comes back canonical.
+        let mapped_lo: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        assert_eq!(client_ip_for(mapped_lo, Some("::ffff:198.51.100.9")), real);
+        assert_eq!(client_ip_for(mapped_lo, None), lo);
     }
 }

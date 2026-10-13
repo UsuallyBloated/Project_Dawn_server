@@ -39,10 +39,11 @@ pub const GM_CMD_REFILL_PER_SEC: f32 = 8.0;
 // peer's screen). Both draw on a per-connection token bucket shaped like the
 // GM command budget and are dropped past it. The bursts are sized so an
 // honest client never meets them: a Stack All across every bag fires one
-// MoveItem per slot in a single frame (under 64), and a dual-wielding fighter
-// reports two swings a second.
+// MoveItem per merge pair in a single frame (bounded by the slot count, 8 base
+// plus 8 bags of 10, so under 128), and a dual-wielding fighter reports two
+// swings a second.
 /// Inventory intents allowed in a burst, and the refill rate after it.
-pub const INVENTORY_OPS_BURST: f32 = 64.0;
+pub const INVENTORY_OPS_BURST: f32 = 128.0;
 pub const INVENTORY_OPS_PER_SEC: f32 = 16.0;
 /// Cosmetic broadcasts (hits, misses, evades, cast bars, buff snapshots,
 /// equipment, chat, inspect) allowed in a burst, and the refill rate.
@@ -590,7 +591,13 @@ impl PerConnection {
             bind: spawn.bind,
             last_swing_at: [None, None],
             last_meditate_at: None,
-            death_processed: false,
+            // A character loaded at 0 HP died before it left (a crash, a
+            // window-X, a server restart while dead) and has paid: the death
+            // sweep must not kill it again (a second XP penalty and a second,
+            // empty corpse; found by the 2026-10-12 review). Respawn still
+            // works, since it gates on exactly this flag. The client learns it
+            // is dead from the HP seed, as it always did.
+            death_processed: spawn.hp <= 0.0,
             corpse_pending: false,
             death_lost_xp: 0,
             pending_res_offer: None,

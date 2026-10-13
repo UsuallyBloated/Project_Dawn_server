@@ -32,7 +32,9 @@ pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
 // ─── Account creation ────────────────────────────────────────────────────
 
 const USERNAME_MIN: usize = 3;
-const USERNAME_MAX: usize = 20;
+/// Public so the login path can refuse a name no account could have before
+/// it becomes a key in the limiter's account map.
+pub const USERNAME_MAX: usize = 20;
 const PASSWORD_MIN: usize = 8;
 
 pub fn validate_username(name: &str) -> AuthResult<()> {
@@ -1959,6 +1961,31 @@ mod invite_tests {
             revoke_invite(&pool, &codes[0]).await.expect("revoke"),
             RevokeOutcome::AlreadyRedeemed
         );
+    }
+
+    /// Two registrations racing on one code: exactly one account. The burn is
+    /// the first statement of each transaction, so SQLite's single writer
+    /// serialises them and the loser's guarded UPDATE changes no row.
+    #[tokio::test]
+    async fn two_registrations_racing_on_one_code_make_one_account() {
+        let (pool, _tmp) = fresh_pool().await;
+        let code = create_invites(&pool, 1, None).await.expect("mint").remove(0);
+        let (a, b) = tokio::join!(
+            create_account_with_invite(&pool, "racer_a", "longpassword", None, &code),
+            create_account_with_invite(&pool, "racer_b", "longpassword", None, &code),
+        );
+        let won = [a.is_ok(), b.is_ok()].iter().filter(|w| **w).count();
+        assert_eq!(won, 1, "one winner: {a:?} / {b:?}");
+        for r in [&a, &b] {
+            if let Err(e) = r {
+                assert!(matches!(e, AuthError::InviteInvalid(_)), "the loser is refused as spent: {e}");
+            }
+        }
+        let accounts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM accounts")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(accounts, 1);
     }
 
     #[tokio::test]

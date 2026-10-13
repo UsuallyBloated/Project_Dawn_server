@@ -57,6 +57,24 @@ async fn main() -> anyhow::Result<()> {
             "PROJECTDAWN_REQUIRE_INVITE is not 1: anyone who can reach the auth port can register an account. Fine on a dev box or a private tailnet; set it before any public exposure"
         );
     }
+    // The auth socket speaks plain ws. On a public host it must bind loopback
+    // behind the TLS proxy, or every password crosses the internet readable;
+    // requiring invites is the sign the host is meant to be public.
+    let auth_bind_is_loopback = cfg
+        .auth_bind
+        .parse::<std::net::SocketAddr>()
+        .map(|a| a.ip().to_canonical().is_loopback())
+        .unwrap_or(false);
+    if auth_policy.require_invite && !auth_bind_is_loopback {
+        tracing::warn!(
+            auth_bind = %cfg.auth_bind,
+            "invites are required but the auth socket is not bound to loopback: it speaks plain ws, so on a public host bind it to 127.0.0.1 behind the TLS proxy (PROJECTDAWN_AUTH_BIND=127.0.0.1:8765)"
+        );
+    }
+    // Resolve the advertised world address now, before either service runs,
+    // so the first connect token never has to resolve it on the auth task.
+    world::register_world_endpoint(&cfg.world_endpoint)
+        .context("resolving PROJECTDAWN_WORLD_ENDPOINT")?;
 
     let pool = db::open(&cfg.database_url).await?;
     db::migrate(&pool).await?;

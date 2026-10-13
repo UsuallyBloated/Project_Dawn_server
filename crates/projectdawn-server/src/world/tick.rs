@@ -10589,6 +10589,22 @@ pub async fn run(
                     players_in_world = in_world_ids.len(),
                     "enemy position fan"
                 );
+                // The operator's side of the client's `/ping`: renet's
+                // smoothed round trip and loss estimate for each player's
+                // link, once a minute, so "it feels laggy" on the public
+                // host comes with a number in the log as well as in chat.
+                for cid in in_world_ids.iter() {
+                    let Some(conn) = connections.get(cid) else {
+                        continue;
+                    };
+                    tracing::info!(
+                        char_id = conn.char_id,
+                        name = %conn.name,
+                        rtt_ms = (server.rtt(*cid) * 1000.0).round(),
+                        packet_loss = server.packet_loss(*cid),
+                        "player link"
+                    );
+                }
                 enemy_pos_sent = 0;
                 last_fan_report = now;
             }

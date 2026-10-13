@@ -2676,6 +2676,13 @@ async fn walk_east(c: &mut WorldClient, seq: &mut u32, metres: f32) {
 /// then let the server park the mover. Lands a little long (the server
 /// integrates its own dt), so read the arrival off the Position fan when it
 /// matters.
+/// Send Moves along `dir` for about `metres` at full speed, then pump past
+/// STALE_MOVE_THRESHOLD so the server parks the mover. The metres are a
+/// wall-clock estimate, not a promise: the server keeps integrating the
+/// held direction for the whole threshold after the last Move, so every
+/// walk runs about 3.75 m long, and longer when a sleep stretches under
+/// load. Fine for walking AWAY from something; to ARRIVE within reach of
+/// something, use `walk_until_within`.
 async fn walk_dir(c: &mut WorldClient, seq: &mut u32, dir: Vec3, metres: f32) {
     let moves = (metres / (world::MAX_MOVE_SPEED * 0.05)).ceil() as u32;
     for _ in 0..moves {
@@ -2685,6 +2692,58 @@ async fn walk_dir(c: &mut WorldClient, seq: &mut u32, dir: Vec3, metres: f32) {
         tokio::time::sleep(TICK_DT).await;
     }
     c.pump_for(Duration::from_millis(600)).await;
+}
+
+/// Walk toward `target` on the server's own word: each tick a Move aims at
+/// `target` from the newest Position the server has fanned for `char_id`
+/// (`from` until the first arrives), and once that Position is inside
+/// `stop_at` a zero Move parks the mover where it stands. Overshooting
+/// between two Positions turns the next Move around, so the walk converges
+/// however long a sleep took. Returns the position it stopped on.
+async fn walk_until_within(
+    c: &mut WorldClient,
+    seq: &mut u32,
+    char_id: i64,
+    from: Vec3,
+    target: Vec3,
+    stop_at: f32,
+) -> Vec3 {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut own = from;
+    loop {
+        let dx = target.x - own.x;
+        let dz = target.z - own.z;
+        let dist = (dx * dx + dz * dz).sqrt();
+        if dist <= stop_at {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "walk_until_within: still {dist:.2} m from the target after 8 s"
+        );
+        c.send_move(*seq, Vec3 { x: dx / dist, y: 0.0, z: dz / dist });
+        *seq += 1;
+        tick_one(&mut c.client, &mut c.transport);
+        while let Some(bytes) = c.client.receive_message(CHANNEL_POSITION) {
+            if let Ok((ServerWorldMsg::Position { id, pos, .. }, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
+                if id == char_id as u64 {
+                    own = pos;
+                }
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    // Park. A zero direction is held like any other, so one Move would do;
+    // the position channel is unreliable, so send a few.
+    for _ in 0..3 {
+        c.send_move(*seq, Vec3 { x: 0.0, y: 0.0, z: 0.0 });
+        *seq += 1;
+        tick_one(&mut c.client, &mut c.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    own
 }
 
 /// Spell batch step 2, the exploit ledger's items 1, 3 and 6: the destination
@@ -5884,9 +5943,15 @@ async fn a_pet_stays_with_its_owner_after_gate() {
         ServerWorldMsg::EnemySpawn { id, pos, .. } => (id, pos),
         _ => unreachable!(),
     };
-    // Bare-handed reach is 2.7 m and the dummy lands 3 m off: step in.
+    // Bare-handed reach is 2.7 m and the dummy lands 3 m off: step in, on
+    // the server's word for where the owner stands. A wall-clock walk
+    // (`walk_dir`, 1.5 m asked) ran the owner 2.25 m PAST the dummy with
+    // one tick of reach to spare, and a stretched sleep under the full
+    // suite ran it out of reach: the swing missed and the pet had nothing
+    // to inherit.
     let mut seq: u32 = 1;
-    walk_dir(&mut a, &mut seq, Vec3 { x: 0.0, y: 0.0, z: -1.0 }, 1.5).await;
+    let start = Vec3 { x: 15.0, y: 0.0, z: 0.0 };
+    walk_until_within(&mut a, &mut seq, a_char_id, start, dummy_pos, 1.5).await;
     a.send_attack(dummy, "", false, DamageType::Physical);
     let engaged = a
         .wait_for(CHANNEL_POSITION, Duration::from_secs(4), |m| {

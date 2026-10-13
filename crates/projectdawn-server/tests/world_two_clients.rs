@@ -6940,3 +6940,182 @@ async fn hand_eating_is_refused_when_full_and_halved_when_early() {
         "half a meal was added: {hunger}"
     );
 }
+
+/// How the server answered a connect attempt: ConnectOk (a live client, past
+/// EnterWorld as `WorldClient::start` leaves it), a Kick at the door, or a
+/// renet handshake that never completed. Netcode ignores a connect request
+/// for a client id that is still connected and sends nothing back, so the
+/// third is a real answer and not a harness failure.
+enum ConnectOutcome {
+    Connected(WorldClient),
+    Kicked { code: protocol::world::KickCode, reconnect_after_secs: Option<u32> },
+    HandshakeTimedOut,
+}
+
+/// `WorldClient::start` without the panics, reporting how the server
+/// answered. A kicked attempt sends the netcode disconnect the real client's
+/// kick handler sends (`disconnect_now`), so the refused connection frees its
+/// client id at once instead of holding it until a timeout.
+async fn try_connect(
+    token_bytes: Vec<u8>,
+    session_token_hex: &str,
+    char_id: i64,
+    handshake_wait: Duration,
+) -> ConnectOutcome {
+    let connect_token =
+        ConnectToken::read(&mut Cursor::new(&token_bytes[..])).expect("ConnectToken::read");
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("udp bind");
+    socket.set_nonblocking(true).expect("nonblocking");
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let auth = ClientAuthentication::Secure { connect_token };
+    let mut transport = NetcodeClientTransport::new(now, auth, socket).expect("transport");
+    let mut client = RenetClient::new(connection_config_matching_server());
+    let deadline = Instant::now() + handshake_wait;
+    while !client.is_connected() {
+        tick_one(&mut client, &mut transport);
+        if Instant::now() > deadline {
+            transport.disconnect();
+            return ConnectOutcome::HandshakeTimedOut;
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    let token = decode_token_bytes(session_token_hex);
+    let msg = ClientWorldMsg::Connect {
+        session_token: token,
+        char_id: char_id as u64,
+        client_version: "0.1.0".into(),
+    };
+    send_msg(&mut client, CHANNEL_SYSTEM, &msg);
+    let mut this = WorldClient { client, transport, _char_id: char_id };
+    let answer = this
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ConnectOk { .. } | ServerWorldMsg::Kick { .. })
+        })
+        .await;
+    match answer {
+        Some(ServerWorldMsg::Kick { code, reconnect_after_secs, .. }) => {
+            this.transport.disconnect();
+            tokio::time::sleep(TICK_DT).await;
+            ConnectOutcome::Kicked { code, reconnect_after_secs }
+        }
+        Some(_) => {
+            send_msg(&mut this.client, CHANNEL_SYSTEM, &ClientWorldMsg::EnterWorld);
+            for _ in 0..4 {
+                tick_one(&mut this.client, &mut this.transport);
+                tokio::time::sleep(TICK_DT).await;
+            }
+            ConnectOutcome::Connected(this)
+        }
+        None => panic!("the server answered the Connect with neither ConnectOk nor Kick within 3 s"),
+    }
+}
+
+/// The camp-and-linkdead design's deny-login rule from the client's seat.
+/// `banker_slice2_checklist.md` row 54 is ticked with a note saying the
+/// opposite ("killed A's client, then immediately logged back in
+/// successfully"), so this pins which is true. A client that dies without a
+/// Disconnect leaves its body in the world, a same-account relogin is refused
+/// until the body is reaped, and the refusals never shorten the window: the
+/// Lineage II force-off (relog to boot your own live session) and the
+/// dodge-the-reap (knock until the body is gone) patterns both fail. Three
+/// phases on the server's own clocks: before the 10 s heartbeat timeout the
+/// old netcode connection still holds the client id, so a second handshake
+/// is ignored outright; after it the body is linkdead and the Connect is
+/// answered with a DuplicateLogin kick carrying the countdown; after
+/// LINKDEAD_SECS the body is gone and the login succeeds. About 45 s of
+/// wall clock, all of it the server's own timers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unclean_drop_refuses_relogin_until_the_body_is_reaped() {
+    let h = start_both().await;
+    let (session, char_id, _stale) =
+        provision_client(&h.auth_url, "crasher", "Dropsy", "Human", "Warrior").await;
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+    // The crash: no Disconnect, no netcode goodbye, the socket just closes.
+    drop(a);
+    let dropped_at = Instant::now();
+
+    // Phase 1: the dropped session is still live as far as the server knows.
+    // A relogin must not boot it; netcode ignores the second handshake.
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    match try_connect(token, &session, char_id, Duration::from_secs(4)).await {
+        ConnectOutcome::HandshakeTimedOut => {}
+        ConnectOutcome::Kicked { code, .. } => {
+            panic!("expected the handshake to be ignored while the old connection lives, got a kick: {code:?}")
+        }
+        ConnectOutcome::Connected(_) => {
+            panic!("a relogin got in while the dropped session was still live: the force-off door is open")
+        }
+    }
+
+    // Phase 2: the heartbeat timeout (10 s) drops the transport and the body
+    // goes linkdead; from then on the Connect is refused with the countdown.
+    // Keep knocking: every knock inside the window is a relogin that must
+    // not reset it.
+    let mut countdown: Option<(u32, Instant)> = None;
+    let deadline = dropped_at + Duration::from_secs(25);
+    while countdown.is_none() && Instant::now() < deadline {
+        let token = request_world_token(&h.auth_url, &session, char_id).await;
+        match try_connect(token, &session, char_id, Duration::from_secs(2)).await {
+            ConnectOutcome::HandshakeTimedOut => {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            ConnectOutcome::Kicked { code, reconnect_after_secs } => {
+                assert!(
+                    matches!(code, protocol::world::KickCode::DuplicateLogin),
+                    "a relogin during the linger is refused as a duplicate login, got {code:?}"
+                );
+                let secs = reconnect_after_secs
+                    .expect("a refusal while the body is linkdead carries the countdown");
+                assert!(
+                    secs <= world::LINKDEAD_SECS.as_secs() as u32,
+                    "the countdown is at most the linger window, got {secs}"
+                );
+                countdown = Some((secs, Instant::now()));
+            }
+            ConnectOutcome::Connected(_) => {
+                panic!("a relogin got in while the body was lingering linkdead")
+            }
+        }
+    }
+    let (secs, told_at) = countdown
+        .expect("within 25 s of the drop the body is linkdead and a relogin is refused with a countdown");
+
+    // Phase 3: the window is the body's clock, not the relogin's. Knock every
+    // few seconds through the countdown the server itself announced (each a
+    // refusal), then expect the door open within a few seconds of it. A reap
+    // timer reset by the knocking would leave this waiting past the deadline.
+    let open_by = told_at + Duration::from_secs(secs as u64 + 10);
+    let mut connected: Option<WorldClient> = None;
+    while connected.is_none() && Instant::now() < open_by {
+        let token = request_world_token(&h.auth_url, &session, char_id).await;
+        match try_connect(token, &session, char_id, Duration::from_secs(2)).await {
+            ConnectOutcome::Connected(c) => connected = Some(c),
+            ConnectOutcome::Kicked { code, .. } => {
+                assert!(
+                    matches!(code, protocol::world::KickCode::DuplicateLogin),
+                    "still the duplicate-login refusal while the body lingers, got {code:?}"
+                );
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+            ConnectOutcome::HandshakeTimedOut => {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+    let mut b = connected.expect(
+        "the relogin succeeds once the announced window has elapsed; a refused relogin must not have extended it",
+    );
+    assert!(
+        b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::HealthUpdate { .. } | ServerWorldMsg::Position { .. } | ServerWorldMsg::TimeOfDay { .. })
+        })
+        .await
+        .is_some(),
+        "the fresh login is a real session: the server talks to it"
+    );
+    b.send_disconnect();
+    b.pump_for(Duration::from_millis(300)).await;
+    drop(b);
+}

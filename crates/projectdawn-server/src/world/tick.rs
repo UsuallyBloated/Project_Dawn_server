@@ -7090,7 +7090,7 @@ pub async fn run(
                     && conn
                         .active_buffs
                         .iter()
-                        .any(|b| b.name.starts_with("Food: "))
+                        .any(|b| b.name.starts_with("Food: ") || b.name.starts_with("Food MP: "))
                 {
                     tracing::debug!(owner = intent.owner, "UseConsumable rejected — already eating");
                     handlers::send_refusal(&mut server, owner_cid, "You're already eating something.");
@@ -7100,7 +7100,7 @@ pub async fn run(
                     && conn
                         .active_buffs
                         .iter()
-                        .any(|b| b.name.starts_with("Drink: "))
+                        .any(|b| b.name.starts_with("Drink: ") || b.name.starts_with("Drink MP: "))
                 {
                     tracing::debug!(owner = intent.owner, "UseConsumable rejected — already drinking");
                     handlers::send_refusal(&mut server, owner_cid, "You're already drinking something.");

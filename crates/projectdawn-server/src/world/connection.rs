@@ -556,7 +556,13 @@ impl PerConnection {
             bind: spawn.bind,
             last_swing_at: [None, None],
             last_meditate_at: None,
-            death_processed: false,
+            // A character loaded at 0 HP died before it left (a crash, a
+            // window-X, a server restart while dead) and has paid: the death
+            // sweep must not kill it again (a second XP penalty and a second,
+            // empty corpse; found by the 2026-10-12 review). Respawn still
+            // works, since it gates on exactly this flag. The client learns it
+            // is dead from the HP seed, as it always did.
+            death_processed: spawn.hp <= 0.0,
             corpse_pending: false,
             death_lost_xp: 0,
             pending_res_offer: None,

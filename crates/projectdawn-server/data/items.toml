@@ -31,7 +31,7 @@ vendor_price = 16
 path = "res://data/loot/items/arrow_bundle.tres"
 name = "Arrow Bundle"
 item_type = "misc"
-stack_size = 200
+stack_size = 20
 vendor_price = 10
 
 [[item]]

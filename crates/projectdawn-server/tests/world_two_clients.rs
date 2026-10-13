@@ -5193,6 +5193,63 @@ async fn a_player_target_reaches_only_those_who_can_see_them_once_per_tick() {
     assert!(far.is_none(), "a player who cannot see A must not learn A's target");
 }
 
+/// Food and water's auto-eat takes the first food in slot order when a
+/// character runs out. Merged onto the trade branch, it did not consult the
+/// trade lock, so a loaf offered in an open trade could be eaten mid-trade (the
+/// commit then refused the changed offer, so no dupe, but the offer was gone).
+/// Auto-eat now skips offered slots. Fails on the previous code: the delta
+/// names the offered base slot 3.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_eat_skips_food_offered_in_a_trade() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _) =
+        provision_client(&h.auth_url, "eata", "Eatalot", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "eatb", "Eatbee", "Human", "Warrior").await;
+    // Six seconds of food left, plenty of water; bread in base 3 and base 5.
+    set_char_appetite(&h.db_url, a_char_id, 6.0, 5000.0, None).await;
+    give_char_item(&h.db_url, a_char_id, "base", 3, BREAD, 1).await;
+    give_char_item(&h.db_url, a_char_id, "base", 5, BREAD, 1).await;
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+    b.pump_for(Duration::from_millis(300)).await;
+
+    // A opens a trade and offers the loaf in base 3 before the food runs out.
+    a.send_trade_request(b_char_id as u64);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { .. })
+    })
+    .await
+    .expect("the trade opens");
+    a.send_trade_offer_item(0, "base", 3);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOfferUpdate { mine: true, slots, .. }
+            if slots.first().map(|(p, _)| p.contains("bread")).unwrap_or(false))
+    })
+    .await
+    .expect("the loaf in base 3 is offered");
+
+    // The food runs out: the auto-eat takes base 5, never the offered base 3.
+    let mut eaten: Option<u32> = None;
+    let end = Instant::now() + Duration::from_secs(12);
+    while Instant::now() < end && eaten.is_none() {
+        a.send_heartbeat();
+        b.send_heartbeat();
+        b.pump_for(Duration::from_millis(50)).await;
+        if let Some(ServerWorldMsg::InventoryDelta { slot, .. }) = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+                matches!(m, ServerWorldMsg::InventoryDelta { location, .. } if location == "base")
+            })
+            .await
+        {
+            eaten = Some(slot);
+        }
+    }
+    assert_eq!(eaten, Some(5), "the auto-eat takes the loaf that is not offered");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn trade_refuses_self_and_coin_overdraft() {
     let h = start_both().await;

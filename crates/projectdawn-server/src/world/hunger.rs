@@ -169,16 +169,19 @@ fn matches(item: &Item, need: Need) -> bool {
 /// The first food (or drink) the character would eat on its own: base slots
 /// 0 to 7 in order, then each bag by the base slot it sits in, its slots in
 /// order. A bag held on the cursor is not searched (it is not "in" the
-/// inventory, and the placer never fills it). Returns the slot's location
-/// string and index as the inventory API names them, plus the item.
+/// inventory, and the placer never fills it). `skip` passes over slots the
+/// caller rules out (the tick passes the trade lock, so food offered in an
+/// open trade is never eaten). Returns the slot's location string and index as
+/// the inventory API names them, plus the item.
 pub fn first_in_slot_order(
     inv: &PlayerInventory,
     need: Need,
+    skip: impl Fn(&str, u32) -> bool,
 ) -> Option<(String, u32, &'static Item)> {
     for (i, entry) in inv.base.iter().enumerate() {
         if let Some(e) = entry {
             if let Some(item) = items::lookup(&e.item_path) {
-                if matches(item, need) {
+                if matches(item, need) && !skip("base", i as u32) {
                     return Some(("base".to_string(), i as u32, item));
                 }
             }
@@ -196,7 +199,7 @@ pub fn first_in_slot_order(
         for (s, entry) in slots.iter().enumerate() {
             if let Some(e) = entry {
                 if let Some(item) = items::lookup(&e.item_path) {
-                    if matches(item, need) {
+                    if matches(item, need) && !skip(&format!("bag_{key}"), s as u32) {
                         return Some((format!("bag_{key}"), s as u32, item));
                     }
                 }
@@ -318,24 +321,24 @@ mod tests {
         inv.bags.get_mut(&1).unwrap()[0] = Some(InventoryEntry { item_path: bread.clone(), count: 2 });
         inv.base[5] = Some(InventoryEntry { item_path: water.clone(), count: 1 });
         assert_eq!(
-            first_in_slot_order(&inv, Need::Food).map(|(l, s, _)| (l, s)),
+            first_in_slot_order(&inv, Need::Food, |_, _| false).map(|(l, s, _)| (l, s)),
             Some(("bag_1".to_string(), 0)),
             "the only bread is in the bag"
         );
         inv.base[3] = Some(InventoryEntry { item_path: bread.clone(), count: 1 });
         assert_eq!(
-            first_in_slot_order(&inv, Need::Food).map(|(l, s, _)| (l, s)),
+            first_in_slot_order(&inv, Need::Food, |_, _| false).map(|(l, s, _)| (l, s)),
             Some(("base".to_string(), 3)),
             "a base slot comes before any bag"
         );
         assert_eq!(
-            first_in_slot_order(&inv, Need::Drink).map(|(l, s, _)| (l, s)),
+            first_in_slot_order(&inv, Need::Drink, |_, _| false).map(|(l, s, _)| (l, s)),
             Some(("base".to_string(), 5))
         );
         // A held bag is not searched.
         inv.base[3] = None;
         let held = inv.bags.remove(&1).unwrap();
         inv.bags.insert(CURSOR_BAG_KEY, held);
-        assert!(first_in_slot_order(&inv, Need::Food).is_none());
+        assert!(first_in_slot_order(&inv, Need::Food, |_, _| false).is_none());
     }
 }

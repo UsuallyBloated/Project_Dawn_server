@@ -11122,8 +11122,13 @@ pub async fn run(
                     if !hunger::is_famished(conn, need) {
                         continue;
                     }
-                    let Some((loc, slot, item)) = hunger::first_in_slot_order(&conn.inventory, need)
-                    else {
+                    // Food offered in an open trade is not the character's to
+                    // eat until the trade ends.
+                    let Some((loc, slot, item)) = hunger::first_in_slot_order(
+                        &conn.inventory,
+                        need,
+                        |l, s| trade_manager.is_locked(*client_id, l, s),
+                    ) else {
                         continue;
                     };
                     if conn.inventory.decrement_at(&loc, slot).is_err() {

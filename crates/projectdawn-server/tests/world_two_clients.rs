@@ -348,6 +348,49 @@ async fn set_char_level(db_url: &str, char_id: i64, level: i32) {
         .expect("bump character level");
 }
 
+/// Food and water: set a character's counters (seconds of fullness) and,
+/// optionally, its HP, before it logs in (the row is read at login).
+async fn set_char_appetite(db_url: &str, char_id: i64, hunger: f32, thirst: f32, hp: Option<f32>) {
+    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    sqlx::query("UPDATE characters SET hunger = ?1, thirst = ?2, hp = COALESCE(?3, hp) WHERE id = ?4")
+        .bind(hunger)
+        .bind(thirst)
+        .bind(hp)
+        .bind(char_id)
+        .execute(&pool)
+        .await
+        .expect("set appetite");
+}
+
+/// Put a stack straight into a character's inventory row (read at login).
+async fn give_char_item(db_url: &str, char_id: i64, location: &str, slot: u32, path: &str, count: u32) {
+    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    sqlx::query(
+        "INSERT OR REPLACE INTO character_items (char_id, location, slot, item_path, count)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(char_id)
+    .bind(location)
+    .bind(slot)
+    .bind(path)
+    .bind(count)
+    .execute(&pool)
+    .await
+    .expect("give item");
+}
+
+async fn read_char_appetite(db_url: &str, char_id: i64) -> (f32, f32) {
+    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    let row: (f32, f32) = sqlx::query_as("SELECT hunger, thirst FROM characters WHERE id = ?1")
+        .bind(char_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read appetite");
+    row
+}
+
+const BREAD: &str = "res://data/loot/items/bread_loaf.tres";
+
 struct WorldClient {
     client: RenetClient,
     transport: NetcodeClientTransport,
@@ -550,6 +593,14 @@ impl WorldClient {
     fn send_pet_command(&mut self, command: u8, target_id: Option<u64>) {
         let msg = ClientWorldMsg::PetCommand { command, target_id };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
+    fn send_use_consumable_base(&mut self, idx: u8) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::UseConsumable { slot: SlotRef::BaseSlot { idx } },
+        );
     }
 
     fn send_move_item(
@@ -6658,4 +6709,169 @@ async fn one_cast_per_caster_per_tick() {
     }
     assert_eq!(hits, 1, "exactly one of the two casts resolves");
     assert!(told, "the extra cast in the same tick is answered, not silently dropped");
+}
+
+
+// ── Food and water, the EQ way (docs/design/food_and_water.md) ─────────────
+
+/// A famished character does not regenerate; the tick it runs out with food
+/// in the bags, the server eats the first food in slot order, says so, fans the
+/// delta, and regen comes back. Logged in famished with bread in base slot 3
+/// and more bread in a bag: the base slot is eaten, the bag is not touched.
+#[tokio::test]
+async fn a_famished_character_eats_the_first_food_in_slot_order_and_regenerates_again() {
+    let h = start_both().await;
+    let (session, char_id, _) =
+        provision_client(&h.auth_url, "hungry", "Hungrus", "Human", "Warrior").await;
+    // Out of both, at 1 HP, with bread in a bag AND in a later base slot.
+    set_char_appetite(&h.db_url, char_id, 0.0, 0.0, Some(1.0)).await;
+    give_char_item(&h.db_url, char_id, "base", 0, "res://data/loot/items/small_pouch.tres", 1).await;
+    give_char_item(&h.db_url, char_id, "base", 1, "res://data/loot/items/cloth_cap.tres", 1).await;
+    give_char_item(&h.db_url, char_id, "base", 3, BREAD, 2).await;
+    give_char_item(&h.db_url, char_id, "bag_0", 0, BREAD, 2).await;
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    let cid = char_id as u64;
+
+    // The eat happens on the first tick in the world: the delta names base 3.
+    let delta = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { location, slot, .. } if location == "base" && *slot == 3)
+        })
+        .await
+        .expect("the bread in base slot 3 is eaten first");
+    if let ServerWorldMsg::InventoryDelta { count, .. } = delta {
+        assert_eq!(count, 1, "one loaf of the two is gone");
+    }
+    let line = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "You eat a Bread Loaf.")
+        })
+        .await;
+    assert!(line.is_some(), "the character is told what it ate");
+    // Still out of water: HP regenerates (fed), stamina does not (needs both).
+    // Heartbeats keep the app-layer timeout (10 s) off while we watch.
+    let end = Instant::now() + Duration::from_secs(15);
+    let mut rose = None;
+    while Instant::now() < end && rose.is_none() {
+        a.send_heartbeat();
+        rose = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp > 1.5)
+            })
+            .await;
+    }
+    assert!(rose.is_some(), "fed again, HP regenerates");
+
+    // The counters persist: leave, and the fullness is the loaf's size less the walk.
+    a.send_disconnect();
+    a.pump_for(Duration::from_millis(500)).await;
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (hunger, thirst) = read_char_appetite(&h.db_url, char_id).await;
+    assert!(hunger > 2880.0 - 60.0 && hunger <= 2880.0, "a meal of twenty units, less what ran: {hunger}");
+    assert_eq!(thirst, 0.0, "no drink was carried, so still out of water");
+}
+
+/// A famished character with no food does NOT regenerate HP, and a dead one
+/// does not drain.
+#[tokio::test]
+async fn out_of_food_means_no_hp_regen_and_the_dead_do_not_starve() {
+    let h = start_both().await;
+    let (session, char_id, _) =
+        provision_client(&h.auth_url, "starving", "Starvo", "Human", "Warrior").await;
+    set_char_appetite(&h.db_url, char_id, 0.0, 1000.0, Some(1.0)).await;
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    let cid = char_id as u64;
+    // Heartbeats keep the app-layer timeout (10 s) off while we watch.
+    let end = Instant::now() + Duration::from_secs(15);
+    let mut rose = None;
+    while Instant::now() < end && rose.is_none() {
+        a.send_heartbeat();
+        rose = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp > 1.5)
+            })
+            .await;
+    }
+    assert!(rose.is_none(), "out of food: HP must not regenerate");
+    // Thirst drained for those 15 s alive; death freezes it.
+    a.send_death();
+    let dead = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp <= 0.01)
+        })
+        .await;
+    assert!(dead.is_some());
+    // Fifteen seconds dead, with heartbeats. Alive it drained about 15 s
+    // (to about 984); code that drained the dead would take 15 more (to
+    // about 969) and fail the lower bound below.
+    let end = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < end {
+        a.send_heartbeat();
+        a.pump_for(Duration::from_secs(3)).await;
+    }
+    a.send_disconnect();
+    a.pump_for(Duration::from_millis(500)).await;
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (_, thirst) = read_char_appetite(&h.db_url, char_id).await;
+    assert!(thirst < 1000.0 - 10.0, "thirst ran while alive: {thirst}");
+    assert!(thirst > 1000.0 - 25.0, "and stopped at death (15 s dead would have taken 15 more): {thirst}");
+}
+
+/// Eating by hand: refused with EQ's line when full (nothing taken), and an
+/// early hand-eat feeds for half the item's size.
+#[tokio::test]
+async fn hand_eating_is_refused_when_full_and_halved_when_early() {
+    let h = start_both().await;
+    let (session, char_id, _) =
+        provision_client(&h.auth_url, "snacker", "Snacko", "Human", "Warrior").await;
+    let cap = projectdawn_server::world::hunger::FULLNESS_CAP_SECS;
+    set_char_appetite(&h.db_url, char_id, cap, cap, None).await;
+    give_char_item(&h.db_url, char_id, "base", 0, BREAD, 2).await;
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+    a.send_use_consumable_base(0);
+    let refused = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("you would explode"))
+        })
+        .await;
+    assert!(refused.is_some(), "full: refused with EQ's line");
+    let taken = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(800), |m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { location, slot, .. } if location == "base" && *slot == 0)
+        })
+        .await;
+    assert!(taken.is_none(), "nothing is taken on a refusal");
+    a.send_disconnect();
+    a.pump_for(Duration::from_millis(500)).await;
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Early: well below the cap but not hungry. The loaf is taken and feeds
+    // for half of 2880.
+    set_char_appetite(&h.db_url, char_id, 3000.0, cap, None).await;
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut b = WorldClient::start(token, &session, char_id).await;
+    b.pump_for(Duration::from_millis(300)).await;
+    b.send_use_consumable_base(0);
+    let taken = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { location, slot, count, .. } if location == "base" && *slot == 0 && *count == 1)
+        })
+        .await;
+    assert!(taken.is_some(), "an early hand-eat takes the loaf");
+    b.send_disconnect();
+    b.pump_for(Duration::from_millis(500)).await;
+    drop(b);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let (hunger, _) = read_char_appetite(&h.db_url, char_id).await;
+    assert!(
+        hunger > 3000.0 + 1440.0 - 30.0 && hunger <= 3000.0 + 1440.0,
+        "half a meal was added: {hunger}"
+    );
 }

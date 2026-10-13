@@ -89,6 +89,15 @@ pub struct RegenResult {
     pub stamina_fanout: bool,
 }
 
+/// Which natural regens a character's stomach allows: (hp, mp, stamina). EQ's
+/// split, decided 2026-10-13: food for hit points, water for mana, both for
+/// stamina (EQ's endurance needs both).
+pub fn natural_regen_allowed(hunger_secs: f32, thirst_secs: f32) -> (bool, bool, bool) {
+    let fed = hunger_secs > 0.0;
+    let watered = thirst_secs > 0.0;
+    (fed, watered, fed && watered)
+}
+
 /// Does the *sitting* regen rate apply right now? Only when seated AND out of
 /// combat: a player who dealt or took damage within `COMBAT_REGEN_LOCKOUT`
 /// regens at the standing rate even while seated. Closes the free-in-combat-regen
@@ -126,7 +135,11 @@ pub fn tick_one(conn: &mut PerConnection, dt: f32, now: Instant) -> RegenResult 
     // Track 6 sub-task 4a: Lich Form disables natural HP regen. The
     // buff still grants its MP/sec via the buff tick (step 5a).
     let lich_active = super::buffs::is_lich_form_active(&conn.active_buffs);
-    if conn.hp > 0.0 && conn.hp < conn.max_hp && !lich_active {
+    // Food and water (the EQ model, `world/hunger.rs`): out of food, no HP
+    // regen; out of water, no mana regen; out of either, no stamina regen.
+    // Spells and potions still heal; only natural recovery stops.
+    let (fed_hp, fed_mp, fed_stamina) = natural_regen_allowed(conn.hunger_secs, conn.thirst_secs);
+    if conn.hp > 0.0 && conn.hp < conn.max_hp && !lich_active && fed_hp {
         let per_tick = hp_regen_per_tick(conn.level, sitting, troll);
         conn.regen_hp_acc += per_tick * scale;
         if conn.regen_hp_acc >= 1.0 {
@@ -139,7 +152,7 @@ pub fn tick_one(conn: &mut PerConnection, dt: f32, now: Instant) -> RegenResult 
         conn.regen_hp_acc = 0.0;
     }
 
-    if conn.mp < conn.max_mp {
+    if conn.mp < conn.max_mp && fed_mp {
         let per_tick = mp_regen_per_tick(sitting, meditate);
         conn.regen_mp_acc += per_tick * scale;
         if conn.regen_mp_acc >= 1.0 {
@@ -151,7 +164,7 @@ pub fn tick_one(conn: &mut PerConnection, dt: f32, now: Instant) -> RegenResult 
         conn.regen_mp_acc = 0.0;
     }
 
-    if conn.stamina < conn.max_stamina {
+    if conn.stamina < conn.max_stamina && fed_stamina {
         conn.regen_stamina_acc += STAMINA_REGEN_PER_TICK * scale;
         if conn.regen_stamina_acc >= 1.0 {
             let delta = conn.regen_stamina_acc.floor();
@@ -228,6 +241,17 @@ mod tests {
         assert!(!sitting_bonus_from(true, None, Some(recent), now));
         // Seated but recently took damage: standing rate.
         assert!(!sitting_bonus_from(true, Some(recent), None, now));
+    }
+
+    /// The stomach's say over natural regen: food for HP, water for mana,
+    /// both for stamina; anything above zero counts as fed.
+    #[test]
+    fn natural_regen_follows_food_and_water() {
+        assert_eq!(natural_regen_allowed(100.0, 100.0), (true, true, true));
+        assert_eq!(natural_regen_allowed(0.0, 100.0), (false, true, false));
+        assert_eq!(natural_regen_allowed(100.0, 0.0), (true, false, false));
+        assert_eq!(natural_regen_allowed(0.0, 0.0), (false, false, false));
+        assert_eq!(natural_regen_allowed(0.5, 0.5), (true, true, true));
     }
 
     #[test]

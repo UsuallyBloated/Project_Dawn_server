@@ -16,7 +16,7 @@ use super::{
     loot::{self, LootBag},
     persistence,
     pet_templates,
-    regen,
+    hunger, regen,
     skills,
     spawn_points::Spawner,
     spells,
@@ -1395,6 +1395,8 @@ async fn reap_connection(
                 conn.xp,
                 conn.xp_to_next,
                 conn.level,
+                conn.hunger_secs,
+                conn.thirst_secs,
             )
             .await
             {
@@ -7083,27 +7085,17 @@ pub async fn run(
                     handlers::send_refusal(&mut server, owner_cid, "You can't use that.");
                     continue;
                 }
-                // Track 15.2 — match the client's "already eating /
-                // drinking" rule: a same-kind food/drink buff already
-                // present rejects without consuming the stack.
-                if item.is_food
-                    && conn
-                        .active_buffs
-                        .iter()
-                        .any(|b| b.name.starts_with("Food: ") || b.name.starts_with("Food MP: "))
-                {
-                    tracing::debug!(owner = intent.owner, "UseConsumable rejected — already eating");
-                    handlers::send_refusal(&mut server, owner_cid, "You're already eating something.");
+                // Food and water the EQ way (`hunger.rs`): a hand-eat is
+                // refused when there is no room, with EQ's own line, and
+                // nothing is taken.
+                if item.is_food && hunger::is_full(conn, hunger::Need::Food) {
+                    tracing::debug!(owner = intent.owner, "UseConsumable rejected — full");
+                    handlers::send_refusal(&mut server, owner_cid, hunger::EXPLODE_FOOD);
                     continue;
                 }
-                if item.is_drink
-                    && conn
-                        .active_buffs
-                        .iter()
-                        .any(|b| b.name.starts_with("Drink: ") || b.name.starts_with("Drink MP: "))
-                {
-                    tracing::debug!(owner = intent.owner, "UseConsumable rejected — already drinking");
-                    handlers::send_refusal(&mut server, owner_cid, "You're already drinking something.");
+                if item.is_drink && hunger::is_full(conn, hunger::Need::Drink) {
+                    tracing::debug!(owner = intent.owner, "UseConsumable rejected — full");
+                    handlers::send_refusal(&mut server, owner_cid, hunger::EXPLODE_DRINK);
                     continue;
                 }
                 // Decrement-and-fan first so the UI loses the slot
@@ -7111,9 +7103,6 @@ pub async fn run(
                 // after. Snapshot item fields we'll need post-decrement
                 // (since `items::lookup` borrows the registry, not
                 // `conn`, this is just convenience).
-                let item_name = item.name.clone();
-                let food_hp = item.food_hp_regen;
-                let food_mp = item.food_mp_regen;
                 let food_dur = item.food_duration;
                 let heal_amt = item.heal_on_use;
                 let mp_amt = item.mp_on_use;
@@ -7149,7 +7138,6 @@ pub async fn run(
                     delta_count,
                 );
                 // Apply the effect.
-                let mut buffs_changed = false;
                 if heal_amt > 0.0 {
                     let before = conn.hp;
                     conn.hp = (conn.hp + heal_amt).min(conn.max_hp);
@@ -7176,37 +7164,16 @@ pub async fn run(
                         );
                     }
                 }
-                if (is_food || is_drink) && food_dur > 0.0 {
-                    // Mirror the client's BuffManager naming so the
-                    // client-side bar shows "Food: <name>" / "Drink:
-                    // <name>" after the BuffSnapshot lands.
-                    let prefix = if is_food { "Food" } else { "Drink" };
-                    if food_hp > 0.0 {
-                        let name = format!("{prefix}: {item_name}");
-                        apply_buff(
-                            conn,
-                            buffs::ActiveBuff::new_hot(name, food_hp, food_dur, now),
-                        );
-                        buffs_changed = true;
-                    }
-                    if food_mp > 0.0 {
-                        // Distinct name so the MP-regen leg doesn't
-                        // collide with the HP-regen entry under the
-                        // same key (apply_buff is keyed by name).
-                        let name = format!("{prefix} MP: {item_name}");
-                        apply_buff(
-                            conn,
-                            buffs::ActiveBuff::new_mp_regen(name, food_mp, food_dur, now),
-                        );
-                        buffs_changed = true;
-                    }
+                // An item eaten by hand feeds for half its size (EQ: "food
+                // lasts half as long if you click it"); there is no buff any
+                // more, a fed character simply regenerates.
+                if is_food && food_dur > 0.0 {
+                    hunger::feed(conn, hunger::Need::Food, food_dur * hunger::HAND_EAT_FRACTION);
+                    handlers::send_system_line(&mut server, owner_cid, &format!("You eat a {}.", item.name));
                 }
-                if buffs_changed {
-                    fan_out_server_buff_snapshot(
-                        &mut server,
-                        &in_world_recipients_now,
-                        conn,
-                    );
+                if is_drink && food_dur > 0.0 {
+                    hunger::feed(conn, hunger::Need::Drink, food_dur * hunger::HAND_EAT_FRACTION);
+                    handlers::send_system_line(&mut server, owner_cid, &format!("You drink a {}.", item.name));
                 }
                 tracing::info!(
                     owner = intent.owner,
@@ -10479,7 +10446,67 @@ pub async fn run(
         //     so a player in the lobby keeps regenerating between
         //     sessions, but only in_world peers receive the fan-outs.
         let mut regen_fanouts: Vec<u64> = Vec::new();
-        for conn in connections.values_mut().filter(|c| c.ready) {
+        for (client_id, conn) in connections.iter_mut().filter(|(_, c)| c.ready) {
+            // Food and water, the EQ way (`hunger.rs`): the counters run
+            // down for the living in the world, the stage lines are told
+            // once each, and a famished character eats the first food (or
+            // drinks the first drink) in slot order the tick it runs out.
+            // EQ checks about every 46 s; checking every tick only trims the
+            // lag, the rule is the same. The dead and the lobby do not drain.
+            if conn.in_world && conn.hp > 0.0 && !conn.death_processed {
+                // A character can log in hungry or out: say so once.
+                if !conn.appetite_announced {
+                    conn.appetite_announced = true;
+                    for line in hunger::current_stage_lines(conn) {
+                        handlers::send_system_line(&mut server, *client_id, line);
+                    }
+                }
+                let entered = hunger::drain(conn, dt);
+                // Eat before speaking: a character that runs out WITH bread in
+                // the bags eats this tick and is never told it is out of food.
+                let mut fed_now = [false, false];
+                for (i, need) in [hunger::Need::Food, hunger::Need::Drink].into_iter().enumerate() {
+                    if !hunger::is_famished(conn, need) {
+                        continue;
+                    }
+                    let Some((loc, slot, item)) = hunger::first_in_slot_order(&conn.inventory, need)
+                    else {
+                        continue;
+                    };
+                    if conn.inventory.decrement_at(&loc, slot).is_err() {
+                        continue;
+                    }
+                    conn.inventory_dirty = true;
+                    let (path, count) = match conn.inventory.peek_at(&loc, slot) {
+                        Some((p, c)) => (Some(p), c),
+                        None => (None, 0),
+                    };
+                    handlers::send_inventory_delta(&mut server, *client_id, loc.clone(), slot, path, count);
+                    let added = hunger::feed(conn, need, hunger::fullness_of(item));
+                    fed_now[i] = true;
+                    let verb = if need == hunger::Need::Food { "eat" } else { "drink" };
+                    handlers::send_system_line(
+                        &mut server,
+                        *client_id,
+                        &format!("You {verb} a {}.", item.name),
+                    );
+                    tracing::info!(
+                        char_id = conn.char_id,
+                        item = %item.path,
+                        %loc,
+                        slot,
+                        added_secs = added,
+                        "auto-{verb}: the first in slot order"
+                    );
+                }
+                for (need, stage, line) in entered {
+                    let i = if need == hunger::Need::Food { 0 } else { 1 };
+                    if stage == hunger::Stage::Out && fed_now[i] {
+                        continue;
+                    }
+                    handlers::send_system_line(&mut server, *client_id, line);
+                }
+            }
             let result = regen::tick_one(conn, dt, now);
             if result.hp_fanout || result.mp_fanout || result.stamina_fanout {
                 regen_fanouts.push(conn.char_id as u64);
@@ -10490,7 +10517,13 @@ pub async fn run(
             // `last_meditate_at`. `try_advance` returns None for classes that can't
             // train it (cap 0), and drives the sitting MP regen in regen.rs. Fans
             // a private SkillProgressUpdate on a gain so the client mirror keeps up.
-            if conn.mp < conn.max_mp && regen::sitting_bonus_applies(conn, now) {
+            // No water, no meditate: the skill-up rides mana regeneration,
+            // which a thirsty character does not have (the 2026-10-13 review
+            // found a seated caster out of water rolling advances for ever).
+            if conn.mp < conn.max_mp
+                && regen::sitting_bonus_applies(conn, now)
+                && regen::natural_regen_allowed(conn.hunger_secs, conn.thirst_secs).1
+            {
                 let due = conn
                     .last_meditate_at
                     .map_or(true, |t| now.duration_since(t) >= Duration::from_secs(6));

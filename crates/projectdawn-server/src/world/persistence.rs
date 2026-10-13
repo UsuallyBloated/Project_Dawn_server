@@ -48,6 +48,8 @@ pub async fn checkpoint_dirty(pool: &SqlitePool, conns: &mut [&mut PerConnection
                 conn.xp,
                 conn.xp_to_next,
                 conn.level,
+                conn.hunger_secs,
+                conn.thirst_secs,
             )
             .await
             {

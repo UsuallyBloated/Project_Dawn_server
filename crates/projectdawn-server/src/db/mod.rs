@@ -654,6 +654,9 @@ pub struct CharacterSpawn {
     /// character has never bound, and respawn falls back to the starter spawn.
     /// Coordinates and zone travel together: a bind is only meaningful with both.
     pub bind: Option<BindPoint>,
+    /// Food and water: seconds of fullness left (`world/hunger.rs`).
+    pub hunger: f32,
+    pub thirst: f32,
     /// Quest ids this character has already turned in (quests pay once, ever).
     /// Loaded into `PerConnection.completed_quests`; the tick loop consults it
     /// before granting a `CompleteQuest` reward.
@@ -667,6 +670,8 @@ pub struct CharacterSpawn {
 
 #[derive(FromRow)]
 struct SpawnRow {
+    hunger: f32,
+    thirst: f32,
     id: i64,
     account_id: i64,
     name: String,
@@ -720,7 +725,8 @@ pub async fn load_character(
                 hp, mp, stamina, platinum, gold, silver, copper,
                 bank_platinum, bank_gold, bank_silver, bank_copper,
                 zone, pos_x, pos_y, pos_z, yaw,
-                bind_zone, bind_x, bind_y, bind_z
+                bind_zone, bind_x, bind_y, bind_z,
+                hunger, thirst
          FROM characters
          WHERE id = ?1 AND deleted_at IS NULL",
     )
@@ -801,6 +807,8 @@ pub async fn load_character(
         max_hp: computed.max_hp,
         max_mp: computed.max_mp,
         max_stamina: computed.max_stamina,
+        hunger: row.hunger,
+        thirst: row.thirst,
         hp: row.hp.min(computed.max_hp),
         mp: row.mp.min(computed.max_mp),
         stamina: row.stamina.min(computed.max_stamina),
@@ -979,10 +987,13 @@ pub async fn checkpoint_resources(
     xp: i32,
     xp_to_next: i32,
     level: i32,
+    hunger: f32,
+    thirst: f32,
 ) -> AuthResult<()> {
     sqlx::query(
         "UPDATE characters
          SET hp = ?1, mp = ?2, stamina = ?3, xp = ?4, xp_to_next = ?5,
+             hunger = ?8, thirst = ?9,
              level = ?6
          WHERE id = ?7 AND deleted_at IS NULL",
     )
@@ -993,6 +1004,8 @@ pub async fn checkpoint_resources(
     .bind(xp_to_next)
     .bind(level)
     .bind(char_id)
+    .bind(hunger)
+    .bind(thirst)
     .execute(pool)
     .await?;
     Ok(())

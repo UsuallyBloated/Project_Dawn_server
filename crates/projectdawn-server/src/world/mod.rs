@@ -23,6 +23,7 @@ mod corpses;
 mod entity;
 mod groups;
 mod handlers;
+pub mod hunger;
 mod inventory;
 mod items;
 mod loot;

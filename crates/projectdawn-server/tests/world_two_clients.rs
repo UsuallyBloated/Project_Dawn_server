@@ -208,6 +208,18 @@ async fn read_char_appetite(db_url: &str, char_id: i64) -> (f32, f32) {
     row
 }
 
+/// How long past a cast bar's end a test releases the cast (or waits out the
+/// global cooldown). The server times a cast from when IT processed the
+/// CastStart and accepts the release from 100 ms before the bar's end
+/// (`CAST_TOLERANCE_MS`) to 2 s after it (`CAST_HOLD_GRACE_MS`); the test can
+/// only time from when it SENT the CastStart. A 200 ms margin left 300 ms
+/// for the server to process the start, which a loaded full suite overran
+/// (a_pet_stays_with_its_owner_after_gate, 2026-10-13: "not ready", no
+/// Teleport). One second sits mid-window: it absorbs a second of server lag
+/// and can never pass the 2 s hold limit, since the server's clock starts no
+/// earlier than the send.
+const CAST_RELEASE_MARGIN: Duration = Duration::from_millis(1_000);
+
 const BREAD: &str = "res://data/loot/items/bread_loaf.tres";
 
 struct WorldClient {
@@ -5918,7 +5930,7 @@ async fn a_pet_stays_with_its_owner_after_gate() {
     a.pump_for(Duration::from_millis(300)).await;
 
     a.send_cast_start("Summon Skeleton", 3.0);
-    a.pump_for(Duration::from_millis(3_200)).await;
+    a.pump_for(Duration::from_millis(3_000) + CAST_RELEASE_MARGIN).await;
     a.send_cast_spell("Summon Skeleton", None);
     let pet_spawn = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
@@ -5963,10 +5975,11 @@ async fn a_pet_stays_with_its_owner_after_gate() {
     assert!(engaged.is_some(), "the pet inherits the owner's target and closes on the dummy");
 
     // Gate home. The dummy cannot interrupt (no damage, no legs). The summon
-    // started the global cooldown; let it pass first.
-    a.pump_for(Duration::from_millis(2_100)).await;
+    // started the global cooldown; let it pass first, with the same margin,
+    // since the server starts that clock when IT accepts the summon.
+    a.pump_for(Duration::from_millis(2_000) + CAST_RELEASE_MARGIN).await;
     a.send_cast_start("Gate", 5.0);
-    a.pump_for(Duration::from_millis(5_200)).await;
+    a.pump_for(Duration::from_millis(5_000) + CAST_RELEASE_MARGIN).await;
     a.send_cast_spell("Gate", None);
     let tp = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| matches!(m, ServerWorldMsg::Teleport { .. }))

@@ -9,7 +9,7 @@
 //!
 //! Three things live here:
 //!   * **stat multipliers** applied at spawn (`hp_mult`, `damage_mult`,
-//!     `xp_mult`, plus a `level` override),
+//!     plus a `level` override; XP comes from the level alone),
 //!   * **enrage** config, fired once per life when HP crosses the threshold,
 //!   * **guaranteed / rare loot**, resolved at death.
 //!
@@ -49,8 +49,6 @@ pub struct NamedMob {
     pub hp_mult: f32,
     #[serde(default = "one_f32")]
     pub damage_mult: f32,
-    #[serde(default = "one_f32")]
-    pub xp_mult: f32,
     pub level: u32,
     /// Fraction of max HP at which enrage fires. `0.0` disables it.
     #[serde(default)]
@@ -162,7 +160,6 @@ mod tests {
         assert_eq!(m.full_name(), "Rotfang the Feared");
         assert_eq!(m.hp_mult, 3.5);
         assert_eq!(m.damage_mult, 1.8);
-        assert_eq!(m.xp_mult, 4.0);
         assert_eq!(m.level, 6);
         assert_eq!(m.enrage_threshold, 0.20);
         assert_eq!(m.guaranteed_loot.len(), 1);

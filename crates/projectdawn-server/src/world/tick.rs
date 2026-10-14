@@ -1925,6 +1925,9 @@ pub async fn run(
         // out in order — coalescing CastStart + CastComplete from the same
         // sender would silently drop a fast-cast complete.
         let mut cast_fanouts: Vec<(ClientId, CastEvent)> = Vec::new();
+        // Jumps begun this tick (the rising edge of a Move's `jumping`),
+        // relayed below to the players who can see each jumper.
+        let mut jump_fanouts: Vec<ClientId> = Vec::new();
         // Track 4 sub-task 3 — like resources, dedup per sender so a burst
         // of buff changes inside one tick produces a single fan-out.
         let mut buff_fanouts: Vec<ClientId> = Vec::new();
@@ -2138,6 +2141,7 @@ pub async fn run(
                                 },
                             ));
                         }
+                        Outcome::JumpFanOut => jump_fanouts.push(client_id),
                         Outcome::CastCompleteFanOut { spell_name } => {
                             cast_fanouts.push((
                                 client_id,
@@ -2880,6 +2884,29 @@ pub async fn run(
                 .copied()
                 .collect();
             handlers::fan_out_buff_snapshot(&mut server, &recipients, sender);
+        }
+
+        // 4b-jump. The jump relay: one PlayerJumped per jump begun this tick,
+        //     to the in-world players whose AOI cell can see the jumper (the
+        //     Say channel's reach), never to the jumper, whose own client
+        //     already played the hop. Position is untouched: the relay is
+        //     the peers' animation cue and nothing else.
+        for jumper_id in jump_fanouts.drain(..) {
+            if to_disconnect.contains(&jumper_id) {
+                continue;
+            }
+            let Some(jumper) = connections.get(&jumper_id) else {
+                continue;
+            };
+            let visible = aoi.entities_visible_from(jumper.aoi_cell);
+            let recipients: Vec<ClientId> = connections
+                .iter()
+                .filter(|(id, c)| {
+                    **id != jumper_id && c.in_world && visible.contains(&(c.char_id as u64))
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            handlers::fan_out_player_jumped(&mut server, &recipients, jumper.char_id as u64);
         }
 
         // 4c. Cast lifecycle fan-out — owning client → every other in_world

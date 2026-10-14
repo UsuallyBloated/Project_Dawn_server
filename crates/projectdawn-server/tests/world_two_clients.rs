@@ -290,6 +290,13 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_POSITION, &msg);
     }
 
+    /// A Move carrying the real `jumping` flag (the client sets it on the Move
+    /// after a jump begins).
+    fn send_move_jump(&mut self, sequence: u32, direction: Vec3, jumping: bool) {
+        let msg = ClientWorldMsg::Move { sequence, direction, jumping };
+        send_msg(&mut self.client, CHANNEL_POSITION, &msg);
+    }
+
     fn send_disconnect(&mut self) {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Disconnect);
     }
@@ -7829,4 +7836,71 @@ async fn looting_your_own_corpse_puts_your_gear_back_on() {
     assert_eq!(worn, vec![(2, CAP.to_string()), (3, ROBE.to_string())], "the database holds the gear as worn");
     a.send_disconnect();
     a.pump_for(Duration::from_millis(200)).await;
+}
+
+/// The jump relay (the "Remote players never show a jump" To-Do, cosmetic
+/// version). A watcher stands beside a jumper at the spawn. One Move with
+/// `jumping: true` reaches the watcher as exactly one PlayerJumped naming the
+/// jumper, and never reaches the jumper; a burst of ten alternating flags
+/// inside the half-second interval relays nothing more; an edge after the
+/// interval relays once more. The jumper's own Position keeps y at zero
+/// throughout: the flag animates peers and moves nobody.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_jump_reaches_the_players_nearby_once_and_moves_nobody() {
+    let h = start_both().await;
+    let (j_session, j_char_id, _) =
+        provision_client(&h.auth_url, "jumper", "Hoppy", "Human", "Warrior").await;
+    let (w_session, w_char_id, _) =
+        provision_client(&h.auth_url, "jumpwatch", "Seeson", "Human", "Warrior").await;
+    let j_token = request_world_token(&h.auth_url, &j_session, j_char_id).await;
+    let mut j = WorldClient::start(j_token, &j_session, j_char_id).await;
+    let w_token = request_world_token(&h.auth_url, &w_session, w_char_id).await;
+    let mut w = WorldClient::start(w_token, &w_session, w_char_id).await;
+    pump_both_for(&mut j, &mut w, Duration::from_millis(400)).await;
+    // Drain what entering fanned, so the counts below are the jumps only.
+    let _ = collect_system(&mut w, Duration::from_millis(200)).await;
+    let _ = collect_system(&mut j, Duration::from_millis(200)).await;
+    let still = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    let jumps_in = |msgs: &[ServerWorldMsg]| {
+        msgs.iter()
+            .filter(|m| matches!(m, ServerWorldMsg::PlayerJumped { id } if *id == j_char_id as u64))
+            .count()
+    };
+
+    // One jump, then a forged burst of ten alternating flags inside the
+    // half-second interval (about 200 ms): exactly one relay in all.
+    j.send_move_jump(1, still, true);
+    for i in 2..12u32 {
+        j.send_move_jump(i, still, i % 2 == 0);
+        tick_one(&mut j.client, &mut j.transport);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (w_msgs, j_msgs) = tokio::join!(
+        collect_system(&mut w, Duration::from_millis(600)),
+        collect_system(&mut j, Duration::from_millis(600)),
+    );
+    assert_eq!(jumps_in(&w_msgs), 1, "the watcher sees one jump; the burst inside the interval adds none");
+    assert_eq!(jumps_in(&j_msgs), 0, "the jumper is not told about their own jump");
+
+    // Past the interval, the next edge relays again.
+    pump_both_for(&mut j, &mut w, Duration::from_millis(400)).await;
+    j.send_move_jump(20, still, false);
+    tick_one(&mut j.client, &mut j.transport);
+    tokio::time::sleep(TICK_DT).await;
+    j.send_move_jump(21, still, true);
+    let (w_msgs, _) = tokio::join!(
+        collect_system(&mut w, Duration::from_millis(600)),
+        collect_system(&mut j, Duration::from_millis(600)),
+    );
+    assert_eq!(jumps_in(&w_msgs), 1, "a jump after the interval relays once more");
+
+    // Nobody moved for any of it: the jumper's own Position keeps y at zero.
+    j.send_move(30, still);
+    let pos = own_position(&mut j, j_char_id).await.expect("the jumper's own Position");
+    assert!(pos.y.abs() < 1e-3, "the server never lifts anyone for a jump: y = {}", pos.y);
+
+    j.send_disconnect();
+    w.send_disconnect();
+    j.pump_for(Duration::from_millis(200)).await;
+    w.pump_for(Duration::from_millis(200)).await;
 }

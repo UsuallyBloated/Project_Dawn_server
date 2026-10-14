@@ -113,6 +113,11 @@ pub const ENEMY_FAN_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 pub const STARTER_SPAWN: connection::Vec3f = connection::Vec3f::ZERO;
 
 pub const MAX_MOVE_SPEED: f32 = 7.5;
+/// The least time between two relayed jumps from one player. An honest
+/// client cannot jump again until it lands (0.7 s at its 7 m/s and 20 m/s²),
+/// so this never clips a real jump, and it caps what a forged stream of
+/// `jumping` flags can make peers' screens draw.
+pub const JUMP_RELAY_MIN_INTERVAL: Duration = Duration::from_millis(500);
 /// How long we keep integrating the last received direction after the
 /// most recent Move message. Beyond this window, the connection is
 /// treated as idle and integration stops — protects against a crashed

@@ -135,7 +135,9 @@ use serde::{Deserialize, Serialize};
 /// id the new one takes over and the client keeps its target (EQ's one
 /// entity throughout). And it appends `HungerUpdate` after `TradeClosed`,
 /// the owner's food and water counters for the hunger window
-/// (docs/design/food_and_water.md section 8).
+/// (docs/design/food_and_water.md section 8), then `PlayerJumped` after
+/// that: the one-shot a client's real `Move.jumping` flag becomes for the
+/// players who can see the jumper, so a jump no longer reads as a slide.
 pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3238; // "PD_W0028"
 
 pub type EntityId = u64;
@@ -1562,6 +1564,15 @@ pub enum ServerWorldMsg {
         thirst_secs: f32,
         cap_secs: f32,
         drain_per_sec: f32,
+    },
+    /// A player began a jump: the rising edge of `Move.jumping`, relayed
+    /// once to the players who can see them (never back to the jumper), at
+    /// most once per `JUMP_RELAY_MIN_INTERVAL`. Cosmetic only: each client
+    /// plays its own hop on the jumper's body, and the server never moves
+    /// anyone for it (XZ stays the server's, Y stays zero), so a forged
+    /// flag can make a player look silly and nothing more.
+    PlayerJumped {
+        id: EntityId,
     },
 }
 

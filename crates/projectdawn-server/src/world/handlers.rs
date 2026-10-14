@@ -43,6 +43,10 @@ pub enum Outcome {
     CastFailFanOut {
         reason: String,
     },
+    /// The owning client's Move carried a jump's rising edge
+    /// (`PerConnection::note_move_jump`). The tick loop fans one
+    /// `PlayerJumped` to the players who can see the jumper.
+    JumpFanOut,
     /// Track 4 sub-task 3 — owning client broadcast a fresh buff snapshot.
     /// Cache updated on `conn`; tick loop fans out to in_world peers in
     /// a post-dispatch sweep, deduped per sender like resources.
@@ -598,7 +602,7 @@ pub fn handle_message(
         ClientWorldMsg::Move {
             sequence,
             direction,
-            jumping: _,
+            jumping,
         } => {
             // Death lock: a dead player stays put. Without this you could walk
             // your corpse around during the respawn countdown, and worse, keep
@@ -656,7 +660,14 @@ pub fn handle_message(
             // loop multiplies by MAX_MOVE_SPEED × TICK_DT.
             conn.latest_direction = dir_v;
             conn.last_move_received = Some(now);
-            Outcome::Continue
+            // The jump is cosmetic and separate from the direction: it is
+            // relayed as a one-shot for peers to animate, and nothing here
+            // reads it into `pos` (Y stays the server's zero).
+            if conn.note_move_jump(jumping, now) {
+                Outcome::JumpFanOut
+            } else {
+                Outcome::Continue
+            }
         }
 
         ClientWorldMsg::CastStartBroadcast { spell_name, duration } => {
@@ -2404,6 +2415,19 @@ pub fn fan_out_cast_start(
         spell_name,
         duration,
     };
+    let Some(bytes) = encode(&msg) else { return };
+    for recipient in recipients {
+        server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+/// A jump's one-shot to the players who can see the jumper (the jumper is
+/// not among `recipients`; their own client already played the hop).
+pub fn fan_out_player_jumped(server: &mut RenetServer, recipients: &[ClientId], id: u64) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::PlayerJumped { id };
     let Some(bytes) = encode(&msg) else { return };
     for recipient in recipients {
         server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());

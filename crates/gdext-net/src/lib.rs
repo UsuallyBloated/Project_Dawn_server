@@ -339,6 +339,11 @@ impl NetClient {
     #[signal]
     fn hunger_update(hunger_secs: f64, thirst_secs: f64, cap_secs: f64, drain_per_sec: f64);
 
+    /// A player you can see began a jump (never your own). The client
+    /// plays a hop on that body; the server moves nobody for it.
+    #[signal]
+    fn player_jumped(id: i64);
+
     /// Track 5 sub-task 4 — private confirmation that the local
     /// player's LootItem / LootAll intent landed and the server has
     /// transferred `count` of `item_path` into our inventory. The
@@ -1679,6 +1684,9 @@ enum Incoming {
         cap_secs: f32,
         drain_per_sec: f32,
     },
+    PlayerJumped {
+        id: i64,
+    },
     LootGranted {
         item_path: String,
         count: u32,
@@ -2325,6 +2333,9 @@ impl NetClient {
                     self.base_mut()
                         .emit_signal("time_of_day", &[(hour as f64).to_variant()]);
                 }
+                Incoming::PlayerJumped { id } => {
+                    self.base_mut().emit_signal("player_jumped", &[id.to_variant()]);
+                }
                 Incoming::HungerUpdate { hunger_secs, thirst_secs, cap_secs, drain_per_sec } => {
                     self.base_mut().emit_signal(
                         "hunger_update",
@@ -2858,6 +2869,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
         ServerWorldMsg::HungerUpdate { hunger_secs, thirst_secs, cap_secs, drain_per_sec } => {
             Incoming::HungerUpdate { hunger_secs, thirst_secs, cap_secs, drain_per_sec }
         }
+        ServerWorldMsg::PlayerJumped { id } => Incoming::PlayerJumped { id: id as i64 },
         ServerWorldMsg::LootGranted { item_path, count } => Incoming::LootGranted {
             item_path,
             count,

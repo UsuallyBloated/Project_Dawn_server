@@ -1099,7 +1099,8 @@ pub struct CorpseRow {
     pub zone: String,
     pub pos: (f32, f32, f32),
     pub coins: protocol::world::Coins,
-    pub items: Vec<(String, u32)>,
+    /// (item_path, count, the equipment slot it was worn in or None).
+    pub items: Vec<(String, u32, Option<u8>)>,
     pub lost_xp: i32,
     pub resurrected: bool,
 }
@@ -1125,7 +1126,8 @@ struct CorpseHeaderRow {
 /// live inventory is cleared, so a crash between this commit and the clear
 /// leaves the gear on the corpse (recoverable) rather than vaporizing it.
 /// `corpse_id` is the minted EntityId (loot-bag id partition); `items` are
-/// flat (item_path, count) stacks.
+/// flat (item_path, count, worn slot) stacks, the slot `None` for anything
+/// that was carried (`PlayerInventory::corpse_stacks`).
 pub async fn save_corpse(
     pool: &SqlitePool,
     corpse_id: i64,
@@ -1134,7 +1136,7 @@ pub async fn save_corpse(
     zone: &str,
     pos: (f32, f32, f32),
     coins: protocol::world::Coins,
-    items: &[(String, u32)],
+    items: &[(String, u32, Option<u8>)],
     lost_xp: i32,
     strip_owner: bool,
 ) -> AuthResult<()> {
@@ -1165,15 +1167,16 @@ pub async fn save_corpse(
     .bind(lost_xp as i64)
     .execute(&mut *tx)
     .await?;
-    for (slot, (item_path, count)) in items.iter().enumerate() {
+    for (slot, (item_path, count, worn)) in items.iter().enumerate() {
         sqlx::query(
-            "INSERT INTO corpse_items (corpse_id, slot, item_path, count)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO corpse_items (corpse_id, slot, item_path, count, equip_slot)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .bind(corpse_id)
         .bind(slot as i64)
         .bind(item_path)
         .bind(*count as i64)
+        .bind(worn.map(|s| s as i64))
         .execute(&mut *tx)
         .await?;
     }
@@ -1215,8 +1218,8 @@ pub async fn load_corpses(pool: &SqlitePool) -> AuthResult<Vec<CorpseRow>> {
     .await?;
     let mut out = Vec::with_capacity(headers.len());
     for h in headers {
-        let items: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT item_path, count FROM corpse_items WHERE corpse_id = ?1 ORDER BY slot",
+        let items: Vec<(String, i64, Option<i64>)> = sqlx::query_as(
+            "SELECT item_path, count, equip_slot FROM corpse_items WHERE corpse_id = ?1 ORDER BY slot",
         )
         .bind(h.corpse_id)
         .fetch_all(pool)
@@ -1233,7 +1236,11 @@ pub async fn load_corpses(pool: &SqlitePool) -> AuthResult<Vec<CorpseRow>> {
                 silver: h.silver,
                 copper: h.copper,
             },
-            items: items.into_iter().map(|(p, n)| (p, n as u32)).collect(),
+            // A slot outside the paperdoll (a corrupted row) reads as carried.
+            items: items
+                .into_iter()
+                .map(|(p, n, w)| (p, n as u32, w.and_then(|s| u8::try_from(s).ok())))
+                .collect(),
             lost_xp: h.lost_xp as i32,
             resurrected: h.resurrected != 0,
         });
@@ -1283,7 +1290,7 @@ pub async fn apply_corpse_loot(
     inv_rows: &[InventoryRow],
     looter_coins: protocol::world::Coins,
     corpse_id: i64,
-    corpse_items: &[(String, u32)],
+    corpse_items: &[(String, u32, Option<u8>)],
     corpse_coins: protocol::world::Coins,
     delete_corpse: bool,
 ) -> AuthResult<()> {
@@ -1328,15 +1335,16 @@ pub async fn apply_corpse_loot(
             .execute(&mut *tx)
             .await?;
     } else {
-        for (slot, (item_path, count)) in corpse_items.iter().enumerate() {
+        for (slot, (item_path, count, worn)) in corpse_items.iter().enumerate() {
             sqlx::query(
-                "INSERT INTO corpse_items (corpse_id, slot, item_path, count)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO corpse_items (corpse_id, slot, item_path, count, equip_slot)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
             )
             .bind(corpse_id)
             .bind(slot as i64)
             .bind(item_path)
             .bind(*count as i64)
+            .bind(worn.map(|s| s as i64))
             .execute(&mut *tx)
             .await?;
         }
@@ -2061,8 +2069,8 @@ mod corpse_loot_tests {
             (1.0, 0.0, 2.0),
             protocol::world::Coins::from_copper(50),
             &[
-                ("res://items/sword.tres".to_string(), 1),
-                ("res://items/shield.tres".to_string(), 1),
+                ("res://items/sword.tres".to_string(), 1, Some(0)),
+                ("res://items/shield.tres".to_string(), 1, None),
             ],
             0,     // lost_xp
             false, // strip_owner: tests exercise corpse creation only
@@ -2090,7 +2098,7 @@ mod corpse_loot_tests {
             &inv_rows,
             protocol::world::Coins::from_copper(50),
             corpse_id,
-            &[("res://items/shield.tres".to_string(), 1)],
+            &[("res://items/shield.tres".to_string(), 1, Some(1))],
             protocol::world::Coins::ZERO,
             false, // partial -> keep the corpse
         )
@@ -2106,7 +2114,9 @@ mod corpse_loot_tests {
         // Corpse still exists, holding only the shield, its coins zeroed.
         let corpses = load_corpses(&pool).await.expect("corpses");
         assert_eq!(corpses.len(), 1);
-        assert_eq!(corpses[0].items, vec![("res://items/shield.tres".to_string(), 1)]);
+        // The worn slot survives a partial loot, so a later loot can still
+        // put the shield back on (corpse auto-re-equip).
+        assert_eq!(corpses[0].items, vec![("res://items/shield.tres".to_string(), 1, Some(1))]);
         assert_eq!(corpses[0].coins, protocol::world::Coins::ZERO);
     }
 
@@ -2209,8 +2219,8 @@ mod corpse_loot_tests {
             (0.0, 0.0, 0.0),
             protocol::world::Coins::from_copper(1234),
             &[
-                ("res://items/sword.tres".to_string(), 1),
-                ("res://items/shield.tres".to_string(), 1),
+                ("res://items/sword.tres".to_string(), 1, None),
+                ("res://items/shield.tres".to_string(), 1, None),
             ],
             0,
             true, // strip_owner
@@ -2262,7 +2272,7 @@ mod corpse_loot_tests {
             "test_zone",
             (3.0, 0.0, 4.0),
             protocol::world::Coins::ZERO,
-            &[("res://items/staff.tres".to_string(), 1)],
+            &[("res://items/staff.tres".to_string(), 1, Some(0))],
             500,   // lost_xp
             false, // strip_owner: tests exercise corpse creation only
         )

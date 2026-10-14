@@ -133,7 +133,9 @@ use serde::{Deserialize, Serialize};
 /// The same bump also gives `EnemySpawn` and `PetSpawn` a trailing
 /// `replaces: Option<EntityId>`, so a charm landing or ending can say which
 /// id the new one takes over and the client keeps its target (EQ's one
-/// entity throughout).
+/// entity throughout). And it appends `HungerUpdate` after `TradeClosed`,
+/// the owner's food and water counters for the hunger window
+/// (docs/design/food_and_water.md section 8).
 pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3238; // "PD_W0028"
 
 pub type EntityId = u64;
@@ -1547,6 +1549,19 @@ pub enum ServerWorldMsg {
     TradeClosed {
         committed: bool,
         reason: String,
+    },
+    /// Food and water, the hunger window: the owner's two counters in
+    /// seconds of fullness, the cap, and how many counter-seconds run off per
+    /// real second right now (the race's rate while alive in the world, 0
+    /// while dead). To the owner ONLY: on entering the world, after any eat
+    /// or drink, on a stage change, on death and on respawn, and otherwise
+    /// about once a minute. The client runs its bars down between sends; the
+    /// bars are a picture, the server's regen gate is the rule.
+    HungerUpdate {
+        hunger_secs: f32,
+        thirst_secs: f32,
+        cap_secs: f32,
+        drain_per_sec: f32,
     },
 }
 

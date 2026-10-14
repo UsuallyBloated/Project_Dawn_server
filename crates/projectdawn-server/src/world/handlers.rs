@@ -2671,6 +2671,20 @@ pub fn fan_out_time_of_day(server: &mut RenetServer, recipients: &[ClientId], ho
 /// client. Vendor BuyItem / SellItem use this after mutating
 /// `conn.coins`. Carries the full four-tier `Coins` wallet
 /// (`ServerWorldMsg::CoinsUpdate`); gdext-net re-emits it as four ints.
+/// The hunger window's feed, to its owner only (`hunger::update_due` says
+/// when). Never fanned: another player's appetite is nobody else's business.
+pub fn send_hunger_update(server: &mut RenetServer, client_id: ClientId, conn: &PerConnection) {
+    let msg = ServerWorldMsg::HungerUpdate {
+        hunger_secs: conn.hunger_secs,
+        thirst_secs: conn.thirst_secs,
+        cap_secs: super::hunger::FULLNESS_CAP_SECS,
+        drain_per_sec: super::hunger::drain_rate_now(conn),
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(client_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
 pub fn send_coins_update(server: &mut RenetServer, client_id: ClientId, coins: Coins) {
     let msg = ServerWorldMsg::CoinsUpdate { coins };
     if let Some(bytes) = encode(&msg) {

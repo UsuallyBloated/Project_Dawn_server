@@ -7451,3 +7451,104 @@ async fn hand_eating_is_refused_when_full_and_halved_when_early() {
         "half a meal was added: {hunger}"
     );
 }
+
+/// Every system-channel message `c` receives over `d`, decoded, pumping the
+/// transport the whole time.
+async fn collect_system(c: &mut WorldClient, d: Duration) -> Vec<ServerWorldMsg> {
+    let end = Instant::now() + d;
+    let mut out = Vec::new();
+    while Instant::now() < end {
+        tick_one(&mut c.client, &mut c.transport);
+        while let Some(bytes) = c.client.receive_message(CHANNEL_SYSTEM) {
+            if let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
+                out.push(msg);
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    out
+}
+
+/// The hunger window (food design section 8). A watcher stands at the spawn;
+/// a starving Halfling with bread enters beside them and eats on its first
+/// tick. The Halfling's own HungerUpdate carries the meal (about 2880 s),
+/// thirst still full, the cap, and the Halfling rate of 2.0; the watcher
+/// hears EQ's "Chomp, chomp, chomp..." naming the eater and the bread, and
+/// never receives the Halfling's counters (owner only: the watcher's own
+/// updates all read full). The eater gets "You eat a Bread Loaf." and not
+/// the emote.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hunger_window_reaches_its_owner_and_the_room_hears_the_meal() {
+    let h = start_both().await;
+    let (w_session, w_char_id, _) =
+        provision_client(&h.auth_url, "watcher", "Lookon", "Human", "Warrior").await;
+    let (e_session, e_char_id, _) =
+        provision_client(&h.auth_url, "muncher", "Munchkin", "Halfling", "Rogue").await;
+    set_char_appetite(&h.db_url, e_char_id, 0.0, hunger_cap(), None).await;
+    give_char_item(&h.db_url, e_char_id, "base", 0, BREAD, 1).await;
+
+    let w_token = request_world_token(&h.auth_url, &w_session, w_char_id).await;
+    let mut w = WorldClient::start(w_token, &w_session, w_char_id).await;
+    let w_first = collect_system(&mut w, Duration::from_millis(500)).await;
+    assert!(
+        w_first.iter().any(|m| matches!(m, ServerWorldMsg::HungerUpdate { hunger_secs, drain_per_sec, .. }
+            if *hunger_secs > hunger_cap() - 5.0 && (*drain_per_sec - 1.0).abs() < 1e-6)),
+        "the watcher's own update arrives on entering: full, at the Human rate"
+    );
+
+    w.send_heartbeat();
+    let e_token = request_world_token(&h.auth_url, &e_session, e_char_id).await;
+    let mut e = WorldClient::start(e_token, &e_session, e_char_id).await;
+    let (e_msgs, w_msgs) = tokio::join!(
+        collect_system(&mut e, Duration::from_secs(2)),
+        collect_system(&mut w, Duration::from_secs(2)),
+    );
+
+    let update = e_msgs
+        .iter()
+        .find_map(|m| match m {
+            ServerWorldMsg::HungerUpdate { hunger_secs, thirst_secs, cap_secs, drain_per_sec } => {
+                Some((*hunger_secs, *thirst_secs, *cap_secs, *drain_per_sec))
+            }
+            _ => None,
+        })
+        .expect("the eater gets a HungerUpdate on entering");
+    let (hunger, thirst, cap, rate) = update;
+    assert!(hunger > 2880.0 - 30.0 && hunger <= 2880.0, "the update carries the meal just eaten: {hunger}");
+    assert!(thirst > cap - 30.0, "thirst still full: {thirst}");
+    assert_eq!(cap, hunger_cap(), "the cap");
+    assert!((rate - 2.0).abs() < 1e-6, "a living Halfling drains at twice the Human rate: {rate}");
+    assert!(
+        e_msgs.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "You eat a Bread Loaf.")),
+        "the eater is told what it ate"
+    );
+    assert!(
+        !e_msgs.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("Chomp"))),
+        "the eater does not get the emote about itself"
+    );
+
+    assert!(
+        w_msgs.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+            if text == "Chomp, chomp, chomp... Munchkin takes a bite from a Bread Loaf.")),
+        "the watcher beside the eater hears EQ's emote"
+    );
+    for m in w_msgs.iter().chain(w_first.iter()) {
+        if let ServerWorldMsg::HungerUpdate { hunger_secs, .. } = m {
+            assert!(
+                *hunger_secs > hunger_cap() - 60.0,
+                "the watcher only ever receives its own counters, never the eater's ({hunger_secs})"
+            );
+        }
+    }
+
+    e.send_disconnect();
+    w.send_disconnect();
+    e.pump_for(Duration::from_millis(200)).await;
+    w.pump_for(Duration::from_millis(200)).await;
+}
+
+fn hunger_cap() -> f32 {
+    projectdawn_server::world::hunger::FULLNESS_CAP_SECS
+}

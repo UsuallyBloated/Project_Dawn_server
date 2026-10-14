@@ -160,6 +160,14 @@ pub struct PerConnection {
     /// Whether the character has been told the stage it logged in at (a
     /// character can arrive hungry or out; `drain` reports transitions only).
     pub appetite_announced: bool,
+    /// The hunger window's feed (`hunger::update_due`): set when a counter
+    /// jumps (an eat, a drink) or crosses a stage, so the next regen step
+    /// sends a `HungerUpdate` instead of waiting out the minute.
+    pub hunger_dirty: bool,
+    /// When the last `HungerUpdate` went to this client, and the drain rate
+    /// it carried (a change of rate, death or respawn, is a reason to send).
+    pub hunger_sent_at: Option<Instant>,
+    pub hunger_rate_sent: f32,
     /// Set after the application-layer Connect handshake completes. Until
     /// then we won't broadcast positions to this client.
     pub ready: bool,
@@ -559,6 +567,9 @@ impl PerConnection {
             last_persisted_hunger: spawn.hunger,
             last_persisted_thirst: spawn.thirst,
             appetite_announced: false,
+            hunger_dirty: true,
+            hunger_sent_at: None,
+            hunger_rate_sent: -1.0,
             last_persisted_xp: spawn.xp,
             last_persisted_level: spawn.level,
             ready: false,

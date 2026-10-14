@@ -7675,6 +7675,10 @@ pub async fn run(
         //      effect (heal-on-use / food / drink) via the buff
         //      pipeline, fans `HealthUpdate` / `ManaUpdate` /
         //      `BuffSnapshot` as needed.
+        // EQ's eating emote for the people near anyone who eats or drinks
+        // this tick (by hand here, on their own at the regen step), fanned
+        // once both steps have run.
+        let mut eat_emotes: Vec<(ClientId, String)> = Vec::new();
         if !use_consumable_intents.is_empty() {
             for intent in use_consumable_intents.drain(..) {
                 let owner_cid = intent.owner as ClientId;
@@ -7805,10 +7809,12 @@ pub async fn run(
                 if is_food && food_dur > 0.0 {
                     hunger::feed(conn, hunger::Need::Food, food_dur * hunger::HAND_EAT_FRACTION);
                     handlers::send_system_line(&mut server, owner_cid, &format!("You eat a {}.", item.name));
+                    eat_emotes.push((owner_cid, hunger::eat_emote(&conn.name, &item.name, hunger::Need::Food)));
                 }
                 if is_drink && food_dur > 0.0 {
                     hunger::feed(conn, hunger::Need::Drink, food_dur * hunger::HAND_EAT_FRACTION);
                     handlers::send_system_line(&mut server, owner_cid, &format!("You drink a {}.", item.name));
+                    eat_emotes.push((owner_cid, hunger::eat_emote(&conn.name, &item.name, hunger::Need::Drink)));
                 }
                 tracing::info!(
                     owner = intent.owner,
@@ -11142,6 +11148,7 @@ pub async fn run(
                     handlers::send_inventory_delta(&mut server, *client_id, loc.clone(), slot, path, count);
                     let added = hunger::feed(conn, need, hunger::fullness_of(item));
                     fed_now[i] = true;
+                    eat_emotes.push((*client_id, hunger::eat_emote(&conn.name, &item.name, need)));
                     let verb = if need == hunger::Need::Food { "eat" } else { "drink" };
                     handlers::send_system_line(
                         &mut server,
@@ -11164,6 +11171,12 @@ pub async fn run(
                     }
                     handlers::send_system_line(&mut server, *client_id, line);
                 }
+            }
+            // The hunger window: to the owner, on each reason `update_due`
+            // knows (dead or alive, so a death stops the bars).
+            if conn.in_world && hunger::update_due(conn, now) {
+                handlers::send_hunger_update(&mut server, *client_id, conn);
+                hunger::mark_sent(conn, now);
             }
             let result = regen::tick_one(conn, dt, now);
             if result.hp_fanout || result.mp_fanout || result.stamina_fanout {
@@ -11201,6 +11214,28 @@ pub async fn run(
                     }
                 }
             }
+        }
+        // EQ's eating emote, to the people who could hear the eater say
+        // something (the say channel's reach), never to the eater.
+        for (eater_cid, text) in eat_emotes.drain(..) {
+            let Some(eater) = connections.get(&eater_cid) else {
+                continue;
+            };
+            let visible = aoi.entities_visible_from(eater.aoi_cell);
+            let recipients: Vec<ClientId> = connections
+                .iter()
+                .filter(|(id, c)| {
+                    **id != eater_cid && c.in_world && visible.contains(&(c.char_id as u64))
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            handlers::fan_out_chat_message(
+                &mut server,
+                &recipients,
+                "",
+                protocol::world::ChatChannel::System,
+                &text,
+            );
         }
         if !regen_fanouts.is_empty() {
             let recipients: Vec<ClientId> = connections

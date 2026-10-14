@@ -331,6 +331,14 @@ impl NetClient {
     #[signal]
     fn time_of_day(hour: f64);
 
+    /// The hunger window: the local player's food and water counters in
+    /// seconds of fullness, the cap, and the drain per real second right
+    /// now (0 while dead). Sent on entering the world, after any eat or
+    /// drink, on a stage change, on death and respawn, and about once a
+    /// minute; the client runs the bars down between sends.
+    #[signal]
+    fn hunger_update(hunger_secs: f64, thirst_secs: f64, cap_secs: f64, drain_per_sec: f64);
+
     /// Track 5 sub-task 4 — private confirmation that the local
     /// player's LootItem / LootAll intent landed and the server has
     /// transferred `count` of `item_path` into our inventory. The
@@ -1665,6 +1673,12 @@ enum Incoming {
     TimeOfDay {
         hour: f32,
     },
+    HungerUpdate {
+        hunger_secs: f32,
+        thirst_secs: f32,
+        cap_secs: f32,
+        drain_per_sec: f32,
+    },
     LootGranted {
         item_path: String,
         count: u32,
@@ -2311,6 +2325,17 @@ impl NetClient {
                     self.base_mut()
                         .emit_signal("time_of_day", &[(hour as f64).to_variant()]);
                 }
+                Incoming::HungerUpdate { hunger_secs, thirst_secs, cap_secs, drain_per_sec } => {
+                    self.base_mut().emit_signal(
+                        "hunger_update",
+                        &[
+                            (hunger_secs as f64).to_variant(),
+                            (thirst_secs as f64).to_variant(),
+                            (cap_secs as f64).to_variant(),
+                            (drain_per_sec as f64).to_variant(),
+                        ],
+                    );
+                }
                 Incoming::LootGranted { item_path, count } => {
                     self.base_mut().emit_signal(
                         "loot_granted",
@@ -2830,6 +2855,9 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
         },
         ServerWorldMsg::Teleport { pos } => Incoming::Teleport { pos },
         ServerWorldMsg::TimeOfDay { hour } => Incoming::TimeOfDay { hour },
+        ServerWorldMsg::HungerUpdate { hunger_secs, thirst_secs, cap_secs, drain_per_sec } => {
+            Incoming::HungerUpdate { hunger_secs, thirst_secs, cap_secs, drain_per_sec }
+        }
         ServerWorldMsg::LootGranted { item_path, count } => Incoming::LootGranted {
             item_path,
             count,

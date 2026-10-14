@@ -389,6 +389,18 @@ async fn read_char_appetite(db_url: &str, char_id: i64) -> (f32, f32) {
     row
 }
 
+/// How long past a cast bar's end a test releases the cast (or waits out the
+/// global cooldown). The server times a cast from when IT processed the
+/// CastStart and accepts the release from 100 ms before the bar's end
+/// (`CAST_TOLERANCE_MS`) to 2 s after it (`CAST_HOLD_GRACE_MS`); the test can
+/// only time from when it SENT the CastStart. A 200 ms margin left 300 ms
+/// for the server to process the start, which a loaded full suite overran
+/// (a_pet_stays_with_its_owner_after_gate, 2026-10-13: "not ready", no
+/// Teleport). One second sits mid-window: it absorbs a second of server lag
+/// and can never pass the 2 s hold limit, since the server's clock starts no
+/// earlier than the send.
+const CAST_RELEASE_MARGIN: Duration = Duration::from_millis(1_000);
+
 const BREAD: &str = "res://data/loot/items/bread_loaf.tres";
 
 struct WorldClient {
@@ -6099,7 +6111,7 @@ async fn a_pet_stays_with_its_owner_after_gate() {
     a.pump_for(Duration::from_millis(300)).await;
 
     a.send_cast_start("Summon Skeleton", 3.0);
-    a.pump_for(Duration::from_millis(3_200)).await;
+    a.pump_for(Duration::from_millis(3_000) + CAST_RELEASE_MARGIN).await;
     a.send_cast_spell("Summon Skeleton", None);
     let pet_spawn = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
@@ -6144,10 +6156,11 @@ async fn a_pet_stays_with_its_owner_after_gate() {
     assert!(engaged.is_some(), "the pet inherits the owner's target and closes on the dummy");
 
     // Gate home. The dummy cannot interrupt (no damage, no legs). The summon
-    // started the global cooldown; let it pass first.
-    a.pump_for(Duration::from_millis(2_100)).await;
+    // started the global cooldown; let it pass first, with the same margin,
+    // since the server starts that clock when IT accepts the summon.
+    a.pump_for(Duration::from_millis(2_000) + CAST_RELEASE_MARGIN).await;
     a.send_cast_start("Gate", 5.0);
-    a.pump_for(Duration::from_millis(5_200)).await;
+    a.pump_for(Duration::from_millis(5_000) + CAST_RELEASE_MARGIN).await;
     a.send_cast_spell("Gate", None);
     let tp = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| matches!(m, ServerWorldMsg::Teleport { .. }))
@@ -7118,4 +7131,90 @@ async fn an_unclean_drop_refuses_relogin_until_the_body_is_reaped() {
     b.send_disconnect();
     b.pump_for(Duration::from_millis(300)).await;
     drop(b);
+}
+
+/// Corpse auto-re-equip (the cursor epic's slice 2). A Warrior wearing a
+/// cloth cap (head, slot 2) and a cloth robe (chest, slot 3) and carrying
+/// bread dies, respawns, and loots the corpse: the cap and robe go straight
+/// back onto slots 2 and 3 (an InventoryDelta to "equip" for each, the
+/// client's ordinary equip path), the bread goes to a base slot, and the
+/// worn rows are what the database holds afterwards. On the previous code all
+/// three landed in the bags.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn looting_your_own_corpse_puts_your_gear_back_on() {
+    const CAP: &str = "res://data/loot/items/cloth_cap.tres";
+    const ROBE: &str = "res://data/loot/items/cloth_robe.tres";
+    let h = start_both().await;
+    let (session, char_id, _) =
+        provision_client(&h.auth_url, "rewear", "Rewear", "Human", "Warrior").await;
+    give_char_item(&h.db_url, char_id, "equip", 2, CAP, 1).await;
+    give_char_item(&h.db_url, char_id, "equip", 3, ROBE, 1).await;
+    give_char_item(&h.db_url, char_id, "base", 0, BREAD, 2).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "rewear", true).await.expect("set is_gm");
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    a.send_damage_self(1_000_000);
+    let contents = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::CorpseContents { .. })
+        })
+        .await
+        .expect("dying leaves a corpse and its owner is told what is on it");
+    let ServerWorldMsg::CorpseContents { corpse_id, items, .. } = contents else {
+        unreachable!()
+    };
+    assert_eq!(items.len(), 3, "cap, robe and bread are on the corpse: {items:?}");
+    assert_eq!(items[0].0, CAP, "worn gear first on the corpse, in paperdoll order");
+    assert_eq!(items[1].0, ROBE);
+
+    a.send_respawn();
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| matches!(m, ServerWorldMsg::Teleport { .. }))
+        .await
+        .expect("respawned at the bind, beside the corpse");
+
+    a.send_loot_all(corpse_id);
+    let mut msgs = Vec::new();
+    let end = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < end {
+        tick_one(&mut a.client, &mut a.transport);
+        while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
+            if let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
+                msgs.push(msg);
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    let equip_delta = |slot: u32, path: &str| {
+        msgs.iter().any(|m| matches!(m, ServerWorldMsg::InventoryDelta { location, slot: s, item_path: Some(p), .. }
+            if location == "equip" && *s == slot && p == path))
+    };
+    assert!(equip_delta(2, CAP), "the cap goes back on the head");
+    assert!(equip_delta(3, ROBE), "the robe goes back on the chest");
+    assert!(
+        msgs.iter().any(|m| matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), .. }
+            if location == "base" && p == BREAD)),
+        "the carried bread goes to the bags"
+    );
+    assert!(
+        !msgs.iter().any(|m| matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), .. }
+            if location != "equip" && (p == CAP || p == ROBE))),
+        "the worn gear does not also land in the bags"
+    );
+
+    // Persisted with the loot, in one transaction.
+    let worn: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT slot, item_path FROM character_items WHERE char_id = ?1 AND location = 'equip' ORDER BY slot",
+    )
+    .bind(char_id)
+    .fetch_all(&pool)
+    .await
+    .expect("read worn rows");
+    assert_eq!(worn, vec![(2, CAP.to_string()), (3, ROBE.to_string())], "the database holds the gear as worn");
+    a.send_disconnect();
+    a.pump_for(Duration::from_millis(200)).await;
 }

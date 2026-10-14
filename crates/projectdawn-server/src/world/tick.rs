@@ -9215,6 +9215,7 @@ pub async fn run(
                     let mut inv_deltas: Vec<(String, u32, String, u32)> = Vec::new();
                     let mut granted_lines: Vec<(String, u32)> = Vec::new();
                     let mut reequipped: u32 = 0;
+                    let mut left_on_corpse: u32 = 0;
                     for (path, count, worn) in granted {
                         if let Some(slot) = worn {
                             if let Some(conn) = connections.get_mut(&looter_cid) {
@@ -9247,6 +9248,7 @@ pub async fn run(
                             granted_lines.push((path.clone(), placed_count));
                         }
                         if leftover_count > 0 {
+                            left_on_corpse += 1;
                             corpses.get_mut(&corpse_id).unwrap().items.push(
                                 loot::LootItemStack { item_path: path, count: leftover_count, equip_slot: worn },
                             );
@@ -9340,6 +9342,16 @@ pub async fn run(
                             if let Some(conn) = connections.get(&looter_cid) {
                                 handlers::fan_out_resources(&mut server, &in_world_recipients_now, conn);
                             }
+                        }
+                        // Say why anything is still on the body, instead of
+                        // leaving the player to work out that the bags filled.
+                        if left_on_corpse > 0 {
+                            let line = if left_on_corpse == 1 {
+                                "Your bags are full: one item stays on your corpse.".to_string()
+                            } else {
+                                format!("Your bags are full: {left_on_corpse} items stay on your corpse.")
+                            };
+                            handlers::send_refusal(&mut server, looter_cid, &line);
                         }
                         if delete_now {
                             // Looted clean -> the body vanishes (the DB rows were

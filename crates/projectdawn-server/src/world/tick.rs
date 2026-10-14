@@ -1538,7 +1538,11 @@ pub async fn run(
                 let items: Vec<super::loot::LootItemStack> = r
                     .items
                     .into_iter()
-                    .map(|(item_path, count)| super::loot::LootItemStack { item_path, count })
+                    .map(|(item_path, count, equip_slot)| super::loot::LootItemStack {
+                        item_path,
+                        count,
+                        equip_slot,
+                    })
                     .collect();
                 aoi.insert(id, aoi::cell_for(pos.x, pos.z));
                 max_id = max_id.max(id);
@@ -7364,7 +7368,7 @@ pub async fn run(
                 // range may pick them up, as before.
                 let bag = loot::LootBag::new(
                     drop_pos,
-                    vec![loot::LootItemStack { item_path: item_path.clone(), count }],
+                    vec![loot::LootItemStack { item_path: item_path.clone(), count, equip_slot: None }],
                     protocol::world::Coins::ZERO,
                     String::new(), // player-dropped public bag — no creature, keep the sack visual
                     None,
@@ -9848,9 +9852,13 @@ pub async fn run(
                     // un-send. `had_content` decides linger-vs-despawn: only a
                     // corpse that HELD something and is now empty is "looted clean";
                     // a born-empty corpse (naked-death res anchor) lingers.
-                    let corpse_items_before: Vec<(String, u32)> = {
+                    let corpse_items_before: Vec<(String, u32, Option<u8>)> = {
                         let corpse = corpses.get(&corpse_id).unwrap();
-                        corpse.items.iter().map(|s| (s.item_path.clone(), s.count)).collect()
+                        corpse
+                            .items
+                            .iter()
+                            .map(|s| (s.item_path.clone(), s.count, s.equip_slot))
+                            .collect()
                     };
                     let corpse_coins_before = corpses.get(&corpse_id).unwrap().coins;
                     let had_content = !corpse_items_before.is_empty()
@@ -9887,7 +9895,7 @@ pub async fn run(
                         }
                     }
                     // Items: take one (slot) or all (None) off the corpse.
-                    let mut granted: Vec<(String, u32)> = Vec::new();
+                    let mut granted: Vec<(String, u32, Option<u8>)> = Vec::new();
                     {
                         let corpse = corpses.get_mut(&corpse_id).unwrap();
                         match intent.slot {
@@ -9895,22 +9903,43 @@ pub async fn run(
                                 let i = idx as usize;
                                 if i < corpse.items.len() {
                                     let stack = corpse.items.remove(i);
-                                    granted.push((stack.item_path, stack.count));
+                                    granted.push((stack.item_path, stack.count, stack.equip_slot));
                                 }
                             }
                             None => {
                                 for stack in corpse.items.drain(..) {
-                                    granted.push((stack.item_path, stack.count));
+                                    granted.push((stack.item_path, stack.count, stack.equip_slot));
                                 }
                             }
                         }
                     }
-                    // Move each stack into the looter's bags (same add_item_locating
-                    // path the bag loot uses); a full inventory refunds the unplaced
-                    // portion to the corpse. Collect the client deltas — don't send.
+                    // Worn gear first, so it goes back on before the carried
+                    // stacks fill the bags (a stable sort keeps each group in
+                    // corpse order).
+                    granted.sort_by_key(|(_, _, worn)| worn.is_none());
+                    // Corpse auto-re-equip, then the bags. Gear worn at death goes
+                    // back on the slot it was worn in when that slot is empty and
+                    // still takes it (`restore_worn`); anything else goes to the
+                    // bags by the same add_item_locating path the bag loot uses,
+                    // and a full inventory refunds the unplaced portion to the
+                    // corpse, keeping its worn slot for a later loot. Collect the
+                    // client deltas: nothing is sent until the persist commits.
                     let mut inv_deltas: Vec<(String, u32, String, u32)> = Vec::new();
                     let mut granted_lines: Vec<(String, u32)> = Vec::new();
-                    for (path, count) in granted {
+                    let mut reequipped: u32 = 0;
+                    let mut left_on_corpse: u32 = 0;
+                    for (path, count, worn) in granted {
+                        if let Some(slot) = worn {
+                            if let Some(conn) = connections.get_mut(&looter_cid) {
+                                if conn.inventory.restore_worn(&path, count, slot) {
+                                    conn.inventory_dirty = true;
+                                    reequipped += 1;
+                                    inv_deltas.push(("equip".to_string(), slot as u32, path.clone(), count));
+                                    granted_lines.push((path, count));
+                                    continue;
+                                }
+                            }
+                        }
                         let mut placed_count: u32 = 0;
                         let mut leftover_count: u32 = count;
                         if let Some(conn) = connections.get_mut(&looter_cid) {
@@ -9931,10 +9960,26 @@ pub async fn run(
                             granted_lines.push((path.clone(), placed_count));
                         }
                         if leftover_count > 0 {
+                            left_on_corpse += 1;
                             corpses.get_mut(&corpse_id).unwrap().items.push(
-                                loot::LootItemStack { item_path: path, count: leftover_count },
+                                loot::LootItemStack { item_path: path, count: leftover_count, equip_slot: worn },
                             );
                         }
+                    }
+                    // Gear went back on: the gear bonuses and max resources change
+                    // with it (fanned after the persist commits, below).
+                    let mut resources_changed = false;
+                    if reequipped > 0 {
+                        if let Some(conn) = connections.get_mut(&looter_cid) {
+                            resources_changed =
+                                inventory::recompute_equipped_stats(conn).any_resource_max_changed();
+                        }
+                        tracing::info!(
+                            corpse_id,
+                            char_id = intent.looter,
+                            reequipped,
+                            "corpse loot put worn gear back on"
+                        );
                     }
                     // Post-drain corpse state for the atomic persist + the despawn
                     // decision (corpse borrow dropped before the await below).
@@ -9944,8 +9989,8 @@ pub async fn run(
                             corpse
                                 .items
                                 .iter()
-                                .map(|s| (s.item_path.clone(), s.count))
-                                .collect::<Vec<(String, u32)>>(),
+                                .map(|s| (s.item_path.clone(), s.count, s.equip_slot))
+                                .collect::<Vec<(String, u32, Option<u8>)>>(),
                             corpse.coins,
                             corpse.pos,
                             corpse.items.is_empty() && corpse.coins == protocol::world::Coins::ZERO,
@@ -10005,6 +10050,21 @@ pub async fn run(
                         for (path, n) in granted_lines {
                             handlers::send_loot_granted(&mut server, looter_cid, path, n);
                         }
+                        if resources_changed {
+                            if let Some(conn) = connections.get(&looter_cid) {
+                                handlers::fan_out_resources(&mut server, &in_world_recipients_now, conn);
+                            }
+                        }
+                        // Say why anything is still on the body, instead of
+                        // leaving the player to work out that the bags filled.
+                        if left_on_corpse > 0 {
+                            let line = if left_on_corpse == 1 {
+                                "Your bags are full: one item stays on your corpse.".to_string()
+                            } else {
+                                format!("Your bags are full: {left_on_corpse} items stay on your corpse.")
+                            };
+                            handlers::send_refusal(&mut server, looter_cid, &line);
+                        }
                         if delete_now {
                             // Looted clean -> the body vanishes (the DB rows were
                             // already deleted inside apply_corpse_loot's tx).
@@ -10030,13 +10090,21 @@ pub async fn run(
                         if let Some(corpse) = corpses.get_mut(&corpse_id) {
                             corpse.items = corpse_items_before
                                 .into_iter()
-                                .map(|(item_path, count)| loot::LootItemStack { item_path, count })
+                                .map(|(item_path, count, equip_slot)| loot::LootItemStack {
+                                    item_path,
+                                    count,
+                                    equip_slot,
+                                })
                                 .collect();
                             corpse.coins = corpse_coins_before;
                         }
                         if let Some(conn) = connections.get_mut(&looter_cid) {
                             conn.inventory = inv_before;
                             conn.coins = coins_before;
+                            // Undo the gear bonuses of anything put back on.
+                            if reequipped > 0 {
+                                inventory::recompute_equipped_stats(conn);
+                            }
                         }
                         handlers::send_loot_rejected(
                             &mut server,
@@ -10278,6 +10346,7 @@ pub async fn run(
                         bag.items.push(loot::LootItemStack {
                             item_path: path,
                             count: leftover_count,
+                            equip_slot: None,
                         });
                         tracing::info!(
                             looter = intent.looter,
@@ -11022,7 +11091,7 @@ pub async fn run(
                     c.name.clone(),
                     c.zone.clone().unwrap_or_default(),
                     c.pos,
-                    c.inventory.all_stacks(),
+                    c.inventory.corpse_stacks(),
                     c.coins,
                     c.death_lost_xp,
                 ),
@@ -11085,7 +11154,11 @@ pub async fn run(
                 .collect();
             let stacks: Vec<super::loot::LootItemStack> = items
                 .iter()
-                .map(|(p, n)| super::loot::LootItemStack { item_path: p.clone(), count: *n })
+                .map(|(p, n, worn)| super::loot::LootItemStack {
+                    item_path: p.clone(),
+                    count: *n,
+                    equip_slot: *worn,
+                })
                 .collect();
             let corpse = super::corpses::Corpse::new(
                 corpse_id, cid, owner_name, zone, pos, stacks, coins, lost_xp, false, now,

@@ -41,6 +41,11 @@ pub struct MobLootTable {
 pub struct LootItemStack {
     pub item_path: String,
     pub count: u32,
+    /// On a player corpse, the equipment slot this stack was worn in when its
+    /// owner died (`None` if it was carried); looting puts it back on. Always
+    /// `None` on a loot bag. Recorded by the server at death, never sent by a
+    /// client.
+    pub equip_slot: Option<u8>,
 }
 
 /// One server-owned loot bag. Lives in `tick::run`'s `HashMap<EntityId,
@@ -154,6 +159,7 @@ pub fn roll_for_mob(mob_name: &str) -> Option<Vec<LootItemStack>> {
             out.push(LootItemStack {
                 item_path: path.clone(),
                 count: 1,
+                equip_slot: None,
             });
         }
         for rare in &named.rare_loot {
@@ -161,6 +167,7 @@ pub fn roll_for_mob(mob_name: &str) -> Option<Vec<LootItemStack>> {
                 out.push(LootItemStack {
                     item_path: rare.path.clone(),
                     count: 1,
+                    equip_slot: None,
                 });
             }
         }
@@ -189,6 +196,7 @@ pub fn roll_for_mob(mob_name: &str) -> Option<Vec<LootItemStack>> {
                 out.push(LootItemStack {
                     item_path: entry.item_path.into(),
                     count,
+                    equip_slot: None,
                 });
                 break;
             }

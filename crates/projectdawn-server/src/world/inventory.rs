@@ -613,13 +613,13 @@ impl PlayerInventory {
         out
     }
 
-    /// Corpse / resurrection Slice 1 — every item stack the player carries
-    /// (equipped + base + inside bags + the cursor), flattened to (item_path,
-    /// count) pairs to move onto a corpse on death. Slot identity isn't
-    /// preserved: looted corpse gear goes into bags in EQ, not back to its
-    /// original slot. The cursor is included deliberately (PD_W0027): dying
-    /// with an item in hand must strip it to the corpse like everything else,
-    /// or holding an item would shelter it from the death penalty.
+    /// Every item stack the player carries (equipped + base + inside bags + the
+    /// cursor), flattened to (item_path, count) pairs. The death path uses
+    /// `corpse_stacks`, which is this plus where each worn item was worn; the
+    /// two must cover the same stacks. The cursor is included deliberately
+    /// (PD_W0027): dying with an item in hand must strip it to the corpse like
+    /// everything else, or holding an item would shelter it from the death
+    /// penalty.
     pub fn all_stacks(&self) -> Vec<(String, u32)> {
         let mut out = Vec::new();
         for entry in self.base.iter().flatten() {
@@ -637,6 +637,56 @@ impl PlayerInventory {
             out.push((entry.item_path.clone(), entry.count));
         }
         out
+    }
+
+    /// What goes onto a corpse at death: every stack `all_stacks` names, each
+    /// with the equipment slot it was worn in (`None` if carried), so looting
+    /// the corpse can put worn gear back on (corpse auto-re-equip). Worn gear
+    /// comes first in paperdoll order, then the base slots, the bags by the
+    /// base slot they sit in, and the cursor: a stable order for the corpse
+    /// window.
+    pub fn corpse_stacks(&self) -> Vec<(String, u32, Option<u8>)> {
+        let mut out = Vec::new();
+        let mut worn: Vec<(&u8, &InventoryEntry)> = self.equipment.iter().collect();
+        worn.sort_by_key(|(slot, _)| **slot);
+        for (slot, entry) in worn {
+            out.push((entry.item_path.clone(), entry.count, Some(*slot)));
+        }
+        for entry in self.base.iter().flatten() {
+            out.push((entry.item_path.clone(), entry.count, None));
+        }
+        let mut bag_keys: Vec<&u8> = self.bags.keys().collect();
+        bag_keys.sort();
+        for key in bag_keys {
+            for entry in self.bags[key].iter().flatten() {
+                out.push((entry.item_path.clone(), entry.count, None));
+            }
+        }
+        if let Some(entry) = &self.cursor {
+            out.push((entry.item_path.clone(), entry.count, None));
+        }
+        out
+    }
+
+    /// Corpse auto-re-equip: put `count` of `path` back on equipment `slot`,
+    /// where it was worn at death, if the slot is in range, empty, and still
+    /// takes the item (`items::is_equippable_in_slot`, the rule every equip
+    /// uses). Returns false and touches nothing otherwise, and the caller
+    /// places the item in the bags instead: gear never displaces what the
+    /// player has put on since.
+    pub fn restore_worn(&mut self, path: &str, count: u32, slot: u8) -> bool {
+        if slot >= EQUIP_SLOT_COUNT
+            || count == 0
+            || self.equipment.contains_key(&slot)
+            || !items::is_equippable_in_slot(path, slot)
+        {
+            return false;
+        }
+        self.equipment.insert(
+            slot,
+            InventoryEntry { item_path: path.to_string(), count },
+        );
+        true
     }
 
     /// Corpse / resurrection Slice 1 — empty the entire inventory (equipped,
@@ -3191,5 +3241,46 @@ mod tests {
         });
         assert!(has_pouch);
         assert!(has_potion);
+    }
+
+    const CAP: &str = "res://data/loot/items/cloth_cap.tres"; // head, slot 2
+
+    /// Corpse auto-re-equip: what goes onto the corpse names the slot each
+    /// worn piece was worn in, worn gear first in paperdoll order, and covers
+    /// exactly the stacks `all_stacks` does (a stack missed here would survive
+    /// death; one counted twice would be a dupe).
+    #[test]
+    fn corpse_stacks_mark_worn_gear_with_its_slot() {
+        let mut inv = PlayerInventory::new();
+        inv.equipment.insert(3, InventoryEntry { item_path: ROBE.into(), count: 1 });
+        inv.equipment.insert(2, InventoryEntry { item_path: CAP.into(), count: 1 });
+        inv.base[0] = Some(InventoryEntry { item_path: VAULT_ITEM.into(), count: 4 });
+        inv.cursor = Some(InventoryEntry { item_path: VAULT_ITEM.into(), count: 1 });
+        let stacks = inv.corpse_stacks();
+        assert_eq!(stacks[0], (CAP.to_string(), 1, Some(2)), "worn gear first, by slot");
+        assert_eq!(stacks[1], (ROBE.to_string(), 1, Some(3)));
+        assert!(stacks[2..].iter().all(|(_, _, worn)| worn.is_none()), "the rest was carried");
+        let mut flat: Vec<(String, u32)> = stacks.into_iter().map(|(p, n, _)| (p, n)).collect();
+        let mut all = inv.all_stacks();
+        flat.sort();
+        all.sort();
+        assert_eq!(flat, all, "the same stacks as all_stacks, no more and no fewer");
+    }
+
+    /// Gear goes back on only where it was worn, only if that slot is empty,
+    /// and only if the slot still takes it; otherwise nothing changes and the
+    /// caller bags the item. It never displaces what the player wears now.
+    #[test]
+    fn restore_worn_puts_gear_back_only_on_an_empty_slot_that_takes_it() {
+        let mut inv = PlayerInventory::new();
+        assert!(inv.restore_worn(ROBE, 1, 3), "an empty chest slot takes the robe");
+        assert_eq!(inv.equipment.get(&3).unwrap().item_path, ROBE);
+        assert!(!inv.restore_worn(ROBE, 1, 3), "an occupied slot refuses");
+        assert_eq!(inv.equipment.len(), 1, "and the worn robe is untouched");
+        assert!(!inv.restore_worn(ROBE, 1, 2), "a robe does not go on the head");
+        assert!(!inv.restore_worn(CAP, 1, EQUIP_SLOT_COUNT), "a slot past the paperdoll refuses");
+        assert!(!inv.restore_worn(CAP, 0, 2), "nothing to put on refuses");
+        assert!(!inv.restore_worn("res://data/loot/items/no_such_item.tres", 1, 2), "an unknown item refuses");
+        assert!(inv.restore_worn(CAP, 1, 2));
     }
 }

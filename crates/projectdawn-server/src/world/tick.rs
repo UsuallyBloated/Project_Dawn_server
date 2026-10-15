@@ -3494,22 +3494,37 @@ pub async fn run(
                         );
                         continue;
                     }
+                    // Seated-combat rule (classic EQ, user call 2026-10-14):
+                    // a sitting target takes the top of the attacker's band
+                    // with no armor; the hit then stands them
+                    // (note_damage_taken). Decided here, after the gates, so
+                    // a refused swing never re-rolls.
+                    let target_seated = connections
+                        .get(&target_cid)
+                        .is_some_and(|t| t.is_sitting);
+                    let swing = if target_seated {
+                        connections
+                            .get(&attacker_cid)
+                            .map(|a| combat::calc_swing_max(a, &server_weapon_path, intent.is_offhand))
+                            .unwrap_or(swing)
+                    } else {
+                        swing
+                    };
                     // Apply damage. Armor reduction matches the
                     // GDScript Combat.receive_player_damage:
                     //   reduction = armor / (armor + ARMOR_DR_DIVISOR)
-                    // with ARMOR_DR_DIVISOR = 100. Track 6 sub-task
-                    // 4c: absorb pool consumed before HP deduction;
-                    // damage shield reflects damage back to attacker
-                    // after.
+                    // with ARMOR_DR_DIVISOR = 100 (`combat::mitigated`).
+                    // Track 6 sub-task 4c: absorb pool consumed before HP
+                    // deduction; damage shield reflects damage back to
+                    // attacker after.
                     let raw_swing = swing.amount;
                     let shield_to_attacker_pvp: f32;
                     let shield_name_pvp: Option<String>;
                     let mut absorb_strip_pvp: Option<usize> = None;
                     let (new_hp, max_hp, amount, target_armor) = {
                         let target_conn = connections.get_mut(&target_cid).expect("checked");
-                        let armor = target_conn.equipped_armor.max(0) as f32;
-                        let reduction = armor / (armor + 100.0);
-                        let mut amount = ((swing.amount as f32 * (1.0 - reduction)) as i32).max(1);
+                        let mut amount =
+                            combat::mitigated(swing.amount, target_conn.equipped_armor, target_seated);
                         let (after_absorb, exhausted) =
                             buffs::consume_absorb(&mut target_conn.active_buffs, amount);
                         amount = after_absorb;
@@ -8079,9 +8094,15 @@ pub async fn run(
                     let target_cid = hit.target as ClientId;
                     if let Some(target_conn) = connections.get_mut(&target_cid) {
                         if target_conn.in_world && target_conn.hp > 0.0 {
-                            let armor = target_conn.equipped_armor.max(0) as f32;
-                            let reduction = armor / (armor + 100.0);
-                            let mut reduced = ((hit.amount as f32 * (1.0 - reduction)) as i32).max(1);
+                            // Seated-combat rule (classic EQ): a sitting
+                            // target takes the swing with no armor, and a
+                            // mob's swing is flat, so its max IS the amount.
+                            // The hit then stands them (note_damage_taken).
+                            let mut reduced = combat::mitigated(
+                                hit.amount,
+                                target_conn.equipped_armor,
+                                target_conn.is_sitting,
+                            );
                             // Track 6 sub-task 4c — consume absorb
                             // pool before applying damage. Returns
                             // the residual + whether the pool hit 0

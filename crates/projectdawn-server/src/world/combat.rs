@@ -74,6 +74,43 @@ pub fn calc_swing(
     weapon_path: &str,
     is_offhand: bool,
 ) -> Swing {
+    swing_with(attacker, weapon_path, is_offhand, false)
+}
+
+/// The same swing at the top of its damage band: what a SEATED target takes
+/// (classic EQ, as Project 1999 and EQEmu keep it: a hit on a sitting player
+/// cannot miss and lands for the most the attacker can do; user call
+/// 2026-10-14). The crit roll is untouched, since a crit is the attacker's
+/// luck on top of the roll, not part of it. Pair with `mitigated`, which
+/// takes no armor off a seated target.
+pub fn calc_swing_max(
+    attacker: &PerConnection,
+    weapon_path: &str,
+    is_offhand: bool,
+) -> Swing {
+    swing_with(attacker, weapon_path, is_offhand, true)
+}
+
+/// Melee damage after the target's armor: `armor / (armor + 100)` of the hit
+/// comes off (the client's `Combat.receive_player_damage` formula, kept in
+/// step), floored at 1. A SEATED target gets no mitigation at all: the one
+/// home of the seated-combat rule's damage half, used by the mob swing and
+/// the PvP swing alike.
+pub fn mitigated(amount: i32, armor: i32, seated: bool) -> i32 {
+    if seated {
+        return amount.max(1);
+    }
+    let armor = armor.max(0) as f32;
+    let reduction = armor / (armor + 100.0);
+    ((amount as f32 * (1.0 - reduction)) as i32).max(1)
+}
+
+fn swing_with(
+    attacker: &PerConnection,
+    weapon_path: &str,
+    is_offhand: bool,
+    max_roll: bool,
+) -> Swing {
     let mut rng = rand::thread_rng();
 
     let weapon = items::lookup(weapon_path);
@@ -91,9 +128,10 @@ pub fn calc_swing(
     let base_roll: i32 = match weapon {
         Some(w) if w.damage_max > 0 => {
             let span = (w.damage_max - w.damage_min).max(0);
-            let roll = if span == 0 { 0 } else { rng.gen_range(0..=span) };
+            let roll = if max_roll || span == 0 { span } else { rng.gen_range(0..=span) };
             w.damage_min + roll
         }
+        _ if max_roll => 4,
         _ => rng.gen_range(1..=4),
     };
     let mut base = base_roll + stat_bonus;
@@ -168,6 +206,28 @@ mod tests {
             bind: None,
         };
         PerConnection::from_spawn(spawn, Instant::now())
+    }
+
+    // The seated-combat rule's damage half: the top of the band, no armor.
+    #[test]
+    fn a_seated_target_takes_the_top_of_the_band_and_no_armor() {
+        let attacker = make_attacker(50, 10);
+        // Iron short sword 7..=15 plus STR 50/5: the max is 25, every time.
+        for _ in 0..50 {
+            let swing = calc_swing_max(&attacker, "res://data/loot/items/iron_short_sword.tres", false);
+            assert_eq!(swing.amount, 25);
+            assert!(!swing.crit);
+        }
+        // Fists: 4 plus STR 20/5.
+        assert_eq!(calc_swing_max(&make_attacker(20, 10), "", false).amount, 8);
+        // The offhand keeps its multiplier: floor(25 * 0.8) = 20.
+        assert_eq!(calc_swing_max(&attacker, "res://data/loot/items/iron_short_sword.tres", true).amount, 20);
+        // Armor takes armor/(armor+100) off a standing target and nothing off
+        // a seated one; the floor of 1 holds for both.
+        assert_eq!(mitigated(100, 100, false), 50);
+        assert_eq!(mitigated(100, 100, true), 100);
+        assert_eq!(mitigated(1, 1000, false), 1);
+        assert_eq!(mitigated(0, 0, true), 1);
     }
 
     #[test]

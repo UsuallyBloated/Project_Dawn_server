@@ -775,11 +775,18 @@ impl PerConnection {
             .is_some_and(|t| now.duration_since(t) >= window)
     }
 
-    /// Camp slice B: record that incoming damage just landed on this player, so
-    /// the per-tick camp sweep can cancel an in-progress `/camp` ("cancelled by
-    /// damage"). Called at each player-damage application site in the tick loop.
+    /// Record that incoming damage just landed on this player. Two things ride
+    /// on it. Camp slice B: the per-tick camp sweep cancels an in-progress
+    /// `/camp` ("cancelled by damage"). And the seated-combat rule (classic
+    /// EQ, user call 2026-10-14): ANY damage stands a seated player, so the
+    /// seated regen rate, `/camp` and the seated-target damage rule all end
+    /// with the first hit; the client stands its own body on the Hit it
+    /// receives, since nothing on the wire carries the flag. Called at every
+    /// player-damage application site in the tick loop (melee, spells, DoT
+    /// ticks, damage shields): one home for what taking damage does to you.
     pub fn note_damage_taken(&mut self, now: Instant) {
         self.last_damaged_at = Some(now);
+        self.is_sitting = false;
     }
 
     /// Where `Respawn` should put this player: their bind point, or the starter
@@ -812,6 +819,16 @@ impl PerConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The seated-combat rule's stand half: any damage stands a seated player.
+    #[test]
+    fn taking_damage_stands_a_seated_player() {
+        let mut c = PerConnection::from_spawn(test_spawn(), Instant::now());
+        c.is_sitting = true;
+        c.note_damage_taken(Instant::now());
+        assert!(!c.is_sitting, "a hit stands you");
+        assert!(c.last_damaged_at.is_some());
+    }
     use std::time::Duration;
 
     /// Minimal spawn for connection-state tests. Field values are arbitrary;

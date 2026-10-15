@@ -15,7 +15,7 @@
 
 use bincode::config::standard as bincode_cfg;
 use futures_util::{SinkExt, StreamExt};
-use projectdawn_server::{auth, db, world, Config};
+use projectdawn_server::{auth, char_data, db, world, Config};
 use protocol::world::{ClientWorldMsg, DamageType, ServerWorldMsg, SkillKind, SlotRef, Vec3, ENEMY_ID_BASE, PET_ID_BASE};
 use renet::{ConnectionConfig, RenetClient};
 use renet_netcode::{ClientAuthentication, ConnectToken, NetcodeClientTransport};
@@ -389,6 +389,16 @@ impl WorldClient {
 
     fn send_pvp_toggle(&mut self, on: bool) {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::PvpToggle { on });
+    }
+
+    fn send_sit(&mut self) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Sit);
+    }
+
+    /// `/camp`: the one intent that needs the SERVER's seated flag, which
+    /// makes it the probe for whether the server thinks a player sits.
+    fn send_camp(&mut self) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Camp);
     }
 
     /// Dev/GM command probe: awards xp through the server's authoritative path.
@@ -7106,4 +7116,80 @@ async fn looting_your_own_corpse_puts_your_gear_back_on() {
     assert_eq!(worn, vec![(2, CAP.to_string()), (3, ROBE.to_string())], "the database holds the gear as worn");
     a.send_disconnect();
     a.pump_for(Duration::from_millis(200)).await;
+}
+
+/// Seated-combat rule (classic EQ; user call 2026-10-14). A hit on a SITTING
+/// player lands for the top of the attacker's damage band with no armor, and
+/// any damage stands them. The stand is proven through `/camp`, the one
+/// intent that needs the server's own seated flag: after the hit the camp is
+/// refused outright, and after sitting again the same camp is accepted. Fails
+/// on the previous code at the camp assertion (the server left the target
+/// seated, so the camp was accepted).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seated_player_is_hit_for_the_max_and_stood_up() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "seat_a", "Seata", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "seat_b", "Seatb", "Human", "Warrior").await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+    a.send_pvp_toggle(true);
+    b.send_pvp_toggle(true);
+    pump_both_for(&mut a, &mut b, Duration::from_millis(150)).await;
+
+    // B sits beside A (both spawn on the same point); A swings bare fists,
+    // which roll 1..=4 plus STR/5, so the seated max is 4 plus STR/5.
+    let strength = char_data::compute("Human", "Warrior", 1).stats.strength;
+    let seated_max = 4 + strength / 5;
+    b.send_sit();
+    pump_both_for(&mut a, &mut b, Duration::from_millis(150)).await;
+    a.send_attack(b_char_id as u64, "", false, DamageType::Physical);
+    // Service A's transport too, or the swing never leaves its socket.
+    pump_both_for(&mut a, &mut b, Duration::from_millis(100)).await;
+    let hit = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
+                if *attacker == a_char_id as u64 && *target == b_char_id as u64)
+        })
+        .await
+        .expect("B is hit");
+    let ServerWorldMsg::Hit { amount, crit, .. } = hit else { unreachable!() };
+    if crit {
+        assert!(
+            amount >= seated_max,
+            "a crit on a seated target lands at least the max ({seated_max}), got {amount}"
+        );
+    } else {
+        assert_eq!(amount, seated_max, "a seated target takes the top of the band");
+    }
+
+    // The hit stood B: a /camp, which needs the server's seated flag, is
+    // refused with no CampUpdate at all.
+    b.send_camp();
+    let refused = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(1200), |m| {
+            matches!(m, ServerWorldMsg::CampUpdate { .. })
+        })
+        .await;
+    assert!(
+        refused.is_none(),
+        "the hit stood the seated player, so /camp is refused; got {refused:?}"
+    );
+
+    // Control: seated again, the same /camp is accepted.
+    b.send_sit();
+    b.pump_for(Duration::from_millis(150)).await;
+    b.send_camp();
+    let accepted = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::CampUpdate { active: true, .. })
+        })
+        .await;
+    assert!(accepted.is_some(), "seated again, /camp is accepted");
+    a.send_disconnect();
+    b.send_disconnect();
+    a.pump_for(Duration::from_millis(200)).await;
+    b.pump_for(Duration::from_millis(200)).await;
 }

@@ -281,40 +281,56 @@ pub fn is_lich_form_active(buffs: &[ActiveBuff]) -> bool {
     buffs.iter().any(|b| matches!(b.effect, BuffEffect::LichForm { .. }))
 }
 
-/// Resurrection sickness (the corpse plan's slice 3, built 2026-10-14): the
-/// debuff every accepted resurrection leaves, classic EQ's "Resurrection
-/// Effects" (five minutes; "You are exhausted." on, "You feel your strength
-/// return." off). EQ cut STR, STA, AGI, WIS and INT by level-scaled
-/// absolutes; here the cut is `level / RES_SICKNESS_LEVELS_PER_POINT`,
-/// floored at one, off each of the five primaries, and natural HP and mana
-/// regen run at `RES_SICKNESS_REGEN_MULT` while it lasts. The cut's size is
-/// an open user call (see the To-Do entry): a class's main stats run from
-/// about 22 at level 1 to 140 or more at 60 while the rest never move, so
-/// level/4 is a small bite on the former and can take the latter negative. The client computes the same
-/// cut from the level it knows (`buff_manager.gd`, kept in lockstep by
-/// hand), so the sheet shows what the server fights with. All three
-/// numbers are tuning knobs.
+/// Resurrection sickness (the corpse plan's slice 3; built 2026-10-14, the
+/// P99 design by user call 2026-10-15): the debuff every accepted
+/// resurrection leaves, classic EQ's "Resurrection Effects". Five minutes;
+/// "You are exhausted." on landing, "You feel your strength return." when it
+/// wears off; the player lands at a quarter of their max HP with no mana
+/// (the one-shot strip is applied at the accept, beside this buff); and
+/// STR, AGI, INT, WIS and CON (EQ's STA) are cut by a level-scaled fraction
+/// of their INTRINSIC value (race, class and level, `char_data::compute`,
+/// never gear or buffs), from `RES_SICKNESS_CUT_AT_1` at level 1 to
+/// `RES_SICKNESS_CUT_AT_60` at 60, which is P99's shape: about half a level
+/// 60's STR. Intrinsic because the client computes the same cut from the
+/// race, class and level it knows (`buff_manager.gd`, kept in lockstep by
+/// hand), so the sheet shows what the server fights with. The numbers are
+/// tuning knobs.
 pub const RES_SICKNESS_NAME: &str = "Resurrection Sickness";
 pub const RES_SICKNESS_SECS: f32 = 300.0;
-pub const RES_SICKNESS_LEVELS_PER_POINT: i32 = 4;
-pub const RES_SICKNESS_REGEN_MULT: f32 = 0.5;
+pub const RES_SICKNESS_CUT_AT_1: f64 = 0.10;
+pub const RES_SICKNESS_CUT_AT_60: f64 = 0.50;
+pub const RES_SICKNESS_ARRIVAL_HP_FRACTION: f32 = 0.25;
 
-pub fn res_sickness_stat_cut(level: i32) -> i32 {
-    (level / RES_SICKNESS_LEVELS_PER_POINT).max(1)
+/// The fraction of each intrinsic primary the sickness takes at `level`:
+/// linear from level 1 to 60, held past 60. f64, in the client's order of
+/// operations (GDScript's float is f64), so both sides round the same product.
+pub fn res_sickness_cut_fraction(level: i32) -> f64 {
+    let t = ((level.clamp(1, 60) - 1) as f64) / 59.0;
+    RES_SICKNESS_CUT_AT_1 + (RES_SICKNESS_CUT_AT_60 - RES_SICKNESS_CUT_AT_1) * t
 }
 
-/// The sickness as a stat buff, so the buff tick expires it and undoes its
-/// deltas like any other stat buff; the regen tick reads it by name.
-pub fn res_sickness_buff(level: i32, now: Instant) -> ActiveBuff {
-    let cut = res_sickness_stat_cut(level);
+/// The points taken off one intrinsic primary at `level`; a stat at or below
+/// zero loses nothing.
+pub fn res_sickness_cut(intrinsic: i32, level: i32) -> i32 {
+    if intrinsic <= 0 {
+        return 0;
+    }
+    (intrinsic as f64 * res_sickness_cut_fraction(level)).round() as i32
+}
+
+/// The sickness as a stat buff over the intrinsic stats, so `apply_stat_buff`
+/// applies it and the buff tick expires it and undoes its deltas like any
+/// other stat buff.
+pub fn res_sickness_buff(level: i32, intrinsic: &crate::char_data::StatBlock, now: Instant) -> ActiveBuff {
+    let cut = |v: i32| -res_sickness_cut(v, level);
     ActiveBuff {
         name: RES_SICKNESS_NAME.to_string(),
         effect: BuffEffect::StatBuff {
-            strength: -cut,
-            agility: -cut,
-            intelligence: -cut,
-            wisdom: -cut,
-            constitution: -cut,
+            strength: cut(intrinsic.strength),
+            agility: cut(intrinsic.agility),
+            intelligence: cut(intrinsic.intelligence),
+            wisdom: cut(intrinsic.wisdom),
+            constitution: cut(intrinsic.constitution),
             max_hp_delta: 0.0,
             max_mp_delta: 0.0,
         },
@@ -322,10 +338,6 @@ pub fn res_sickness_buff(level: i32, now: Instant) -> ActiveBuff {
         tick_acc: 0.0,
         applied_at: now,
     }
-}
-
-pub fn is_res_sick(buffs: &[ActiveBuff]) -> bool {
-    buffs.iter().any(|b| b.name == RES_SICKNESS_NAME)
 }
 
 /// Track 6 sub-task 4c — highest active Speed multiplier (1.0 if no
@@ -534,26 +546,34 @@ pub fn snapshot_pairs(buffs: &[ActiveBuff]) -> Vec<(String, f32)> {
 mod tests {
     use super::*;
 
-    // Resurrection sickness: one point per four levels off each primary,
-    // never less than one, five minutes, read back by its name.
+    // Resurrection sickness, the P99 shape: a fraction of each intrinsic
+    // primary that grows from a tenth at level 1 to a half at 60.
     #[test]
-    fn res_sickness_cuts_by_level_and_is_read_by_name() {
-        assert_eq!(res_sickness_stat_cut(1), 1);
-        assert_eq!(res_sickness_stat_cut(7), 1);
-        assert_eq!(res_sickness_stat_cut(8), 2);
-        assert_eq!(res_sickness_stat_cut(20), 5);
-        assert_eq!(res_sickness_stat_cut(60), 15);
-        let b = res_sickness_buff(20, Instant::now());
+    fn res_sickness_takes_a_level_scaled_fraction_of_the_intrinsic_stats() {
+        assert!((res_sickness_cut_fraction(1) - 0.10).abs() < 1e-6);
+        assert!((res_sickness_cut_fraction(60) - 0.50).abs() < 1e-6);
+        assert!((res_sickness_cut_fraction(99) - 0.50).abs() < 1e-6);
+        let mid = res_sickness_cut_fraction(20);
+        assert!(mid > 0.22 && mid < 0.24, "level 20 sits near 23%: {mid}");
+        assert_eq!(res_sickness_cut(22, 1), 2);
+        assert_eq!(res_sickness_cut(60, 20), 14);
+        assert_eq!(res_sickness_cut(140, 60), 70);
+        assert_eq!(res_sickness_cut(0, 60), 0);
+        assert_eq!(res_sickness_cut(-5, 60), 0);
+        // A level 60 Human Warrior: STR 142, the rest small; half off the
+        // main stat, a point or two off the others, nothing below zero.
+        let w = crate::char_data::compute("Human", "Warrior", 60).stats;
+        let b = res_sickness_buff(60, &w, Instant::now());
         assert_eq!(b.name, RES_SICKNESS_NAME);
         assert_eq!(b.remaining, RES_SICKNESS_SECS);
         match b.effect {
             BuffEffect::StatBuff { strength, agility, intelligence, wisdom, constitution, max_hp_delta, max_mp_delta } => {
-                assert_eq!((strength, agility, intelligence, wisdom, constitution), (-5, -5, -5, -5, -5));
+                assert_eq!(strength, -(w.strength / 2));
+                assert_eq!(wisdom, -((w.wisdom as f32 * 0.5).round() as i32));
+                assert!(w.agility + agility >= 0 && w.intelligence + intelligence >= 0 && w.constitution + constitution >= 0);
                 assert_eq!((max_hp_delta, max_mp_delta), (0.0, 0.0));
             }
             other => panic!("not a stat buff: {other:?}"),
         }
-        assert!(is_res_sick(&[b]));
-        assert!(!is_res_sick(&[]));
     }
 }

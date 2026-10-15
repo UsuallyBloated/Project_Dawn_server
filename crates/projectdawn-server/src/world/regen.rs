@@ -135,19 +135,12 @@ pub fn tick_one(conn: &mut PerConnection, dt: f32, now: Instant) -> RegenResult 
     // Track 6 sub-task 4a: Lich Form disables natural HP regen. The
     // buff still grants its MP/sec via the buff tick (step 5a).
     let lich_active = super::buffs::is_lich_form_active(&conn.active_buffs);
-    // Resurrection sickness halves natural HP and mana regen for its five
-    // minutes (`buffs::RES_SICKNESS_REGEN_MULT`); stamina is untouched.
-    let sickness_mult = if super::buffs::is_res_sick(&conn.active_buffs) {
-        super::buffs::RES_SICKNESS_REGEN_MULT
-    } else {
-        1.0
-    };
     // Food and water (the EQ model, `world/hunger.rs`): out of food, no HP
     // regen; out of water, no mana regen; out of either, no stamina regen.
     // Spells and potions still heal; only natural recovery stops.
     let (fed_hp, fed_mp, fed_stamina) = natural_regen_allowed(conn.hunger_secs, conn.thirst_secs);
     if conn.hp > 0.0 && conn.hp < conn.max_hp && !lich_active && fed_hp {
-        let per_tick = hp_regen_per_tick(conn.level, sitting, troll) * sickness_mult;
+        let per_tick = hp_regen_per_tick(conn.level, sitting, troll);
         conn.regen_hp_acc += per_tick * scale;
         if conn.regen_hp_acc >= 1.0 {
             let delta = conn.regen_hp_acc.floor();
@@ -160,7 +153,7 @@ pub fn tick_one(conn: &mut PerConnection, dt: f32, now: Instant) -> RegenResult 
     }
 
     if conn.mp < conn.max_mp && fed_mp {
-        let per_tick = mp_regen_per_tick(sitting, meditate) * sickness_mult;
+        let per_tick = mp_regen_per_tick(sitting, meditate);
         conn.regen_mp_acc += per_tick * scale;
         if conn.regen_mp_acc >= 1.0 {
             let delta = conn.regen_mp_acc.floor();
@@ -248,56 +241,6 @@ mod tests {
         assert!(!sitting_bonus_from(true, None, Some(recent), now));
         // Seated but recently took damage: standing rate.
         assert!(!sitting_bonus_from(true, Some(recent), None, now));
-    }
-
-    /// Resurrection sickness halves natural HP and mana regen: the same
-    /// character, run for the same ticks, recovers half as much sick as well.
-    #[test]
-    fn res_sickness_halves_natural_regen() {
-        fn conn() -> PerConnection {
-            let spawn = crate::db::CharacterSpawn {
-                hunger: 14400.0,
-                thirst: 14400.0,
-                char_id: 1,
-                account_id: 1,
-                name: "Sick".into(),
-                race: "Human".into(),
-                class: "Cleric".into(),
-                level: 20,
-                xp: 0,
-                xp_to_next: 100,
-                strength: 10, dexterity: 10, agility: 10, intelligence: 10,
-                wisdom: 10, charisma: 10, constitution: 10,
-                max_hp: 1000.0, max_mp: 1000.0, max_stamina: 100.0,
-                hp: 10.0, mp: 10.0, stamina: 100.0,
-                coins: protocol::world::Coins::ZERO,
-                bank_coins: protocol::world::Coins::ZERO,
-                zone: None,
-                pos: (0.0, 0.0, 0.0),
-                yaw: 0.0,
-                completed_quests: Vec::new(),
-                active_quests: Vec::new(),
-                bind: None,
-            };
-            let mut c = PerConnection::from_spawn(spawn, Instant::now());
-            c.in_world = true;
-            c
-        }
-        let now = Instant::now();
-        let run = |c: &mut PerConnection| {
-            for _ in 0..40 {
-                tick_one(c, CLIENT_TICK_INTERVAL_SECS, now);
-            }
-            (c.hp - 10.0, c.mp - 10.0)
-        };
-        let mut well = conn();
-        let (hp_well, mp_well) = run(&mut well);
-        let mut sick = conn();
-        sick.active_buffs.push(super::super::buffs::res_sickness_buff(20, now));
-        let (hp_sick, mp_sick) = run(&mut sick);
-        assert!(hp_well > 0.0 && mp_well > 0.0, "the healthy character regenerates");
-        assert!((hp_sick * 2.0 - hp_well).abs() <= 1.0, "HP regen halved: {hp_sick} vs {hp_well}");
-        assert!((mp_sick * 2.0 - mp_well).abs() <= 1.0, "mana regen halved: {mp_sick} vs {mp_well}");
     }
 
     /// The stomach's say over natural regen: food for HP, water for mana,

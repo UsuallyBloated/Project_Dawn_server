@@ -7202,11 +7202,11 @@ async fn a_seated_player_is_hit_for_the_max_and_stood_up() {
     b.pump_for(Duration::from_millis(200)).await;
 }
 
-/// Resurrection sickness (the corpse plan's slice 3, built 2026-10-14). A dies
-/// and respawns beside the corpse; B, a Cleric 20, casts Resurrection (Minor)
-/// on it; A accepts. A is summoned, told "You are exhausted.", and its buff
-/// snapshot carries the five-minute sickness. Fails on the previous code at
-/// the snapshot (no sickness) and the line.
+/// Resurrection sickness (the corpse plan's slice 3; the P99 design, user call
+/// 2026-10-15). A dies and respawns beside the corpse; B, a Cleric 20, casts
+/// Resurrection (Minor) on it; A accepts. A is summoned, told "You are
+/// exhausted.", lands at a quarter of its max HP with no mana, and its buff
+/// snapshot carries the five-minute sickness.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_accepted_resurrection_leaves_its_sickness() {
     let h = start_both().await;
@@ -7290,6 +7290,22 @@ async fn an_accepted_resurrection_leaves_its_sickness() {
         msgs.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "You are exhausted.")),
         "the owner is told EQ's line"
     );
+    // The landing: a quarter of max HP, no mana, both told at once. Regen
+    // fans its own updates through the window, so look for the landing
+    // values rather than the last word.
+    let hp_updates: Vec<(f32, f32)> = msgs.iter().filter_map(|m| match m {
+        ServerWorldMsg::HealthUpdate { id, hp, max_hp } if *id == a_char_id as u64 => Some((*hp, *max_hp)),
+        _ => None,
+    }).collect();
+    assert!(
+        hp_updates.iter().any(|(hp, max_hp)| (hp - max_hp * 0.25).abs() < 1.0),
+        "lands at a quarter of max HP; saw {hp_updates:?}"
+    );
+    let mp_updates: Vec<f32> = msgs.iter().filter_map(|m| match m {
+        ServerWorldMsg::ManaUpdate { id, mp, .. } if *id == a_char_id as u64 => Some(*mp),
+        _ => None,
+    }).collect();
+    assert!(mp_updates.contains(&0.0), "lands with no mana; saw {mp_updates:?}");
     a.send_disconnect();
     b.send_disconnect();
     a.pump_for(Duration::from_millis(200)).await;

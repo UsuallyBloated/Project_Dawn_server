@@ -8467,12 +8467,22 @@ pub async fn run(
                 if refund > 0 {
                     super::progression::award_xp(&mut server, conn, refund);
                 }
-                // Resurrection sickness (the corpse plan's slice 3): the
-                // debuff rides the stat-buff path, so the buff tick expires
-                // it and undoes its deltas like any other stat buff, and the
-                // regen tick halves natural regen while it is on.
+                // Resurrection sickness (the corpse plan's slice 3, the P99
+                // design): the stat cut rides the stat-buff path, so the
+                // buff tick expires it and undoes its deltas like any other
+                // stat buff; the cut is over the INTRINSIC stats so the
+                // client can compute the same from race, class and level.
+                // Then the landing itself: a quarter of max HP and no mana,
+                // one-shot, however the player arrived. Not damage, so no
+                // stand and no camp cancel ride on it.
                 let level = conn.level;
-                apply_stat_buff(conn, buffs::res_sickness_buff(level, now));
+                let intrinsic = crate::char_data::compute(&conn.race, &conn.class, level).stats;
+                apply_stat_buff(conn, buffs::res_sickness_buff(level, &intrinsic, now));
+                conn.hp = conn
+                    .hp
+                    .min((conn.max_hp * buffs::RES_SICKNESS_ARRIVAL_HP_FRACTION).max(1.0));
+                conn.mp = 0.0;
+                regen::mark_dirty(conn);
             }
             let recipients: Vec<ClientId> = connections
                 .iter()
@@ -8481,6 +8491,8 @@ pub async fn run(
                 .collect();
             if let Some(conn) = connections.get(&responder_cid) {
                 fan_out_server_buff_snapshot(&mut server, &recipients, conn);
+                handlers::fan_out_health_update(&mut server, &recipients, responder, conn.hp, conn.max_hp);
+                handlers::fan_out_mana_update(&mut server, &recipients, responder, conn.mp, conn.max_mp);
             }
             handlers::fan_out_chat_message(
                 &mut server,

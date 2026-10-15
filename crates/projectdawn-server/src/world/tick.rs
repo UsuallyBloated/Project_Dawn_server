@@ -4111,8 +4111,8 @@ pub async fn run(
                 // name"). Checked before the mana / cooldown / skill side effects so
                 // a rejected forgery costs nothing to retry against. Every spell in
                 // spells.toml has a non-empty `classes` and a `min_level`, so no
-                // legit spell trips this on missing data. The CORPSE / resurrection
-                // arm keeps its own copy as defense-in-depth.
+                // legit spell trips this on missing data. This is the one home of
+                // the rule: the CORPSE arm no longer keeps a copy.
                 {
                     let caster_cl = connections
                         .get(&caster_cid)
@@ -4334,7 +4334,7 @@ pub async fn run(
                 // mana and started its own cooldown when it sent the cast: the
                 // private CastFail is its signal to undo that, and the
                 // ManaUpdate carries the server's untouched value.
-                if let Some(line) = cast_target_refusal(
+                let resolved = match cast_target_refusal(
                     spell,
                     intent.target_id,
                     intent.caster,
@@ -4345,39 +4345,42 @@ pub async fn run(
                     &corpses,
                     &group_manager,
                 ) {
-                    tracing::info!(
-                        caster = intent.caster,
-                        spell = %spell.name,
-                        target = ?intent.target_id,
-                        reason = %line,
-                        "CastSpell refused — target pre-flight"
-                    );
-                    // Clear the cast cache so this refused cast's in-flight
-                    // state cannot gate the next one.
-                    if let Some(cc) = connections.get_mut(&caster_cid) {
-                        cc.cast_spell_name.clear();
-                        cc.cast_total_duration = 0.0;
-                        cc.cast_set_at = None;
-                    }
-                    handlers::fan_out_cast_fail(&mut server, &[caster_cid], intent.caster, line);
-                    handlers::fan_out_mana_update(
-                        &mut server,
-                        &[caster_cid],
-                        intent.caster,
-                        caster_mp_now,
-                        caster_max_mp,
-                    );
-                    if hp_cost > 0.0 {
-                        handlers::fan_out_health_update(
+                    Ok(resolved) => resolved,
+                    Err(line) => {
+                        tracing::info!(
+                            caster = intent.caster,
+                            spell = %spell.name,
+                            target = ?intent.target_id,
+                            reason = %line,
+                            "CastSpell refused — target pre-flight"
+                        );
+                        // Clear the cast cache so this refused cast's in-flight
+                        // state cannot gate the next one.
+                        if let Some(cc) = connections.get_mut(&caster_cid) {
+                            cc.cast_spell_name.clear();
+                            cc.cast_total_duration = 0.0;
+                            cc.cast_set_at = None;
+                        }
+                        handlers::fan_out_cast_fail(&mut server, &[caster_cid], intent.caster, line);
+                        handlers::fan_out_mana_update(
                             &mut server,
                             &[caster_cid],
                             intent.caster,
-                            caster_hp_now,
-                            caster_max_hp_now,
+                            caster_mp_now,
+                            caster_max_mp,
                         );
-                    }
+                        if hp_cost > 0.0 {
+                            handlers::fan_out_health_update(
+                                &mut server,
+                                &[caster_cid],
+                                intent.caster,
+                                caster_hp_now,
+                                caster_max_hp_now,
+                            );
+                        }
                     continue;
-                }
+                    }
+                };
 
                 // Deduct mana (+ optional hp_cost for blood / fallen
                 // spells). Both are caster-side; target-side effects
@@ -4460,47 +4463,21 @@ pub async fn run(
                         // corpse; offer the res to its owner, who summons + gets an
                         // xp refund on accept. Mana was already deducted above
                         // (consistent with the rest of the cast pipeline).
-                        let Some(corpse_id) = intent.target_id else {
-                            tracing::info!(caster = intent.caster, spell = %spell.name, "resurrection rejected — no corpse targeted (target_id 0)");
-                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, "No corpse targeted.");
+                        let ResolvedTarget::Corpse(corpse_id, owner_cid) = resolved else {
+                            cast_resolution_lost(
+                                &mut server,
+                                &mut connections,
+                                &in_world_recipients_now,
+                                caster_cid,
+                                intent.caster,
+                                mana_cost,
+                                hp_cost,
+                                &spell.name,
+                                "corpse",
+                            );
                             continue;
                         };
                         tracing::info!(caster = intent.caster, spell = %spell.name, corpse_id, "resurrection cast received");
-                        // Defense-in-depth: only the spell's own classes (Cleric /
-                        // Paladin) at the required level may cast it. The client
-                        // gates this, but don't trust a forged client with a free
-                        // xp grant.
-                        let caster_class_level = connections.get(&caster_cid).map(|c| (c.class.clone(), c.level));
-                        let caster_ok = caster_class_level.as_ref().map(|(class, level)| {
-                            spell.classes.iter().any(|cl| cl == class) && *level >= spell.min_level
-                        }).unwrap_or(false);
-                        if !caster_ok {
-                            if let Some((class, level)) = &caster_class_level {
-                                tracing::info!(caster = intent.caster, spell = %spell.name, class = %class, level, required = spell.min_level, "resurrection rejected — caster class/level");
-                            }
-                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, "You cannot cast that.");
-                            continue;
-                        }
-                        // Validate the corpse: exists, in range, not already rezzed.
-                        let mut reason: Option<&str> = None;
-                        let corpse_owner = match corpses.get(&corpse_id) {
-                            None => { reason = Some("That is not a corpse."); 0 }
-                            Some(c) if !(c.pos.distance_to(caster_pos) <= RES_CAST_RANGE) => { reason = Some("You are too far from the corpse."); 0 }
-                            Some(c) if c.resurrected => { reason = Some("That corpse has already been resurrected."); 0 }
-                            Some(c) => c.owner_char,
-                        };
-                        if let Some(r) = reason {
-                            tracing::info!(caster = intent.caster, corpse_id, reason = r, "resurrection rejected — corpse");
-                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, r);
-                            continue;
-                        }
-                        // The owner must be in-world to receive + accept the offer.
-                        let owner_cid = corpse_owner as ClientId;
-                        if !connections.get(&owner_cid).map(|c| c.in_world).unwrap_or(false) {
-                            tracing::info!(caster = intent.caster, corpse_id, owner = corpse_owner, "resurrection rejected — owner not in world");
-                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, "Their spirit is not present.");
-                            continue;
-                        }
                         let xp_percent = spell.res_xp_percent.round() as u32;
                         let caster_name = connections.get(&caster_cid).map(|c| c.name.clone()).unwrap_or_default();
                         // Record the pending offer on the owner so the accept can't
@@ -4588,83 +4565,28 @@ pub async fn run(
                         }
                     }
                     "ALLY" => {
-                        use protocol::world::{ENEMY_ID_BASE, LOOT_BAG_ID_BASE, PET_ID_BASE};
-                        let raw_target = intent.target_id.unwrap_or(0);
-                        // Pet ALLY heal: any pet whose owner is in-world is
-                        // a valid heal target. No group requirement —
-                        // Beast Master can support a stranger's warder.
-                        if raw_target >= PET_ID_BASE {
-                            let pet_alive = enemies
-                                .get(&raw_target)
-                                .map_or(false, |p| p.is_alive() && p.owner.is_some());
-                            if !pet_alive {
-                                handlers::fan_out_cast_fail(
+                        // The pre-flight resolved the target (a pet, a player,
+                        // or oneself) and decided reach, liveness and the PvP
+                        // heal gates; the arm only applies.
+                        let (pet_target, target_cid) = match resolved {
+                            ResolvedTarget::Pet(id) => (Some(id), caster_cid),
+                            ResolvedTarget::Player(cid) => (None, cid),
+                            _ => {
+                                cast_resolution_lost(
                                     &mut server,
-                                    &[caster_cid],
+                                    &mut connections,
+                                    &in_world_recipients_now,
+                                    caster_cid,
                                     intent.caster,
-                                    "That pet is no longer in the world.".to_string(),
+                                    mana_cost,
+                                    hp_cost,
+                                    &spell.name,
+                                    "ally",
                                 );
                                 continue;
                             }
-                            // PvP heal gate. If the caster and the pet's
-                            // owner are mutually attackable (can_attack
-                            // returns true), the pet is treated as a
-                            // hostile target for heal purposes — same
-                            // gate as direct attacks, just mirrored.
-                            // Stops a healer from topping up the duel
-                            // partner's warder mid-fight.
-                            let pet_owner = enemies
-                                .get(&raw_target)
-                                .and_then(|p| p.owner);
-                            if let Some(owner_id) = pet_owner {
-                                if owner_id != intent.caster {
-                                    let owner_cid = owner_id as ClientId;
-                                    let hostile = match (
-                                        connections.get(&caster_cid),
-                                        connections.get(&owner_cid),
-                                    ) {
-                                        (Some(a), Some(o)) => combat::can_attack(
-                                            a, o,
-                                            a.zone.as_deref(),
-                                            o.zone.as_deref(),
-                                        ),
-                                        _ => false,
-                                    };
-                                    // Group-mates can always support each other —
-                                    // a shared /pvp flag never blocks healing a
-                                    // group-mate's pet.
-                                    let allied = group_manager.same_group(caster_cid, owner_cid);
-                                    if hostile && !allied {
-                                        let owner_name = connections
-                                            .get(&owner_cid)
-                                            .map(|c| c.name.clone())
-                                            .unwrap_or_default();
-                                        let pet_name = enemies
-                                            .get(&raw_target)
-                                            .map(|p| p.mob.name.clone())
-                                            .unwrap_or_default();
-                                        let line = if !owner_name.is_empty() && !pet_name.is_empty() {
-                                            format!("You cannot heal {}'s {}.", owner_name, pet_name)
-                                        } else {
-                                            "You cannot heal an enemy's pet.".to_string()
-                                        };
-                                        handlers::fan_out_chat_message(
-                                            &mut server,
-                                            &[caster_cid],
-                                            "",
-                                            protocol::world::ChatChannel::System,
-                                            &line,
-                                        );
-                                        tracing::debug!(
-                                            caster = intent.caster,
-                                            target = raw_target,
-                                            owner = owner_id,
-                                            "ALLY pet heal rejected — PvP gate"
-                                        );
-                                        continue;
-                                    }
-                                }
-                            }
+                        };
+                        if let Some(raw_target) = pet_target {
                             let heal = spell.heal_amount;
                             if heal > 0.0 {
                                 if let Some(pet) = enemies.get_mut(&raw_target) {
@@ -4723,104 +4645,7 @@ pub async fn run(
                             }
                             continue;
                         }
-                        // Loot bags / out-of-range / unknown high ids are
-                        // not heal targets.
-                        if raw_target >= LOOT_BAG_ID_BASE {
-                            handlers::fan_out_cast_fail(
-                                &mut server,
-                                &[caster_cid],
-                                intent.caster,
-                                "Cannot heal that target.".to_string(),
-                            );
-                            continue;
-                        }
-                        // NPC enemy → explicit reject so the player sees a
-                        // chat line instead of a silent no-op.
-                        if raw_target >= ENEMY_ID_BASE {
-                            handlers::fan_out_cast_fail(
-                                &mut server,
-                                &[caster_cid],
-                                intent.caster,
-                                "Cannot heal enemies.".to_string(),
-                            );
-                            continue;
-                        }
-                        // raw_target == 0 → self-heal. raw_target > 0 and
-                        // below ENEMY_ID_BASE is a player char_id.
-                        let target_entity_id = if raw_target > 0 {
-                            raw_target
-                        } else {
-                            intent.caster
-                        };
-                        let target_cid = target_entity_id as ClientId;
-                        let target_ok = connections
-                            .get(&target_cid)
-                            .map_or(false, |c| c.in_world && c.hp > 0.0);
-                        if !target_ok {
-                            // Healing someone who just died or zoned out. Mana
-                            // came off at the top of the handler, so silence
-                            // here reads as the heal being broken — and in the
-                            // exact moment a healer is panicking. Refund and say so.
-                            refund_spell_cost(
-                                &mut server,
-                                &mut connections,
-                                &in_world_recipients_now,
-                                caster_cid,
-                                intent.caster,
-                                mana_cost,
-                                hp_cost,
-                            );
-                            handlers::send_refusal(
-                                &mut server, caster_cid, "That target is no longer here.",
-                            );
-                            continue;
-                        }
-                        // PvP heal gate (player target). If caster and
-                        // target are mutually attackable, treat the
-                        // target as hostile for heal purposes. Self-
-                        // heal (caster == target) bypasses naturally
-                        // since combat::can_attack rejects same-id.
-                        if target_cid != caster_cid {
-                            let hostile = match (
-                                connections.get(&caster_cid),
-                                connections.get(&target_cid),
-                            ) {
-                                (Some(a), Some(t)) => combat::can_attack(
-                                    a, t,
-                                    a.zone.as_deref(),
-                                    t.zone.as_deref(),
-                                ),
-                                _ => false,
-                            };
-                            // Group-mates can always heal/buff each other; a
-                            // shared /pvp flag doesn't make a group-mate a
-                            // valid beneficial-cast block.
-                            let allied = group_manager.same_group(caster_cid, target_cid);
-                            if hostile && !allied {
-                                let t_name = connections
-                                    .get(&target_cid)
-                                    .map(|c| c.name.clone())
-                                    .unwrap_or_default();
-                                let line = if !t_name.is_empty() {
-                                    format!("You cannot heal {}.", t_name)
-                                } else {
-                                    "You cannot heal an enemy.".to_string()
-                                };
-                                handlers::fan_out_chat_message(
-                                    &mut server,
-                                    &[caster_cid],
-                                    "",
-                                    protocol::world::ChatChannel::System,
-                                    &line,
-                                );
-                                tracing::debug!(
-                                    caster = intent.caster,
-                                    target = target_entity_id,
-                                    "ALLY heal rejected — PvP gate"
-                                );
-                                continue;
-                            }
-                        }
+                        let target_entity_id = target_cid as u64;
                         let heal = spell.heal_amount;
                         if heal > 0.0 {
                             let (final_hp, max_hp) = {
@@ -4873,32 +4698,15 @@ pub async fn run(
                         }
                     }
                     "ENEMY" => {
-                        let Some(target_id) = intent.target_id else {
-                            // Nuking with nothing targeted. The user reported
-                            // this UX in 2026-05-05 ("player can cast attack
-                            // spells when nothing is targeted... should receive
-                            // an error"); the server half is that it also ate
-                            // the mana.
-                            refund_spell_cost(
-                                &mut server,
-                                &mut connections,
-                                &in_world_recipients_now,
-                                caster_cid,
-                                intent.caster,
-                                mana_cost,
-                                hp_cost,
-                            );
-                            handlers::send_refusal(
-                                &mut server, caster_cid, "You need a target for that spell.",
-                            );
-                            continue;
-                        };
-                        // Player target → PvP path (gate via can_attack
-                        // for parity with melee swings).
-                        if target_id < protocol::world::ENEMY_ID_BASE {
-                            let target_cid = target_id as ClientId;
-                            if target_cid == caster_cid {
-                                refund_spell_cost(
+                        // The pre-flight resolved the target and decided
+                        // presence, reach, liveness and the PvP gates (for a
+                        // player, and for another player's pet); the arm only
+                        // applies.
+                        let (target_id, pvp_target) = match resolved {
+                            ResolvedTarget::Player(cid) => (cid as u64, Some(cid)),
+                            ResolvedTarget::Mob(id) | ResolvedTarget::Pet(id) => (id, None),
+                            _ => {
+                                cast_resolution_lost(
                                     &mut server,
                                     &mut connections,
                                     &in_world_recipients_now,
@@ -4906,70 +4714,17 @@ pub async fn run(
                                     intent.caster,
                                     mana_cost,
                                     hp_cost,
-                                );
-                                handlers::send_refusal(
-                                    &mut server,
-                                    caster_cid,
-                                    "You cannot cast that on yourself.",
+                                    &spell.name,
+                                    "enemy",
                                 );
                                 continue;
                             }
-                            let pvp_ok = match (
-                                connections.get(&caster_cid),
-                                connections.get(&target_cid),
-                            ) {
-                                (Some(a), Some(t)) => combat::can_attack(
-                                    a, t,
-                                    a.zone.as_deref(),
-                                    t.zone.as_deref(),
-                                ),
-                                _ => false,
-                            };
-                            if !pvp_ok {
-                                let name = connections
-                                    .get(&target_cid)
-                                    .map(|c| c.name.clone())
-                                    .unwrap_or_else(|| "that target".to_string());
-                                handlers::fan_out_chat_message(
-                                    &mut server,
-                                    &[caster_cid],
-                                    "",
-                                    protocol::world::ChatChannel::System,
-                                    &format!("Unable to attack {}.", name),
-                                );
-                                tracing::debug!(
-                                    caster = intent.caster,
-                                    target = target_id,
-                                    spell = %spell.name,
-                                    "PvP spell not authorized"
-                                );
-                                continue;
-                            }
+                        };
+                        if let Some(target_cid) = pvp_target {
                             // Track 6 sub-task 4c — absorb pool +
                             // damage shield apply on PvP spell hit
                             // too. Armor reduction is skipped for
                             // spells (matches GDScript wrapping).
-                            // Liveness checked BEFORE the mutable borrow so the
-                            // refusal path can refund (refund_spell_cost needs
-                            // `&mut connections` of its own).
-                            let pvp_target_alive = connections
-                                .get(&target_cid)
-                                .map_or(false, |t| t.hp > 0.0 && t.in_world);
-                            if !pvp_target_alive {
-                                refund_spell_cost(
-                                    &mut server,
-                                    &mut connections,
-                                    &in_world_recipients_now,
-                                    caster_cid,
-                                    intent.caster,
-                                    mana_cost,
-                                    hp_cost,
-                                );
-                                handlers::send_refusal(
-                                    &mut server, caster_cid, "That target is no longer here.",
-                                );
-                                continue;
-                            }
                             let shield_back: f32;
                             let shield_back_name: Option<String>;
                             let mut absorb_strip_idx: Option<usize> = None;
@@ -5212,109 +4967,9 @@ pub async fn run(
                             }
                             continue;
                         }
-                        // Enemy target — range-check, then apply spell
-                        // damage via the shared helper (Track 9; same
-                        // path AOE uses per victim).
-                        let in_range = match enemies.get(&target_id) {
-                            Some(e) if e.is_alive() => {
-                                let dist = e.pos.distance_to(caster_pos);
-                                if dist > RANGED_ATTACK_RANGE {
-                                    // info!, not debug!: a player-visible failure
-                                    // should not be invisible at the default log
-                                    // level. A 2026-08-24 playtest saw the chat
-                                    // line with no matching server.log entry.
-                                    tracing::info!(
-                                        caster = intent.caster,
-                                        target = target_id,
-                                        spell = %spell.name,
-                                        dist,
-                                        "spell out of range"
-                                    );
-                                    false
-                                } else {
-                                    true
-                                }
-                            }
-                            _ => false,
-                        };
-                        if !in_range {
-                            // Mana came off at the top of this handler, so an
-                            // out-of-range nuke charged full price. Melee already
-                            // tells you (an out-of-range Attack fans a Miss), so
-                            // players expect a reply and read silence as the spell
-                            // being broken. Reporting it was only half the fix:
-                            // give the cost back too.
-                            refund_spell_cost(
-                                &mut server,
-                                &mut connections,
-                                &in_world_recipients_now,
-                                caster_cid,
-                                intent.caster,
-                                mana_cost,
-                                hp_cost,
-                            );
-                            handlers::send_refusal(
-                                &mut server, caster_cid, "That target is too far away.",
-                            );
-                            continue;
-                        }
-                        // Pet PvP gate, mirroring the melee/ranged path.
-                        // Spell hits on another player's pet require
-                        // can_attack between the caster and the pet's
-                        // owner.
-                        if target_id >= protocol::world::PET_ID_BASE {
-                            let pet_owner = enemies.get(&target_id).and_then(|e| e.owner);
-                            if let Some(owner_id) = pet_owner {
-                                let owner_cid = owner_id as ClientId;
-                                let allowed = if owner_cid == caster_cid {
-                                    false  // own pet — defensive guard
-                                } else {
-                                    match (
-                                        connections.get(&caster_cid),
-                                        connections.get(&owner_cid),
-                                    ) {
-                                        (Some(a), Some(o)) => combat::can_attack(
-                                            a, o,
-                                            a.zone.as_deref(),
-                                            o.zone.as_deref(),
-                                        ),
-                                        _ => false,
-                                    }
-                                };
-                                if !allowed {
-                                    let owner_name = connections
-                                        .get(&(owner_id as ClientId))
-                                        .map(|c| c.name.clone())
-                                        .unwrap_or_default();
-                                    let pet_name = enemies
-                                        .get(&target_id)
-                                        .map(|p| p.mob.name.clone())
-                                        .unwrap_or_default();
-                                    let line = if !owner_name.is_empty() && !pet_name.is_empty() {
-                                        format!("Unable to attack {}'s {}.", owner_name, pet_name)
-                                    } else if !pet_name.is_empty() {
-                                        format!("Unable to attack the {}.", pet_name)
-                                    } else {
-                                        "Unable to attack that target.".to_string()
-                                    };
-                                    handlers::fan_out_chat_message(
-                                        &mut server,
-                                        &[caster_cid],
-                                        "",
-                                        protocol::world::ChatChannel::System,
-                                        &line,
-                                    );
-                                    tracing::debug!(
-                                        caster = intent.caster,
-                                        target = target_id,
-                                        owner = owner_id,
-                                        spell = %spell.name,
-                                        "PvP spell not authorized vs pet"
-                                    );
-                                    continue;
-                                }
-                            }
-                        }
+                        // A mob, or another player's pet the pre-flight
+                        // admitted: apply spell damage via the shared helper
+                        // (Track 9; the same path AOE uses per victim).
                         apply_spell_damage_to_enemy(
                             &mut server,
                             &in_world_recipients_now,
@@ -5359,28 +5014,6 @@ pub async fn run(
                         // CELL_SIZE=120), then filter by spell radius.
                         // AOE spell radii top out around 6 m today, so
                         // this is a tiny working set in practice.
-                        if spell.aoe_radius <= 0.0 {
-                            tracing::info!(
-                                caster = intent.caster,
-                                spell = %spell.name,
-                                "AOE spell with no radius; nothing to apply"
-                            );
-                            // Only reachable from a malformed spells.toml, but
-                            // the player paid for it either way.
-                            refund_spell_cost(
-                                &mut server,
-                                &mut connections,
-                                &in_world_recipients_now,
-                                caster_cid,
-                                intent.caster,
-                                mana_cost,
-                                hp_cost,
-                            );
-                            handlers::send_refusal(
-                                &mut server, caster_cid, "That magic has no effect here yet.",
-                            );
-                            continue;
-                        }
                         let radius = spell.aoe_radius;
                         let radius_sq = radius * radius;
                         let caster_cell = aoi::cell_for(caster_pos.x, caster_pos.z);
@@ -5471,26 +5104,6 @@ pub async fn run(
                         // corpse cleanup phase removes it from the
                         // map and AOI next tick).
                         let pet_type = spell.pet_type.clone();
-                        if pet_type.is_empty() {
-                            tracing::info!(
-                                caster = intent.caster,
-                                spell = %spell.name,
-                                "PET_SUMMON spell has no pet_type; ignored"
-                            );
-                            refund_spell_cost(
-                                &mut server,
-                                &mut connections,
-                                &in_world_recipients_now,
-                                caster_cid,
-                                intent.caster,
-                                mana_cost,
-                                hp_cost,
-                            );
-                            handlers::send_refusal(
-                                &mut server, caster_cid, "That magic has no effect here yet.",
-                            );
-                            continue;
-                        }
                         // Owner-derived level (pet interim A): manual
                         // summons take the EQ re-summon gamble — a 0..=2
                         // roll off owner - 1 — so paying mana again can
@@ -5528,18 +5141,10 @@ pub async fn run(
                             1.0,
                             now,
                         ) else {
-                            tracing::info!(
-                                caster = intent.caster,
-                                spell = %spell.name,
-                                pet_type = %pet_type,
-                                "unknown pet_type — server-side summon dropped"
-                            );
-                            // Reachable in ordinary play: the client-only spell
-                            // backlog includes pet spells whose pet_type the
-                            // server has never heard of (Warder's Mend's
-                            // sibling case). Same refund-and-say-so as the
-                            // unknown-spell arm above.
-                            refund_spell_cost(
+                            // The pre-flight checked the pet type is known
+                            // (`pet_templates::scaled` at variance 0), so a
+                            // miss here is the template vanishing between.
+                            cast_resolution_lost(
                                 &mut server,
                                 &mut connections,
                                 &in_world_recipients_now,
@@ -5547,9 +5152,8 @@ pub async fn run(
                                 intent.caster,
                                 mana_cost,
                                 hp_cost,
-                            );
-                            handlers::send_refusal(
-                                &mut server, caster_cid, "That magic has no effect here yet.",
+                                &spell.name,
+                                "pet template",
                             );
                             continue;
                         };
@@ -5574,9 +5178,8 @@ pub async fn run(
                         // owner leaving) the mob is handed back as the
                         // enemy it was, hostile to its charmer; see
                         // `return_charmed_mob`.
-                        let Some(target_id) = intent.target_id else {
-                            tracing::info!(caster = intent.caster, spell = %spell.name, "PET_CHARM dropped — no target");
-                            refund_spell_cost(
+                        let ResolvedTarget::Mob(target_id) = resolved else {
+                            cast_resolution_lost(
                                 &mut server,
                                 &mut connections,
                                 &in_world_recipients_now,
@@ -5584,30 +5187,11 @@ pub async fn run(
                                 intent.caster,
                                 mana_cost,
                                 hp_cost,
-                            );
-                            handlers::send_refusal(
-                                &mut server, caster_cid, "You need a target for that spell.",
+                                &spell.name,
+                                "charm",
                             );
                             continue;
                         };
-                        if target_id < protocol::world::ENEMY_ID_BASE
-                            || target_id >= protocol::world::LOOT_BAG_ID_BASE
-                        {
-                            tracing::info!(caster = intent.caster, target = target_id, "PET_CHARM dropped — target id not in enemy partition");
-                            refund_spell_cost(
-                                &mut server,
-                                &mut connections,
-                                &in_world_recipients_now,
-                                caster_cid,
-                                intent.caster,
-                                mana_cost,
-                                hp_cost,
-                            );
-                            handlers::send_refusal(
-                                &mut server, caster_cid, "You cannot charm that.",
-                            );
-                            continue;
-                        }
                         let owner_id = intent.caster;
                         // Look up the target; copy out the stats we
                         // need then remove it from the map + AOI.
@@ -5616,8 +5200,7 @@ pub async fn run(
                             .filter(|e| e.is_alive() && !e.is_pet())
                             .map(|e| (e.mob.clone(), e.hp, e.max_hp, e.pos, e.yaw, e.spawn_point_idx, e.spawn_pos));
                         let Some((mob, hp, max_hp, pos, yaw, slot_idx, home_pos)) = extracted else {
-                            tracing::info!(caster = owner_id, target = target_id, "PET_CHARM dropped — target gone or not a live enemy");
-                            refund_spell_cost(
+                            cast_resolution_lost(
                                 &mut server,
                                 &mut connections,
                                 &in_world_recipients_now,
@@ -5625,33 +5208,11 @@ pub async fn run(
                                 intent.caster,
                                 mana_cost,
                                 hp_cost,
-                            );
-                            handlers::send_refusal(
-                                &mut server, caster_cid, "That target is no longer here.",
+                                &spell.name,
+                                "charm victim",
                             );
                             continue;
                         };
-                        // Range gate, the same reach as a nuke. Charm had none,
-                        // so any live enemy id in the world could be charmed
-                        // from anywhere (a named mob from the safety of town).
-                        // Kept-only-when-in-range, so a non-finite distance
-                        // refuses.
-                        if !(pos.distance_to(caster_pos) <= RANGED_ATTACK_RANGE) {
-                            tracing::info!(caster = owner_id, target = target_id, "PET_CHARM dropped — out of range");
-                            refund_spell_cost(
-                                &mut server,
-                                &mut connections,
-                                &in_world_recipients_now,
-                                caster_cid,
-                                intent.caster,
-                                mana_cost,
-                                hp_cost,
-                            );
-                            handlers::send_refusal(
-                                &mut server, caster_cid, "That target is too far away.",
-                            );
-                            continue;
-                        }
                         // Despawn the old enemy id from AOI + fan.
                         let enemy_cell = aoi::cell_for(pos.x, pos.z);
                         aoi.remove(target_id, enemy_cell);
@@ -5711,12 +5272,8 @@ pub async fn run(
                         // the pre-flight found it alive and in reach. Warder's
                         // Mend was the one client-only pet spell (ported
                         // 2026-10-07 after the tester asked for none).
-                        let own_pet_id = enemies
-                            .iter()
-                            .find(|(_, e)| e.owner == Some(intent.caster) && e.is_alive())
-                            .map(|(id, _)| *id);
-                        let Some(pet_id) = own_pet_id else {
-                            refund_spell_cost(
+                        let ResolvedTarget::Pet(pet_id) = resolved else {
+                            cast_resolution_lost(
                                 &mut server,
                                 &mut connections,
                                 &in_world_recipients_now,
@@ -5724,8 +5281,9 @@ pub async fn run(
                                 intent.caster,
                                 mana_cost,
                                 hp_cost,
+                                &spell.name,
+                                "own pet",
                             );
-                            handlers::send_refusal(&mut server, caster_cid, "You have no pet to mend.");
                             continue;
                         };
                         let heal = spell.heal_amount.max(0.0);
@@ -5752,14 +5310,32 @@ pub async fn run(
                         // Spell batch step 2: bind the target (self, or the
                         // group member the pre-flight admitted) where THEY
                         // stand, and persist it like the Soul Binder does.
-                        let raw = intent.target_id.unwrap_or(0);
-                        let bound_cid: ClientId =
-                            if raw == 0 || raw == intent.caster || raw >= protocol::world::ENEMY_ID_BASE {
-                                caster_cid
-                            } else {
-                                raw as ClientId
-                            };
+                        let ResolvedTarget::Player(bound_cid) = resolved else {
+                            cast_resolution_lost(
+                                &mut server,
+                                &mut connections,
+                                &in_world_recipients_now,
+                                caster_cid,
+                                intent.caster,
+                                mana_cost,
+                                hp_cost,
+                                &spell.name,
+                                "bind",
+                            );
+                            continue;
+                        };
                         let Some(bc) = connections.get_mut(&bound_cid) else {
+                            cast_resolution_lost(
+                                &mut server,
+                                &mut connections,
+                                &in_world_recipients_now,
+                                caster_cid,
+                                intent.caster,
+                                mana_cost,
+                                hp_cost,
+                                &spell.name,
+                                "bind target",
+                            );
                             continue;
                         };
                         let pos = bc.pos.into_tuple();
@@ -10807,8 +10383,32 @@ const NO_EFFECT_YET: &str = "That magic has no effect here yet.";
 /// How close (metres) a resurrection's caster must be to the corpse.
 const RES_CAST_RANGE: f32 = 30.0;
 
-/// Cast eligibility, decided BEFORE any side effect. Returns the refusal line,
-/// or `None` when the cast may proceed.
+/// What the cast pre-flight resolved the cast to, for the arm to act on
+/// without looking the target up a second time or re-deciding reach,
+/// liveness or the PvP gates. The pre-flight and the arm run back to back for
+/// one intent, with nothing in between, so the arm may trust it; if an arm
+/// ever finds its target gone anyway, `cast_resolution_lost` says so loudly
+/// and refunds. One home for every rule (the 2026-10-02 review): a new target
+/// kind or a per-spell range is decided here and nowhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolvedTarget {
+    /// Nothing to resolve: SELF, AOE, PET_SUMMON, PORT.
+    Nothing,
+    /// A player in the world and in reach: ENEMY's PvP path, ALLY on a
+    /// player or on oneself, BIND on oneself or a group member.
+    Player(ClientId),
+    /// A live mob in reach: ENEMY's mob path, PET_CHARM's victim.
+    Mob(EntityId),
+    /// A live pet in reach: ENEMY on another player's pet, ALLY on a pet,
+    /// PET_HEAL's own pet.
+    Pet(EntityId),
+    /// A corpse in reach that is not yet resurrected, and its owner, who is
+    /// in the world.
+    Corpse(EntityId, ClientId),
+}
+
+/// Cast eligibility, decided BEFORE any side effect. Returns the resolved
+/// target for the arm to act on, or the refusal line.
 ///
 /// Two reasons this is a pre-flight rather than checks inside the
 /// per-target-type arms:
@@ -10817,7 +10417,8 @@ const RES_CAST_RANGE: f32 = 30.0;
 ///    spells against a player had no range check at all, so a modified client
 ///    could heal a friend in a dungeon from town, or nuke a PvP-flagged player
 ///    from across the world, by naming an id. Every targeted cast now needs
-///    its target within `RANGED_ATTACK_RANGE`, the one spell reach until
+///    its target within reach (`RANGED_ATTACK_RANGE`, or
+///    `FRIENDLY_SPELL_RANGE` for a friendly cast), the one spell reach until
 ///    spells carry their own. Written keep-only-when-in-reach, so a
 ///    non-finite distance refuses.
 /// 2. **Order.** The handler takes the mana, stamps the cooldown and rolls the
@@ -10832,8 +10433,9 @@ const RES_CAST_RANGE: f32 = 30.0;
 /// Every target type is covered: the three with a target (ENEMY, ALLY,
 /// PET_CHARM), PET_HEAL (the caster's own pet), CORPSE, the spell-data checks
 /// (an AOE with no radius, a summon with no known pet), and any type with no
-/// arm. The arms keep their own checks as a second line; after this they
-/// should not fire.
+/// arm. The arms carry NO copy of these checks (the 2026-10-02 review found
+/// two homes for one rule): they consume the `ResolvedTarget` and treat a
+/// target gone between here and there as the bug it would be.
 #[allow(clippy::too_many_arguments)]
 fn cast_target_refusal(
     spell: &spells::Spell,
@@ -10845,9 +10447,11 @@ fn cast_target_refusal(
     enemies: &HashMap<EntityId, Entity>,
     corpses: &HashMap<EntityId, super::corpses::Corpse>,
     group_manager: &GroupManager,
-) -> Option<String> {
+) -> Result<ResolvedTarget, String> {
     use protocol::world::{ENEMY_ID_BASE, LOOT_BAG_ID_BASE, PET_ID_BASE};
-    let caster = connections.get(&caster_cid)?;
+    let Some(caster) = connections.get(&caster_cid) else {
+        return Err(TARGET_UNREACHABLE.to_string());
+    };
     // Friendly spells reach further than hostile ones (spell batch step 1);
     // binding a group member is a friendly cast too.
     let reach = match spell.target_type.as_str() {
@@ -10855,8 +10459,8 @@ fn cast_target_refusal(
         _ => RANGED_ATTACK_RANGE,
     };
     let in_reach = |pos: Vec3f| pos.distance_to(caster_pos) <= reach;
-    let unreachable = || Some(TARGET_UNREACHABLE.to_string());
-    let no_effect = || Some(NO_EFFECT_YET.to_string());
+    let unreachable = || Err(TARGET_UNREACHABLE.to_string());
+    let no_effect = || Err(NO_EFFECT_YET.to_string());
     let player_in_reach =
         |cid: ClientId| connections.get(&cid).filter(|c| c.in_world && in_reach(c.pos));
     let entity_in_reach =
@@ -10868,24 +10472,24 @@ fn cast_target_refusal(
     match spell.target_type.as_str() {
         "ENEMY" => {
             let Some(target) = target_id else {
-                return Some("You need a target for that spell.".to_string());
+                return Err("You need a target for that spell.".to_string());
             };
             if target < ENEMY_ID_BASE {
                 // A player: the PvP path.
                 let target_cid = target as ClientId;
                 if target_cid == caster_cid {
-                    return Some("You cannot cast that on yourself.".to_string());
+                    return Err("You cannot cast that on yourself.".to_string());
                 }
                 let Some(t) = player_in_reach(target_cid) else {
                     return unreachable();
                 };
                 if !attackable(t) {
-                    return Some("You cannot attack that player.".to_string());
+                    return Err("You cannot attack that player.".to_string());
                 }
                 if t.hp <= 0.0 {
-                    return Some("That target is no longer here.".to_string());
+                    return Err("That target is no longer here.".to_string());
                 }
-                return None;
+                return Ok(ResolvedTarget::Player(target_cid));
             }
             let Some(e) = entity_in_reach(target) else {
                 return unreachable();
@@ -10897,7 +10501,7 @@ fn cast_target_refusal(
                 let allowed = owner_cid != caster_cid
                     && connections.get(&owner_cid).is_some_and(attackable);
                 if !allowed {
-                    return Some("You cannot attack that pet.".to_string());
+                    return Err("You cannot attack that pet.".to_string());
                 }
             }
             // One attack slow at a time, strongest wins (spell batch step 1):
@@ -10906,14 +10510,18 @@ fn cast_target_refusal(
             if spell.attack_slow_amount > 0.0
                 && e.attack_slow_pct() > (spell.attack_slow_amount.clamp(0.0, 1.0) * 100.0) as u8
             {
-                return Some("A stronger slow already holds that target.".to_string());
+                return Err("A stronger slow already holds that target.".to_string());
             }
-            None
+            if e.is_pet() {
+                Ok(ResolvedTarget::Pet(target))
+            } else {
+                Ok(ResolvedTarget::Mob(target))
+            }
         }
         "ALLY" => {
             let raw = target_id.unwrap_or(0);
             if raw == 0 || raw == caster_id {
-                return None; // self
+                return Ok(ResolvedTarget::Player(caster_cid)); // self
             }
             if raw >= PET_ID_BASE {
                 let Some(owner_id) = entity_in_reach(raw).and_then(|p| p.owner) else {
@@ -10925,64 +10533,64 @@ fn cast_target_refusal(
                 if owner_cid != caster_cid {
                     let hostile = connections.get(&owner_cid).is_some_and(attackable);
                     if hostile && !group_manager.same_group(caster_cid, owner_cid) {
-                        return Some("You cannot heal that pet.".to_string());
+                        return Err("You cannot heal that pet.".to_string());
                     }
                 }
-                return None;
+                return Ok(ResolvedTarget::Pet(raw));
             }
             if raw >= LOOT_BAG_ID_BASE {
-                return Some("Cannot heal that target.".to_string());
+                return Err("Cannot heal that target.".to_string());
             }
             if raw >= ENEMY_ID_BASE {
-                return Some("Cannot heal enemies.".to_string());
+                return Err("Cannot heal enemies.".to_string());
             }
             let target_cid = raw as ClientId;
             let Some(t) = player_in_reach(target_cid) else {
                 return unreachable();
             };
             if t.hp <= 0.0 {
-                return Some("That target is no longer here.".to_string());
+                return Err("That target is no longer here.".to_string());
             }
             if attackable(t) && !group_manager.same_group(caster_cid, target_cid) {
-                return Some("You cannot heal that player.".to_string());
+                return Err("You cannot heal that player.".to_string());
             }
-            None
+            Ok(ResolvedTarget::Player(target_cid))
         }
         "PET_CHARM" => {
             let Some(target) = target_id else {
-                return Some("You need a target for that spell.".to_string());
+                return Err("You need a target for that spell.".to_string());
             };
             if !(ENEMY_ID_BASE..LOOT_BAG_ID_BASE).contains(&target) {
-                return Some("You cannot charm that.".to_string());
+                return Err("You cannot charm that.".to_string());
             }
             match entity_in_reach(target) {
-                Some(e) if !e.is_pet() => None,
+                Some(e) if !e.is_pet() => Ok(ResolvedTarget::Mob(target)),
                 _ => unreachable(),
             }
         }
         "CORPSE" => {
             let Some(corpse_id) = target_id else {
-                return Some("No corpse targeted.".to_string());
+                return Err("No corpse targeted.".to_string());
             };
             let Some(corpse) = corpses.get(&corpse_id) else {
-                return Some("That is not a corpse.".to_string());
+                return Err("That is not a corpse.".to_string());
             };
             if !(corpse.pos.distance_to(caster_pos) <= RES_CAST_RANGE) {
-                return Some("You are too far from the corpse.".to_string());
+                return Err("You are too far from the corpse.".to_string());
             }
             if corpse.resurrected {
-                return Some("That corpse has already been resurrected.".to_string());
+                return Err("That corpse has already been resurrected.".to_string());
             }
             // The owner must be in the world to receive the offer.
             let owner_cid = corpse.owner_char as ClientId;
             if !connections.get(&owner_cid).is_some_and(|c| c.in_world) {
-                return Some("Their spirit is not present.".to_string());
+                return Err("Their spirit is not present.".to_string());
             }
-            None
+            Ok(ResolvedTarget::Corpse(corpse_id, owner_cid))
         }
         "AOE" => {
             if spell.aoe_radius > 0.0 {
-                None
+                Ok(ResolvedTarget::Nothing)
             } else {
                 no_effect()
             }
@@ -10992,7 +10600,7 @@ fn cast_target_refusal(
                 && pet_templates::scaled(&spell.pet_type, caster.level.max(1) as u32, 0)
                     .is_some();
             if known {
-                None
+                Ok(ResolvedTarget::Nothing)
             } else {
                 no_effect()
             }
@@ -11005,22 +10613,22 @@ fn cast_target_refusal(
             // position, never a client value.
             let raw = target_id.unwrap_or(0);
             if raw == 0 || raw == caster_id || raw >= ENEMY_ID_BASE {
-                return None;
+                return Ok(ResolvedTarget::Player(caster_cid));
             }
             let target_cid = raw as ClientId;
             if !group_manager.same_group(caster_cid, target_cid) {
-                return Some("You can only bind yourself or a group member.".to_string());
+                return Err("You can only bind yourself or a group member.".to_string());
             }
             let Some(t) = player_in_reach(target_cid) else {
                 return unreachable();
             };
             if t.hp <= 0.0 || t.death_processed {
-                return Some("That target is no longer here.".to_string());
+                return Err("That target is no longer here.".to_string());
             }
             if super::safe_areas::containing(t.pos).is_none() {
-                return Some("You can only bind another in a safe place, such as the town.".to_string());
+                return Err("You can only bind another in a safe place, such as the town.".to_string());
             }
-            None
+            Ok(ResolvedTarget::Player(target_cid))
         }
         "PORT" => {
             // Gate (port = "bind") always has somewhere to go, since every
@@ -11028,8 +10636,10 @@ fn cast_target_refusal(
             // area to exist. Anything else is a port the server has no
             // destination for (the zone ports) and costs nothing.
             match spell.port.as_str() {
-                "bind" => None,
-                "safe" if super::safe_areas::nearest_arrival(caster_pos).is_some() => None,
+                "bind" => Ok(ResolvedTarget::Nothing),
+                "safe" if super::safe_areas::nearest_arrival(caster_pos).is_some() => {
+                    Ok(ResolvedTarget::Nothing)
+                }
                 _ => no_effect(),
             }
         }
@@ -11038,18 +10648,44 @@ fn cast_target_refusal(
             // Having no pet says nothing about anyone else, so it can be
             // said plainly.
             let own_pet = enemies
-                .values()
-                .find(|e| e.owner == Some(caster_id) && e.is_alive());
+                .iter()
+                .find(|(_, e)| e.owner == Some(caster_id) && e.is_alive());
             match own_pet {
-                None => Some("You have no pet to mend.".to_string()),
-                Some(p) if in_reach(p.pos) => None,
+                None => Err("You have no pet to mend.".to_string()),
+                Some((id, p)) if in_reach(p.pos) => Ok(ResolvedTarget::Pet(*id)),
                 Some(_) => unreachable(),
             }
         }
-        "SELF" => None,
+        "SELF" => Ok(ResolvedTarget::Nothing),
         // No arm exists for anything else: a target type new to the data.
         _ => no_effect(),
     }
+}
+
+/// An arm found the target the pre-flight resolved a moment ago gone. The
+/// pre-flight and the arm run back to back for one intent, so this cannot
+/// happen; if it ever does it is a bug, logged as one, and the caster is
+/// refunded and told rather than silently charged for nothing.
+#[allow(clippy::too_many_arguments)]
+fn cast_resolution_lost(
+    server: &mut RenetServer,
+    connections: &mut HashMap<ClientId, PerConnection>,
+    recipients: &[ClientId],
+    caster_cid: ClientId,
+    caster_id: u64,
+    mana_cost: f32,
+    hp_cost: f32,
+    spell_name: &str,
+    what: &str,
+) {
+    tracing::error!(
+        caster = caster_id,
+        spell = %spell_name,
+        what,
+        "cast target resolved by the pre-flight was gone at the arm; refunded"
+    );
+    refund_spell_cost(server, connections, recipients, caster_cid, caster_id, mana_cost, hp_cost);
+    handlers::send_refusal(server, caster_cid, TARGET_UNREACHABLE);
 }
 
 /// End every PvP DoT these casters have on any player (spell batch step 5):
@@ -11269,6 +10905,142 @@ fn corpse_emptied_by_loot(had_content: bool, empty_now: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::corpse_emptied_by_loot;
+
+    // The cast pre-flight is the ONE home of target resolution: the arms act
+    // on the `ResolvedTarget` it returns and carry no copy of its checks (the
+    // 2026-10-02 review's finding, closed 2026-10-14). So the VARIANT it
+    // returns is load-bearing, not just the accept/refuse: an ENEMY cast
+    // resolving a rival's pet as a Mob or a flagged player as anything else
+    // would send the arm down the wrong path, and an untargeted heal is a
+    // self-heal only because ALLY resolves nothing to the caster.
+    mod cast_pre_flight {
+        use super::super::{cast_target_refusal, ResolvedTarget, Vec3f, TARGET_UNREACHABLE};
+        use crate::world::{
+            connection::PerConnection, corpses::Corpse, entity::{mint_pet_id, Entity},
+            groups::GroupManager, pet_templates, spells,
+        };
+        use protocol::world::{Coins, LOOT_BAG_ID_BASE};
+        use renet::ClientId;
+        use std::{collections::HashMap, time::Instant};
+
+        fn conn_at(char_id: i64, pos: Vec3f, pvp: bool) -> PerConnection {
+            let spawn = crate::db::CharacterSpawn {
+                hunger: 14400.0,
+                thirst: 14400.0,
+                char_id,
+                account_id: char_id,
+                name: format!("Char{char_id}"),
+                race: "Human".into(),
+                class: "Cleric".into(),
+                level: 20,
+                xp: 0,
+                xp_to_next: 100,
+                strength: 10, dexterity: 10, agility: 10, intelligence: 10,
+                wisdom: 10, charisma: 10, constitution: 10,
+                max_hp: 100.0, max_mp: 100.0, max_stamina: 100.0,
+                hp: 100.0, mp: 100.0, stamina: 100.0,
+                coins: Coins::ZERO,
+                bank_coins: Coins::ZERO,
+                zone: None,
+                pos: (pos.x, pos.y, pos.z),
+                yaw: 0.0,
+                completed_quests: Vec::new(),
+                active_quests: Vec::new(),
+                bind: None,
+            };
+            let mut c = PerConnection::from_spawn(spawn, Instant::now());
+            c.in_world = true;
+            c.pos = pos;
+            c.pvp_override_on = pvp;
+            c
+        }
+
+        /// A live skeleton at `pos`; with an owner it is that owner's pet,
+        /// in the pet id partition like a real one.
+        fn mob_at(pos: Vec3f, owner: Option<u64>) -> Entity {
+            let template = pet_templates::lookup("skeleton").expect("skeleton template");
+            let mut e = Entity::from_spawn(0, pos, template, Instant::now());
+            if let Some(owner_id) = owner {
+                e.id = mint_pet_id();
+                e.owner = Some(owner_id);
+            }
+            e
+        }
+
+        #[test]
+        fn resolves_each_target_kind_to_the_variant_its_arm_consumes() {
+            let at = |x: f32| Vec3f { x, y: 0.0, z: 0.0 };
+            let caster: ClientId = 1;
+            let friend: ClientId = 2;
+            let rival: ClientId = 3;
+            let mut connections = HashMap::new();
+            connections.insert(caster, conn_at(1, at(0.0), true));
+            connections.insert(friend, conn_at(2, at(5.0), false));
+            connections.insert(rival, conn_at(3, at(10.0), true));
+
+            let mut enemies = HashMap::new();
+            let mut add = |e: Entity| {
+                let id = e.id;
+                enemies.insert(id, e);
+                id
+            };
+            let mob_id = add(mob_at(at(12.0), None));
+            let own_pet_id = add(mob_at(at(3.0), Some(caster)));
+            let rival_pet_id = add(mob_at(at(14.0), Some(rival)));
+            let far_mob_id = add(mob_at(at(26.0), None));
+
+            let corpse_id = LOOT_BAG_ID_BASE + 7;
+            let mut corpses = HashMap::new();
+            corpses.insert(
+                corpse_id,
+                Corpse::new(corpse_id, friend as i64, "Char2".into(), String::new(), at(8.0),
+                    Vec::new(), Coins::ZERO, 0, false, Instant::now()),
+            );
+            let groups = GroupManager::new();
+            let resolve = |name: &str, target: Option<u64>| {
+                let spell = spells::lookup(name).unwrap_or_else(|| panic!("{name} in spells.toml"));
+                cast_target_refusal(spell, target, caster, caster, at(0.0),
+                    &connections, &enemies, &corpses, &groups)
+            };
+            let refused = |line: &str| Err(line.to_string());
+
+            // ENEMY: a mob, a rival's pet (its owner attackable), a flagged
+            // player; never one's own pet, nothing out of reach, nothing
+            // untargeted.
+            assert_eq!(resolve("Fireball", Some(mob_id)), Ok(ResolvedTarget::Mob(mob_id)));
+            assert_eq!(resolve("Fireball", Some(rival_pet_id)), Ok(ResolvedTarget::Pet(rival_pet_id)));
+            assert_eq!(resolve("Fireball", Some(rival)), Ok(ResolvedTarget::Player(rival)));
+            assert_eq!(resolve("Fireball", Some(own_pet_id)), refused("You cannot attack that pet."));
+            assert_eq!(resolve("Fireball", Some(far_mob_id)), refused(TARGET_UNREACHABLE));
+            assert_eq!(resolve("Fireball", None), refused("You need a target for that spell."));
+            // ALLY: nothing targeted (or oneself) is a self-heal; a player; a pet.
+            assert_eq!(resolve("Heal", None), Ok(ResolvedTarget::Player(caster)));
+            assert_eq!(resolve("Heal", Some(caster)), Ok(ResolvedTarget::Player(caster)));
+            assert_eq!(resolve("Heal", Some(friend)), Ok(ResolvedTarget::Player(friend)));
+            assert_eq!(resolve("Heal", Some(own_pet_id)), Ok(ResolvedTarget::Pet(own_pet_id)));
+            // PET_HEAL: the caster's own pet, whatever the client targeted.
+            assert_eq!(resolve("Warder's Mend", Some(mob_id)), Ok(ResolvedTarget::Pet(own_pet_id)));
+            // PET_CHARM: a mob, never a pet (a pet id is outside the enemy
+            // partition, so the partition check answers before the lookup).
+            assert_eq!(resolve("Charm", Some(mob_id)), Ok(ResolvedTarget::Mob(mob_id)));
+            assert_eq!(resolve("Charm", Some(rival_pet_id)), refused("You cannot charm that."));
+            // CORPSE: the corpse and its owner, who is in the world.
+            assert_eq!(
+                resolve("Resurrection (Minor)", Some(corpse_id)),
+                Ok(ResolvedTarget::Corpse(corpse_id, friend))
+            );
+            // BIND: oneself; a group member only (none here).
+            assert_eq!(resolve("Bind Affinity", None), Ok(ResolvedTarget::Player(caster)));
+            assert_eq!(
+                resolve("Bind Affinity", Some(friend)),
+                refused("You can only bind yourself or a group member.")
+            );
+            // SELF, AOE, PET_SUMMON, PORT: nothing to resolve.
+            for name in ["Breeze", "Inferno", "Summon Skeleton", "Gate"] {
+                assert_eq!(resolve(name, None), Ok(ResolvedTarget::Nothing), "{name}");
+            }
+        }
+    }
 
     // Melee swing-rate limit: the per-hand minimum interval the server allows
     // between same-hand swings. It must (a) sit comfortably BELOW the fastest a

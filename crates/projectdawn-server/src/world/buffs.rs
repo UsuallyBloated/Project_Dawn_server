@@ -285,10 +285,12 @@ pub fn is_lich_form_active(buffs: &[ActiveBuff]) -> bool {
 /// debuff every accepted resurrection leaves, classic EQ's "Resurrection
 /// Effects" (five minutes; "You are exhausted." on, "You feel your strength
 /// return." off). EQ cut STR, STA, AGI, WIS and INT by level-scaled
-/// absolutes on its hundred-point stats; ours sit around ten to sixty, so
-/// the cut is `level / RES_SICKNESS_LEVELS_PER_POINT`, floored at one, off
-/// each of the five primaries, and natural HP and mana regen run at
-/// `RES_SICKNESS_REGEN_MULT` while it lasts. The client computes the same
+/// absolutes; here the cut is `level / RES_SICKNESS_LEVELS_PER_POINT`,
+/// floored at one, off each of the five primaries, and natural HP and mana
+/// regen run at `RES_SICKNESS_REGEN_MULT` while it lasts. The cut's size is
+/// an open user call (see the To-Do entry): a class's main stats run from
+/// about 22 at level 1 to 140 or more at 60 while the rest never move, so
+/// level/4 is a small bite on the former and can take the latter negative. The client computes the same
 /// cut from the level it knows (`buff_manager.gd`, kept in lockstep by
 /// hand), so the sheet shows what the server fights with. All three
 /// numbers are tuning knobs.

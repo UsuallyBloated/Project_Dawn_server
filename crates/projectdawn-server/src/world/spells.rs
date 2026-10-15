@@ -47,6 +47,21 @@ pub struct Spell {
     // Cleric tiers, 20 for the Paladin "Reclaim Soul"). 0 for every non-res spell.
     #[serde(default)]
     pub res_xp_percent: f32,
+    /// Summon Food / Summon Drink (food slice 2, user call 2026-10-15,
+    /// Monsters and Memories' shape): a SUMMON_ITEM spell conjures
+    /// `summon_item` into the caster's bags, `summon_count` of them: one at
+    /// the level the class gets the spell and one more per
+    /// `SUMMON_LEVELS_PER_EXTRA` levels, capped at `summon_max`.
+    #[serde(default)]
+    pub summon_item: String,
+    #[serde(default)]
+    pub summon_max: u32,
+    /// Per-class level requirements on a spell several classes share
+    /// (Summon Drink: Magician 1, Shaman 2, Cleric 3, Druid 10). A class
+    /// absent here uses `min_level`. Read by the cast gate's level check
+    /// and by the summon count's base; the client carries the same table.
+    #[serde(default)]
+    pub class_min_levels: std::collections::HashMap<String, i32>,
 
     // Track 6 sub-task 4a — buff fields applied to the target (or
     // caster for SELF spells) after the immediate damage/heal lands.
@@ -446,5 +461,60 @@ mod tests {
         assert_eq!(ds.target_type, "ENEMY");
         assert!(ds.classes.iter().any(|c| c == "Shadow Knight"));
         assert_eq!(ds.min_level, 10);
+    }
+}
+
+impl Spell {
+    /// The level `class` needs for this spell: its own entry in
+    /// `class_min_levels`, else `min_level`.
+    pub fn required_level(&self, class: &str) -> i32 {
+        self.class_min_levels
+            .get(class)
+            .copied()
+            .unwrap_or(self.min_level)
+    }
+}
+
+/// Summon Food / Drink: one more item per this many levels above the level
+/// the class got the spell (a tuning knob; Monsters and Memories scales 1 to
+/// 4 by level without publishing the steps).
+pub const SUMMON_LEVELS_PER_EXTRA: i32 = 10;
+
+/// How many of a SUMMON_ITEM spell's item a caster of `class` at
+/// `caster_level` conjures: 1 at the class's level for the spell, one more
+/// per `SUMMON_LEVELS_PER_EXTRA` levels, never more than `summon_max` (and
+/// never less than one).
+pub fn summon_count(spell: &Spell, class: &str, caster_level: i32) -> u32 {
+    let base = spell.required_level(class);
+    let extra = (caster_level - base).max(0) / SUMMON_LEVELS_PER_EXTRA;
+    ((1 + extra) as u32).min(spell.summon_max.max(1))
+}
+
+#[cfg(test)]
+mod summon_tests {
+    use super::*;
+
+    // Summon Food: Magician 1, Cleric 9, Shaman 9, Druid 14; one loaf at the
+    // class's level, one more per ten levels, four at most.
+    #[test]
+    fn summon_count_scales_from_the_class_level_and_caps_at_four() {
+        let food = lookup("Summon Food").expect("Summon Food in spells.toml");
+        assert_eq!(food.required_level("Magician"), 1);
+        assert_eq!(food.required_level("Druid"), 14);
+        assert_eq!(food.required_level("Warrior"), food.min_level, "a class with no entry uses min_level");
+        assert_eq!(summon_count(food, "Magician", 1), 1);
+        assert_eq!(summon_count(food, "Magician", 10), 1);
+        assert_eq!(summon_count(food, "Magician", 11), 2);
+        assert_eq!(summon_count(food, "Magician", 31), 4);
+        assert_eq!(summon_count(food, "Magician", 60), 4);
+        assert_eq!(summon_count(food, "Druid", 14), 1);
+        assert_eq!(summon_count(food, "Druid", 24), 2);
+        assert_eq!(summon_count(food, "Druid", 5), 1, "below the level the gate refuses; the count itself never drops under one");
+        let drink = lookup("Summon Drink").expect("Summon Drink in spells.toml");
+        assert_eq!(drink.required_level("Shaman"), 2);
+        assert_eq!(drink.required_level("Cleric"), 3);
+        assert_eq!(drink.required_level("Druid"), 10);
+        assert_eq!(drink.summon_max, 4);
+        assert!(drink.summon_item.ends_with("conjured_water.tres"));
     }
 }

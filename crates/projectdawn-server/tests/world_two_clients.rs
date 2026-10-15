@@ -7311,3 +7311,58 @@ async fn an_accepted_resurrection_leaves_its_sickness() {
     a.pump_for(Duration::from_millis(200)).await;
     b.pump_for(Duration::from_millis(200)).await;
 }
+
+/// Summon Food and Summon Drink (food slice 2, user call 2026-10-15). A level
+/// 1 Magician conjures one Conjured Bread into its bags and is told so; a
+/// level 35 Magician conjures four Conjured Water. Both arrive as inventory
+/// deltas, and the merchant will not buy the result (the item has no vendor
+/// value; covered by the SellItem rule).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn summon_food_conjures_bread_that_scales_with_level() {
+    const BREAD: &str = "res://data/loot/items/conjured_bread.tres";
+    const WATER: &str = "res://data/loot/items/conjured_water.tres";
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "sumfood1", "Sumone", "Human", "Magician").await;
+    let (b_session, b_char_id, _) =
+        provision_client(&h.auth_url, "sumfood2", "Sumtwo", "Human", "Magician").await;
+    set_char_level(&h.db_url, b_char_id, 35).await;
+    let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    a.send_cast_start("Summon Food", 4.0);
+    b.send_cast_start("Summon Drink", 4.0);
+    pump_both_for(&mut a, &mut b, Duration::from_millis(4200)).await;
+    a.send_cast_spell("Summon Food", None);
+    b.send_cast_spell("Summon Drink", None);
+    pump_both_for(&mut a, &mut b, Duration::from_millis(100)).await;
+
+    let bread = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD)
+        })
+        .await
+        .expect("the level 1 Magician's bread lands in its bags");
+    let ServerWorldMsg::InventoryDelta { location, count, .. } = bread else { unreachable!() };
+    assert_eq!((location.as_str(), count), ("base", 1), "one loaf at level 1");
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "You conjure Conjured Bread x1.")
+    })
+    .await
+    .expect("and is told");
+
+    let water = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == WATER)
+        })
+        .await
+        .expect("the level 35 Magician's water lands in its bags");
+    let ServerWorldMsg::InventoryDelta { count, .. } = water else { unreachable!() };
+    assert_eq!(count, 4, "four flasks at level 35 (one, plus one per ten levels past 1, capped at four)");
+    a.send_disconnect();
+    b.send_disconnect();
+    a.pump_for(Duration::from_millis(200)).await;
+    b.pump_for(Duration::from_millis(200)).await;
+}

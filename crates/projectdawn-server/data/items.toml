@@ -1432,3 +1432,25 @@ name = "Yeast"
 item_type = "misc"
 stack_size = 20
 vendor_price = 3
+
+# Summoned food and drink (food slice 2): conjured by Summon Food and
+# Summon Drink, a full meal and a full drink each, with no vendor value so
+# a merchant refuses them ("The merchant won't take that."). Mirrored in
+# data/loot/items/conjured_*.tres on the client.
+[[item]]
+path = "res://data/loot/items/conjured_bread.tres"
+name = "Conjured Bread"
+item_type = "consumable"
+stack_size = 20
+vendor_price = 0
+is_food = true
+food_duration = 2880.0
+
+[[item]]
+path = "res://data/loot/items/conjured_water.tres"
+name = "Conjured Water"
+item_type = "consumable"
+stack_size = 20
+vendor_price = 0
+is_drink = true
+food_duration = 2160.0

@@ -15,7 +15,8 @@
 #
 # What the server models today: direct damage and heals, HoTs, mana
 # regen, stat / speed / haste / shield / absorb buffs, mez and root,
-# pet summon and charm, resurrection. NOT modelled, so a spell that
+# pet summon and charm, resurrection, summoned food and drink. NOT
+# modelled, so a spell that
 # depends on one must stay out of this file until it is: damage over
 # time, mana drain, stealth, and ports. A spell absent from this file
 # is refused as unknown and costs the caster nothing.
@@ -1906,3 +1907,42 @@ cast_time = 2.0
 cooldown = 10.0
 min_level = 12
 classes = ["Paladin"]
+
+# ══ Summon Food and Drink ═════════════════════════════════════════════
+# Food slice 2 (user call 2026-10-15, Monsters and Memories' shape): a
+# SUMMON_ITEM spell conjures `summon_item` into the caster's bags, one at
+# the level the class gets the spell and one more per ten levels, capped
+# at `summon_max`. `class_min_levels` carries the per-class levels (EQ's,
+# via the P99 wiki and Al'Kabor: Summon Food CLR 9 / DRU 14 / SHM 9 /
+# MAG 1, Summon Drink CLR 3 / DRU 10 / SHM 2 / MAG 1); `min_level` is the
+# lowest of them. The conjured items have no vendor value, so a merchant
+# will not buy them.
+[[spell]]
+name = "Summon Food"
+target_type = "SUMMON_ITEM"
+damage_type = "NONE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 10.0
+cast_time = 4.0
+cooldown = 0.0
+min_level = 1
+classes = ["Magician", "Cleric", "Shaman", "Druid"]
+class_min_levels = { Magician = 1, Cleric = 9, Shaman = 9, Druid = 14 }
+summon_item = "res://data/loot/items/conjured_bread.tres"
+summon_max = 4
+
+[[spell]]
+name = "Summon Drink"
+target_type = "SUMMON_ITEM"
+damage_type = "NONE"
+base_damage = 0.0
+heal_amount = 0.0
+mana_cost = 10.0
+cast_time = 4.0
+cooldown = 0.0
+min_level = 1
+classes = ["Magician", "Cleric", "Shaman", "Druid"]
+class_min_levels = { Magician = 1, Shaman = 2, Cleric = 3, Druid = 10 }
+summon_item = "res://data/loot/items/conjured_water.tres"
+summon_max = 4

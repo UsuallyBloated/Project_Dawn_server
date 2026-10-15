@@ -4138,7 +4138,7 @@ pub async fn run(
                         .unwrap_or(false);
                     let level_ok = caster_cl
                         .as_ref()
-                        .map(|(_, level)| *level >= spell.min_level)
+                        .map(|(class, level)| *level >= spell.required_level(class))
                         .unwrap_or(false);
                     if !(class_ok && level_ok) {
                         let (class, level) = caster_cl.unwrap_or_default();
@@ -4152,7 +4152,7 @@ pub async fn run(
                             spell = %spell.name,
                             class = %class,
                             level,
-                            required_level = spell.min_level,
+                            required_level = spell.required_level(&class),
                             class_ok,
                             "CastSpell rejected — class/level not eligible"
                         );
@@ -4502,6 +4502,86 @@ pub async fn run(
                         }
                         handlers::send_resurrect_offer(&mut server, owner_cid, corpse_id, caster_name, xp_percent);
                         tracing::info!(caster = intent.caster, corpse_id, xp_percent, "resurrection offered");
+                    }
+                    "SUMMON_ITEM" => {
+                        // Summon Food / Drink (food slice 2): conjure the
+                        // spell's item into the caster's bags, the count
+                        // scaling with level; the pre-flight checked the
+                        // item and the room. Into the bags rather than onto
+                        // the cursor (EQ landed summoned items on the
+                        // cursor; flagged, not built). The placement block
+                        // ends the connection borrow before any refund.
+                        let placement = {
+                            let Some(conn) = connections.get_mut(&caster_cid) else {
+                                continue;
+                            };
+                            let n = spells::summon_count(spell, &conn.class, conn.level);
+                            match conn.inventory.add_item_locating(&spell.summon_item, n) {
+                                Ok((touched, leftover)) => {
+                                    let placed = n - leftover;
+                                    if placed > 0 {
+                                        conn.inventory_dirty = true;
+                                    }
+                                    let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
+                                        .iter()
+                                        .map(|(loc, slot)| (loc.clone(), *slot, conn.inventory.peek_at(loc, *slot)))
+                                        .collect();
+                                    Ok((placed, leftover, deltas))
+                                }
+                                Err(e) => Err(e),
+                            }
+                        };
+                        match placement {
+                            Ok((placed, leftover, deltas)) if placed > 0 => {
+                                for (loc, slot, payload) in deltas {
+                                    let (dp, dc) = match payload {
+                                        Some((p, c)) => (Some(p), c),
+                                        None => (None, 0),
+                                    };
+                                    handlers::send_inventory_delta(&mut server, caster_cid, loc, slot, dp, dc);
+                                }
+                                let item_name = items::lookup(&spell.summon_item)
+                                    .map(|i| i.name.clone())
+                                    .unwrap_or_else(|| spell.summon_item.clone());
+                                handlers::fan_out_chat_message(
+                                    &mut server,
+                                    &[caster_cid],
+                                    "",
+                                    protocol::world::ChatChannel::System,
+                                    &format!("You conjure {} x{}.", item_name, placed),
+                                );
+                                tracing::info!(
+                                    caster = intent.caster,
+                                    spell = %spell.name,
+                                    item = %spell.summon_item,
+                                    qty = placed,
+                                    leftover,
+                                    "SUMMON_ITEM applied"
+                                );
+                            }
+                            other => {
+                                // The pre-flight found room a moment ago, so
+                                // this is the placer disagreeing with its own
+                                // probe; say so, refund, and refuse.
+                                tracing::warn!(
+                                    caster = intent.caster,
+                                    spell = %spell.name,
+                                    outcome = ?other.as_ref().map(|(p, l, _)| (*p, *l)),
+                                    "SUMMON_ITEM placed nothing after the pre-flight accepted it; refunded"
+                                );
+                                refund_spell_cost(
+                                    &mut server,
+                                    &mut connections,
+                                    &in_world_recipients_now,
+                                    caster_cid,
+                                    intent.caster,
+                                    mana_cost,
+                                    hp_cost,
+                                );
+                                handlers::send_refusal(&mut server, caster_cid, "Your bags are full.");
+                                continue;
+                            }
+                        }
                     }
                     "SELF" => {
                         tracing::info!(
@@ -10723,6 +10803,19 @@ fn cast_target_refusal(
                 Some((id, p)) if in_reach(p.pos) => Ok(ResolvedTarget::Pet(*id)),
                 Some(_) => unreachable(),
             }
+        }
+        "SUMMON_ITEM" => {
+            // Summon Food / Drink: the item must exist and the whole batch
+            // must fit, decided before the mana comes off (EQ refused a
+            // summon into full bags; here it costs nothing).
+            let Some(item) = items::lookup(&spell.summon_item) else {
+                return no_effect();
+            };
+            let n = spells::summon_count(spell, &caster.class, caster.level);
+            if !caster.inventory.can_accept(&[(item.path.clone(), n)]) {
+                return Err("Your bags are full.".to_string());
+            }
+            Ok(ResolvedTarget::Nothing)
         }
         "SELF" => Ok(ResolvedTarget::Nothing),
         // No arm exists for anything else: a target type new to the data.

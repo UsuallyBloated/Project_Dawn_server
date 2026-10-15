@@ -8467,7 +8467,28 @@ pub async fn run(
                 if refund > 0 {
                     super::progression::award_xp(&mut server, conn, refund);
                 }
+                // Resurrection sickness (the corpse plan's slice 3): the
+                // debuff rides the stat-buff path, so the buff tick expires
+                // it and undoes its deltas like any other stat buff, and the
+                // regen tick halves natural regen while it is on.
+                let level = conn.level;
+                apply_stat_buff(conn, buffs::res_sickness_buff(level, now));
             }
+            let recipients: Vec<ClientId> = connections
+                .iter()
+                .filter(|(_, c)| c.in_world)
+                .map(|(id, _)| *id)
+                .collect();
+            if let Some(conn) = connections.get(&responder_cid) {
+                fan_out_server_buff_snapshot(&mut server, &recipients, conn);
+            }
+            handlers::fan_out_chat_message(
+                &mut server,
+                &[responder_cid],
+                "",
+                protocol::world::ChatChannel::System,
+                "You are exhausted.",
+            );
             tracing::info!(char_id = responder, corpse_id, xp_percent, refund, "resurrection accepted");
         }
 
@@ -9647,6 +9668,8 @@ pub async fn run(
         //     the regen-driven HealthUpdate fan-out — one ManaUpdate
         //     / HealthUpdate per affected resource per tick at most.
         let mut buff_snapshot_dirty: Vec<u64> = Vec::new();
+        // Whose resurrection sickness wore off this tick: they get EQ's line.
+        let mut res_sickness_ended: Vec<ClientId> = Vec::new();
         // PvP DoT ticks dealt this pass: (bearer, caster, spell, amount,
         // dmg_type, hp after, max_hp), fanned once the borrow ends.
         let mut pvp_dot_ticks: Vec<(u64, u64, String, i32, DamageType, f32, f32)> = Vec::new();
@@ -9786,6 +9809,9 @@ pub async fn run(
                         );
                         regen::mark_dirty(conn);
                     }
+                    if conn.active_buffs[i].name == buffs::RES_SICKNESS_NAME {
+                        res_sickness_ended.push(conn.char_id as ClientId);
+                    }
                     conn.active_buffs.remove(i);
                     snapshot_changed = true;
                 } else {
@@ -9836,6 +9862,15 @@ pub async fn run(
                 if let Some(conn) = connections.get(&(id as ClientId)) {
                     fan_out_server_buff_snapshot(&mut server, &recipients, conn);
                 }
+            }
+            for cid in res_sickness_ended {
+                handlers::fan_out_chat_message(
+                    &mut server,
+                    &[cid],
+                    "",
+                    protocol::world::ChatChannel::System,
+                    "You feel your strength return.",
+                );
             }
         }
 

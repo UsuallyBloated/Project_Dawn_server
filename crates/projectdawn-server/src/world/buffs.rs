@@ -281,6 +281,51 @@ pub fn is_lich_form_active(buffs: &[ActiveBuff]) -> bool {
     buffs.iter().any(|b| matches!(b.effect, BuffEffect::LichForm { .. }))
 }
 
+/// Resurrection sickness (the corpse plan's slice 3, built 2026-10-14): the
+/// debuff every accepted resurrection leaves, classic EQ's "Resurrection
+/// Effects" (five minutes; "You are exhausted." on, "You feel your strength
+/// return." off). EQ cut STR, STA, AGI, WIS and INT by level-scaled
+/// absolutes on its hundred-point stats; ours sit around ten to sixty, so
+/// the cut is `level / RES_SICKNESS_LEVELS_PER_POINT`, floored at one, off
+/// each of the five primaries, and natural HP and mana regen run at
+/// `RES_SICKNESS_REGEN_MULT` while it lasts. The client computes the same
+/// cut from the level it knows (`buff_manager.gd`, kept in lockstep by
+/// hand), so the sheet shows what the server fights with. All three
+/// numbers are tuning knobs.
+pub const RES_SICKNESS_NAME: &str = "Resurrection Sickness";
+pub const RES_SICKNESS_SECS: f32 = 300.0;
+pub const RES_SICKNESS_LEVELS_PER_POINT: i32 = 4;
+pub const RES_SICKNESS_REGEN_MULT: f32 = 0.5;
+
+pub fn res_sickness_stat_cut(level: i32) -> i32 {
+    (level / RES_SICKNESS_LEVELS_PER_POINT).max(1)
+}
+
+/// The sickness as a stat buff, so the buff tick expires it and undoes its
+/// deltas like any other stat buff; the regen tick reads it by name.
+pub fn res_sickness_buff(level: i32, now: Instant) -> ActiveBuff {
+    let cut = res_sickness_stat_cut(level);
+    ActiveBuff {
+        name: RES_SICKNESS_NAME.to_string(),
+        effect: BuffEffect::StatBuff {
+            strength: -cut,
+            agility: -cut,
+            intelligence: -cut,
+            wisdom: -cut,
+            constitution: -cut,
+            max_hp_delta: 0.0,
+            max_mp_delta: 0.0,
+        },
+        remaining: RES_SICKNESS_SECS,
+        tick_acc: 0.0,
+        applied_at: now,
+    }
+}
+
+pub fn is_res_sick(buffs: &[ActiveBuff]) -> bool {
+    buffs.iter().any(|b| b.name == RES_SICKNESS_NAME)
+}
+
 /// Track 6 sub-task 4c — highest active Speed multiplier (1.0 if no
 /// Speed buff). Movement integration multiplies MAX_MOVE_SPEED by
 /// this each tick.
@@ -481,4 +526,32 @@ pub fn snapshot_pairs(buffs: &[ActiveBuff]) -> Vec<(String, f32)> {
             (b.name.clone(), dur)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Resurrection sickness: one point per four levels off each primary,
+    // never less than one, five minutes, read back by its name.
+    #[test]
+    fn res_sickness_cuts_by_level_and_is_read_by_name() {
+        assert_eq!(res_sickness_stat_cut(1), 1);
+        assert_eq!(res_sickness_stat_cut(7), 1);
+        assert_eq!(res_sickness_stat_cut(8), 2);
+        assert_eq!(res_sickness_stat_cut(20), 5);
+        assert_eq!(res_sickness_stat_cut(60), 15);
+        let b = res_sickness_buff(20, Instant::now());
+        assert_eq!(b.name, RES_SICKNESS_NAME);
+        assert_eq!(b.remaining, RES_SICKNESS_SECS);
+        match b.effect {
+            BuffEffect::StatBuff { strength, agility, intelligence, wisdom, constitution, max_hp_delta, max_mp_delta } => {
+                assert_eq!((strength, agility, intelligence, wisdom, constitution), (-5, -5, -5, -5, -5));
+                assert_eq!((max_hp_delta, max_mp_delta), (0.0, 0.0));
+            }
+            other => panic!("not a stat buff: {other:?}"),
+        }
+        assert!(is_res_sick(&[b]));
+        assert!(!is_res_sick(&[]));
+    }
 }

@@ -336,6 +336,14 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::DeathBroadcast);
     }
 
+    fn send_resurrect_accept(&mut self, corpse_id: u64, accept: bool) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::ResurrectAccept { corpse_id, accept },
+        );
+    }
+
     fn send_respawn(&mut self) {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Respawn);
     }
@@ -7188,6 +7196,100 @@ async fn a_seated_player_is_hit_for_the_max_and_stood_up() {
         })
         .await;
     assert!(accepted.is_some(), "seated again, /camp is accepted");
+    a.send_disconnect();
+    b.send_disconnect();
+    a.pump_for(Duration::from_millis(200)).await;
+    b.pump_for(Duration::from_millis(200)).await;
+}
+
+/// Resurrection sickness (the corpse plan's slice 3, built 2026-10-14). A dies
+/// and respawns beside the corpse; B, a Cleric 20, casts Resurrection (Minor)
+/// on it; A accepts. A is summoned, told "You are exhausted.", and its buff
+/// snapshot carries the five-minute sickness. Fails on the previous code at
+/// the snapshot (no sickness) and the line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_accepted_resurrection_leaves_its_sickness() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _) =
+        provision_client(&h.auth_url, "ressick_a", "Ressa", "Human", "Warrior").await;
+    let (b_session, b_char_id, _) =
+        provision_client(&h.auth_url, "ressick_b", "Ressb", "Human", "Cleric").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "ressick_a", true).await.expect("set is_gm");
+    set_char_level(&h.db_url, b_char_id, 20).await;
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    // A dies where it stands and respawns at the bind, which is the same
+    // spot, so the corpse is in the cleric's reach.
+    a.send_damage_self(1_000_000);
+    let contents = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::CorpseContents { .. })
+        })
+        .await
+        .expect("dying leaves a corpse");
+    let ServerWorldMsg::CorpseContents { corpse_id, .. } = contents else { unreachable!() };
+    a.send_respawn();
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| matches!(m, ServerWorldMsg::Teleport { .. }))
+        .await
+        .expect("respawned");
+    pump_both_for(&mut a, &mut b, Duration::from_millis(200)).await;
+
+    // B casts the six-second resurrection on the corpse.
+    b.send_cast_start("Resurrection (Minor)", 6.0);
+    pump_both_for(&mut a, &mut b, Duration::from_millis(6200)).await;
+    b.send_cast_spell("Resurrection (Minor)", Some(corpse_id));
+    pump_both_for(&mut a, &mut b, Duration::from_millis(100)).await;
+    let offer = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::ResurrectOffer { corpse_id: c, .. } if *c == corpse_id)
+        })
+        .await
+        .expect("the owner is offered the resurrection");
+    let ServerWorldMsg::ResurrectOffer { xp_percent, .. } = offer else { unreachable!() };
+    assert_eq!(xp_percent, 25);
+
+    // A accepts: summoned, told, and sick for five minutes.
+    a.send_resurrect_accept(corpse_id, true);
+    pump_both_for(&mut a, &mut b, Duration::from_millis(100)).await;
+    let mut msgs = Vec::new();
+    let end = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < end {
+        tick_one(&mut a.client, &mut a.transport);
+        tick_one(&mut b.client, &mut b.transport);
+        while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
+            if let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
+                msgs.push(msg);
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    assert!(
+        msgs.iter().any(|m| matches!(m, ServerWorldMsg::Teleport { .. })),
+        "the accept summons the player to the corpse"
+    );
+    let sickness = msgs.iter().find_map(|m| match m {
+        ServerWorldMsg::BuffSnapshot { target, buffs } if *target == a_char_id as u64 => buffs
+            .iter()
+            .find(|(name, _)| name == "Resurrection Sickness")
+            .map(|(_, remaining)| *remaining),
+        _ => None,
+    });
+    let remaining = sickness.expect("the owner's buff snapshot carries Resurrection Sickness");
+    assert!(
+        (295.0..=300.0).contains(&remaining),
+        "the sickness lasts five minutes from the accept, got {remaining}"
+    );
+    assert!(
+        msgs.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "You are exhausted.")),
+        "the owner is told EQ's line"
+    );
     a.send_disconnect();
     b.send_disconnect();
     a.pump_for(Duration::from_millis(200)).await;

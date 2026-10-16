@@ -95,6 +95,15 @@ impl NetClient {
     #[signal]
     fn kicked(reason: GString, code: GString);
 
+    /// The kick just received says when a relogin will be accepted
+    /// (`reconnect_after_secs`: a duplicate login refused while the old body
+    /// lingers linkdead). Emitted immediately BEFORE `kicked`, and only when
+    /// the server sent a time, so `kicked` keeps its two arguments and a
+    /// client that never connects this signal loses nothing but the
+    /// countdown.
+    #[signal]
+    fn kick_retry_after(secs: i64);
+
     /// Server position broadcast. `sequence` echoes the last accepted Move seq.
     #[signal]
     fn position(id: i64, pos: Vector3, vel: Vector3, yaw: f32, sequence: i64);
@@ -1396,6 +1405,8 @@ enum Incoming {
     Kick {
         reason: String,
         code: String,
+        /// Seconds until a relogin is accepted, or -1 when the kick sent none.
+        retry_after_secs: i64,
     },
     Position {
         id: i64,
@@ -1754,7 +1765,11 @@ impl NetClient {
                 Incoming::Heartbeat => {
                     self.base_mut().emit_signal("heartbeat", &[]);
                 }
-                Incoming::Kick { reason, code } => {
+                Incoming::Kick { reason, code, retry_after_secs } => {
+                    if retry_after_secs >= 0 {
+                        self.base_mut()
+                            .emit_signal("kick_retry_after", &[retry_after_secs.to_variant()]);
+                    }
                     self.base_mut().emit_signal(
                         "kicked",
                         &[
@@ -2425,9 +2440,10 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             is_gm,
         },
         ServerWorldMsg::Heartbeat => Incoming::Heartbeat,
-        ServerWorldMsg::Kick { reason, code, .. } => Incoming::Kick {
+        ServerWorldMsg::Kick { reason, code, reconnect_after_secs } => Incoming::Kick {
             reason,
             code: format!("{code:?}"),
+            retry_after_secs: reconnect_after_secs.map_or(-1, i64::from),
         },
         ServerWorldMsg::Position {
             id,
@@ -2828,5 +2844,38 @@ fn connection_config_matching_server() -> ConnectionConfig {
         available_bytes_per_tick: 60_000,
         server_channels_config: chans.clone(),
         client_channels_config: chans,
+    }
+}
+
+#[cfg(test)]
+mod kick_retry_tests {
+    use super::*;
+    use protocol::world::KickCode;
+
+    // The live relogin countdown: the kick's reconnect_after_secs reaches the
+    // client as retry_after_secs, and a kick with none says -1.
+    #[test]
+    fn a_kick_carries_its_retry_time_to_the_client() {
+        let with = ServerWorldMsg::Kick {
+            reason: "You already have a character in this world.".into(),
+            code: KickCode::DuplicateLogin,
+            reconnect_after_secs: Some(27),
+        };
+        match classify(CHANNEL_SYSTEM, with, &[]) {
+            Incoming::Kick { code, retry_after_secs, .. } => {
+                assert_eq!(code, "DuplicateLogin");
+                assert_eq!(retry_after_secs, 27);
+            }
+            _ => panic!("a Kick classifies as Incoming::Kick"),
+        }
+        let without = ServerWorldMsg::Kick {
+            reason: "Banned.".into(),
+            code: KickCode::BannedNow,
+            reconnect_after_secs: None,
+        };
+        match classify(CHANNEL_SYSTEM, without, &[]) {
+            Incoming::Kick { retry_after_secs, .. } => assert_eq!(retry_after_secs, -1),
+            _ => panic!("a Kick classifies as Incoming::Kick"),
+        }
     }
 }

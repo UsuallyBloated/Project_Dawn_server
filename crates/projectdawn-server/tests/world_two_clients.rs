@@ -469,6 +469,11 @@ impl WorldClient {
         );
     }
 
+    /// Dev-gated "Despawn All Enemies" (the Test Panel button).
+    fn send_dev_despawn_enemies(&mut self) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::DevDespawnEnemies);
+    }
+
     fn send_pet_command(&mut self, command: u8, target_id: Option<u64>) {
         let msg = ClientWorldMsg::PetCommand { command, target_id };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
@@ -7903,4 +7908,124 @@ async fn a_jump_reaches_the_players_nearby_once_and_moves_nobody() {
     w.send_disconnect();
     j.pump_for(Duration::from_millis(200)).await;
     w.pump_for(Duration::from_millis(200)).await;
+}
+
+/// The Test Panel's "Despawn All Enemies" removes the mobs on the SERVER. It
+/// used to free only the pressing client's own nodes, so "cleared" mobs stayed
+/// in the world, invisible to that player and still fighting everyone else.
+/// A (a GM Cleric) spawns two dummies; B (a plain Beast Master beside A, with
+/// its warder) asks first and nothing happens; A asks and B sees both dummies
+/// despawn while the warder stays; a Smite at a despawned id is refused,
+/// because the server no longer has it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dev_despawn_removes_enemies_on_the_server() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "sweeper", "Sweepa", "Human", "Cleric").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "sweepwatch", "Watcha", "Human", "Beast Master").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "sweeper", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+
+    let warder: u64 = match b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == b_char_id as u64)
+        })
+        .await
+        .expect("B's warder is summoned on entering the world")
+    {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    let mut dummies: Vec<u64> = Vec::new();
+    for name in ["Despawn Dummy", "Despawn Target"] {
+        a.send_dev_spawn(name, 1, 500.0, 0, 0.0, 0.0);
+        let spawn = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == name)
+            })
+            .await
+            .expect("the dummy spawns");
+        match spawn {
+            ServerWorldMsg::EnemySpawn { id, .. } => dummies.push(id),
+            _ => unreachable!(),
+        }
+    }
+
+    // A plain account's request is ignored. Only meaningful when the process
+    // is not in dev mode, where every connection may use dev commands.
+    if std::env::var("PD_DEV_CMDS").as_deref() != Ok("1") {
+        b.send_dev_despawn_enemies();
+        b.pump_for(Duration::from_millis(300)).await;
+        let gone = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(1), |m| {
+                matches!(m, ServerWorldMsg::EntityDespawn { id } if dummies.contains(id))
+            })
+            .await;
+        assert!(gone.is_none(), "a plain account cannot despawn anything");
+    }
+
+    a.send_dev_despawn_enemies();
+    a.pump_for(Duration::from_millis(300)).await;
+    let mut despawned: Vec<u64> = Vec::new();
+    while despawned.len() < dummies.len() {
+        let msg = b
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::EntityDespawn { id }
+                    if dummies.contains(id) || *id == warder)
+            })
+            .await
+            .expect("the bystander sees every dummy despawn");
+        let ServerWorldMsg::EntityDespawn { id } = msg else { unreachable!() };
+        assert_ne!(id, warder, "a player's pet is not an enemy to despawn");
+        despawned.push(id);
+    }
+    let warder_gone = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(1), |m| {
+            matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == warder)
+        })
+        .await;
+    assert!(warder_gone.is_none(), "the warder stays");
+
+    // The GM is told the count (camp mobs in view may add to the two).
+    let told = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("Despawned "))
+        })
+        .await
+        .expect("the GM is told how many went");
+    let ServerWorldMsg::ChatMessage { text, .. } = told else { unreachable!() };
+    let count: usize = text
+        .trim_start_matches("Despawned ")
+        .trim_end_matches(" enemies.")
+        .parse()
+        .expect("the line carries a count");
+    assert!(count >= dummies.len(), "the count covers both dummies ({text})");
+
+    a.send_cast_spell("Smite", Some(dummies[0]));
+    let refused = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64 && reason.contains("no longer here"))
+        })
+        .await;
+    assert!(refused.is_some(), "the server no longer has the mob, so a Smite at it is refused");
+
+    // Audited like every dev command: one row, the GM's; the plain account's
+    // refused request wrote nothing.
+    let rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM gm_actions WHERE command = 'dev_despawn_enemies'")
+            .fetch_one(&pool)
+            .await
+            .expect("read gm_actions");
+    assert_eq!(rows, 1, "the GM's despawn is recorded, the plain account's is not");
+
+    a.send_disconnect();
+    b.send_disconnect();
+    a.pump_for(Duration::from_millis(200)).await;
+    b.pump_for(Duration::from_millis(200)).await;
 }

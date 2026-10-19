@@ -1990,6 +1990,9 @@ pub async fn run(
         // spawner pass where the enemies map + AOI grid are in scope.
         let mut dev_spawn_intents: Vec<(super::connection::Vec3f, super::zones::MobTemplate)> =
             Vec::new();
+        // The Test Panel's "Despawn All Enemies": the GM and their position,
+        // applied with the dev spawns.
+        let mut dev_despawn_intents: Vec<(ClientId, Vec3f)> = Vec::new();
         // PD_W0023 — quest turn-ins (responder, quest_id), applied after dispatch
         // where the DB pool is in scope (the completion persists before the award).
         let mut complete_quest_intents: Vec<(u64, String)> = Vec::new();
@@ -2491,6 +2494,9 @@ pub async fn run(
                         }
                         Outcome::DevSpawnMobIntent { pos, mob } => {
                             dev_spawn_intents.push((pos, mob));
+                        }
+                        Outcome::DevDespawnEnemiesIntent { requester, pos } => {
+                            dev_despawn_intents.push((requester, pos));
                         }
                         Outcome::CompleteQuestIntent { responder, quest_id } => {
                             complete_quest_intents.push((responder, quest_id));
@@ -3248,6 +3254,54 @@ pub async fn run(
                 }
                 enemies.insert(entity.id, entity);
             }
+        }
+
+        // Test Panel "Despawn All Enemies" (dev-gated and audited in the
+        // handler): every enemy the GM can see goes, the same set the
+        // client-side button used to hide. Unowned only, so a player's pet
+        // and a charmed mob stay. It is a removal, not a death: no XP, no
+        // loot, no corpse. The camp slot is freed exactly as the body sweep
+        // frees it, so camp mobs respawn on their timer (a dev spawn's slot
+        // is usize::MAX, a no-op). Anything still pointing at a removed id
+        // (a pet's target, an owner's last-attacked) is dropped by the same
+        // liveness checks the charm landing relies on.
+        for (requester, gm_pos) in dev_despawn_intents.drain(..) {
+            let near = aoi.entities_visible_from(aoi::cell_for(gm_pos.x, gm_pos.z));
+            let doomed: Vec<EntityId> = enemies
+                .values()
+                .filter(|e| e.owner.is_none() && near.contains(&e.id))
+                .map(|e| e.id)
+                .collect();
+            let in_world: Vec<ClientId> = connections
+                .iter()
+                .filter(|(_, c)| c.in_world)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in &doomed {
+                let Some(entity) = enemies.remove(id) else {
+                    continue;
+                };
+                let cell = aoi::cell_for(entity.pos.x, entity.pos.z);
+                aoi.remove(entity.id, cell);
+                let visible = aoi.entities_visible_from(cell);
+                for recipient in despawn_recipients(&visible, &in_world, &entity) {
+                    handlers::send_entity_despawn(&mut server, recipient, entity.id);
+                }
+                spawner.on_enemy_died(entity.spawn_point_idx, now);
+            }
+            tracing::info!(
+                count = doomed.len(),
+                x = gm_pos.x,
+                z = gm_pos.z,
+                "dev despawn enemies"
+            );
+            // Only an authorized request gets here, so the count tells a plain
+            // account nothing about the dev gate.
+            handlers::send_system_line(
+                &mut server,
+                requester,
+                &format!("Despawned {} enemies.", doomed.len()),
+            );
         }
 
         // Recipients snapshot for the enemy-related fan-outs below. Held

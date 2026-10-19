@@ -138,6 +138,9 @@ use serde::{Deserialize, Serialize};
 /// (docs/design/food_and_water.md section 8), then `PlayerJumped` after
 /// that: the one-shot a client's real `Move.jumping` flag becomes for the
 /// players who can see the jumper, so a jump no longer reads as a slide.
+/// It also appends the dev-gated `DevDespawnEnemies` after `TradeCancel`, so
+/// the Test Panel's "Despawn All Enemies" removes the mobs on the server
+/// instead of only hiding them on one client.
 pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3238; // "PD_W0028"
 
 pub type EntityId = u64;
@@ -981,6 +984,13 @@ pub enum ClientWorldMsg {
     TradeAccept,
     /// Close the window. Also implied by range, death, zone, disconnect.
     TradeCancel,
+
+    /// Dev-only, gated and audited like `DevSpawnMob`: remove every unowned
+    /// enemy in the requester's view (their AOI neighbourhood) from the
+    /// world. Backs the Test Panel's "Despawn All Enemies", which used to
+    /// free only the client's own nodes while the server kept the mobs. Pays
+    /// nothing, drops nothing; camp mobs respawn on their camp's timer.
+    DevDespawnEnemies,
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────

@@ -393,6 +393,14 @@ pub enum Outcome {
         pos: super::connection::Vec3f,
         mob: super::zones::MobTemplate,
     },
+    /// Dev-gated "Despawn All Enemies" (Test Panel). The handler checks the
+    /// gate and queues the audit row; the tick loop removes every unowned
+    /// enemy visible from `pos`, since it owns the enemies map and the AOI,
+    /// and tells `requester` how many went.
+    DevDespawnEnemiesIntent {
+        requester: ClientId,
+        pos: super::connection::Vec3f,
+    },
     /// PD_W0023 — server-authoritative quest turn-in. The tick loop validates
     /// against the server quest table + the character's completed set +
     /// (PD_W0024) full objective progress, persists the completion FIRST,
@@ -1048,6 +1056,21 @@ pub fn handle_message(
                 "dev spawn mob"
             );
             Outcome::DevSpawnMobIntent { pos, mob }
+        }
+
+        ClientWorldMsg::DevDespawnEnemies => {
+            // Same gate and audit as DevSpawnMob: a plain account's request is
+            // ignored silently and writes nothing (a reply would tell it
+            // whether dev commands are on).
+            if !conn.in_world || !conn.can_use_dev_cmds() {
+                return Outcome::Continue;
+            }
+            let pos = conn.pos;
+            let audit_args = format!("pos={:.1},{:.1}", pos.x, pos.z);
+            if !dev_cmd_allowed(server, conn, client_id, now, "dev_despawn_enemies", audit_args) {
+                return Outcome::Continue;
+            }
+            Outcome::DevDespawnEnemiesIntent { requester: client_id, pos }
         }
 
         ClientWorldMsg::DamageSelf { amount } => {

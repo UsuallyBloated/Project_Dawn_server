@@ -917,6 +917,15 @@ impl NetClient {
         )
     }
 
+    /// Dev-only, gated and audited like `send_dev_spawn_mob`: remove every
+    /// unowned enemy in this player's view from the SERVER (the Test Panel's
+    /// "Despawn All Enemies"). The clients learn of it through the ordinary
+    /// EntityDespawn.
+    #[func]
+    fn send_dev_despawn_enemies(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::DevDespawnEnemies)
+    }
+
     /// Track 6 — owning client respawned (local death-timer elapsed).
     /// Server resets conn.hp/mp/stamina to max and fans HealthUpdate /
     /// ManaUpdate / StaminaUpdate so peer RemotePlayer bars stand back

@@ -1396,8 +1396,9 @@ async fn aoe_spell_damages_nearby_enemies() {
     }
 
     // Inferno must fan at least one Hit with attacker=a, target=enemy,
-    // dmg_type=Fire. The amount is the authored base_damage (45) â€”
-    // server doesn't apply INT scale yet, matching single-target.
+    // dmg_type=Fire. The server applies the caster's spell power
+    // (spell_power.rs): 45 + INT x 0.5, times the evocation multiplier
+    // (1.0 up to 1.15), and a crit takes that 1.5x to 2x.
     let aoe_hit = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
             matches!(
@@ -1410,8 +1411,17 @@ async fn aoe_spell_damages_nearby_enemies() {
         })
         .await
         .expect("Inferno fans a Fire Hit to the enemy standing 3 m away");
-    if let ServerWorldMsg::Hit { amount, .. } = aoe_hit {
-        assert_eq!(amount, 45, "Inferno authored base_damage is 45");
+    // Stats are derived from race, class and level at load, as here.
+    let int = char_data::compute("Human", "Magician", 12).stats.intelligence;
+    let low = 45.0 + int as f32 * 0.5;
+    let high = low * 1.15;
+    if let ServerWorldMsg::Hit { amount, crit, .. } = aoe_hit {
+        let amount = amount as f32;
+        if crit {
+            assert!(amount >= (low * 1.5).floor() && amount <= (high * 2.0).ceil(), "a crit: {amount}");
+        } else {
+            assert!(amount >= low.floor() && amount <= high.ceil(), "45 + INT {int} x 0.5, evocation: {amount}");
+        }
     }
 }
 
@@ -6340,9 +6350,10 @@ async fn bard_songs_ignore_the_global_cooldown() {
 /// Spell batch step 5: a DoT ticks on the server every three seconds, the
 /// caster sees each tick as a named line, and a tick that kills pays exactly
 /// what a direct hit would (XP through the one kill step). Druid 6's Entangle:
-/// 10 direct, then 15 per tick (5 dps x 3 s). A 40 HP dummy: 30 after the
-/// hit, 15 at three seconds, dead at six. On the previous code Entangle was
-/// an unknown spell.
+/// 10 + INT x 0.5 direct (spell_power.rs; a crit doubles it at most), then 15
+/// per tick (5 dps x 3 s). The dummy has one HP more than the largest direct
+/// hit can take, so a tick always does the killing, crit or not. On the
+/// previous code Entangle was an unknown spell.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dot_kills_with_the_same_rewards_as_a_hit() {
     let h = start_both().await;
@@ -6355,7 +6366,10 @@ async fn a_dot_kills_with_the_same_rewards_as_a_hit() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
 
-    a.send_dev_spawn("Charm Dummy", 1, 40.0, 0, 0.0, 1.0);
+    // Stats are derived from race, class and level at load, as here.
+    let int = char_data::compute("Human", "Druid", 6).stats.intelligence;
+    let biggest_direct = 2.0 * (10.0 + int as f32 * 0.5);
+    a.send_dev_spawn("Charm Dummy", 1, biggest_direct.floor() + 1.0, 0, 0.0, 1.0);
     let spawn = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
@@ -6390,8 +6404,8 @@ async fn a_dot_kills_with_the_same_rewards_as_a_hit() {
         }
         tokio::time::sleep(TICK_DT).await;
     }
-    assert!(ticks_seen >= 2, "the caster saw the ticks as named lines (saw {ticks_seen})");
-    assert!(died, "the second tick kills the dummy");
+    assert!(ticks_seen >= 1, "the caster saw the ticks as named lines (saw {ticks_seen})");
+    assert!(died, "a tick kills the dummy");
     assert!(xp > 0, "a DoT kill pays XP like a direct hit");
 }
 
@@ -7392,4 +7406,51 @@ async fn summon_food_conjures_bread_that_scales_with_level() {
     b.send_disconnect();
     a.pump_for(Duration::from_millis(200)).await;
     b.pump_for(Duration::from_millis(200)).await;
+}
+
+/// Client-authority audit fix 3, the user's decision of 2026-10-19 ("move the
+/// wisdom bonus on to the server"): a heal adds the caster's WIS x 0.3. B, a
+/// GM Warrior beside A, takes 150 dev damage; A, a Cleric, casts Healing
+/// Light (60) on B; B's HP comes back by 60 + WIS x 0.3, where it used to
+/// come back by the flat 60 while only the client knew the WIS term.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_heal_adds_the_casters_wisdom() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "wisheal", "Wisa", "Human", "Cleric").await;
+    let (b_session, b_char_id, _stale) =
+        provision_client(&h.auth_url, "wishurt", "Hurta", "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "wishurt", true).await.expect("set is_gm");
+    let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    b.send_damage_self(150);
+    let hurt = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::HealthUpdate { id, hp, max_hp } if *id == b_char_id as u64 && *hp < *max_hp)
+    })
+    .await
+    .expect("B is hurt");
+    let ServerWorldMsg::HealthUpdate { hp: hurt_hp, .. } = hurt else { unreachable!() };
+
+    a.send_cast_start("Healing Light", 1.2);
+    pump_both_for(&mut a, &mut b, Duration::from_millis(1_400)).await;
+    a.send_cast_spell("Healing Light", Some(b_char_id as u64));
+    let healed = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == b_char_id as u64 && *hp > hurt_hp)
+    })
+    .await
+    .expect("the heal lands");
+    let ServerWorldMsg::HealthUpdate { hp: healed_hp, .. } = healed else { unreachable!() };
+    let wis = char_data::compute("Human", "Cleric", 1).stats.wisdom;
+    let expected = 60.0 + wis as f32 * 0.3;
+    // B's own regen may add a point or two in the 1.4 s before the heal; the
+    // flat 60 the old server healed stays well below the window either way.
+    let gained = healed_hp - hurt_hp;
+    assert!(
+        gained >= expected - 0.01 && gained <= expected + 2.01,
+        "healed {gained} (WIS {wis}); 60 + WIS x 0.3 is {expected}"
+    );
 }

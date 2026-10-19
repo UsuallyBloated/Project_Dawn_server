@@ -343,6 +343,12 @@ fn build_discipline_map() -> HashMap<&'static str, &'static str> {
         ("Hunter's Eye", "alteration"),
         // Witch Hunter (new)
         ("Spellbreak", "alteration"), ("Antimagic Ward", "abjuration"),
+        // Missing until 2026-10-19 (found comparing this map with the
+        // client's DISCIPLINE for every spells.toml entry): they fell back to
+        // evocation, so casting them trained the wrong skill.
+        ("Resurrection (Minor)", "alteration"), ("Resurrection", "alteration"),
+        ("Resurrection II", "alteration"), ("Reclaim Soul", "alteration"),
+        ("Summon Food", "conjuration"), ("Summon Drink", "conjuration"),
     ];
     for (k, v) in entries {
         m.insert(*k, *v);

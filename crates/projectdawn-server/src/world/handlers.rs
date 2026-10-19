@@ -43,6 +43,10 @@ pub enum Outcome {
     CastFailFanOut {
         reason: String,
     },
+    /// The owning client's Move carried a jump's rising edge
+    /// (`PerConnection::note_move_jump`). The tick loop fans one
+    /// `PlayerJumped` to the players who can see the jumper.
+    JumpFanOut,
     /// Track 4 sub-task 3 — owning client broadcast a fresh buff snapshot.
     /// Cache updated on `conn`; tick loop fans out to in_world peers in
     /// a post-dispatch sweep, deduped per sender like resources.
@@ -168,6 +172,35 @@ pub enum Outcome {
         src_slot: u32,
         dst_location: String,
         dst_slot: u32,
+    },
+
+    // ── PD_W0028 — trade window intents. All validation happens in the
+    //    tick apply phase, which owns the TradeManager and both parties'
+    //    inventories; the handler only gates in_world (and the dead-state
+    //    whitelist upstream refuses every one of these while dead). ──
+    TradeRequestIntent {
+        requester: u64,
+        target: u64,
+    },
+    TradeOfferItemIntent {
+        owner: u64,
+        window_slot: u8,
+        from_location: String,
+        from_slot: u32,
+    },
+    TradeRetrieveItemIntent {
+        owner: u64,
+        window_slot: u8,
+    },
+    TradeOfferCoinsIntent {
+        owner: u64,
+        coins: protocol::world::Coins,
+    },
+    TradeAcceptIntent {
+        owner: u64,
+    },
+    TradeCancelIntent {
+        owner: u64,
     },
 
     /// Track 13.2.b — split `count` items off src into dst. Both
@@ -359,6 +392,14 @@ pub enum Outcome {
     DevSpawnMobIntent {
         pos: super::connection::Vec3f,
         mob: super::zones::MobTemplate,
+    },
+    /// Dev-gated "Despawn All Enemies" (Test Panel). The handler checks the
+    /// gate and queues the audit row; the tick loop removes every unowned
+    /// enemy visible from `pos`, since it owns the enemies map and the AOI,
+    /// and tells `requester` how many went.
+    DevDespawnEnemiesIntent {
+        requester: ClientId,
+        pos: super::connection::Vec3f,
     },
     /// PD_W0023 — server-authoritative quest turn-in. The tick loop validates
     /// against the server quest table + the character's completed set +
@@ -569,7 +610,7 @@ pub fn handle_message(
         ClientWorldMsg::Move {
             sequence,
             direction,
-            jumping: _,
+            jumping,
         } => {
             // Death lock: a dead player stays put. Without this you could walk
             // your corpse around during the respawn countdown, and worse, keep
@@ -627,7 +668,14 @@ pub fn handle_message(
             // speed itself (RUN_SPEED's note) and multiplies by TICK_DT.
             conn.latest_direction = dir_v;
             conn.last_move_received = Some(now);
-            Outcome::Continue
+            // The jump is cosmetic and separate from the direction: it is
+            // relayed as a one-shot for peers to animate, and nothing here
+            // reads it into `pos` (Y stays the server's zero).
+            if conn.note_move_jump(jumping, now) {
+                Outcome::JumpFanOut
+            } else {
+                Outcome::Continue
+            }
         }
 
         ClientWorldMsg::CastStartBroadcast { spell_name, duration } => {
@@ -801,6 +849,69 @@ pub fn handle_message(
             }
         }
 
+        // ── PD_W0028 — trade window. Thin conversions to intents; the
+        //    tick apply phase owns the TradeManager and both inventories,
+        //    so every real check lives there. The dead-state whitelist
+        //    above already refuses all of these while dead. ──
+        ClientWorldMsg::TradeRequest { target_id } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::TradeRequestIntent {
+                requester: conn.char_id as u64,
+                target: target_id,
+            }
+        }
+        ClientWorldMsg::TradeOfferItem {
+            window_slot,
+            from_location,
+            from_slot,
+        } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::TradeOfferItemIntent {
+                owner: conn.char_id as u64,
+                window_slot,
+                from_location,
+                from_slot,
+            }
+        }
+        ClientWorldMsg::TradeRetrieveItem { window_slot } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::TradeRetrieveItemIntent {
+                owner: conn.char_id as u64,
+                window_slot,
+            }
+        }
+        ClientWorldMsg::TradeOfferCoins { coins } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::TradeOfferCoinsIntent {
+                owner: conn.char_id as u64,
+                coins,
+            }
+        }
+        ClientWorldMsg::TradeAccept => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::TradeAcceptIntent {
+                owner: conn.char_id as u64,
+            }
+        }
+        ClientWorldMsg::TradeCancel => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::TradeCancelIntent {
+                owner: conn.char_id as u64,
+            }
+        }
+
         ClientWorldMsg::AcceptQuest { quest_id, giver_id: _ } => {
             // PD_W0024 — validated in the tick loop (needs the quest table +
             // the connection's active/completed sets + the DB pool to persist
@@ -964,6 +1075,21 @@ pub fn handle_message(
                 "dev spawn mob"
             );
             Outcome::DevSpawnMobIntent { pos, mob }
+        }
+
+        ClientWorldMsg::DevDespawnEnemies => {
+            // Same gate and audit as DevSpawnMob: a plain account's request is
+            // ignored silently and writes nothing (a reply would tell it
+            // whether dev commands are on).
+            if !conn.in_world || !conn.can_use_dev_cmds() {
+                return Outcome::Continue;
+            }
+            let pos = conn.pos;
+            let audit_args = format!("pos={:.1},{:.1}", pos.x, pos.z);
+            if !dev_cmd_allowed(server, conn, client_id, now, "dev_despawn_enemies", audit_args) {
+                return Outcome::Continue;
+            }
+            Outcome::DevDespawnEnemiesIntent { requester: client_id, pos }
         }
 
         ClientWorldMsg::DamageSelf { amount } => {
@@ -2186,11 +2312,13 @@ pub fn send_inspect_result(
 /// Fan out `EnemySpawn` for `entity` to every recipient. Encoded once and
 /// cloned per recipient. Used for live spawns (new mob appears → broadcast
 /// to all in_world clients) and late-joiner seed (new client enters world
-/// → server sends every living enemy).
+/// → server sends every living enemy). `replaces` names the id this mob
+/// takes over (a charm ending), `None` otherwise.
 pub fn fan_out_enemy_spawn(
     server: &mut RenetServer,
     recipients: &[ClientId],
     entity: &Entity,
+    replaces: Option<protocol::world::EntityId>,
 ) {
     if recipients.is_empty() {
         return;
@@ -2203,6 +2331,7 @@ pub fn fan_out_enemy_spawn(
         hp: entity.hp,
         pos: Vec3 { x: entity.pos.x, y: entity.pos.y, z: entity.pos.z },
         yaw: entity.yaw,
+        replaces,
     };
     let Some(bytes) = encode(&msg) else {
         return;
@@ -2251,11 +2380,13 @@ pub fn send_inventory_delta(
 /// Track 11 — fan out `PetSpawn` for a freshly summoned pet. Same
 /// pattern as `fan_out_enemy_spawn`; the variant carries the owner's
 /// char_id so the client can route the pet under the right player.
-/// Caller is responsible for `entity.owner.is_some()`.
+/// Caller is responsible for `entity.owner.is_some()`. `replaces` names the
+/// enemy id a charm just converted, `None` for a summon.
 pub fn fan_out_pet_spawn(
     server: &mut RenetServer,
     recipients: &[ClientId],
     entity: &Entity,
+    replaces: Option<protocol::world::EntityId>,
 ) {
     if recipients.is_empty() {
         return;
@@ -2273,6 +2404,7 @@ pub fn fan_out_pet_spawn(
         hp: entity.hp,
         pos: Vec3 { x: entity.pos.x, y: entity.pos.y, z: entity.pos.z },
         yaw: entity.yaw,
+        replaces,
     };
     let Some(bytes) = encode(&msg) else {
         return;
@@ -2293,9 +2425,9 @@ pub fn fan_out_entity_spawn(
     entity: &Entity,
 ) {
     if entity.is_pet() {
-        fan_out_pet_spawn(server, recipients, entity);
+        fan_out_pet_spawn(server, recipients, entity, None);
     } else {
-        fan_out_enemy_spawn(server, recipients, entity);
+        fan_out_enemy_spawn(server, recipients, entity, None);
     }
 }
 
@@ -2325,6 +2457,19 @@ pub fn fan_out_cast_start(
         spell_name,
         duration,
     };
+    let Some(bytes) = encode(&msg) else { return };
+    for recipient in recipients {
+        server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+/// A jump's one-shot to the players who can see the jumper (the jumper is
+/// not among `recipients`; their own client already played the hop).
+pub fn fan_out_player_jumped(server: &mut RenetServer, recipients: &[ClientId], id: u64) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::PlayerJumped { id };
     let Some(bytes) = encode(&msg) else { return };
     for recipient in recipients {
         server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
@@ -2522,6 +2667,56 @@ pub fn fan_out_buff_snapshot(
     }
 }
 
+// ── PD_W0028 — trade window fans, all private per-party. ──
+pub fn send_trade_opened(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    partner_id: u64,
+    partner_name: String,
+) {
+    let msg = ServerWorldMsg::TradeOpened { partner_id, partner_name };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+pub fn send_trade_offer_update(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    mine: bool,
+    slots: Vec<(String, u32)>,
+    coins: Coins,
+) {
+    let msg = ServerWorldMsg::TradeOfferUpdate { mine, slots, coins };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+pub fn send_trade_accept_state(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    you: bool,
+    them: bool,
+) {
+    let msg = ServerWorldMsg::TradeAcceptState { you, them };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+pub fn send_trade_closed(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    committed: bool,
+    reason: &str,
+) {
+    let msg = ServerWorldMsg::TradeClosed { committed, reason: reason.to_string() };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
 /// The world clock's hour (`clock::current_hour`), to one player entering
 /// the world or to everyone on the slow cadence. Clients keep their own
 /// time between sends; this only keeps them in step with each other.
@@ -2542,6 +2737,20 @@ pub fn fan_out_time_of_day(server: &mut RenetServer, recipients: &[ClientId], ho
 /// client. Vendor BuyItem / SellItem use this after mutating
 /// `conn.coins`. Carries the full four-tier `Coins` wallet
 /// (`ServerWorldMsg::CoinsUpdate`); gdext-net re-emits it as four ints.
+/// The hunger window's feed, to its owner only (`hunger::update_due` says
+/// when). Never fanned: another player's appetite is nobody else's business.
+pub fn send_hunger_update(server: &mut RenetServer, client_id: ClientId, conn: &PerConnection) {
+    let msg = ServerWorldMsg::HungerUpdate {
+        hunger_secs: conn.hunger_secs,
+        thirst_secs: conn.thirst_secs,
+        cap_secs: super::hunger::FULLNESS_CAP_SECS,
+        drain_per_sec: super::hunger::drain_rate_now(conn),
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(client_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
 pub fn send_coins_update(server: &mut RenetServer, client_id: ClientId, coins: Coins) {
     let msg = ServerWorldMsg::CoinsUpdate { coins };
     if let Some(bytes) = encode(&msg) {

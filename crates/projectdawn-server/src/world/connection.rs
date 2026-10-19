@@ -160,6 +160,14 @@ pub struct PerConnection {
     /// Whether the character has been told the stage it logged in at (a
     /// character can arrive hungry or out; `drain` reports transitions only).
     pub appetite_announced: bool,
+    /// The hunger window's feed (`hunger::update_due`): set when a counter
+    /// jumps (an eat, a drink) or crosses a stage, so the next regen step
+    /// sends a `HungerUpdate` instead of waiting out the minute.
+    pub hunger_dirty: bool,
+    /// When the last `HungerUpdate` went to this client, and the drain rate
+    /// it carried (a change of rate, death or respawn, is a reason to send).
+    pub hunger_sent_at: Option<Instant>,
+    pub hunger_rate_sent: f32,
     /// Set after the application-layer Connect handshake completes. Until
     /// then we won't broadcast positions to this client.
     pub ready: bool,
@@ -268,6 +276,11 @@ pub struct PerConnection {
     /// [`super::STALE_MOVE_THRESHOLD`] so a crashed client doesn't keep
     /// visually moving until heartbeat timeout.
     pub last_move_received: Option<Instant>,
+    /// The `jumping` flag of the last accepted Move, so a jump is relayed on
+    /// its rising edge and a held flag relays nothing more.
+    pub last_move_jumping: bool,
+    /// When this player's last jump was relayed (`JUMP_RELAY_MIN_INTERVAL`).
+    pub last_jump_relayed_at: Option<Instant>,
 
     /// Track 6: authoritative resources. Seeded from DB at spawn, mutated
     /// by the regen tick + future combat / heal / damage paths, fanned out
@@ -559,6 +572,9 @@ impl PerConnection {
             last_persisted_hunger: spawn.hunger,
             last_persisted_thirst: spawn.thirst,
             appetite_announced: false,
+            hunger_dirty: true,
+            hunger_sent_at: None,
+            hunger_rate_sent: -1.0,
             last_persisted_xp: spawn.xp,
             last_persisted_level: spawn.level,
             ready: false,
@@ -587,6 +603,8 @@ impl PerConnection {
             last_move_seq: 0,
             latest_direction: Vec3f::ZERO,
             last_move_received: None,
+            last_move_jumping: false,
+            last_jump_relayed_at: None,
             hp: spawn.hp,
             max_hp: spawn.max_hp,
             mp: spawn.mp,
@@ -719,6 +737,28 @@ impl PerConnection {
     /// [`super::HEARTBEAT_TIMEOUT`] of wall-clock time.
     pub fn is_app_idle(&self, now: Instant) -> bool {
         now.duration_since(self.last_packet) >= super::HEARTBEAT_TIMEOUT
+    }
+
+    /// Record a Move's `jumping` flag and say whether a jump should be
+    /// relayed now: only on the flag's rising edge (a held flag is one jump),
+    /// and at most once per [`super::JUMP_RELAY_MIN_INTERVAL`]. A relayed
+    /// jump stands the player, as a step does. The flag never touches
+    /// position: the relay is for the peers' screens only.
+    pub fn note_move_jump(&mut self, jumping: bool, now: Instant) -> bool {
+        let rising = jumping && !self.last_move_jumping;
+        self.last_move_jumping = jumping;
+        if !rising {
+            return false;
+        }
+        let due = self
+            .last_jump_relayed_at
+            .map_or(true, |t| now.duration_since(t) >= super::JUMP_RELAY_MIN_INTERVAL);
+        if !due {
+            return false;
+        }
+        self.last_jump_relayed_at = Some(now);
+        self.is_sitting = false;
+        true
     }
 
     pub fn touch(&mut self, now: Instant) {
@@ -1071,5 +1111,28 @@ mod tests {
         // At and past the window: reapable.
         assert!(conn.linkdead_expired(base + window, window));
         assert!(conn.linkdead_expired(base + Duration::from_secs(31), window));
+    }
+
+    /// The jump relay's rule: a jump is relayed on the flag's rising edge
+    /// only (a held flag is one jump, a cleared flag relays nothing), and
+    /// not again inside JUMP_RELAY_MIN_INTERVAL however many edges a forged
+    /// stream sends; a relayed jump stands the player.
+    #[test]
+    fn a_jump_relays_on_the_rising_edge_and_not_again_inside_the_interval() {
+        let t0 = Instant::now();
+        let mut conn = PerConnection::from_spawn(test_spawn(), t0);
+        conn.is_sitting = true;
+        assert!(!conn.note_move_jump(false, t0), "no flag, no jump");
+        assert!(conn.note_move_jump(true, t0), "the rising edge relays");
+        assert!(!conn.is_sitting, "a jump stands the player");
+        assert!(!conn.note_move_jump(true, t0 + Duration::from_millis(50)), "a held flag is the same jump");
+        assert!(!conn.note_move_jump(false, t0 + Duration::from_millis(100)), "clearing it relays nothing");
+        assert!(
+            !conn.note_move_jump(true, t0 + Duration::from_millis(150)),
+            "a second edge inside the interval is dropped"
+        );
+        let later = t0 + super::super::JUMP_RELAY_MIN_INTERVAL + Duration::from_millis(1);
+        assert!(!conn.note_move_jump(false, later), "the flag clears between jumps");
+        assert!(conn.note_move_jump(true, later), "past the interval the next edge relays again");
     }
 }

@@ -966,7 +966,7 @@ fn summon_pet_for_owner(
         .filter(|id| visible.contains(id))
         .collect();
     if !pet_recipients.is_empty() {
-        handlers::fan_out_pet_spawn(server, &pet_recipients, &pet);
+        handlers::fan_out_pet_spawn(server, &pet_recipients, &pet, None);
     }
     enemies.insert(pet_id, pet);
     pet_id
@@ -1194,7 +1194,8 @@ fn return_charmed_mob(
         .copied()
         .filter(|cid| visible.contains(cid))
         .collect();
-    handlers::fan_out_enemy_spawn(server, &audience, &mob);
+    // `replaces` lets a client that had the pet targeted keep the mob targeted.
+    handlers::fan_out_enemy_spawn(server, &audience, &mob, Some(pet.id));
     if let Some(charmer) = turn_on {
         handlers::fan_out_entity_target(server, in_world, mob_id, Some(charmer));
     }
@@ -1516,6 +1517,10 @@ pub async fn run(
     // Ephemeral; lives only for the tick loop's lifetime. Disconnect
     // removes the member; one-member-left groups dissolve.
     let mut group_manager = GroupManager::new();
+    // PD_W0028 — server-owned trade sessions (escrow by locking; see
+    // world/trade.rs). Ephemeral like groups: a crash or restart drops every
+    // session and every item is exactly where it always was.
+    let mut trade_manager = super::trade::TradeManager::new();
 
     // Corpse / resurrection Slice 1 — server-owned player corpses (persisted
     // LootBags). Load every persisted corpse BEFORE the loop (so before any login
@@ -1920,6 +1925,9 @@ pub async fn run(
         // out in order — coalescing CastStart + CastComplete from the same
         // sender would silently drop a fast-cast complete.
         let mut cast_fanouts: Vec<(ClientId, CastEvent)> = Vec::new();
+        // Jumps begun this tick (the rising edge of a Move's `jumping`),
+        // relayed below to the players who can see each jumper.
+        let mut jump_fanouts: Vec<ClientId> = Vec::new();
         // Track 4 sub-task 3 — like resources, dedup per sender so a burst
         // of buff changes inside one tick produces a single fan-out.
         let mut buff_fanouts: Vec<ClientId> = Vec::new();
@@ -1982,6 +1990,9 @@ pub async fn run(
         // spawner pass where the enemies map + AOI grid are in scope.
         let mut dev_spawn_intents: Vec<(super::connection::Vec3f, super::zones::MobTemplate)> =
             Vec::new();
+        // The Test Panel's "Despawn All Enemies": the GM and their position,
+        // applied with the dev spawns.
+        let mut dev_despawn_intents: Vec<(ClientId, Vec3f)> = Vec::new();
         // PD_W0023 — quest turn-ins (responder, quest_id), applied after dispatch
         // where the DB pool is in scope (the completion persists before the award).
         let mut complete_quest_intents: Vec<(u64, String)> = Vec::new();
@@ -2015,6 +2026,16 @@ pub async fn run(
             dst_slot: u32,
         }
         let mut move_item_intents: Vec<MoveItemI> = Vec::new();
+        // PD_W0028 — trade intents, buffered like everything else.
+        enum TradeI {
+            Request { requester: u64, target: u64 },
+            OfferItem { owner: u64, window_slot: u8, from_location: String, from_slot: u32 },
+            RetrieveItem { owner: u64, window_slot: u8 },
+            OfferCoins { owner: u64, coins: protocol::world::Coins },
+            Accept { owner: u64 },
+            Cancel { owner: u64 },
+        }
+        let mut trade_intents: Vec<TradeI> = Vec::new();
         // Track 13.2.b — split + drop intents.
         struct SplitStackI {
             owner: u64,
@@ -2123,6 +2144,7 @@ pub async fn run(
                                 },
                             ));
                         }
+                        Outcome::JumpFanOut => jump_fanouts.push(client_id),
                         Outcome::CastCompleteFanOut { spell_name } => {
                             cast_fanouts.push((
                                 client_id,
@@ -2256,6 +2278,34 @@ pub async fn run(
                                 dst_location,
                                 dst_slot,
                             });
+                        }
+                        Outcome::TradeRequestIntent { requester, target } => {
+                            trade_intents.push(TradeI::Request { requester, target });
+                        }
+                        Outcome::TradeOfferItemIntent {
+                            owner,
+                            window_slot,
+                            from_location,
+                            from_slot,
+                        } => {
+                            trade_intents.push(TradeI::OfferItem {
+                                owner,
+                                window_slot,
+                                from_location,
+                                from_slot,
+                            });
+                        }
+                        Outcome::TradeRetrieveItemIntent { owner, window_slot } => {
+                            trade_intents.push(TradeI::RetrieveItem { owner, window_slot });
+                        }
+                        Outcome::TradeOfferCoinsIntent { owner, coins } => {
+                            trade_intents.push(TradeI::OfferCoins { owner, coins });
+                        }
+                        Outcome::TradeAcceptIntent { owner } => {
+                            trade_intents.push(TradeI::Accept { owner });
+                        }
+                        Outcome::TradeCancelIntent { owner } => {
+                            trade_intents.push(TradeI::Cancel { owner });
                         }
                         Outcome::SplitStackIntent {
                             owner,
@@ -2444,6 +2494,9 @@ pub async fn run(
                         }
                         Outcome::DevSpawnMobIntent { pos, mob } => {
                             dev_spawn_intents.push((pos, mob));
+                        }
+                        Outcome::DevDespawnEnemiesIntent { requester, pos } => {
+                            dev_despawn_intents.push((requester, pos));
                         }
                         Outcome::CompleteQuestIntent { responder, quest_id } => {
                             complete_quest_intents.push((responder, quest_id));
@@ -2676,6 +2729,7 @@ pub async fn run(
                     &mut server,
                     std::slice::from_ref(new_id),
                     entity,
+                    None,
                 );
                 tracing::debug!(
                     new_client = *new_id as u64,
@@ -2773,6 +2827,7 @@ pub async fn run(
                         &mut server,
                         std::slice::from_ref(new_id),
                         entity,
+                        None,
                     );
                 }
             }
@@ -2835,6 +2890,29 @@ pub async fn run(
                 .copied()
                 .collect();
             handlers::fan_out_buff_snapshot(&mut server, &recipients, sender);
+        }
+
+        // 4b-jump. The jump relay: one PlayerJumped per jump begun this tick,
+        //     to the in-world players whose AOI cell can see the jumper (the
+        //     Say channel's reach), never to the jumper, whose own client
+        //     already played the hop. Position is untouched: the relay is
+        //     the peers' animation cue and nothing else.
+        for jumper_id in jump_fanouts.drain(..) {
+            if to_disconnect.contains(&jumper_id) {
+                continue;
+            }
+            let Some(jumper) = connections.get(&jumper_id) else {
+                continue;
+            };
+            let visible = aoi.entities_visible_from(jumper.aoi_cell);
+            let recipients: Vec<ClientId> = connections
+                .iter()
+                .filter(|(id, c)| {
+                    **id != jumper_id && c.in_world && visible.contains(&(c.char_id as u64))
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            handlers::fan_out_player_jumped(&mut server, &recipients, jumper.char_id as u64);
         }
 
         // 4c. Cast lifecycle fan-out — owning client → every other in_world
@@ -2943,10 +3021,17 @@ pub async fn run(
             handlers::fan_out_entity_died(&mut server, &recipients, entity_id);
         }
 
-        // Track 22.H — player target fan-out. Fan an EntityTarget per
-        // queued SetTarget intent, skipping the sender (they already
-        // know their own choice) and clients flagged for disconnect.
+        // Track 22.H: player target fan-out, for the target-of-target frame.
+        // Only the LATEST target per sender per tick goes out (a burst of
+        // retargets is one message, not one per player per retarget), and
+        // only to players who can see the sender: nobody else has a frame
+        // to draw it in, and a world-wide fan told everyone who was fighting
+        // what. The sender and clients flagged for disconnect are skipped.
+        let mut latest_target: HashMap<ClientId, Option<EntityId>> = HashMap::new();
         for (sender_id, target) in player_target_fanouts.drain(..) {
+            latest_target.insert(sender_id, target);
+        }
+        for (sender_id, target) in latest_target {
             if to_disconnect.contains(&sender_id) {
                 continue;
             }
@@ -2954,9 +3039,10 @@ pub async fn run(
                 continue;
             };
             let entity_id = sender.char_id as u64;
+            let visible = aoi.entities_visible_from(sender.aoi_cell);
             let recipients: Vec<ClientId> = in_world_recipients
                 .iter()
-                .filter(|id| **id != sender_id)
+                .filter(|id| **id != sender_id && visible.contains(*id))
                 .copied()
                 .collect();
             handlers::fan_out_entity_target(&mut server, &recipients, entity_id, target);
@@ -3132,6 +3218,7 @@ pub async fn run(
                                 &mut server,
                                 &aoi_recipients,
                                 &entity,
+                                None,
                             );
                         }
                     }
@@ -3162,11 +3249,59 @@ pub async fn run(
                         .filter(|id| visible.contains(id))
                         .collect();
                     if !aoi_recipients.is_empty() {
-                        handlers::fan_out_enemy_spawn(&mut server, &aoi_recipients, &entity);
+                        handlers::fan_out_enemy_spawn(&mut server, &aoi_recipients, &entity, None);
                     }
                 }
                 enemies.insert(entity.id, entity);
             }
+        }
+
+        // Test Panel "Despawn All Enemies" (dev-gated and audited in the
+        // handler): every enemy the GM can see goes, the same set the
+        // client-side button used to hide. Unowned only, so a player's pet
+        // and a charmed mob stay. It is a removal, not a death: no XP, no
+        // loot, no corpse. The camp slot is freed exactly as the body sweep
+        // frees it, so camp mobs respawn on their timer (a dev spawn's slot
+        // is usize::MAX, a no-op). Anything still pointing at a removed id
+        // (a pet's target, an owner's last-attacked) is dropped by the same
+        // liveness checks the charm landing relies on.
+        for (requester, gm_pos) in dev_despawn_intents.drain(..) {
+            let near = aoi.entities_visible_from(aoi::cell_for(gm_pos.x, gm_pos.z));
+            let doomed: Vec<EntityId> = enemies
+                .values()
+                .filter(|e| e.owner.is_none() && near.contains(&e.id))
+                .map(|e| e.id)
+                .collect();
+            let in_world: Vec<ClientId> = connections
+                .iter()
+                .filter(|(_, c)| c.in_world)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in &doomed {
+                let Some(entity) = enemies.remove(id) else {
+                    continue;
+                };
+                let cell = aoi::cell_for(entity.pos.x, entity.pos.z);
+                aoi.remove(entity.id, cell);
+                let visible = aoi.entities_visible_from(cell);
+                for recipient in despawn_recipients(&visible, &in_world, &entity) {
+                    handlers::send_entity_despawn(&mut server, recipient, entity.id);
+                }
+                spawner.on_enemy_died(entity.spawn_point_idx, now);
+            }
+            tracing::info!(
+                count = doomed.len(),
+                x = gm_pos.x,
+                z = gm_pos.z,
+                "dev despawn enemies"
+            );
+            // Only an authorized request gets here, so the count tells a plain
+            // account nothing about the dev gate.
+            handlers::send_system_line(
+                &mut server,
+                requester,
+                &format!("Despawned {} enemies.", doomed.len()),
+            );
         }
 
         // Recipients snapshot for the enemy-related fan-outs below. Held
@@ -5350,7 +5485,8 @@ pub async fn run(
                             .filter(|id| spawn_visible.contains(id))
                             .collect();
                         if !pet_recipients.is_empty() {
-                            handlers::fan_out_pet_spawn(&mut server, &pet_recipients, &pet);
+                            // Same creature, new id: the caster keeps it targeted.
+                            handlers::fan_out_pet_spawn(&mut server, &pet_recipients, &pet, Some(target_id));
                         }
                         enemies.insert(pet_id, pet);
                         tracing::info!(
@@ -6143,6 +6279,13 @@ pub async fn run(
         if !move_item_intents.is_empty() {
             for intent in move_item_intents.drain(..) {
                 let owner_cid = intent.owner as ClientId;
+                // PD_W0028 escrow: an offered slot moves for no one — not
+                // out of (src) and not merged/swapped into (dst).
+                if trade_locked(&mut server, &trade_manager, owner_cid, &intent.src_location, intent.src_slot)
+                    || trade_locked(&mut server, &trade_manager, owner_cid, &intent.dst_location, intent.dst_slot)
+                {
+                    continue;
+                }
                 let Some(conn) = connections.get_mut(&owner_cid) else {
                     continue;
                 };
@@ -6232,6 +6375,602 @@ pub async fn run(
             }
         }
 
+        // 4hd2. PD_W0028 — apply trade intents (docs/design/trade_window.md).
+        //       Escrow by locking: offers are references into the owner's
+        //       inventory, locks derive from live sessions, and the commit
+        //       is ONE db transaction spanning both characters. Refusals
+        //       answer in chat except arms only a forged client can reach.
+        if !trade_intents.is_empty() {
+            for intent in trade_intents.drain(..) {
+                match intent {
+                    TradeI::Request { requester, target } => {
+                        let rcid = requester as ClientId;
+                        // Ledger 10: players only. Enemy / bag / pet ids live
+                        // in the reserved partitions; NPCs are not entities.
+                        if target >= protocol::world::ENEMY_ID_BASE {
+                            handlers::send_refusal(
+                                &mut server,
+                                rcid,
+                                "You can only trade with players.",
+                            );
+                            continue;
+                        }
+                        let tcid = target as ClientId;
+                        let target_state = connections.get(&tcid).and_then(|t| {
+                            if t.in_world && !t.death_processed && t.hp > 0.0 {
+                                Some((t.pos, t.name.clone()))
+                            } else {
+                                None
+                            }
+                        });
+                        // Absent, dead and too far share ONE line, so a request
+                        // by id cannot tell from anywhere whether a character
+                        // is online (the inspect and cast refusals' rule).
+                        // Written keep-only-when-in-reach, so a non-finite
+                        // distance refuses.
+                        let in_reach = target_state.filter(|(tpos, _)| {
+                            connections
+                                .get(&rcid)
+                                .is_some_and(|r| r.pos.distance_to(*tpos) <= super::trade::TRADE_RANGE)
+                        });
+                        let Some((_, tname)) = in_reach else {
+                            handlers::send_refusal(&mut server, rcid, "There is no one here to trade with.");
+                            continue;
+                        };
+                        let rname = connections
+                            .get(&rcid)
+                            .map(|c| c.name.clone())
+                            .unwrap_or_default();
+                        match trade_manager.open(rcid, tcid) {
+                            Ok(()) => {
+                                // Instant open, both sides (decided 2026-09-19).
+                                handlers::send_trade_opened(&mut server, rcid, target, tname);
+                                handlers::send_trade_opened(&mut server, tcid, requester, rname);
+                                tracing::info!(a = requester, b = target, "trade opened");
+                            }
+                            // Ledger 8: busy / self refusals answer the
+                            // SENDER only — quiet to the target, so a spammy
+                            // requester cannot use refusal echoes to harass.
+                            Err(e) => handlers::send_refusal(&mut server, rcid, e),
+                        }
+                    }
+                    TradeI::OfferItem { owner, window_slot, from_location, from_slot } => {
+                        let cid = owner as ClientId;
+                        if trade_manager.session_of(cid).is_none() {
+                            handlers::send_refusal(&mut server, cid, "You are not trading.");
+                            continue;
+                        }
+                        // Ledger 9: the server re-reads everything from ITS
+                        // inventory. A held bag's inners (bag_255) are never
+                        // addressable, mirroring the inventory entry points.
+                        if from_location == format!("bag_{}", inventory::CURSOR_BAG_KEY) {
+                            continue; // forged-only
+                        }
+                        // Resolve the source. "cursor" parks the held stack
+                        // into an empty inventory slot first (no merging, so
+                        // the offer stays one discrete referenced stack) and
+                        // frees the hand for the next pickup.
+                        let (loc, slot) = if from_location == "cursor" {
+                            match connections
+                                .get_mut(&cid)
+                                .map(|c| c.inventory.park_cursor_stack())
+                            {
+                                Some(Ok(((l, s), touched))) => {
+                                    if let Some(conn) = connections.get_mut(&cid) {
+                                        conn.inventory_dirty = true;
+                                        let deltas: Vec<(String, u32, Option<(String, u32)>)> =
+                                            touched
+                                                .iter()
+                                                .map(|(tl, ts)| {
+                                                    (tl.clone(), *ts, conn.inventory.peek_at(tl, *ts))
+                                                })
+                                                .collect();
+                                        for (tl, ts, payload) in deltas {
+                                            let (p, c2) = match payload {
+                                                Some((p, c2)) => (Some(p), c2),
+                                                None => (None, 0),
+                                            };
+                                            handlers::send_inventory_delta(
+                                                &mut server, cid, tl, ts, p, c2,
+                                            );
+                                        }
+                                    }
+                                    (l, s)
+                                }
+                                Some(Err(e)) => {
+                                    handlers::send_refusal(&mut server, cid, e);
+                                    continue;
+                                }
+                                None => continue,
+                            }
+                        } else {
+                            (from_location, from_slot)
+                        };
+                        // The referenced slot must hold something, and a
+                        // bag-typed offer must be an EMPTY bag (a full bag's
+                        // contents transfer is its own later slice).
+                        let peek = connections
+                            .get(&cid)
+                            .and_then(|c| c.inventory.peek_at(&loc, slot));
+                        let Some((path, offer_count)) = peek else {
+                            handlers::send_refusal(
+                                &mut server,
+                                cid,
+                                "There's nothing in that slot to offer.",
+                            );
+                            continue;
+                        };
+                        if items::bag_num_slots(&path).is_some() {
+                            // A bag can only rest in a base slot, so its key
+                            // is its base index.
+                            let nonempty = loc == "base"
+                                && connections
+                                    .get(&cid)
+                                    .map(|c| c.inventory.bag_key_is_nonempty(slot as u8))
+                                    .unwrap_or(false);
+                            if nonempty {
+                                handlers::send_refusal(
+                                    &mut server,
+                                    cid,
+                                    "Empty the bag before trading it.",
+                                );
+                                continue;
+                            }
+                        }
+                        match trade_manager.offer_item(
+                            cid,
+                            window_slot as usize,
+                            super::trade::Offer {
+                                location: loc,
+                                slot,
+                                item_path: path,
+                                count: offer_count,
+                            },
+                        ) {
+                            Ok(()) => {
+                                if let Some(session) = trade_manager.session_of(cid) {
+                                    fan_trade_state(&mut server, session);
+                                }
+                            }
+                            Err(e) => handlers::send_refusal(&mut server, cid, e),
+                        }
+                    }
+                    TradeI::RetrieveItem { owner, window_slot } => {
+                        let cid = owner as ClientId;
+                        match trade_manager.retrieve_item(cid, window_slot as usize) {
+                            Ok(()) => {
+                                if let Some(session) = trade_manager.session_of(cid) {
+                                    fan_trade_state(&mut server, session);
+                                }
+                            }
+                            Err(e) => handlers::send_refusal(&mut server, cid, e),
+                        }
+                    }
+                    TradeI::OfferCoins { owner, coins } => {
+                        let cid = owner as ClientId;
+                        // Forged negatives would STEAL from the partner at
+                        // commit; only a modified client can send one.
+                        if coins.platinum < 0
+                            || coins.gold < 0
+                            || coins.silver < 0
+                            || coins.copper < 0
+                        {
+                            continue; // forged-only
+                        }
+                        // Ledger 4: absolute per-tier amounts, each within
+                        // the live wallet (the four stacks are independent
+                        // by design — no auto-breaking in a trade).
+                        let covered = connections
+                            .get(&cid)
+                            .map(|c| {
+                                coins.platinum <= c.coins.platinum
+                                    && coins.gold <= c.coins.gold
+                                    && coins.silver <= c.coins.silver
+                                    && coins.copper <= c.coins.copper
+                            })
+                            .unwrap_or(false);
+                        if !covered {
+                            handlers::send_refusal(&mut server, cid, "You don't have that much coin.");
+                            // Re-fan the APPLIED state so the client's coin
+                            // fields snap back to what the server holds
+                            // instead of displaying the refused amount.
+                            if let Some(session) = trade_manager.session_of(cid) {
+                                fan_trade_state(&mut server, session);
+                            }
+                            continue;
+                        }
+                        match trade_manager.offer_coins(cid, coins) {
+                            Ok(()) => {
+                                if let Some(session) = trade_manager.session_of(cid) {
+                                    fan_trade_state(&mut server, session);
+                                }
+                            }
+                            Err(e) => handlers::send_refusal(&mut server, cid, e),
+                        }
+                    }
+                    TradeI::Cancel { owner } => {
+                        close_trade(
+                            &mut server,
+                            &mut trade_manager,
+                            owner as ClientId,
+                            "Trade cancelled.",
+                        );
+                    }
+                    TradeI::Accept { owner } => {
+                        let cid = owner as ClientId;
+                        let both = match trade_manager.accept(cid) {
+                            Err(e) => {
+                                handlers::send_refusal(&mut server, cid, e);
+                                continue;
+                            }
+                            Ok(b) => b,
+                        };
+                        if !both {
+                            if let Some(session) = trade_manager.session_of(cid) {
+                                fan_trade_state(&mut server, session);
+                            }
+                            continue;
+                        }
+                        // ── COMMIT. Everything below runs inside this tick,
+                        // so nothing interleaves between validation and
+                        // application (ledger 4's argument). ──
+                        let Some(session) = trade_manager.session_of(cid).cloned() else {
+                            continue;
+                        };
+                        let (acid, bcid) = (session.a.cid, session.b.cid);
+                        // Re-validate liveness + range (ledger 7).
+                        let both_ok = match (connections.get(&acid), connections.get(&bcid)) {
+                            (Some(a), Some(b)) => {
+                                a.in_world
+                                    && b.in_world
+                                    && !a.death_processed
+                                    && !b.death_processed
+                                    && a.hp > 0.0
+                                    && b.hp > 0.0
+                                    && a.pos.distance_to(b.pos) <= super::trade::TRADE_RANGE
+                            }
+                            _ => false,
+                        };
+                        if !both_ok {
+                            close_trade(
+                                &mut server,
+                                &mut trade_manager,
+                                acid,
+                                "Trade failed — you are no longer together.",
+                            );
+                            continue;
+                        }
+                        // Re-validate coin coverage per tier (ledger 4 —
+                        // wallets can shrink between offer and commit via a
+                        // vendor purchase; items cannot move, they are locked).
+                        let coins_covered = |cid: ClientId, offered: protocol::world::Coins| {
+                            connections
+                                .get(&cid)
+                                .map(|c| {
+                                    offered.platinum <= c.coins.platinum
+                                        && offered.gold <= c.coins.gold
+                                        && offered.silver <= c.coins.silver
+                                        && offered.copper <= c.coins.copper
+                                })
+                                .unwrap_or(false)
+                        };
+                        if !coins_covered(acid, session.a.coins)
+                            || !coins_covered(bcid, session.b.coins)
+                        {
+                            trade_manager.clear_accepts_of(acid);
+                            for c in [acid, bcid] {
+                                handlers::send_refusal(
+                                    &mut server,
+                                    c,
+                                    "The coin offer is no longer covered.",
+                                );
+                            }
+                            if let Some(s) = trade_manager.session_of(acid) {
+                                fan_trade_state(&mut server, s);
+                            }
+                            continue;
+                        }
+                        // Snapshot verification: every offered slot must still
+                        // hold exactly the item and count the partner was
+                        // shown. Locks stop a slot (and the bag around it)
+                        // moving, but the placer (loot, purchases, grants,
+                        // withdrawals) ignores locks and can top up an offered
+                        // stack or drop something into an offered bag, and the
+                        // item check makes any other drift fail shut instead
+                        // of handing over something else. A changed offer
+                        // leaves the window, which also unlocks it, so the
+                        // owner sees what happened and can offer it again;
+                        // leaving it in would refuse every later accept with
+                        // nothing visibly wrong.
+                        let changed = |cid: ClientId, side: &super::trade::TradeSide| -> Vec<usize> {
+                            let Some(conn) = connections.get(&cid) else {
+                                return (0..super::trade::TRADE_SLOTS).collect();
+                            };
+                            side.offers
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(i, offer)| {
+                                    let o = offer.as_ref()?;
+                                    let same = conn
+                                        .inventory
+                                        .peek_at(&o.location, o.slot)
+                                        .map(|(p, c)| p == o.item_path && c == o.count)
+                                        .unwrap_or(false);
+                                    let bag_still_empty = o.location != "base"
+                                        || !conn.inventory.bag_key_is_nonempty(o.slot as u8);
+                                    (!(same && bag_still_empty)).then_some(i)
+                                })
+                                .collect()
+                        };
+                        let a_changed = changed(acid, &session.a);
+                        let b_changed = changed(bcid, &session.b);
+                        if !a_changed.is_empty() || !b_changed.is_empty() {
+                            for (owner, slots) in [(acid, &a_changed), (bcid, &b_changed)] {
+                                for &i in slots {
+                                    // An empty window slot just reports empty.
+                                    let _ = trade_manager.retrieve_item(owner, i);
+                                }
+                            }
+                            trade_manager.clear_accepts_of(acid);
+                            for (c, mine) in [(acid, !a_changed.is_empty()), (bcid, !b_changed.is_empty())] {
+                                let text = if mine {
+                                    "An item you offered changed, so it was taken out of the trade."
+                                } else {
+                                    "Their offer changed. Check the window before accepting again."
+                                };
+                                handlers::send_refusal(&mut server, c, text);
+                            }
+                            if let Some(s) = trade_manager.session_of(acid) {
+                                fan_trade_state(&mut server, s);
+                            }
+                            continue;
+                        }
+                        // Resolve every offered reference to (loc, slot,
+                        // path, count). Locked slots cannot have changed and
+                        // counts just verified, so a None here is internal
+                        // inconsistency — fail shut.
+                        let resolve = |cid: ClientId, side: &super::trade::TradeSide| {
+                            let conn = connections.get(&cid)?;
+                            side.offered_slots()
+                                .map(|o| {
+                                    conn.inventory
+                                        .peek_at(&o.location, o.slot)
+                                        .map(|(p, c)| (o.location.clone(), o.slot, p, c))
+                                })
+                                .collect::<Option<Vec<(String, u32, String, u32)>>>()
+                        };
+                        let (Some(a_gives), Some(b_gives)) =
+                            (resolve(acid, &session.a), resolve(bcid, &session.b))
+                        else {
+                            close_trade(&mut server, &mut trade_manager, acid, "Trade failed.");
+                            continue;
+                        };
+                        // Capacity (ledger 6): simulate each receiver on a
+                        // CLONE — outgoing removed first, then the partner's
+                        // stacks through the real placer (merge_capped
+                        // semantics, ledger 5). Refuse cleanly, window open.
+                        let simulate = |cid: ClientId,
+                                        gives: &[(String, u32, String, u32)],
+                                        receives: &[(String, u32, String, u32)]|
+                         -> bool {
+                            let Some(conn) = connections.get(&cid) else {
+                                return false;
+                            };
+                            let mut sim = conn.inventory.clone();
+                            for (l, s, _, _) in gives {
+                                if sim.destroy_at(l, *s, 0).is_err() {
+                                    return false;
+                                }
+                            }
+                            for (_, _, path, count) in receives {
+                                match sim.add_item_locating(path, *count) {
+                                    Ok((_, leftover)) if leftover == 0 => {}
+                                    _ => return false,
+                                }
+                            }
+                            true
+                        };
+                        let a_fits = simulate(acid, &a_gives, &b_gives);
+                        let b_fits = simulate(bcid, &b_gives, &a_gives);
+                        if !a_fits || !b_fits {
+                            trade_manager.clear_accepts_of(acid);
+                            let full = if a_fits { bcid } else { acid };
+                            for c in [acid, bcid] {
+                                let text = if c == full {
+                                    "Your bags cannot hold their offer."
+                                } else {
+                                    "Their bags cannot hold your offer."
+                                };
+                                handlers::send_refusal(&mut server, c, text);
+                            }
+                            if let Some(s) = trade_manager.session_of(acid) {
+                                fan_trade_state(&mut server, s);
+                            }
+                            continue;
+                        }
+                        // Apply for real, with full revert clones (the db
+                        // write below can still fail; the in-memory swap
+                        // must be reversible until it commits).
+                        let revert = |connections: &HashMap<ClientId, PerConnection>,
+                                      cid: ClientId| {
+                            connections.get(&cid).map(|c| (c.inventory.clone(), c.coins))
+                        };
+                        let (Some(a_before), Some(b_before)) =
+                            (revert(&connections, acid), revert(&connections, bcid))
+                        else {
+                            close_trade(&mut server, &mut trade_manager, acid, "Trade failed.");
+                            continue;
+                        };
+                        let mut touched_by: HashMap<ClientId, Vec<(String, u32)>> =
+                            HashMap::new();
+                        let mut apply_side = |cid: ClientId,
+                                              gives: &[(String, u32, String, u32)],
+                                              receives: &[(String, u32, String, u32)],
+                                              pay: protocol::world::Coins,
+                                              gain: protocol::world::Coins,
+                                              connections: &mut HashMap<ClientId, PerConnection>|
+                         -> bool {
+                            let Some(conn) = connections.get_mut(&cid) else {
+                                return false;
+                            };
+                            let touched = touched_by.entry(cid).or_default();
+                            for (l, s, _, _) in gives {
+                                if conn.inventory.destroy_at(l, *s, 0).is_err() {
+                                    return false;
+                                }
+                                touched.push((l.clone(), *s));
+                            }
+                            for (_, _, path, count) in receives {
+                                match conn.inventory.add_item_locating(path, *count) {
+                                    Ok((placed, 0)) => touched.extend(placed),
+                                    _ => return false,
+                                }
+                            }
+                            conn.coins.platinum -= pay.platinum;
+                            conn.coins.gold -= pay.gold;
+                            conn.coins.silver -= pay.silver;
+                            conn.coins.copper -= pay.copper;
+                            conn.coins.platinum += gain.platinum;
+                            conn.coins.gold += gain.gold;
+                            conn.coins.silver += gain.silver;
+                            conn.coins.copper += gain.copper;
+                            conn.inventory_dirty = true;
+                            true
+                        };
+                        let applied = apply_side(
+                            acid,
+                            &a_gives,
+                            &b_gives,
+                            session.a.coins,
+                            session.b.coins,
+                            &mut connections,
+                        ) && apply_side(
+                            bcid,
+                            &b_gives,
+                            &a_gives,
+                            session.b.coins,
+                            session.a.coins,
+                            &mut connections,
+                        );
+                        let persist_ok = if applied {
+                            let rows_a = connections
+                                .get(&acid)
+                                .map(|c| (c.inventory.to_rows(), c.coins));
+                            let rows_b = connections
+                                .get(&bcid)
+                                .map(|c| (c.inventory.to_rows(), c.coins));
+                            match (rows_a, rows_b) {
+                                (Some((ra, ca)), Some((rb, cb))) => {
+                                    match db::commit_trade(
+                                        &pool,
+                                        acid as i64,
+                                        &ra,
+                                        ca,
+                                        bcid as i64,
+                                        &rb,
+                                        cb,
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => true,
+                                        Err(e) => {
+                                            tracing::error!(
+                                                a = acid as u64,
+                                                b = bcid as u64,
+                                                error = %e,
+                                                "commit_trade persist failed"
+                                            );
+                                            false
+                                        }
+                                    }
+                                }
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        };
+                        if !persist_ok {
+                            // Revert BOTH sides to the pre-apply snapshots;
+                            // nothing was sent yet, so there is nothing to
+                            // un-send (the corpse-loot doctrine).
+                            if let Some(c) = connections.get_mut(&acid) {
+                                c.inventory = a_before.0.clone();
+                                c.coins = a_before.1;
+                            }
+                            if let Some(c) = connections.get_mut(&bcid) {
+                                c.inventory = b_before.0.clone();
+                                c.coins = b_before.1;
+                            }
+                            close_trade(&mut server, &mut trade_manager, acid, "Trade failed.");
+                            continue;
+                        }
+                        // Committed. Close the session, then fan the truth:
+                        // deltas for every touched slot, wallets, and the
+                        // committed close. The window itself granted nothing.
+                        trade_manager.close(acid);
+                        for c in [acid, bcid] {
+                            if let Some(conn) = connections.get(&c) {
+                                if let Some(touched) = touched_by.get(&c) {
+                                    for (l, s) in touched {
+                                        let (p, cnt) = match conn.inventory.peek_at(l, *s) {
+                                            Some((p, cnt)) => (Some(p), cnt),
+                                            None => (None, 0),
+                                        };
+                                        handlers::send_inventory_delta(
+                                            &mut server,
+                                            c,
+                                            l.clone(),
+                                            *s,
+                                            p,
+                                            cnt,
+                                        );
+                                    }
+                                }
+                                handlers::send_coins_update(&mut server, c, conn.coins);
+                            }
+                            handlers::send_trade_closed(&mut server, c, true, "Trade complete.");
+                        }
+                        tracing::info!(
+                            a = acid as u64,
+                            b = bcid as u64,
+                            a_stacks = a_gives.len(),
+                            b_stacks = b_gives.len(),
+                            a_coins = session.a.coins.total_copper(),
+                            b_coins = session.b.coins.total_copper(),
+                            "trade committed"
+                        );
+                    }
+                }
+            }
+        }
+
+        // 4hd3. PD_W0028 — trade session sweep: range, liveness, and
+        //       presence, every tick (ledger 7). A session survives only
+        //       while both parties are connected, in-world, alive, and
+        //       within TRADE_RANGE of each other.
+        for (acid, bcid) in trade_manager.open_session_cids() {
+            let healthy = match (connections.get(&acid), connections.get(&bcid)) {
+                (Some(a), Some(b)) => {
+                    a.in_world
+                        && b.in_world
+                        && !a.death_processed
+                        && !b.death_processed
+                        && a.hp > 0.0
+                        && b.hp > 0.0
+                        && a.pos.distance_to(b.pos) <= super::trade::TRADE_RANGE
+                }
+                _ => false,
+            };
+            if !healthy {
+                close_trade(
+                    &mut server,
+                    &mut trade_manager,
+                    acid,
+                    "Trade cancelled — you are no longer together.",
+                );
+            }
+        }
+
         // 4he. Track 13.2.b — apply split-stack intents. Splits part
         //      of one base stack into another slot (empty dst or
         //      merge same-path dst). Bag/equip locations defer.
@@ -6252,6 +6991,13 @@ pub async fn run(
                     continue;
                 }
                 let owner_cid = intent.owner as ClientId;
+                // PD_W0028 escrow: an offered slot neither splits nor
+                // receives a split.
+                if trade_locked(&mut server, &trade_manager, owner_cid, "base", intent.src_slot)
+                    || trade_locked(&mut server, &trade_manager, owner_cid, "base", intent.dst_slot)
+                {
+                    continue;
+                }
                 let Some(conn) = connections.get_mut(&owner_cid) else {
                     continue;
                 };
@@ -6312,6 +7058,10 @@ pub async fn run(
         if !drop_item_intents.is_empty() {
             for intent in drop_item_intents.drain(..) {
                 let owner_cid = intent.owner as ClientId;
+                // PD_W0028 escrow: an offered slot cannot be dropped.
+                if trade_locked(&mut server, &trade_manager, owner_cid, &intent.location, intent.slot) {
+                    continue;
+                }
                 let drop_pos: Vec3f;
                 let dropped: Option<(String, u32)>;
                 if let Some(conn) = connections.get_mut(&owner_cid) {
@@ -6416,6 +7166,10 @@ pub async fn run(
         if !equip_item_intents.is_empty() {
             for intent in equip_item_intents.drain(..) {
                 let owner_cid = intent.owner as ClientId;
+                // PD_W0028 escrow: an offered slot cannot be equipped from.
+                if trade_locked(&mut server, &trade_manager, owner_cid, &intent.src_location, intent.src_slot) {
+                    continue;
+                }
                 let Some(conn) = connections.get_mut(&owner_cid) else {
                     continue;
                 };
@@ -6514,6 +7268,13 @@ pub async fn run(
                     continue;
                 }
                 let owner_cid = intent.owner as ClientId;
+                // PD_W0028 escrow: an unequip cannot land in (or swap with)
+                // an offered slot.
+                if intent.dst_location == "base"
+                    && trade_locked(&mut server, &trade_manager, owner_cid, "base", intent.dst_slot)
+                {
+                    continue;
+                }
                 let Some(conn) = connections.get_mut(&owner_cid) else {
                     continue;
                 };
@@ -6614,6 +7375,10 @@ pub async fn run(
         if !destroy_item_intents.is_empty() {
             for intent in destroy_item_intents.drain(..) {
                 let owner_cid = intent.owner as ClientId;
+                // PD_W0028 escrow: an offered slot cannot be destroyed.
+                if trade_locked(&mut server, &trade_manager, owner_cid, &intent.location, intent.slot) {
+                    continue;
+                }
                 let Some(conn) = connections.get_mut(&owner_cid) else {
                     continue;
                 };
@@ -6666,9 +7431,17 @@ pub async fn run(
         //      effect (heal-on-use / food / drink) via the buff
         //      pipeline, fans `HealthUpdate` / `ManaUpdate` /
         //      `BuffSnapshot` as needed.
+        // EQ's eating emote for the people near anyone who eats or drinks
+        // this tick (by hand here, on their own at the regen step), fanned
+        // once both steps have run.
+        let mut eat_emotes: Vec<(ClientId, String)> = Vec::new();
         if !use_consumable_intents.is_empty() {
             for intent in use_consumable_intents.drain(..) {
                 let owner_cid = intent.owner as ClientId;
+                // PD_W0028 escrow: an offered slot cannot be eaten from.
+                if trade_locked(&mut server, &trade_manager, owner_cid, &intent.location, intent.slot) {
+                    continue;
+                }
                 let Some(conn) = connections.get_mut(&owner_cid) else {
                     continue;
                 };
@@ -6792,10 +7565,12 @@ pub async fn run(
                 if is_food && food_dur > 0.0 {
                     hunger::feed(conn, hunger::Need::Food, food_dur * hunger::HAND_EAT_FRACTION);
                     handlers::send_system_line(&mut server, owner_cid, &format!("You eat a {}.", item.name));
+                    eat_emotes.push((owner_cid, hunger::eat_emote(&conn.name, &item.name, hunger::Need::Food)));
                 }
                 if is_drink && food_dur > 0.0 {
                     hunger::feed(conn, hunger::Need::Drink, food_dur * hunger::HAND_EAT_FRACTION);
                     handlers::send_system_line(&mut server, owner_cid, &format!("You drink a {}.", item.name));
+                    eat_emotes.push((owner_cid, hunger::eat_emote(&conn.name, &item.name, hunger::Need::Drink)));
                 }
                 tracing::info!(
                     owner = intent.owner,
@@ -7032,6 +7807,19 @@ pub async fn run(
         if !sell_item_intents.is_empty() {
             for intent in sell_item_intents.drain(..) {
                 let owner_cid = intent.owner as ClientId;
+                // PD_W0028 escrow: an offered slot cannot be sold.
+                let (lock_loc, lock_slot) = match intent.slot {
+                    protocol::world::SlotRef::BaseSlot { idx } => ("base".to_string(), idx as u32),
+                    protocol::world::SlotRef::BagSlot { base, slot } => {
+                        (format!("bag_{base}"), slot as u32)
+                    }
+                    protocol::world::SlotRef::EquipSlot(_) => (String::new(), 0),
+                };
+                if !lock_loc.is_empty()
+                    && trade_locked(&mut server, &trade_manager, owner_cid, &lock_loc, lock_slot)
+                {
+                    continue;
+                }
                 let Some(conn) = connections.get_mut(&owner_cid) else {
                     continue;
                 };
@@ -7319,6 +8107,11 @@ pub async fn run(
         //           a full BankItemSnapshot (the tiny vault).
         for intent in bank_store_item_intents.drain(..) {
             let cid = intent.owner as ClientId;
+            // PD_W0028 escrow: an offered slot cannot be banked (this is
+            // also the death-penalty-void slot, so the lock matters twice).
+            if trade_locked(&mut server, &trade_manager, cid, &intent.src_location, intent.src_slot) {
+                continue;
+            }
             let Some(conn) = connections.get_mut(&cid) else { continue };
             // Same banker proximity gate as the deposit loop above.
             if super::npcs::any_within_range("banker", conn.pos).is_none() {
@@ -10217,8 +11010,13 @@ pub async fn run(
                     if !hunger::is_famished(conn, need) {
                         continue;
                     }
-                    let Some((loc, slot, item)) = hunger::first_in_slot_order(&conn.inventory, need)
-                    else {
+                    // Food offered in an open trade is not the character's to
+                    // eat until the trade ends.
+                    let Some((loc, slot, item)) = hunger::first_in_slot_order(
+                        &conn.inventory,
+                        need,
+                        |l, s| trade_manager.is_locked(*client_id, l, s),
+                    ) else {
                         continue;
                     };
                     if conn.inventory.decrement_at(&loc, slot).is_err() {
@@ -10232,6 +11030,7 @@ pub async fn run(
                     handlers::send_inventory_delta(&mut server, *client_id, loc.clone(), slot, path, count);
                     let added = hunger::feed(conn, need, hunger::fullness_of(item));
                     fed_now[i] = true;
+                    eat_emotes.push((*client_id, hunger::eat_emote(&conn.name, &item.name, need)));
                     let verb = if need == hunger::Need::Food { "eat" } else { "drink" };
                     handlers::send_system_line(
                         &mut server,
@@ -10254,6 +11053,12 @@ pub async fn run(
                     }
                     handlers::send_system_line(&mut server, *client_id, line);
                 }
+            }
+            // The hunger window: to the owner, on each reason `update_due`
+            // knows (dead or alive, so a death stops the bars).
+            if conn.in_world && hunger::update_due(conn, now) {
+                handlers::send_hunger_update(&mut server, *client_id, conn);
+                hunger::mark_sent(conn, now);
             }
             let result = regen::tick_one(conn, dt, now);
             if result.hp_fanout || result.mp_fanout || result.stamina_fanout {
@@ -10291,6 +11096,28 @@ pub async fn run(
                     }
                 }
             }
+        }
+        // EQ's eating emote, to the people who could hear the eater say
+        // something (the say channel's reach), never to the eater.
+        for (eater_cid, text) in eat_emotes.drain(..) {
+            let Some(eater) = connections.get(&eater_cid) else {
+                continue;
+            };
+            let visible = aoi.entities_visible_from(eater.aoi_cell);
+            let recipients: Vec<ClientId> = connections
+                .iter()
+                .filter(|(id, c)| {
+                    **id != eater_cid && c.in_world && visible.contains(&(c.char_id as u64))
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            handlers::fan_out_chat_message(
+                &mut server,
+                &recipients,
+                "",
+                protocol::world::ChatChannel::System,
+                &text,
+            );
         }
         if !regen_fanouts.is_empty() {
             let recipients: Vec<ClientId> = connections
@@ -10978,6 +11805,79 @@ fn refund_spell_cost(
     if hp_cost > 0.0 {
         handlers::fan_out_health_update(server, recipients, caster_id, hp, max_hp);
     }
+}
+
+// ── PD_W0028 — trade helpers (docs/design/trade_window.md). ──
+
+/// Project one trade side's offers into the wire payload: the item and count
+/// snapshotted at offer time, which is exactly what the commit verifies
+/// against the live slot and hands over (escrow-by-locking: the session
+/// stores references and a snapshot, never the item itself).
+fn trade_side_payload(
+    side: &super::trade::TradeSide,
+) -> (Vec<(String, u32)>, protocol::world::Coins) {
+    let mut slots = vec![(String::new(), 0u32); super::trade::TRADE_SLOTS];
+    for (i, offer) in side.offers.iter().enumerate() {
+        if let Some(o) = offer {
+            slots[i] = (o.item_path.clone(), o.count);
+        }
+    }
+    (slots, side.coins)
+}
+
+/// Fan BOTH parties the full state of BOTH sides plus the accept flags —
+/// after any edit. Full-state per update, not deltas: a tiny payload with
+/// no desync class.
+fn fan_trade_state(
+    server: &mut RenetServer,
+    session: &super::trade::TradeSession,
+) {
+    for (me, them) in [(&session.a, &session.b), (&session.b, &session.a)] {
+        let (my_slots, my_coins) = trade_side_payload(me);
+        let (their_slots, their_coins) = trade_side_payload(them);
+        handlers::send_trade_offer_update(server, me.cid, true, my_slots, my_coins);
+        handlers::send_trade_offer_update(server, me.cid, false, their_slots, their_coins);
+        handlers::send_trade_accept_state(server, me.cid, me.accepted, them.accepted);
+    }
+}
+
+/// Close the session covering `cid` (if any) and tell both parties why.
+/// Every non-commit exit routes here: cancel, range, death, disconnect,
+/// commit failure. Unlocking is implicit — locks derive from live sessions.
+fn close_trade(
+    server: &mut RenetServer,
+    trade_manager: &mut super::trade::TradeManager,
+    cid: ClientId,
+    reason: &str,
+) {
+    if let Some(session) = trade_manager.close(cid) {
+        for c in [session.a.cid, session.b.cid] {
+            handlers::send_trade_closed(server, c, false, reason);
+        }
+        tracing::info!(
+            a = session.a.cid as u64,
+            b = session.b.cid as u64,
+            reason,
+            "trade closed"
+        );
+    }
+}
+
+/// The escrow: a slot offered in an open trade refuses every other
+/// inventory intent. Reports the refusal (the silent-refusals doctrine);
+/// callers just `continue` on `true`.
+fn trade_locked(
+    server: &mut RenetServer,
+    trade_manager: &super::trade::TradeManager,
+    cid: ClientId,
+    location: &str,
+    slot: u32,
+) -> bool {
+    if trade_manager.is_locked(cid, location, slot) {
+        handlers::send_refusal(server, cid, "That item is offered in a trade.");
+        return true;
+    }
+    false
 }
 
 /// Tell one client the true contents of the two slots a failed `MoveItem`

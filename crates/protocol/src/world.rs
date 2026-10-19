@@ -120,7 +120,28 @@ use serde::{Deserialize, Serialize};
 /// `DropItem` / `UseConsumable` / `InventoryDelta` (strings, so no shape
 /// change — the bump exists because an old server would drop the new intent
 /// and an old client would not understand a cursor delta).
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3237; // "PD_W0027"
+///
+/// PD_W0028: the trade window, slice 1 (player to player;
+/// docs/design/trade_window.md). Appends the trade intents
+/// (`TradeRequest` / `TradeOfferItem` / `TradeRetrieveItem` /
+/// `TradeOfferCoins` / `TradeAccept` / `TradeCancel`) at the END of
+/// `ClientWorldMsg`, and the trade messages (`TradeOpened` /
+/// `TradeOfferUpdate` / `TradeAcceptState` / `TradeClosed`) at the END of
+/// `ServerWorldMsg`. Escrow is by LOCKING: offered items never leave the
+/// owner's inventory until the single-transaction commit, and every offer
+/// edit clears both accepts server-side. Both sides deploy together.
+/// The same bump also gives `EnemySpawn` and `PetSpawn` a trailing
+/// `replaces: Option<EntityId>`, so a charm landing or ending can say which
+/// id the new one takes over and the client keeps its target (EQ's one
+/// entity throughout). And it appends `HungerUpdate` after `TradeClosed`,
+/// the owner's food and water counters for the hunger window
+/// (docs/design/food_and_water.md section 8), then `PlayerJumped` after
+/// that: the one-shot a client's real `Move.jumping` flag becomes for the
+/// players who can see the jumper, so a jump no longer reads as a slide.
+/// It also appends the dev-gated `DevDespawnEnemies` after `TradeCancel`, so
+/// the Test Panel's "Despawn All Enemies" removes the mobs on the server
+/// instead of only hiding them on one client.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3238; // "PD_W0028"
 
 pub type EntityId = u64;
 
@@ -928,6 +949,47 @@ pub enum ClientWorldMsg {
     CompleteQuest {
         quest_id: String,
     },
+
+    // ── PD_W0028 — the trade window (docs/design/trade_window.md) ──
+    /// Open a trade with `target_id` (a player char id). Sent by the
+    /// holding-click path; the server validates target is a connected,
+    /// alive, in-range PLAYER with no session of their own, then opens
+    /// instantly for both (decided: EQ-style, no accept prompt).
+    TradeRequest {
+        target_id: EntityId,
+    },
+    /// Place the stack at `(from_location, from_slot)` into my side's
+    /// `window_slot` (0..8). The server re-reads the slot from ITS
+    /// inventory (the client never names an item path) and LOCKS it in
+    /// place; `"cursor"` as the source first parks the held stack into an
+    /// empty inventory slot so the hand frees for the next pickup.
+    TradeOfferItem {
+        window_slot: u8,
+        from_location: String,
+        from_slot: u32,
+    },
+    /// Clear my side's `window_slot`: the referenced inventory slot
+    /// unlocks where it sits (escrow-by-locking means nothing moves).
+    TradeRetrieveItem {
+        window_slot: u8,
+    },
+    /// Absolute per-tier coin offer (the four independent stacks).
+    /// Validated against the live wallet at offer time and again at
+    /// commit inside the tick.
+    TradeOfferCoins {
+        coins: Coins,
+    },
+    /// Press Trade. Both sides accepted -> commit (one db transaction).
+    TradeAccept,
+    /// Close the window. Also implied by range, death, zone, disconnect.
+    TradeCancel,
+
+    /// Dev-only, gated and audited like `DevSpawnMob`: remove every unowned
+    /// enemy in the requester's view (their AOI neighbourhood) from the
+    /// world. Backs the Test Panel's "Despawn All Enemies", which used to
+    /// free only the client's own nodes while the server kept the mobs. Pays
+    /// nothing, drops nothing; camp mobs respawn on their camp's timer.
+    DevDespawnEnemies,
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────
@@ -1168,6 +1230,10 @@ pub enum ServerWorldMsg {
         hp: f32,
         pos: Vec3,
         yaw: f32,
+        /// The id this entity takes over, when it is the same creature under
+        /// a new id: a charmed pet handed back as an enemy. `None` for every
+        /// ordinary spawn. The client moves its target across on a match.
+        replaces: Option<EntityId>,
     },
     /// Server-authoritative aggro replication. Broadcast on target switch
     /// only (not per tick) — enough for "the mob turned on the healer!"
@@ -1263,6 +1329,9 @@ pub enum ServerWorldMsg {
         hp: f32,
         pos: Vec3,
         yaw: f32,
+        /// The id this pet takes over: the enemy a charm just converted.
+        /// `None` for a summon. See `EnemySpawn::replaces`.
+        replaces: Option<EntityId>,
     },
 
     /// Track 13.2 — full inventory snapshot. Fanned privately to the
@@ -1464,6 +1533,55 @@ pub enum ServerWorldMsg {
         amount: i32,
         crit: bool,
         dmg_type: DamageType,
+    },
+
+    // ── PD_W0028 — the trade window (docs/design/trade_window.md) ──
+    /// A trade session opened; sent to both parties (instant open).
+    TradeOpened {
+        partner_id: EntityId,
+        partner_name: String,
+    },
+    /// Full state of ONE side's offer after any edit — full-state per
+    /// update, not deltas: a tiny payload with no desync class. `mine`
+    /// tells the recipient whether this is their own side or the
+    /// partner's. Slots are `(item_path, count)`, empty string = empty.
+    TradeOfferUpdate {
+        mine: bool,
+        slots: Vec<(String, u32)>,
+        coins: Coins,
+    },
+    /// Accept flags after any change (every offer edit clears both).
+    TradeAcceptState {
+        you: bool,
+        them: bool,
+    },
+    /// The session ended. `committed` distinguishes a successful trade
+    /// from a cancel; `reason` is the human-readable why for chat.
+    TradeClosed {
+        committed: bool,
+        reason: String,
+    },
+    /// Food and water, the hunger window: the owner's two counters in
+    /// seconds of fullness, the cap, and how many counter-seconds run off per
+    /// real second right now (the race's rate while alive in the world, 0
+    /// while dead). To the owner ONLY: on entering the world, after any eat
+    /// or drink, on a stage change, on death and on respawn, and otherwise
+    /// about once a minute. The client runs its bars down between sends; the
+    /// bars are a picture, the server's regen gate is the rule.
+    HungerUpdate {
+        hunger_secs: f32,
+        thirst_secs: f32,
+        cap_secs: f32,
+        drain_per_sec: f32,
+    },
+    /// A player began a jump: the rising edge of `Move.jumping`, relayed
+    /// once to the players who can see them (never back to the jumper), at
+    /// most once per `JUMP_RELAY_MIN_INTERVAL`. Cosmetic only: each client
+    /// plays its own hop on the jumper's body, and the server never moves
+    /// anyone for it (XZ stays the server's, Y stays zero), so a forged
+    /// flag can make a player look silly and nothing more.
+    PlayerJumped {
+        id: EntityId,
     },
 }
 

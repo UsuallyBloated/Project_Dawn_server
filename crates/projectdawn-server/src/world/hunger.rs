@@ -110,6 +110,7 @@ pub fn feed(conn: &mut PerConnection, need: Need, amount: f32) -> f32 {
     let before = counter(conn, need);
     let after = (before + amount.max(0.0)).min(FULLNESS_CAP_SECS);
     set_counter(conn, need, after);
+    conn.hunger_dirty = true;
     after - before
 }
 
@@ -141,6 +142,7 @@ pub fn drain(conn: &mut PerConnection, dt: f32) -> Vec<(Need, Stage, &'static st
         set_counter(conn, need, after);
         let (was, now) = (stage_of(before), stage_of(after));
         if now != was {
+            conn.hunger_dirty = true;
             if let Some(line) = stage_line(need, now) {
                 entered.push((need, now, line));
             }
@@ -159,6 +161,49 @@ pub fn current_stage_lines(conn: &PerConnection) -> Vec<&'static str> {
         .collect()
 }
 
+/// How often the hunger window is corrected when nothing else happened.
+/// Between sends the client runs the bars down at the rate it was given.
+pub const UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Counter-seconds drained per real second right now: the race's rate while
+/// the character is alive in the world, nothing while dead or in the lobby
+/// (the same condition the regen step drains under).
+pub fn drain_rate_now(conn: &PerConnection) -> f32 {
+    if conn.in_world && conn.hp > 0.0 && !conn.death_processed {
+        race_drain_multiplier(&conn.race)
+    } else {
+        0.0
+    }
+}
+
+/// Whether the hunger window should be sent now: never sent, a counter
+/// jumped or crossed a stage, the drain rate changed (a death, a respawn),
+/// or a minute has passed.
+pub fn update_due(conn: &PerConnection, now: std::time::Instant) -> bool {
+    conn.hunger_dirty
+        || (conn.hunger_rate_sent - drain_rate_now(conn)).abs() > f32::EPSILON
+        || conn
+            .hunger_sent_at
+            .map_or(true, |t| now.duration_since(t) >= UPDATE_INTERVAL)
+}
+
+/// Record a send, so `update_due` waits for the next reason.
+pub fn mark_sent(conn: &mut PerConnection, now: std::time::Instant) {
+    conn.hunger_dirty = false;
+    conn.hunger_sent_at = Some(now);
+    conn.hunger_rate_sent = drain_rate_now(conn);
+}
+
+/// EQ's line for the people around someone eating or drinking, word for
+/// word from EQEmu's string table (`EATING_MESSAGE` / `DRINKING_MESSAGE`).
+/// The eater gets their own "You eat a X." instead.
+pub fn eat_emote(eater: &str, item_name: &str, need: Need) -> String {
+    match need {
+        Need::Food => format!("Chomp, chomp, chomp... {eater} takes a bite from a {item_name}."),
+        Need::Drink => format!("Glug, glug, glug... {eater} takes a drink from a {item_name}."),
+    }
+}
+
 fn matches(item: &Item, need: Need) -> bool {
     match need {
         Need::Food => item.is_food,
@@ -169,16 +214,19 @@ fn matches(item: &Item, need: Need) -> bool {
 /// The first food (or drink) the character would eat on its own: base slots
 /// 0 to 7 in order, then each bag by the base slot it sits in, its slots in
 /// order. A bag held on the cursor is not searched (it is not "in" the
-/// inventory, and the placer never fills it). Returns the slot's location
-/// string and index as the inventory API names them, plus the item.
+/// inventory, and the placer never fills it). `skip` passes over slots the
+/// caller rules out (the tick passes the trade lock, so food offered in an
+/// open trade is never eaten). Returns the slot's location string and index as
+/// the inventory API names them, plus the item.
 pub fn first_in_slot_order(
     inv: &PlayerInventory,
     need: Need,
+    skip: impl Fn(&str, u32) -> bool,
 ) -> Option<(String, u32, &'static Item)> {
     for (i, entry) in inv.base.iter().enumerate() {
         if let Some(e) = entry {
             if let Some(item) = items::lookup(&e.item_path) {
-                if matches(item, need) {
+                if matches(item, need) && !skip("base", i as u32) {
                     return Some(("base".to_string(), i as u32, item));
                 }
             }
@@ -196,7 +244,7 @@ pub fn first_in_slot_order(
         for (s, entry) in slots.iter().enumerate() {
             if let Some(e) = entry {
                 if let Some(item) = items::lookup(&e.item_path) {
-                    if matches(item, need) {
+                    if matches(item, need) && !skip(&format!("bag_{key}"), s as u32) {
                         return Some((format!("bag_{key}"), s as u32, item));
                     }
                 }
@@ -270,6 +318,58 @@ mod tests {
         assert!((human.thirst_secs - (FULLNESS_CAP_SECS - 60.0)).abs() < 0.01);
     }
 
+    /// The hunger window's send rule: a fresh connection is due, a send
+    /// clears it, a meal or a stage change makes it due again, the minute
+    /// makes it due, and so does a change of drain rate (death, respawn).
+    #[test]
+    fn the_hunger_window_is_sent_on_each_reason_and_not_otherwise() {
+        let t0 = Instant::now();
+        let mut c = conn("Halfling");
+        c.in_world = true;
+        assert!(update_due(&c, t0), "never sent: due");
+        mark_sent(&mut c, t0);
+        assert_eq!(c.hunger_rate_sent, 2.0, "a living Halfling drains at twice the Human rate");
+        assert!(!update_due(&c, t0 + std::time::Duration::from_secs(5)), "nothing happened: not due");
+
+        // A small drain inside a stage is not a reason.
+        drain(&mut c, 10.0);
+        assert!(!update_due(&c, t0 + std::time::Duration::from_secs(5)));
+        // Crossing into Hungry is.
+        let to_hungry = (c.hunger_secs - HUNGRY_AT_SECS + 1.0) / 2.0;
+        drain(&mut c, to_hungry);
+        assert!(update_due(&c, t0 + std::time::Duration::from_secs(5)), "a stage change is a reason");
+        mark_sent(&mut c, t0);
+
+        // A meal is.
+        feed(&mut c, Need::Food, 100.0);
+        assert!(update_due(&c, t0), "an eat is a reason");
+        mark_sent(&mut c, t0);
+
+        // The minute is.
+        assert!(update_due(&c, t0 + UPDATE_INTERVAL), "the minute is a reason");
+
+        // Death stops the drain, and that is a reason too.
+        c.hp = 0.0;
+        assert_eq!(drain_rate_now(&c), 0.0);
+        assert!(update_due(&c, t0), "a death changes the rate");
+        mark_sent(&mut c, t0);
+        assert!(!update_due(&c, t0));
+        c.hp = 50.0;
+        assert!(update_due(&c, t0), "a respawn changes it back");
+    }
+
+    #[test]
+    fn the_eating_emote_is_eqs_line() {
+        assert_eq!(
+            eat_emote("Dropsy", "Bread Loaf", Need::Food),
+            "Chomp, chomp, chomp... Dropsy takes a bite from a Bread Loaf."
+        );
+        assert_eq!(
+            eat_emote("Dropsy", "Water Flask", Need::Drink),
+            "Glug, glug, glug... Dropsy takes a drink from a Water Flask."
+        );
+    }
+
     #[test]
     fn each_stage_is_told_once_on_the_way_down_and_never_on_the_way_up() {
         let mut c = conn("Human");
@@ -318,24 +418,24 @@ mod tests {
         inv.bags.get_mut(&1).unwrap()[0] = Some(InventoryEntry { item_path: bread.clone(), count: 2 });
         inv.base[5] = Some(InventoryEntry { item_path: water.clone(), count: 1 });
         assert_eq!(
-            first_in_slot_order(&inv, Need::Food).map(|(l, s, _)| (l, s)),
+            first_in_slot_order(&inv, Need::Food, |_, _| false).map(|(l, s, _)| (l, s)),
             Some(("bag_1".to_string(), 0)),
             "the only bread is in the bag"
         );
         inv.base[3] = Some(InventoryEntry { item_path: bread.clone(), count: 1 });
         assert_eq!(
-            first_in_slot_order(&inv, Need::Food).map(|(l, s, _)| (l, s)),
+            first_in_slot_order(&inv, Need::Food, |_, _| false).map(|(l, s, _)| (l, s)),
             Some(("base".to_string(), 3)),
             "a base slot comes before any bag"
         );
         assert_eq!(
-            first_in_slot_order(&inv, Need::Drink).map(|(l, s, _)| (l, s)),
+            first_in_slot_order(&inv, Need::Drink, |_, _| false).map(|(l, s, _)| (l, s)),
             Some(("base".to_string(), 5))
         );
         // A held bag is not searched.
         inv.base[3] = None;
         let held = inv.bags.remove(&1).unwrap();
         inv.bags.insert(CURSOR_BAG_KEY, held);
-        assert!(first_in_slot_order(&inv, Need::Food).is_none());
+        assert!(first_in_slot_order(&inv, Need::Food, |_, _| false).is_none());
     }
 }

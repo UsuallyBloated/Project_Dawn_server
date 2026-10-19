@@ -290,6 +290,13 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_POSITION, &msg);
     }
 
+    /// A Move carrying the real `jumping` flag (the client sets it on the Move
+    /// after a jump begins).
+    fn send_move_jump(&mut self, sequence: u32, direction: Vec3, jumping: bool) {
+        let msg = ClientWorldMsg::Move { sequence, direction, jumping };
+        send_msg(&mut self.client, CHANNEL_POSITION, &msg);
+    }
+
     fn send_disconnect(&mut self) {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Disconnect);
     }
@@ -350,6 +357,47 @@ impl WorldClient {
 
     fn send_loot_all(&mut self, bag_id: u64) {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::LootAll { bag_id });
+    }
+
+    fn send_gm_command(&mut self, line: &str) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::GmCommand { line: line.to_string() },
+        );
+    }
+
+    // ── PD_W0028 — trade window intents. ──
+    fn send_trade_request(&mut self, target: u64) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeRequest { target_id: target },
+        );
+    }
+
+    fn send_trade_offer_item(&mut self, window_slot: u8, loc: &str, slot: u32) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeOfferItem {
+                window_slot,
+                from_location: loc.to_string(),
+                from_slot: slot,
+            },
+        );
+    }
+
+    fn send_trade_offer_coins(&mut self, coins: protocol::world::Coins) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeOfferCoins { coins },
+        );
+    }
+
+    fn send_trade_accept(&mut self) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::TradeAccept);
     }
 
     fn send_group_invite(&mut self, name: &str) {
@@ -437,6 +485,11 @@ impl WorldClient {
                 aggro,
             },
         );
+    }
+
+    /// Dev-gated "Despawn All Enemies" (the Test Panel button).
+    fn send_dev_despawn_enemies(&mut self) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::DevDespawnEnemies);
     }
 
     fn send_pet_command(&mut self, command: u8, target_id: Option<u64>) {
@@ -2239,7 +2292,10 @@ async fn an_expired_charm_hands_the_mob_back_and_it_turns_on_the_charmer() {
         .await
         .expect("the dummy spawns");
     let enemy_id: u64 = match spawn_evt {
-        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        ServerWorldMsg::EnemySpawn { id, replaces, .. } => {
+            assert_eq!(replaces, None, "an ordinary spawn replaces nothing");
+            id
+        }
         _ => unreachable!(),
     };
 
@@ -2252,8 +2308,13 @@ async fn an_expired_charm_hands_the_mob_back_and_it_turns_on_the_charmer() {
         })
         .await
         .expect("the charm lands");
+    // One creature throughout (EQ): the pet names the enemy it was, so a
+    // client that had the mob targeted keeps it targeted.
     let pet_id: u64 = match pet_spawn {
-        ServerWorldMsg::PetSpawn { id, .. } => id,
+        ServerWorldMsg::PetSpawn { id, replaces, .. } => {
+            assert_eq!(replaces, Some(enemy_id), "the charmed pet replaces the enemy id");
+            id
+        }
         _ => unreachable!(),
     };
 
@@ -2278,7 +2339,10 @@ async fn an_expired_charm_hands_the_mob_back_and_it_turns_on_the_charmer() {
         .await
         .expect("the mob comes back as an enemy where the pet stood");
     let (mob_id, hp) = match back {
-        ServerWorldMsg::EnemySpawn { id, hp, .. } => (id, hp),
+        ServerWorldMsg::EnemySpawn { id, hp, replaces, .. } => {
+            assert_eq!(replaces, Some(pet_id), "the returned mob replaces the pet id");
+            (id, hp)
+        }
         _ => unreachable!(),
     };
     assert_ne!(mob_id, enemy_id, "a fresh enemy id; the old one is never reused");
@@ -4776,6 +4840,576 @@ async fn enemy_spell_without_a_target_refunds_and_reports() {
     }
 }
 
+// ── PD_W0028 — the trade window (docs/design/trade_window.md). The tests
+// below are the exploit ledger made executable: atomic two-sided commit,
+// the every-edit-clears-both-accepts law, the escrow lock, self-trade and
+// coin-overdraft refusals. ──
+
+/// Shared setup: A (GM, so it can conjure goods/coins) and B connected at
+/// the spawn, with A holding 3 Bread Loaf at a known slot and 25 copper.
+async fn trade_pair(
+    h: &Harness,
+    a_user: &str,
+    a_name: &str,
+    b_user: &str,
+    b_name: &str,
+) -> (WorldClient, i64, WorldClient, i64, String, u32) {
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, a_user, a_name, "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, a_user, true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, b_user, b_name, "Elf", "Cleric").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let b = WorldClient::start(b_token, &b_session, b_char_id).await;
+
+    // The wire line carries no slash: the client's /give strips it before
+    // sending (`give <item name> [qty]`, handlers.rs).
+    a.send_gm_command("give Bread Loaf 3");
+    send_msg(
+        &mut a.client,
+        CHANNEL_SYSTEM,
+        &ClientWorldMsg::GiveCoins { platinum: 0, gold: 0, silver: 0, copper: 25 },
+    );
+    let bread = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. }
+                if p.contains("bread"))
+        })
+        .await
+        .expect("the bread lands");
+    let (bread_loc, bread_slot) = match bread {
+        ServerWorldMsg::InventoryDelta { location, slot, .. } => (location, slot),
+        _ => unreachable!(),
+    };
+    (a, a_char_id, b, b_char_id, bread_loc, bread_slot)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trade_commits_atomically_and_pays_both_sides() {
+    let h = start_both().await;
+    let (mut a, _a_char_id, mut b, b_char_id, bread_loc, bread_slot) =
+        trade_pair(&h, "tradea", "Tradealy", "tradeb", "Tradebel").await;
+
+    // Flush A's outbound intents before waiting on the peer: wait_for only
+    // pumps the client it is called on, so A's packets otherwise sit in A's
+    // transport buffer.
+    macro_rules! pump_a {
+        () => {{
+            for _ in 0..4 {
+                tick_one(&mut a.client, &mut a.transport);
+                tokio::time::sleep(TICK_DT).await;
+            }
+        }};
+    }
+
+    a.send_trade_request(b_char_id as u64);
+    pump_a!();
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { partner_id, .. }
+            if *partner_id == b_char_id as u64)
+    })
+    .await
+    .expect("A's window opens");
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { .. })
+    })
+    .await
+    .expect("B's window opens instantly (no accept prompt)");
+
+    // A offers the bread and the copper; B offers nothing (a gift).
+    a.send_trade_offer_item(0, &bread_loc, bread_slot);
+    pump_a!();
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOfferUpdate { mine: false, slots, .. }
+            if slots.first().map(|(p, c)| p.contains("bread") && *c == 3).unwrap_or(false))
+    })
+    .await
+    .expect("B sees A's offered stack, path and count");
+    a.send_trade_offer_coins(protocol::world::Coins {
+        platinum: 0,
+        gold: 0,
+        silver: 0,
+        copper: 25,
+    });
+    pump_a!();
+
+    a.send_trade_accept();
+    pump_a!();
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeAcceptState { you: false, them: true })
+    })
+    .await
+    .expect("B sees A standing accepted");
+    b.send_trade_accept();
+
+    // B receives the goods, then the committed close. (wait_for drops
+    // non-matching messages, so assert in fan order: delta, coins, close.)
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), count: 3, .. }
+            if p.contains("bread"))
+    })
+    .await
+    .expect("B receives the bread stack");
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.copper >= 25)
+    })
+    .await
+    .expect("B receives the copper");
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeClosed { committed: true, .. })
+    })
+    .await
+    .expect("B's close says committed");
+
+    // A's side: the offered slot cleared and the close says committed.
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, slot, item_path: None, .. }
+            if *location == bread_loc && *slot == bread_slot)
+    })
+    .await
+    .expect("A's offered slot empties");
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeClosed { committed: true, .. })
+    })
+    .await
+    .expect("A's close says committed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trade_edits_clear_accepts_and_locks_hold() {
+    let h = start_both().await;
+    let (mut a, _a_char_id, mut b, b_char_id, bread_loc, bread_slot) =
+        trade_pair(&h, "tradec", "Tradecyn", "traded", "Tradedor").await;
+
+    a.send_trade_request(b_char_id as u64);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { .. })
+    })
+    .await
+    .expect("A's window opens");
+    a.send_trade_offer_item(0, &bread_loc, bread_slot);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOfferUpdate { mine: true, .. })
+    })
+    .await
+    .expect("A sees its own offer");
+
+    // Ledger 2 — the escrow: the offered slot refuses a MoveItem with the
+    // lock's chat line, and the stack stays put.
+    a.send_move_item(&bread_loc, bread_slot, "base", 7);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+            if text.contains("offered in a trade"))
+    })
+    .await
+    .expect("locked slot refuses the move, with the line");
+
+    // Ledger 1 — bait-and-switch: A accepts, then B edits; BOTH accepts
+    // clear, and B's later lone accept commits nothing.
+    a.send_trade_accept();
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeAcceptState { them: true, .. })
+    })
+    .await
+    .expect("B sees A accepted");
+    b.send_trade_offer_coins(protocol::world::Coins::ZERO);
+    for _ in 0..4 {
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeAcceptState { you: false, them: false })
+    })
+    .await
+    .expect("the edit cleared BOTH accepts on A's display");
+    b.send_trade_accept();
+    let premature = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::TradeClosed { committed: true, .. })
+        })
+        .await;
+    assert!(
+        premature.is_none(),
+        "one accept after the edit must not commit — A's stale accept is dead"
+    );
+}
+
+/// Review 2026-10-12: an offer is a reference to `bag_<k>` slot `s`, and a
+/// full bag moves with its contents (re-keyed to its new base slot) since
+/// 2026-09-27. Swapping the PARENT bag was not locked, so after B accepted,
+/// A could swap two pouches and the reference would name the other pouch's
+/// item: the count still matched (1 = 1) and B's window never refreshed.
+/// The scam offers the good sword and swaps in the junk; this test runs the
+/// mirror (junk shown, so receiving the good sword proves the re-point). The
+/// parent bag's base slot is locked now, and the commit checks the item too.
+/// Fails on the previous code at the refusal, and without that assertion,
+/// B receives the good sword.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trade_locks_the_bag_holding_an_offered_item() {
+    let h = start_both().await;
+    let (mut a, _a_char_id, mut b, b_char_id, _bread_loc, _bread_slot) =
+        trade_pair(&h, "tradeg", "Tradegan", "tradeh", "Tradehal").await;
+
+    macro_rules! pump_a {
+        () => {{
+            for _ in 0..4 {
+                tick_one(&mut a.client, &mut a.transport);
+                tokio::time::sleep(TICK_DT).await;
+            }
+        }};
+    }
+    // Wait for one item to land and return its (location, slot).
+    async fn landed(c: &mut WorldClient, needle: &str) -> (String, u32) {
+        match c
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. }
+                    if p.contains(needle))
+            })
+            .await
+            .expect("the item lands")
+        {
+            ServerWorldMsg::InventoryDelta { location, slot, .. } => (location, slot),
+            _ => unreachable!(),
+        }
+    }
+
+    // Two pouches in base slots, a junk sword in one, a good sword in the other.
+    a.send_gm_command("give Small Pouch");
+    let (_, p1) = landed(&mut a, "small_pouch").await;
+    a.send_gm_command("give Small Pouch");
+    let (_, p2) = landed(&mut a, "small_pouch").await;
+    a.send_gm_command("give Rusty Short Sword");
+    let (jl, js) = landed(&mut a, "rusty_short_sword").await;
+    a.send_gm_command("give Iron Short Sword");
+    let (gl, gs) = landed(&mut a, "iron_short_sword").await;
+    let junk_bag = format!("bag_{p1}");
+    let good_bag = format!("bag_{p2}");
+    a.send_move_item(&jl, js, &junk_bag, 0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, slot: 0, item_path: Some(p), .. }
+            if *location == junk_bag && p.contains("rusty_short_sword"))
+    })
+    .await
+    .expect("the junk sword goes into the first pouch");
+    a.send_move_item(&gl, gs, &good_bag, 0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, slot: 0, item_path: Some(p), .. }
+            if *location == good_bag && p.contains("iron_short_sword"))
+    })
+    .await
+    .expect("the good sword goes into the second pouch");
+
+    // A offers the junk sword; B sees it and accepts.
+    a.send_trade_request(b_char_id as u64);
+    pump_a!();
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { .. })
+    })
+    .await
+    .expect("B's window opens");
+    a.send_trade_offer_item(0, &junk_bag, 0);
+    pump_a!();
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOfferUpdate { mine: false, slots, .. }
+            if slots.first().map(|(p, c)| p.contains("rusty_short_sword") && *c == 1).unwrap_or(false))
+    })
+    .await
+    .expect("B sees the junk sword offered");
+    b.send_trade_accept();
+    for _ in 0..4 {
+        tick_one(&mut b.client, &mut b.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // The switch: swap the two pouches. The pouch holding the offer is locked.
+    a.send_move_item("base", p1, "base", p2);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+            if text.contains("offered in a trade"))
+    })
+    .await
+    .expect("moving the bag that holds an offered item is refused");
+
+    // A accepts; B gets exactly what B saw, never the good sword.
+    a.send_trade_accept();
+    pump_a!();
+    let mut got_junk = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let Some(m) = b
+            .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
+                matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(_), .. }
+                    | ServerWorldMsg::TradeClosed { .. })
+            })
+            .await
+        else {
+            continue;
+        };
+        match m {
+            ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } => {
+                assert!(!p.contains("iron_short_sword"), "B must never receive the good sword");
+                if p.contains("rusty_short_sword") {
+                    got_junk = true;
+                }
+            }
+            ServerWorldMsg::TradeClosed { committed, .. } => {
+                assert!(committed, "the trade commits");
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(got_junk, "B receives the junk sword it was shown");
+}
+
+/// Review 2026-10-12: loot, purchases and grants place through the server's
+/// placer, which can top up an offered stack. The commit then refuses, but the
+/// window kept showing the old snapshot and the stack stayed locked, so every
+/// later accept failed the same way with nothing visibly wrong. A changed
+/// offer now leaves the window (which unlocks it); offering it again commits.
+/// Fails on the previous code at "the changed offer leaves A's window".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trade_drops_an_offer_that_changed_so_the_trade_can_go_on() {
+    let h = start_both().await;
+    let (mut a, _a_char_id, mut b, b_char_id, bread_loc, bread_slot) =
+        trade_pair(&h, "tradei", "Tradeira", "tradej", "Tradejon").await;
+    macro_rules! pump {
+        ($c:expr) => {{
+            for _ in 0..4 {
+                tick_one(&mut $c.client, &mut $c.transport);
+                tokio::time::sleep(TICK_DT).await;
+            }
+        }};
+    }
+
+    a.send_trade_request(b_char_id as u64);
+    pump!(a);
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { .. })
+    })
+    .await
+    .expect("B's window opens");
+    a.send_trade_offer_item(0, &bread_loc, bread_slot);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOfferUpdate { mine: true, slots, .. }
+            if slots.first().map(|(p, c)| p.contains("bread") && *c == 3).unwrap_or(false))
+    })
+    .await
+    .expect("A offers 3 bread");
+
+    // A grant tops the offered stack up to 4 through the placer.
+    a.send_gm_command("give Bread Loaf 1");
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, slot, count: 4, .. }
+            if *location == bread_loc && *slot == bread_slot)
+    })
+    .await
+    .expect("the grant merges into the offered stack");
+
+    b.send_trade_accept();
+    pump!(b);
+    a.send_trade_accept();
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("changed"))
+    })
+    .await
+    .expect("the commit refuses the changed offer, with a line");
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOfferUpdate { mine: true, slots, .. }
+            if slots.first().map(|(p, _)| p.is_empty()).unwrap_or(false))
+    })
+    .await
+    .expect("the changed offer leaves A's window");
+
+    // Offered again, the trade goes through with what B now sees.
+    a.send_trade_offer_item(0, &bread_loc, bread_slot);
+    pump!(a);
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOfferUpdate { mine: false, slots, .. }
+            if slots.first().map(|(p, c)| p.contains("bread") && *c == 4).unwrap_or(false))
+    })
+    .await
+    .expect("B sees the re-offer at 4");
+    b.send_trade_accept();
+    pump!(b);
+    a.send_trade_accept();
+    pump!(a);
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), count: 4, .. }
+            if p.contains("bread"))
+    })
+    .await
+    .expect("B receives all 4");
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeClosed { committed: true, .. })
+    })
+    .await
+    .expect("the trade commits");
+}
+
+/// The player target broadcast (target-of-target) was dead on the client
+/// from 2026-05-29 to 2026-10-12, so the server path was never exercised in
+/// play. Reviving it, the server fanned every SetTarget to EVERY player in the
+/// world, once per message: a modified client could amplify a burst to the
+/// whole server, and anyone anywhere learned who was fighting what. It now
+/// goes only to players who can see the sender, at most once per tick (the
+/// latest). Fails on the previous code: the far player receives it, and the
+/// near one receives the whole burst.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_player_target_reaches_only_those_who_can_see_them_once_per_tick() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "tgta", "Targeta", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "tgtb", "Targetb", "Human", "Warrior").await;
+    let (c_session, c_char_id, c_token) =
+        provision_client(&h.auth_url, "tgtc", "Targetc", "Human", "Warrior").await;
+    // C two cells east of spawn: outside A's 3x3, so C cannot see A.
+    set_char_pos(&h.db_url, c_char_id, 248.0, 0.0).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    let mut c = WorldClient::start(c_token, &c_session, c_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+    b.pump_for(Duration::from_millis(300)).await;
+    c.pump_for(Duration::from_millis(300)).await;
+
+    // A burst of five retargets in one go; the last names B.
+    for t in [9001u64, 9002, 9003, 9004, b_char_id as u64] {
+        send_msg(&mut a.client, CHANNEL_SYSTEM, &ClientWorldMsg::SetTarget { target_id: Some(t) });
+    }
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    // B (beside A) hears A's target exactly once, and it is the last one.
+    let mut seen: Vec<Option<u64>> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if let Some(ServerWorldMsg::EntityTarget { target, .. }) = b
+            .wait_for(CHANNEL_SYSTEM, Duration::from_millis(300), |m| {
+                matches!(m, ServerWorldMsg::EntityTarget { id, .. } if *id == a_char_id as u64)
+            })
+            .await
+        {
+            seen.push(target);
+        }
+    }
+    assert_eq!(seen, vec![Some(b_char_id as u64)], "B gets the latest target, once");
+
+    // C (two cells away) hears nothing about A.
+    let far = c
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(800), |m| {
+            matches!(m, ServerWorldMsg::EntityTarget { id, .. } if *id == a_char_id as u64)
+        })
+        .await;
+    assert!(far.is_none(), "a player who cannot see A must not learn A's target");
+}
+
+/// Food and water's auto-eat takes the first food in slot order when a
+/// character runs out. Merged onto the trade branch, it did not consult the
+/// trade lock, so a loaf offered in an open trade could be eaten mid-trade (the
+/// commit then refused the changed offer, so no dupe, but the offer was gone).
+/// Auto-eat now skips offered slots. Fails on the previous code: the delta
+/// names the offered base slot 3.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_eat_skips_food_offered_in_a_trade() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _) =
+        provision_client(&h.auth_url, "eata", "Eatalot", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "eatb", "Eatbee", "Human", "Warrior").await;
+    // Six seconds of food left, plenty of water; bread in base 3 and base 5.
+    set_char_appetite(&h.db_url, a_char_id, 6.0, 5000.0, None).await;
+    give_char_item(&h.db_url, a_char_id, "base", 3, BREAD, 1).await;
+    give_char_item(&h.db_url, a_char_id, "base", 5, BREAD, 1).await;
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+    b.pump_for(Duration::from_millis(300)).await;
+
+    // A opens a trade and offers the loaf in base 3 before the food runs out.
+    a.send_trade_request(b_char_id as u64);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { .. })
+    })
+    .await
+    .expect("the trade opens");
+    a.send_trade_offer_item(0, "base", 3);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOfferUpdate { mine: true, slots, .. }
+            if slots.first().map(|(p, _)| p.contains("bread")).unwrap_or(false))
+    })
+    .await
+    .expect("the loaf in base 3 is offered");
+
+    // The food runs out: the auto-eat takes base 5, never the offered base 3.
+    let mut eaten: Option<u32> = None;
+    let end = Instant::now() + Duration::from_secs(12);
+    while Instant::now() < end && eaten.is_none() {
+        a.send_heartbeat();
+        b.send_heartbeat();
+        b.pump_for(Duration::from_millis(50)).await;
+        if let Some(ServerWorldMsg::InventoryDelta { slot, .. }) = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+                matches!(m, ServerWorldMsg::InventoryDelta { location, .. } if location == "base")
+            })
+            .await
+        {
+            eaten = Some(slot);
+        }
+    }
+    assert_eq!(eaten, Some(5), "the auto-eat takes the loaf that is not offered");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trade_refuses_self_and_coin_overdraft() {
+    let h = start_both().await;
+    let (mut a, a_char_id, mut b, b_char_id, _bread_loc, _bread_slot) =
+        trade_pair(&h, "tradee", "Tradeeva", "tradef", "Tradefin").await;
+
+    // Ledger 8 — self-trade.
+    a.send_trade_request(a_char_id as u64);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+            if text.contains("yourself"))
+    })
+    .await
+    .expect("self-trade refuses");
+
+    // Ledger 4 — overdraft: B offers coin it cannot cover.
+    a.send_trade_request(b_char_id as u64);
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { .. })
+    })
+    .await
+    .expect("window opens");
+    b.send_trade_offer_coins(protocol::world::Coins {
+        platinum: 999,
+        gold: 0,
+        silver: 0,
+        copper: 0,
+    });
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+            if text.contains("that much coin"))
+    })
+    .await
+    .expect("the overdraft refuses with the line");
+}
+
 /// Scale readiness: an idle enemy's Position must not fan at 20 Hz. The
 /// statue has aggro 0 and speed 0, so it never targets and never moves.
 /// Before the change-or-keepalive gate it still produced one Position per
@@ -6892,6 +7526,107 @@ async fn hand_eating_is_refused_when_full_and_halved_when_early() {
     );
 }
 
+/// Every system-channel message `c` receives over `d`, decoded, pumping the
+/// transport the whole time.
+async fn collect_system(c: &mut WorldClient, d: Duration) -> Vec<ServerWorldMsg> {
+    let end = Instant::now() + d;
+    let mut out = Vec::new();
+    while Instant::now() < end {
+        tick_one(&mut c.client, &mut c.transport);
+        while let Some(bytes) = c.client.receive_message(CHANNEL_SYSTEM) {
+            if let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
+                out.push(msg);
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    out
+}
+
+/// The hunger window (food design section 8). A watcher stands at the spawn;
+/// a starving Halfling with bread enters beside them and eats on its first
+/// tick. The Halfling's own HungerUpdate carries the meal (about 2880 s),
+/// thirst still full, the cap, and the Halfling rate of 2.0; the watcher
+/// hears EQ's "Chomp, chomp, chomp..." naming the eater and the bread, and
+/// never receives the Halfling's counters (owner only: the watcher's own
+/// updates all read full). The eater gets "You eat a Bread Loaf." and not
+/// the emote.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hunger_window_reaches_its_owner_and_the_room_hears_the_meal() {
+    let h = start_both().await;
+    let (w_session, w_char_id, _) =
+        provision_client(&h.auth_url, "watcher", "Lookon", "Human", "Warrior").await;
+    let (e_session, e_char_id, _) =
+        provision_client(&h.auth_url, "muncher", "Munchkin", "Halfling", "Rogue").await;
+    set_char_appetite(&h.db_url, e_char_id, 0.0, hunger_cap(), None).await;
+    give_char_item(&h.db_url, e_char_id, "base", 0, BREAD, 1).await;
+
+    let w_token = request_world_token(&h.auth_url, &w_session, w_char_id).await;
+    let mut w = WorldClient::start(w_token, &w_session, w_char_id).await;
+    let w_first = collect_system(&mut w, Duration::from_millis(500)).await;
+    assert!(
+        w_first.iter().any(|m| matches!(m, ServerWorldMsg::HungerUpdate { hunger_secs, drain_per_sec, .. }
+            if *hunger_secs > hunger_cap() - 5.0 && (*drain_per_sec - 1.0).abs() < 1e-6)),
+        "the watcher's own update arrives on entering: full, at the Human rate"
+    );
+
+    w.send_heartbeat();
+    let e_token = request_world_token(&h.auth_url, &e_session, e_char_id).await;
+    let mut e = WorldClient::start(e_token, &e_session, e_char_id).await;
+    let (e_msgs, w_msgs) = tokio::join!(
+        collect_system(&mut e, Duration::from_secs(2)),
+        collect_system(&mut w, Duration::from_secs(2)),
+    );
+
+    let update = e_msgs
+        .iter()
+        .find_map(|m| match m {
+            ServerWorldMsg::HungerUpdate { hunger_secs, thirst_secs, cap_secs, drain_per_sec } => {
+                Some((*hunger_secs, *thirst_secs, *cap_secs, *drain_per_sec))
+            }
+            _ => None,
+        })
+        .expect("the eater gets a HungerUpdate on entering");
+    let (hunger, thirst, cap, rate) = update;
+    assert!(hunger > 2880.0 - 30.0 && hunger <= 2880.0, "the update carries the meal just eaten: {hunger}");
+    assert!(thirst > cap - 30.0, "thirst still full: {thirst}");
+    assert_eq!(cap, hunger_cap(), "the cap");
+    assert!((rate - 2.0).abs() < 1e-6, "a living Halfling drains at twice the Human rate: {rate}");
+    assert!(
+        e_msgs.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "You eat a Bread Loaf.")),
+        "the eater is told what it ate"
+    );
+    assert!(
+        !e_msgs.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("Chomp"))),
+        "the eater does not get the emote about itself"
+    );
+
+    assert!(
+        w_msgs.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+            if text == "Chomp, chomp, chomp... Munchkin takes a bite from a Bread Loaf.")),
+        "the watcher beside the eater hears EQ's emote"
+    );
+    for m in w_msgs.iter().chain(w_first.iter()) {
+        if let ServerWorldMsg::HungerUpdate { hunger_secs, .. } = m {
+            assert!(
+                *hunger_secs > hunger_cap() - 60.0,
+                "the watcher only ever receives its own counters, never the eater's ({hunger_secs})"
+            );
+        }
+    }
+
+    e.send_disconnect();
+    w.send_disconnect();
+    e.pump_for(Duration::from_millis(200)).await;
+    w.pump_for(Duration::from_millis(200)).await;
+}
+
+fn hunger_cap() -> f32 {
+    projectdawn_server::world::hunger::FULLNESS_CAP_SECS
+}
+
 /// How the server answered a connect attempt: ConnectOk (a live client, past
 /// EnterWorld as `WorldClient::start` leaves it), a Kick at the door, or a
 /// renet handshake that never completed. Netcode ignores a connect request
@@ -7471,5 +8206,192 @@ async fn the_server_decides_run_speed() {
     let floor = 0.25 * projectdawn_server::world::encumbrance::MIN_SPEED_MULT;
     assert!((crawl - floor).abs() < 0.01, "an overloaded character crawls at the floor: {crawl}");
     b.send_disconnect();
+    b.pump_for(Duration::from_millis(200)).await;
+}
+
+/// The jump relay (the "Remote players never show a jump" To-Do, cosmetic
+/// version). A watcher stands beside a jumper at the spawn. One Move with
+/// `jumping: true` reaches the watcher as exactly one PlayerJumped naming the
+/// jumper, and never reaches the jumper; a burst of ten alternating flags
+/// inside the half-second interval relays nothing more; an edge after the
+/// interval relays once more. The jumper's own Position keeps y at zero
+/// throughout: the flag animates peers and moves nobody.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_jump_reaches_the_players_nearby_once_and_moves_nobody() {
+    let h = start_both().await;
+    let (j_session, j_char_id, _) =
+        provision_client(&h.auth_url, "jumper", "Hoppy", "Human", "Warrior").await;
+    let (w_session, w_char_id, _) =
+        provision_client(&h.auth_url, "jumpwatch", "Seeson", "Human", "Warrior").await;
+    let j_token = request_world_token(&h.auth_url, &j_session, j_char_id).await;
+    let mut j = WorldClient::start(j_token, &j_session, j_char_id).await;
+    let w_token = request_world_token(&h.auth_url, &w_session, w_char_id).await;
+    let mut w = WorldClient::start(w_token, &w_session, w_char_id).await;
+    pump_both_for(&mut j, &mut w, Duration::from_millis(400)).await;
+    // Drain what entering fanned, so the counts below are the jumps only.
+    let _ = collect_system(&mut w, Duration::from_millis(200)).await;
+    let _ = collect_system(&mut j, Duration::from_millis(200)).await;
+    let still = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    let jumps_in = |msgs: &[ServerWorldMsg]| {
+        msgs.iter()
+            .filter(|m| matches!(m, ServerWorldMsg::PlayerJumped { id } if *id == j_char_id as u64))
+            .count()
+    };
+
+    // One jump, then a forged burst of ten alternating flags inside the
+    // half-second interval (about 200 ms): exactly one relay in all.
+    j.send_move_jump(1, still, true);
+    for i in 2..12u32 {
+        j.send_move_jump(i, still, i % 2 == 0);
+        tick_one(&mut j.client, &mut j.transport);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (w_msgs, j_msgs) = tokio::join!(
+        collect_system(&mut w, Duration::from_millis(600)),
+        collect_system(&mut j, Duration::from_millis(600)),
+    );
+    assert_eq!(jumps_in(&w_msgs), 1, "the watcher sees one jump; the burst inside the interval adds none");
+    assert_eq!(jumps_in(&j_msgs), 0, "the jumper is not told about their own jump");
+
+    // Past the interval, the next edge relays again.
+    pump_both_for(&mut j, &mut w, Duration::from_millis(400)).await;
+    j.send_move_jump(20, still, false);
+    tick_one(&mut j.client, &mut j.transport);
+    tokio::time::sleep(TICK_DT).await;
+    j.send_move_jump(21, still, true);
+    let (w_msgs, _) = tokio::join!(
+        collect_system(&mut w, Duration::from_millis(600)),
+        collect_system(&mut j, Duration::from_millis(600)),
+    );
+    assert_eq!(jumps_in(&w_msgs), 1, "a jump after the interval relays once more");
+
+    // Nobody moved for any of it: the jumper's own Position keeps y at zero.
+    j.send_move(30, still);
+    let pos = own_position(&mut j, j_char_id).await.expect("the jumper's own Position");
+    assert!(pos.y.abs() < 1e-3, "the server never lifts anyone for a jump: y = {}", pos.y);
+
+    j.send_disconnect();
+    w.send_disconnect();
+    j.pump_for(Duration::from_millis(200)).await;
+    w.pump_for(Duration::from_millis(200)).await;
+}
+
+/// The Test Panel's "Despawn All Enemies" removes the mobs on the SERVER. It
+/// used to free only the pressing client's own nodes, so "cleared" mobs stayed
+/// in the world, invisible to that player and still fighting everyone else.
+/// A (a GM Cleric) spawns two dummies; B (a plain Beast Master beside A, with
+/// its warder) asks first and nothing happens; A asks and B sees both dummies
+/// despawn while the warder stays; a Smite at a despawned id is refused,
+/// because the server no longer has it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dev_despawn_removes_enemies_on_the_server() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "sweeper", "Sweepa", "Human", "Cleric").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "sweepwatch", "Watcha", "Human", "Beast Master").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "sweeper", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+
+    let warder: u64 = match b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == b_char_id as u64)
+        })
+        .await
+        .expect("B's warder is summoned on entering the world")
+    {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    let mut dummies: Vec<u64> = Vec::new();
+    for name in ["Despawn Dummy", "Despawn Target"] {
+        a.send_dev_spawn(name, 1, 500.0, 0, 0.0, 0.0);
+        let spawn = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == name)
+            })
+            .await
+            .expect("the dummy spawns");
+        match spawn {
+            ServerWorldMsg::EnemySpawn { id, .. } => dummies.push(id),
+            _ => unreachable!(),
+        }
+    }
+
+    // A plain account's request is ignored. Only meaningful when the process
+    // is not in dev mode, where every connection may use dev commands.
+    if std::env::var("PD_DEV_CMDS").as_deref() != Ok("1") {
+        b.send_dev_despawn_enemies();
+        b.pump_for(Duration::from_millis(300)).await;
+        let gone = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(1), |m| {
+                matches!(m, ServerWorldMsg::EntityDespawn { id } if dummies.contains(id))
+            })
+            .await;
+        assert!(gone.is_none(), "a plain account cannot despawn anything");
+    }
+
+    a.send_dev_despawn_enemies();
+    a.pump_for(Duration::from_millis(300)).await;
+    let mut despawned: Vec<u64> = Vec::new();
+    while despawned.len() < dummies.len() {
+        let msg = b
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::EntityDespawn { id }
+                    if dummies.contains(id) || *id == warder)
+            })
+            .await
+            .expect("the bystander sees every dummy despawn");
+        let ServerWorldMsg::EntityDespawn { id } = msg else { unreachable!() };
+        assert_ne!(id, warder, "a player's pet is not an enemy to despawn");
+        despawned.push(id);
+    }
+    let warder_gone = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(1), |m| {
+            matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == warder)
+        })
+        .await;
+    assert!(warder_gone.is_none(), "the warder stays");
+
+    // The GM is told the count (camp mobs in view may add to the two).
+    let told = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("Despawned "))
+        })
+        .await
+        .expect("the GM is told how many went");
+    let ServerWorldMsg::ChatMessage { text, .. } = told else { unreachable!() };
+    let count: usize = text
+        .trim_start_matches("Despawned ")
+        .trim_end_matches(" enemies.")
+        .parse()
+        .expect("the line carries a count");
+    assert!(count >= dummies.len(), "the count covers both dummies ({text})");
+
+    a.send_cast_spell("Smite", Some(dummies[0]));
+    let refused = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64 && reason.contains("no longer here"))
+        })
+        .await;
+    assert!(refused.is_some(), "the server no longer has the mob, so a Smite at it is refused");
+
+    // Audited like every dev command: one row, the GM's; the plain account's
+    // refused request wrote nothing.
+    let rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM gm_actions WHERE command = 'dev_despawn_enemies'")
+            .fetch_one(&pool)
+            .await
+            .expect("read gm_actions");
+    assert_eq!(rows, 1, "the GM's despawn is recorded, the plain account's is not");
+
+    a.send_disconnect();
+    b.send_disconnect();
+    a.pump_for(Duration::from_millis(200)).await;
     b.pump_for(Duration::from_millis(200)).await;
 }

@@ -173,6 +173,30 @@ impl NetClient {
         dmg_type: i64,
     );
 
+    // ── PD_W0028 — the trade window (docs/design/trade_window.md). ──
+    #[signal]
+    fn trade_opened(partner_id: i64, partner_name: GString);
+
+    /// Full state of ONE side's offer after any edit. `mine` = my side vs
+    /// the partner's. `item_paths` / `counts` are TRADE_SLOTS long; an
+    /// empty path means an empty window slot.
+    #[signal]
+    fn trade_offer_update(
+        mine: bool,
+        item_paths: PackedStringArray,
+        counts: PackedInt32Array,
+        platinum: i64,
+        gold: i64,
+        silver: i64,
+        copper: i64,
+    );
+
+    #[signal]
+    fn trade_accept_state(you: bool, them: bool);
+
+    #[signal]
+    fn trade_closed(committed: bool, reason: GString);
+
     #[signal]
     fn miss(attacker: i64, target: i64);
 
@@ -224,6 +248,13 @@ impl NetClient {
         pos: Vector3,
         yaw: f32,
     );
+
+    /// PD_W0028: the spawn just emitted (`enemy_spawn` / `pet_spawn`) is the
+    /// creature that was `old_id`, under a new id: a charm landing or ending.
+    /// A separate signal so the spawn signals keep their arity; emitted
+    /// right after the spawn, so the new node already exists.
+    #[signal]
+    fn entity_replaced(old_id: i64, new_id: i64);
 
     /// Track 13.2 — full inventory snapshot privately seeded to the
     /// owning client on EnterWorld. Parallel arrays: locations[i] /
@@ -308,6 +339,19 @@ impl NetClient {
     /// with every other player.
     #[signal]
     fn time_of_day(hour: f64);
+
+    /// The hunger window: the local player's food and water counters in
+    /// seconds of fullness, the cap, and the drain per real second right
+    /// now (0 while dead). Sent on entering the world, after any eat or
+    /// drink, on a stage change, on death and respawn, and about once a
+    /// minute; the client runs the bars down between sends.
+    #[signal]
+    fn hunger_update(hunger_secs: f64, thirst_secs: f64, cap_secs: f64, drain_per_sec: f64);
+
+    /// A player you can see began a jump (never your own). The client
+    /// plays a hop on that body; the server moves nobody for it.
+    #[signal]
+    fn player_jumped(id: i64);
 
     /// Track 5 sub-task 4 — private confirmation that the local
     /// player's LootItem / LootAll intent landed and the server has
@@ -763,6 +807,76 @@ impl NetClient {
         )
     }
 
+    // ── PD_W0028 — the trade window (docs/design/trade_window.md). ──
+    /// Open a trade with the player `target_id` (a char id). The holding-
+    /// click path sends this; the server opens instantly for both parties.
+    #[func]
+    fn send_trade_request(&mut self, target_id: i64) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeRequest { target_id: target_id.max(0) as u64 },
+        )
+    }
+
+    /// Place the stack at `(from_location, from_slot)` into my `window_slot`
+    /// (0..8). `from_location = "cursor"` parks the held stack first.
+    #[func]
+    fn send_trade_offer_item(
+        &mut self,
+        window_slot: i64,
+        from_location: GString,
+        from_slot: i64,
+    ) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeOfferItem {
+                window_slot: window_slot.clamp(0, 255) as u8,
+                from_location: from_location.to_string(),
+                from_slot: from_slot.max(0) as u32,
+            },
+        )
+    }
+
+    /// Clear my side's `window_slot` (unlocks the referenced inventory slot).
+    #[func]
+    fn send_trade_retrieve_item(&mut self, window_slot: i64) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeRetrieveItem {
+                window_slot: window_slot.clamp(0, 255) as u8,
+            },
+        )
+    }
+
+    /// Absolute per-tier coin offer.
+    #[func]
+    fn send_trade_offer_coins(
+        &mut self,
+        platinum: i64,
+        gold: i64,
+        silver: i64,
+        copper: i64,
+    ) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeOfferCoins {
+                coins: protocol::world::Coins { platinum, gold, silver, copper },
+            },
+        )
+    }
+
+    /// Press Trade. Both sides accepted commits in the same server tick.
+    #[func]
+    fn send_trade_accept(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::TradeAccept)
+    }
+
+    /// Close the window (also implied by range/death/zone/disconnect).
+    #[func]
+    fn send_trade_cancel(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::TradeCancel)
+    }
+
     /// PD_W0024 — accept a quest so the server starts counting its objectives.
     /// Fire alongside the local QuestManager.add_quest (optimistic add); a
     /// `quest_rejected` reply means roll the add back. giver_id is a scaffold
@@ -810,6 +924,15 @@ impl NetClient {
                 aggro: aggro as f32,
             },
         )
+    }
+
+    /// Dev-only, gated and audited like `send_dev_spawn_mob`: remove every
+    /// unowned enemy in this player's view from the SERVER (the Test Panel's
+    /// "Despawn All Enemies"). The clients learn of it through the ordinary
+    /// EntityDespawn.
+    #[func]
+    fn send_dev_despawn_enemies(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::DevDespawnEnemies)
     }
 
     /// Track 6 — owning client respawned (local death-timer elapsed).
@@ -1474,6 +1597,27 @@ enum Incoming {
         crit: bool,
         dmg_type: u8,
     },
+    // ── PD_W0028 — the trade window. ──
+    TradeOpened {
+        partner_id: i64,
+        partner_name: String,
+    },
+    TradeOfferUpdate {
+        mine: bool,
+        slots: Vec<(String, u32)>,
+        platinum: i64,
+        gold: i64,
+        silver: i64,
+        copper: i64,
+    },
+    TradeAcceptState {
+        you: bool,
+        them: bool,
+    },
+    TradeClosed {
+        committed: bool,
+        reason: String,
+    },
     Miss {
         attacker: i64,
         target: i64,
@@ -1493,6 +1637,7 @@ enum Incoming {
         hp: f32,
         pos: WireVec3,
         yaw: f32,
+        replaces: Option<i64>,
     },
     EntityTarget {
         id: i64,
@@ -1507,6 +1652,7 @@ enum Incoming {
         hp: f32,
         pos: WireVec3,
         yaw: f32,
+        replaces: Option<i64>,
     },
     InventorySnapshot {
         entries: Vec<(String, u32, String, u32)>,
@@ -1551,6 +1697,15 @@ enum Incoming {
     },
     TimeOfDay {
         hour: f32,
+    },
+    HungerUpdate {
+        hunger_secs: f32,
+        thirst_secs: f32,
+        cap_secs: f32,
+        drain_per_sec: f32,
+    },
+    PlayerJumped {
+        id: i64,
     },
     LootGranted {
         item_path: String,
@@ -1905,6 +2060,54 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::TradeOpened { partner_id, partner_name } => {
+                    self.base_mut().emit_signal(
+                        "trade_opened",
+                        &[
+                            partner_id.to_variant(),
+                            GString::from(partner_name.as_str()).to_variant(),
+                        ],
+                    );
+                }
+                Incoming::TradeOfferUpdate {
+                    mine,
+                    slots,
+                    platinum,
+                    gold,
+                    silver,
+                    copper,
+                } => {
+                    let mut item_paths = PackedStringArray::new();
+                    let mut counts = PackedInt32Array::new();
+                    for (path, count) in slots {
+                        item_paths.push(&GString::from(path.as_str()));
+                        counts.push(count as i32);
+                    }
+                    self.base_mut().emit_signal(
+                        "trade_offer_update",
+                        &[
+                            mine.to_variant(),
+                            item_paths.to_variant(),
+                            counts.to_variant(),
+                            platinum.to_variant(),
+                            gold.to_variant(),
+                            silver.to_variant(),
+                            copper.to_variant(),
+                        ],
+                    );
+                }
+                Incoming::TradeAcceptState { you, them } => {
+                    self.base_mut().emit_signal(
+                        "trade_accept_state",
+                        &[you.to_variant(), them.to_variant()],
+                    );
+                }
+                Incoming::TradeClosed { committed, reason } => {
+                    self.base_mut().emit_signal(
+                        "trade_closed",
+                        &[committed.to_variant(), GString::from(reason.as_str()).to_variant()],
+                    );
+                }
                 Incoming::ProcTriggered {
                     attacker,
                     target,
@@ -1965,6 +2168,7 @@ impl NetClient {
                     hp,
                     pos,
                     yaw,
+                    replaces,
                 } => {
                     self.base_mut().emit_signal(
                         "enemy_spawn",
@@ -1978,6 +2182,12 @@ impl NetClient {
                             yaw.to_variant(),
                         ],
                     );
+                    if let Some(old_id) = replaces {
+                        self.base_mut().emit_signal(
+                            "entity_replaced",
+                            &[old_id.to_variant(), id.to_variant()],
+                        );
+                    }
                 }
                 Incoming::PetSpawn {
                     id,
@@ -1988,6 +2198,7 @@ impl NetClient {
                     hp,
                     pos,
                     yaw,
+                    replaces,
                 } => {
                     self.base_mut().emit_signal(
                         "pet_spawn",
@@ -2002,6 +2213,12 @@ impl NetClient {
                             yaw.to_variant(),
                         ],
                     );
+                    if let Some(old_id) = replaces {
+                        self.base_mut().emit_signal(
+                            "entity_replaced",
+                            &[old_id.to_variant(), id.to_variant()],
+                        );
+                    }
                 }
                 Incoming::InventorySnapshot { entries } => {
                     let mut locations = PackedStringArray::new();
@@ -2139,6 +2356,20 @@ impl NetClient {
                 Incoming::TimeOfDay { hour } => {
                     self.base_mut()
                         .emit_signal("time_of_day", &[(hour as f64).to_variant()]);
+                }
+                Incoming::PlayerJumped { id } => {
+                    self.base_mut().emit_signal("player_jumped", &[id.to_variant()]);
+                }
+                Incoming::HungerUpdate { hunger_secs, thirst_secs, cap_secs, drain_per_sec } => {
+                    self.base_mut().emit_signal(
+                        "hunger_update",
+                        &[
+                            (hunger_secs as f64).to_variant(),
+                            (thirst_secs as f64).to_variant(),
+                            (cap_secs as f64).to_variant(),
+                            (drain_per_sec as f64).to_variant(),
+                        ],
+                    );
                 }
                 Incoming::LootGranted { item_path, count } => {
                     self.base_mut().emit_signal(
@@ -2543,6 +2774,23 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             crit,
             dmg_type: damage_type_to_u8(dmg_type),
         },
+        // ── PD_W0028 — the trade window. ──
+        ServerWorldMsg::TradeOpened { partner_id, partner_name } => Incoming::TradeOpened {
+            partner_id: partner_id as i64,
+            partner_name,
+        },
+        ServerWorldMsg::TradeOfferUpdate { mine, slots, coins } => Incoming::TradeOfferUpdate {
+            mine,
+            slots,
+            platinum: coins.platinum,
+            gold: coins.gold,
+            silver: coins.silver,
+            copper: coins.copper,
+        },
+        ServerWorldMsg::TradeAcceptState { you, them } => Incoming::TradeAcceptState { you, them },
+        ServerWorldMsg::TradeClosed { committed, reason } => {
+            Incoming::TradeClosed { committed, reason }
+        }
         ServerWorldMsg::Miss { attacker, target } => Incoming::Miss {
             attacker: attacker as i64,
             target: target as i64,
@@ -2560,6 +2808,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             hp,
             pos,
             yaw,
+            replaces,
         } => Incoming::EnemySpawn {
             id: id as i64,
             mob_name,
@@ -2568,6 +2817,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             hp,
             pos,
             yaw,
+            replaces: replaces.map(|r| r as i64),
         },
         ServerWorldMsg::EntityTarget { id, target } => Incoming::EntityTarget {
             id: id as i64,
@@ -2582,6 +2832,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             hp,
             pos,
             yaw,
+            replaces,
         } => Incoming::PetSpawn {
             id: id as i64,
             owner: owner as i64,
@@ -2591,6 +2842,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             hp,
             pos,
             yaw,
+            replaces: replaces.map(|r| r as i64),
         },
         ServerWorldMsg::InventorySnapshot { entries } => {
             Incoming::InventorySnapshot { entries }
@@ -2639,6 +2891,10 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
         },
         ServerWorldMsg::Teleport { pos } => Incoming::Teleport { pos },
         ServerWorldMsg::TimeOfDay { hour } => Incoming::TimeOfDay { hour },
+        ServerWorldMsg::HungerUpdate { hunger_secs, thirst_secs, cap_secs, drain_per_sec } => {
+            Incoming::HungerUpdate { hunger_secs, thirst_secs, cap_secs, drain_per_sec }
+        }
+        ServerWorldMsg::PlayerJumped { id } => Incoming::PlayerJumped { id: id as i64 },
         ServerWorldMsg::LootGranted { item_path, count } => Incoming::LootGranted {
             item_path,
             count,

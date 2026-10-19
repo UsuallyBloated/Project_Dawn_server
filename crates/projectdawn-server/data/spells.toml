@@ -1911,8 +1911,8 @@ classes = ["Paladin"]
 # ══ Summon Food and Drink ═════════════════════════════════════════════
 # Food slice 2 (user call 2026-10-15, Monsters and Memories' shape): a
 # SUMMON_ITEM spell conjures `summon_item` into the caster's bags, one at
-# the level the class gets the spell and one more per ten levels, capped
-# at `summon_max`. `class_min_levels` carries the per-class levels (EQ's,
+# the level the class gets the spell and one more per level after (user,
+# 2026-10-19; it was one per ten levels to four), capped at `summon_max`. `class_min_levels` carries the per-class levels (EQ's,
 # via the P99 wiki and Al'Kabor: Summon Food CLR 9 / DRU 14 / SHM 9 /
 # MAG 1, Summon Drink CLR 3 / DRU 10 / SHM 2 / MAG 1); `min_level` is the
 # lowest of them. The conjured items have no vendor value, so a merchant
@@ -1930,7 +1930,7 @@ min_level = 1
 classes = ["Magician", "Cleric", "Shaman", "Druid"]
 class_min_levels = { Magician = 1, Cleric = 9, Shaman = 9, Druid = 14 }
 summon_item = "res://data/loot/items/conjured_bread.tres"
-summon_max = 4
+summon_max = 10
 
 [[spell]]
 name = "Summon Drink"
@@ -1945,4 +1945,4 @@ min_level = 1
 classes = ["Magician", "Cleric", "Shaman", "Druid"]
 class_min_levels = { Magician = 1, Shaman = 2, Cleric = 3, Druid = 10 }
 summon_item = "res://data/loot/items/conjured_water.tres"
-summon_max = 4
+summon_max = 10

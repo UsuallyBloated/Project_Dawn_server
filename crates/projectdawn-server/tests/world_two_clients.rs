@@ -8098,7 +8098,7 @@ async fn an_accepted_resurrection_leaves_its_sickness() {
 
 /// Summon Food and Summon Drink (food slice 2, user call 2026-10-15). A level
 /// 1 Magician conjures one Conjured Bread into its bags and is told so; a
-/// level 35 Magician conjures four Conjured Water. Both arrive as inventory
+/// level 35 Magician conjures ten Conjured Water (the cap). Both arrive as inventory
 /// deltas, and the merchant will not buy the result (the item has no vendor
 /// value; covered by the SellItem rule).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8144,7 +8144,7 @@ async fn summon_food_conjures_bread_that_scales_with_level() {
         .await
         .expect("the level 35 Magician's water lands in its bags");
     let ServerWorldMsg::InventoryDelta { count, .. } = water else { unreachable!() };
-    assert_eq!(count, 4, "four flasks at level 35 (one, plus one per ten levels past 1, capped at four)");
+    assert_eq!(count, 10, "ten flasks at level 35 (one, plus one per level past 1, capped at ten)");
     a.send_disconnect();
     b.send_disconnect();
     a.pump_for(Duration::from_millis(200)).await;

@@ -478,7 +478,7 @@ impl Spell {
 /// Summon Food / Drink: one more item per this many levels above the level
 /// the class got the spell (a tuning knob; Monsters and Memories scales 1 to
 /// 4 by level without publishing the steps).
-pub const SUMMON_LEVELS_PER_EXTRA: i32 = 10;
+pub const SUMMON_LEVELS_PER_EXTRA: i32 = 1;
 
 /// How many of a SUMMON_ITEM spell's item a caster of `class` at
 /// `caster_level` conjures: 1 at the class's level for the spell, one more
@@ -495,26 +495,26 @@ mod summon_tests {
     use super::*;
 
     // Summon Food: Magician 1, Cleric 9, Shaman 9, Druid 14; one loaf at the
-    // class's level, one more per ten levels, four at most.
+    // class's level, one more per level after (user, 2026-10-19), ten at most.
     #[test]
-    fn summon_count_scales_from_the_class_level_and_caps_at_four() {
+    fn summon_count_scales_from_the_class_level_and_caps_at_ten() {
         let food = lookup("Summon Food").expect("Summon Food in spells.toml");
         assert_eq!(food.required_level("Magician"), 1);
         assert_eq!(food.required_level("Druid"), 14);
         assert_eq!(food.required_level("Warrior"), food.min_level, "a class with no entry uses min_level");
         assert_eq!(summon_count(food, "Magician", 1), 1);
-        assert_eq!(summon_count(food, "Magician", 10), 1);
-        assert_eq!(summon_count(food, "Magician", 11), 2);
-        assert_eq!(summon_count(food, "Magician", 31), 4);
-        assert_eq!(summon_count(food, "Magician", 60), 4);
+        assert_eq!(summon_count(food, "Magician", 2), 2);
+        assert_eq!(summon_count(food, "Magician", 9), 9);
+        assert_eq!(summon_count(food, "Magician", 10), 10);
+        assert_eq!(summon_count(food, "Magician", 60), 10);
         assert_eq!(summon_count(food, "Druid", 14), 1);
-        assert_eq!(summon_count(food, "Druid", 24), 2);
+        assert_eq!(summon_count(food, "Druid", 18), 5);
         assert_eq!(summon_count(food, "Druid", 5), 1, "below the level the gate refuses; the count itself never drops under one");
         let drink = lookup("Summon Drink").expect("Summon Drink in spells.toml");
         assert_eq!(drink.required_level("Shaman"), 2);
         assert_eq!(drink.required_level("Cleric"), 3);
         assert_eq!(drink.required_level("Druid"), 10);
-        assert_eq!(drink.summon_max, 4);
+        assert_eq!(drink.summon_max, 10);
         assert!(drink.summon_item.ends_with("conjured_water.tres"));
     }
 }

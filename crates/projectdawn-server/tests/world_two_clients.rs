@@ -181,6 +181,21 @@ async fn set_char_appetite(db_url: &str, char_id: i64, hunger: f32, thirst: f32,
         .expect("set appetite");
 }
 
+/// Store a weapon skill far over any cap (read at login, over the starting
+/// scores), so the server's miss roll sits at its 5% floor: tests that need a
+/// melee swing to land stop depending on a 35% coin flip.
+async fn master_weapon_skill(db_url: &str, char_id: i64, key: &str) {
+    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    sqlx::query(
+        "INSERT OR REPLACE INTO character_skills (char_id, kind, key, score) VALUES (?1, 'weapon', ?2, 1000)",
+    )
+    .bind(char_id)
+    .bind(key)
+    .execute(&pool)
+    .await
+    .expect("master weapon skill");
+}
+
 /// Put a stack straight into a character's inventory row (read at login).
 async fn give_char_item(db_url: &str, char_id: i64, location: &str, slot: u32, path: &str, count: u32) {
     let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
@@ -1030,22 +1045,17 @@ async fn enemy_aggros_chases_and_attacks_player() {
     // Decrepit Skeleton pulls, the same single-puller semantics these tests
     // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
     // pack, and standing in it turns every cast into interrupt rolls.
-    let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
-    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
 
     // Walk for ~2 s at 50 ms cadence. Each Move refreshes the server-side
     // stale-move clock so integration continues until we stop sending.
     // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
     // whether an enemy locks on before the wait expires depended on where it
     // happened to be wandering. Walking fully in makes the pull deterministic.
-    let walk_end = Instant::now() + Duration::from_millis(3_500);
+    // Walk in on the server's own word, not the wall clock (a slow test
+    // thread used to come up short): to 2 m from the spawn point, well
+    // inside its aggro whatever the spawn jitter.
     let mut seq: u32 = 1;
-    while Instant::now() < walk_end {
-        a.send_move(seq, dir);
-        seq += 1;
-        tick_one(&mut a.client, &mut a.transport);
-        tokio::time::sleep(TICK_DT).await;
-    }
+    walk_until_within(&mut a, &mut seq, a_char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, BONEPILE_SPAWN, 2.0).await;
     // Stop. The server's STALE_MOVE_THRESHOLD (500 ms) will park the
     // player at its current pos within ~10 ticks.
 
@@ -1115,6 +1125,7 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "eta", "Etta", "Human", "Warrior").await;
 
+    master_weapon_skill(&h.db_url, a_char_id, "hand_to_hand").await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     // Walk toward the Bonepile's isolated [-16, -14] spawn (one level 1
@@ -1125,19 +1136,14 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     // Decrepit Skeleton pulls, the same single-puller semantics these tests
     // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
     // pack, and standing in it turns every cast into interrupt rolls.
-    let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
-    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
     // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
     // whether an enemy locks on before the wait expires depended on where it
     // happened to be wandering. Walking fully in makes the pull deterministic.
-    let walk_end = Instant::now() + Duration::from_millis(3_500);
+    // Walk in on the server's own word, not the wall clock (a slow test
+    // thread used to come up short): to 2 m from the spawn point, well
+    // inside its aggro whatever the spawn jitter.
     let mut seq: u32 = 1;
-    while Instant::now() < walk_end {
-        a.send_move(seq, dir);
-        seq += 1;
-        tick_one(&mut a.client, &mut a.transport);
-        tokio::time::sleep(TICK_DT).await;
-    }
+    walk_until_within(&mut a, &mut seq, a_char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, BONEPILE_SPAWN, 2.0).await;
 
     // Wait for an enemy hit on the player â€” proves the AI walked an
     // enemy into melee with us. The Hit carries the attacker id (in
@@ -1823,16 +1829,11 @@ async fn pet_attacks_owners_target() {
     // [-16, 0, -14] spawn â€” the one ring 1 spawn whose aggro circle
     // overlaps no other, so exactly ONE slow level 1 Decrepit Skeleton
     // pulls, the single-puller semantics this test was written against.
-    let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
-    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
-    let walk_end = Instant::now() + Duration::from_millis(3_500);
+    // Walk in on the server's own word, not the wall clock (a slow test
+    // thread used to come up short): to 2 m from the spawn point, well
+    // inside its aggro whatever the spawn jitter.
     let mut seq: u32 = 1;
-    while Instant::now() < walk_end {
-        a.send_move(seq, dir);
-        seq += 1;
-        tick_one(&mut a.client, &mut a.transport);
-        tokio::time::sleep(TICK_DT).await;
-    }
+    walk_until_within(&mut a, &mut seq, a_char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, BONEPILE_SPAWN, 2.0).await;
 
     // Wait for an enemy hit on us â€” proves the AI walked an enemy into
     // melee with us.
@@ -1939,19 +1940,14 @@ async fn pet_command_attack_locks_onto_target() {
     // Decrepit Skeleton pulls, the same single-puller semantics these tests
     // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
     // pack, and standing in it turns every cast into interrupt rolls.
-    let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
-    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
     // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
     // whether an enemy locks on before the wait expires depended on where it
     // happened to be wandering. Walking fully in makes the pull deterministic.
-    let walk_end = Instant::now() + Duration::from_millis(3_500);
+    // Walk in on the server's own word, not the wall clock (a slow test
+    // thread used to come up short): to 2 m from the spawn point, well
+    // inside its aggro whatever the spawn jitter.
     let mut seq: u32 = 1;
-    while Instant::now() < walk_end {
-        a.send_move(seq, dir);
-        seq += 1;
-        tick_one(&mut a.client, &mut a.transport);
-        tokio::time::sleep(TICK_DT).await;
-    }
+    walk_until_within(&mut a, &mut seq, a_char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, BONEPILE_SPAWN, 2.0).await;
     let hit_evt = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
             matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
@@ -2036,16 +2032,11 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
     // whose aggro circle overlaps no other, so exactly ONE slow level 1
     // Decrepit Skeleton pulls, the single-puller semantics this test was
     // written against.
-    let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
-    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
-    let walk_end = Instant::now() + Duration::from_millis(3_500);
+    // Walk in on the server's own word, not the wall clock (a slow test
+    // thread used to come up short): to 2 m from the spawn point, well
+    // inside its aggro whatever the spawn jitter.
     let mut seq: u32 = 1;
-    while Instant::now() < walk_end {
-        a.send_move(seq, dir);
-        seq += 1;
-        tick_one(&mut a.client, &mut a.transport);
-        tokio::time::sleep(TICK_DT).await;
-    }
+    walk_until_within(&mut a, &mut seq, a_char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, BONEPILE_SPAWN, 2.0).await;
 
     // Wait for enemy to lock on us and start swinging. We capture
     // the enemy id and confirm the player is the target.
@@ -2816,6 +2807,11 @@ async fn walk_dir(c: &mut WorldClient, seq: &mut u32, dir: Vec3, metres: f32) {
     }
     c.pump_for(Duration::from_millis(600)).await;
 }
+
+/// The Bonepile's isolated [-16, 0, -14] spawn: the one ring 1 spawn whose
+/// aggro circle overlaps no other, so exactly one slow level 1 Decrepit
+/// Skeleton pulls (the camp-walking tests' target).
+const BONEPILE_SPAWN: Vec3 = Vec3 { x: -16.0, y: 0.0, z: -14.0 };
 
 /// Walk toward `target` on the server's own word: each tick a Move aims at
 /// `target` from the newest Position the server has fanned for `char_id`
@@ -3688,19 +3684,14 @@ async fn lifesteal_spell_heals_caster() {
     // Decrepit Skeleton pulls, the same single-puller semantics these tests
     // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
     // pack, and standing in it turns every cast into interrupt rolls.
-    let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
-    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
     // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
     // whether an enemy locks on before the wait expires depended on where it
     // happened to be wandering. Walking fully in makes the pull deterministic.
-    let walk_end = Instant::now() + Duration::from_millis(3_500);
+    // Walk in on the server's own word, not the wall clock (a slow test
+    // thread used to come up short): to 2 m from the spawn point, well
+    // inside its aggro whatever the spawn jitter.
     let mut seq: u32 = 1;
-    while Instant::now() < walk_end {
-        a.send_move(seq, dir);
-        seq += 1;
-        tick_one(&mut a.client, &mut a.transport);
-        tokio::time::sleep(TICK_DT).await;
-    }
+    walk_until_within(&mut a, &mut seq, a_char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, BONEPILE_SPAWN, 2.0).await;
 
     // Wait for an enemy hit to confirm an enemy is in range. The
     // attacker id is the spell target.
@@ -4192,6 +4183,7 @@ async fn cast_interrupted_by_incoming_pvp_hit() {
         provision_client(&h.auth_url, "intw", "Intb", "Human", "Warrior").await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    master_weapon_skill(&h.db_url, b_char_id, "hand_to_hand").await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
 
     // Both clients enter world + flip /pvp on.
@@ -4220,21 +4212,30 @@ async fn cast_interrupted_by_incoming_pvp_hit() {
     // B attacks A. Both spawned at the same DB-loaded position so
     // they're in melee range immediately; bare-fist attack uses the
     // default melee envelope.
-    b.send_attack(a_char_id as u64, "", false, DamageType::Physical);
-    for _ in 0..6 {
-        tick_one(&mut a.client, &mut a.transport);
-        tick_one(&mut b.client, &mut b.transport);
-        tokio::time::sleep(TICK_DT).await;
+    // The server rolls the miss now (combat.rs), and only a hit interrupts.
+    // B's hand_to_hand is mastered (a 5% miss), and B swings again, at a
+    // legal cadence, until a hit lands inside A's 5 s cast: four misses in a
+    // row is about one in 160,000.
+    let mut fail = None;
+    for _ in 0..4 {
+        b.send_attack(a_char_id as u64, "", false, DamageType::Physical);
+        for _ in 0..2 {
+            tick_one(&mut a.client, &mut a.transport);
+            tick_one(&mut b.client, &mut b.transport);
+            tokio::time::sleep(TICK_DT).await;
+        }
+        fail = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_millis(1_050), |m| {
+                matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                    if *caster == a_char_id as u64
+                        && reason == "interrupted (hit during cast)")
+            })
+            .await;
+        if fail.is_some() {
+            break;
+        }
     }
-
-    let fail = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::CastFail { caster, reason }
-                if *caster == a_char_id as u64
-                    && reason == "interrupted (hit during cast)")
-        })
-        .await
-        .expect("Warrior with no channeling skill is always interrupted on incoming hit");
+    let fail = fail.expect("Warrior with no channeling skill is always interrupted on incoming hit");
     if let ServerWorldMsg::CastFail { reason, .. } = fail {
         assert_eq!(reason, "interrupted (hit during cast)");
     }
@@ -4672,6 +4673,7 @@ async fn dead_group_member_gets_no_xp_share() {
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "xpdead", "Xpdead", "Elf", "Cleric").await;
 
+    master_weapon_skill(&h.db_url, a_char_id, "hand_to_hand").await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
     let _ = b_char_id;
@@ -7920,6 +7922,7 @@ async fn a_seated_player_is_hit_for_the_max_and_stood_up() {
         provision_client(&h.auth_url, "seat_a", "Seata", "Human", "Warrior").await;
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "seat_b", "Seatb", "Human", "Warrior").await;
+    master_weapon_skill(&h.db_url, a_char_id, "hand_to_hand").await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
     pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
@@ -7928,9 +7931,10 @@ async fn a_seated_player_is_hit_for_the_max_and_stood_up() {
     pump_both_for(&mut a, &mut b, Duration::from_millis(150)).await;
 
     // B sits beside A (both spawn on the same point); A swings bare fists,
-    // which roll 1..=4 plus STR/5, so the seated max is 4 plus STR/5.
+    // which roll 1..=4 plus STR/5, so the seated max is 4 plus STR/5, times
+    // A's mastered hand_to_hand (x1.15, combat.rs).
     let strength = char_data::compute("Human", "Warrior", 1).stats.strength;
-    let seated_max = 4 + strength / 5;
+    let seated_max = ((4 + strength / 5) as f32 * 1.15) as i32;
     b.send_sit();
     pump_both_for(&mut a, &mut b, Duration::from_millis(150)).await;
     a.send_attack(b_char_id as u64, "", false, DamageType::Physical);
@@ -8455,4 +8459,59 @@ async fn a_heal_adds_the_casters_wisdom() {
         gained >= expected - 0.01 && gained <= expected + 2.01,
         "healed {gained} (WIS {wis}); 60 + WIS x 0.3 is {expected}"
     );
+}
+
+/// Client-authority audit fix 4: the server rolls the melee miss. A Rogue
+/// swings the Carved Staff, two-handed blunt, a weapon type the class cannot
+/// use (an 80% miss for half damage), at a dummy beside them. Across eight
+/// swings the server answers with at least one Miss (eight straight landings
+/// would be about one in 400,000). The old server landed every in-range swing:
+/// only the client ever rolled a miss, and a modified client never did.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_server_rolls_the_melee_miss() {
+    const STAFF: &str = "res://data/loot/items/carved_staff.tres";
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "misser", "Missa", "Human", "Rogue").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "misser", true).await.expect("set is_gm");
+    give_char_item(&h.db_url, a_char_id, "equip", 0, STAFF, 1).await;
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    a.send_dev_spawn("Miss Dummy", 1, 100_000.0, 0, 0.0, 0.0);
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Miss Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let (dummy, dummy_pos) = match spawn {
+        ServerWorldMsg::EnemySpawn { id, pos, .. } => (id, pos),
+        _ => unreachable!(),
+    };
+    let mut seq: u32 = 1;
+    walk_until_within(&mut a, &mut seq, a_char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, dummy_pos, 1.0).await;
+
+    let (mut misses, mut hits) = (0, 0);
+    for _ in 0..8 {
+        a.send_attack(dummy, "", false, DamageType::Physical);
+        let until = Instant::now() + Duration::from_millis(1_100);
+        while Instant::now() < until {
+            tick_one(&mut a.client, &mut a.transport);
+            while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
+                match bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) {
+                    Ok((ServerWorldMsg::Miss { attacker, target }, _))
+                        if attacker == a_char_id as u64 && target == dummy => misses += 1,
+                    Ok((ServerWorldMsg::Hit { attacker, target, .. }, _))
+                        if attacker == a_char_id as u64 && target == dummy => hits += 1,
+                    _ => {}
+                }
+            }
+            tokio::time::sleep(TICK_DT).await;
+        }
+    }
+    assert_eq!(misses + hits, 8, "every swing was answered: {misses} misses, {hits} hits");
+    assert!(misses >= 1, "the server rolled at least one miss ({hits} hits)");
 }

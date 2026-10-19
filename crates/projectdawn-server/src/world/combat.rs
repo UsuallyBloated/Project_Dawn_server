@@ -6,15 +6,14 @@
 //! to the target — and the `amount` it broadcasts in `Hit` — is the
 //! one this module returns.
 //!
-//! Out of scope for sub-task 2 (deferred to 2b / 3):
-//! * Weapon-skill multiplier scaling (no skill-table port yet).
-//! * Miss-chance from skill (server always lands the hit; client-side
-//!   miss vis is unchanged).
-//! * Armor damage reduction on the target side.
-//! * Spell crit / spell damage routing (sub-task 3 wires `CastSpell`).
-//!
-//! These will close the remaining client/server damage gap in their
-//! own commits.
+//! The swing is the server's whole verdict (client-authority audit fix 4,
+//! 2026-10-19): the miss roll from the weapon skill (5% to 35%, 80% with a
+//! weapon the class cannot use; the off hand misses 20 points more; accuracy
+//! buffs take points off), the skill damage multiplier (1.0 to 1.15, 0.5 with
+//! a weapon the class cannot use), the DEX crit. Until then the client rolled
+//! the miss and simply never sent a missed swing, so a modified client never
+//! missed, and the skill multiplier existed only on the client. Armor on the
+//! target is `mitigated`; spell damage is `spell_power.rs`.
 
 use super::buffs;
 use super::connection::PerConnection;
@@ -55,6 +54,20 @@ pub fn can_attack(
 const CRIT_PER_DEX: f32 = 0.003;
 const CRIT_MAX: f32 = 0.30;
 const OFFHAND_DAMAGE_MULT: f32 = 0.80;
+/// The miss chance runs from MISS_AT_NO_SKILL down to MISS_FLOOR as the
+/// weapon skill nears its cap (`weapon_skills.gd::get_miss_chance`).
+const MISS_AT_NO_SKILL: f32 = 0.35;
+const MISS_FLOOR: f32 = 0.05;
+/// A weapon type the class cannot use (its skill cap is 0) misses this
+/// often and hits for SKILL_UNUSABLE_DAMAGE_MULT.
+const MISS_UNUSABLE: f32 = 0.80;
+const SKILL_UNUSABLE_DAMAGE_MULT: f32 = 0.5;
+/// Skill at its cap adds this much damage (`get_damage_multiplier`).
+const SKILL_MAX_DAMAGE_BONUS: f32 = 0.15;
+/// The off hand misses this much more often, never above OFFHAND_MISS_CAP
+/// (`combat.gd`, DUAL_WIELD_MISS_PENALTY).
+const DUAL_WIELD_MISS_PENALTY: f32 = 0.20;
+const OFFHAND_MISS_CAP: f32 = 0.95;
 
 /// Outcome of one swing — the amount + crit flag the server fans out as
 /// `ServerWorldMsg::Hit` and applies to the target's HP.
@@ -62,6 +75,49 @@ const OFFHAND_DAMAGE_MULT: f32 = 0.80;
 pub struct Swing {
     pub amount: i32,
     pub crit: bool,
+    /// The swing missed: no damage, a Miss for everyone who can see it.
+    pub missed: bool,
+}
+
+/// The weapon skill a swing in this hand trains and is judged by: the item's
+/// `skill`, or `hand_to_hand` for a bare hand or a weapon with none.
+pub fn weapon_skill_key(weapon_path: &str) -> String {
+    items::lookup(weapon_path)
+        .map(|w| if w.skill.is_empty() { "hand_to_hand".to_string() } else { w.skill.clone() })
+        .unwrap_or_else(|| "hand_to_hand".to_string())
+}
+
+/// The attacker's score in a weapon skill against its cap for their class
+/// and level; `None` when the class cannot use that weapon type at all.
+fn skill_ratio(attacker: &PerConnection, key: &str) -> Option<f32> {
+    let cap = super::skills::cap_for(super::skills::Skill::Weapon, &attacker.class, attacker.level, key);
+    if cap <= 0 {
+        return None;
+    }
+    let score = attacker.weapon_skills.get(key).copied().unwrap_or(0);
+    Some((score as f32 / cap as f32).clamp(0.0, 1.0))
+}
+
+/// The chance this swing misses, before the roll.
+pub fn miss_chance(attacker: &PerConnection, key: &str, is_offhand: bool) -> f32 {
+    let base = match skill_ratio(attacker, key) {
+        None => MISS_UNUSABLE,
+        Some(r) => (MISS_AT_NO_SKILL * (1.0 - r)).max(MISS_FLOOR),
+    };
+    let (accuracy, _) = buffs::accuracy_crit_bonus(&attacker.active_buffs);
+    if is_offhand {
+        (base + DUAL_WIELD_MISS_PENALTY - accuracy).clamp(0.0, OFFHAND_MISS_CAP)
+    } else {
+        (base - accuracy).max(0.0)
+    }
+}
+
+/// The damage multiplier the weapon skill gives.
+pub fn skill_damage_mult(attacker: &PerConnection, key: &str) -> f32 {
+    match skill_ratio(attacker, key) {
+        None => SKILL_UNUSABLE_DAMAGE_MULT,
+        Some(r) => 1.0 + SKILL_MAX_DAMAGE_BONUS * r,
+    }
 }
 
 /// Compute one main-hand or offhand attack from `attacker` against an
@@ -80,7 +136,7 @@ pub fn calc_swing(
 /// The same swing at the top of its damage band: what a SEATED target takes
 /// (classic EQ, as Project 1999 and EQEmu keep it: a hit on a sitting player
 /// cannot miss and lands for the most the attacker can do; user call
-/// 2026-10-14). The crit roll is untouched, since a crit is the attacker's
+/// 2026-10-14). It never rolls a miss. The crit roll is untouched, since a crit is the attacker's
 /// luck on top of the roll, not part of it. Pair with `mitigated`, which
 /// takes no armor off a seated target.
 pub fn calc_swing_max(
@@ -113,6 +169,13 @@ fn swing_with(
 ) -> Swing {
     let mut rng = rand::thread_rng();
 
+    // The miss roll comes first: a missed swing deals nothing. A swing at a
+    // seated target (max_roll) cannot miss.
+    let skill_key = weapon_skill_key(weapon_path);
+    if !max_roll && rng.gen::<f32>() < miss_chance(attacker, &skill_key, is_offhand) {
+        return Swing { amount: 0, crit: false, missed: true };
+    }
+
     let weapon = items::lookup(weapon_path);
     let is_ranged = weapon.map(|w| w.is_ranged).unwrap_or(false);
 
@@ -143,13 +206,9 @@ fn swing_with(
     // Offhand caps at 60% of the main-hand crit chance per the GDScript
     // `calc_offhand_damage` formula.
     let mut crit_chance = ((attacker.dexterity as f32 - 10.0) * CRIT_PER_DEX).clamp(0.0, CRIT_MAX);
-    // Track 6 sub-task 4c: accuracy + crit buffs (Hunter's Eye,
-    // Anthem of the Hunt). Add crit bonus to chance; accuracy bonus
-    // is unused here for now (sub-task 2 didn't model miss chance
-    // server-side — that lands when the skill table ports), but
-    // pulling it for forward-compat lets the buff still show up in
-    // logs without a second pass.
-    let (_acc_bonus, crit_bonus) = buffs::accuracy_crit_bonus(&attacker.active_buffs);
+    // Crit buffs (Hunter's Eye, Anthem of the Hunt) add to the chance; their
+    // accuracy half took points off the miss roll above.
+    let (_, crit_bonus) = buffs::accuracy_crit_bonus(&attacker.active_buffs);
     crit_chance = (crit_chance + crit_bonus).min(CRIT_MAX);
     if is_offhand {
         crit_chance *= 0.6;
@@ -161,8 +220,9 @@ fn swing_with(
         1.0
     };
 
-    let amount = ((base as f32 * crit_mult) as i32).max(1);
-    Swing { amount, crit }
+    let skill_mult = skill_damage_mult(attacker, &skill_key);
+    let amount = ((base as f32 * skill_mult * crit_mult) as i32).max(1);
+    Swing { amount, crit, missed: false }
 }
 
 #[cfg(test)]
@@ -208,6 +268,18 @@ mod tests {
         PerConnection::from_spawn(spawn, Instant::now())
     }
 
+    /// A swing that landed: the miss roll is the server's now, so the band
+    /// tests re-roll past misses (a fresh Warrior with no skill misses 35%).
+    fn landed(attacker: &PerConnection, path: &str, offhand: bool) -> Swing {
+        for _ in 0..1000 {
+            let s = calc_swing(attacker, path, offhand);
+            if !s.missed {
+                return s;
+            }
+        }
+        panic!("a thousand misses in a row");
+    }
+
     // The seated-combat rule's damage half: the top of the band, no armor.
     #[test]
     fn a_seated_target_takes_the_top_of_the_band_and_no_armor() {
@@ -233,7 +305,7 @@ mod tests {
     #[test]
     fn bare_handed_damage_in_range() {
         let attacker = make_attacker(20, 10);
-        let swing = calc_swing(&attacker, "", false);
+        let swing = landed(&attacker, "", false);
         // Base roll 1-4, STR/5 = 4 bonus, no crit cap on 0% chance.
         // amount = (1..=4) + 4 = 5..=8 worst case, up to 2x on the
         // 0% crit chance (never crits at DEX 10). So strict 5..=8.
@@ -249,7 +321,7 @@ mod tests {
         // damage_min=7, damage_max=15, STR bonus = 50/5 = 10.
         // Range: (7+10) ..= (15+10) = 17..=25 (no crit at DEX 10).
         for _ in 0..50 {
-            let swing = calc_swing(&attacker, "res://data/loot/items/iron_short_sword.tres", false);
+            let swing = landed(&attacker, "res://data/loot/items/iron_short_sword.tres", false);
             assert!(swing.amount >= 17 && swing.amount <= 25,
                     "iron short sword should land 17-25, got {}",
                     swing.amount);
@@ -262,7 +334,7 @@ mod tests {
         let attacker = make_attacker(50, 10);
         // Main = 17..=25, offhand = floor(main * 0.8) = 13..=20.
         for _ in 0..50 {
-            let swing = calc_swing(&attacker, "res://data/loot/items/iron_short_sword.tres", true);
+            let swing = landed(&attacker, "res://data/loot/items/iron_short_sword.tres", true);
             assert!(swing.amount >= 13 && swing.amount <= 20,
                     "offhand should land 13-20, got {}",
                     swing.amount);
@@ -272,7 +344,7 @@ mod tests {
     #[test]
     fn unknown_path_falls_back_to_fists() {
         let attacker = make_attacker(20, 10);
-        let swing = calc_swing(&attacker, "res://data/loot/items/nonexistent.tres", false);
+        let swing = landed(&attacker, "res://data/loot/items/nonexistent.tres", false);
         // Same range as bare-handed.
         assert!(swing.amount >= 5 && swing.amount <= 8);
     }
@@ -284,9 +356,58 @@ mod tests {
         // damage would scale with DEX. For now this just documents
         // the branch; sub-task 2b adds ranged weapons to items.toml.
         let attacker = make_attacker(50, 10);
-        let swing = calc_swing(&attacker, "", false);
+        let swing = landed(&attacker, "", false);
         // Bare-handed always melee; this is a no-op until ranged
         // weapons land in items.toml.
         assert!(swing.amount > 0);
     }
+
+    // Client-authority audit fix 4: the miss roll and the skill multiplier,
+    // the client's weapon_skills.gd numbers.
+    #[test]
+    fn the_miss_chance_follows_the_weapon_skill() {
+        let mut a = make_attacker(20, 10);
+        a.weapon_skills.clear();
+        let key = "1h_slashing";
+        assert!((miss_chance(&a, key, false) - 0.35).abs() < 1e-6, "no skill: 35%");
+        assert!((miss_chance(&a, key, true) - 0.55).abs() < 1e-6, "the off hand: 20 points more");
+        let cap = super::super::skills::cap_for(super::super::skills::Skill::Weapon, "Warrior", 1, key);
+        a.weapon_skills.insert(key.into(), cap);
+        assert!((miss_chance(&a, key, false) - 0.05).abs() < 1e-6, "at the cap: the 5% floor");
+        assert!((skill_damage_mult(&a, key) - 1.15).abs() < 1e-6, "at the cap: +15% damage");
+        // An accuracy buff takes points off, never below zero.
+        a.active_buffs.push(super::super::buffs::ActiveBuff::new_accuracy_crit(
+            "Hunter's Eye".into(), 0.10, 0.0, 60.0, Instant::now(),
+        ));
+        assert_eq!(miss_chance(&a, key, false), 0.0);
+    }
+
+    #[test]
+    fn a_weapon_the_class_cannot_use_misses_eighty_percent_for_half_damage() {
+        let mut a = make_attacker(20, 10);
+        a.class = "Wizard".into(); // a Wizard's 1h_slashing cap is 0
+        assert!((miss_chance(&a, "1h_slashing", false) - 0.80).abs() < 1e-6);
+        assert_eq!(skill_damage_mult(&a, "1h_slashing"), 0.5);
+    }
+
+    #[test]
+    fn a_miss_deals_nothing_and_a_seated_target_is_never_missed() {
+        let mut a = make_attacker(50, 10);
+        a.weapon_skills.clear();
+        let (mut misses, mut swings) = (0, 0);
+        for _ in 0..2000 {
+            let s = calc_swing(&a, "res://data/loot/items/iron_short_sword.tres", false);
+            swings += 1;
+            if s.missed {
+                misses += 1;
+                assert_eq!(s.amount, 0);
+                assert!(!s.crit);
+            }
+        }
+        assert!((500..=900).contains(&misses), "about 35% miss: {misses} of {swings}");
+        for _ in 0..200 {
+            assert!(!calc_swing_max(&a, "res://data/loot/items/iron_short_sword.tres", false).missed);
+        }
+    }
 }
+

@@ -100,8 +100,8 @@ const HARD_MIN_SWING_SECS: f32 = 0.4;
 /// `weapon_delay` (fists 2.0) times the off-hand multiplier, scaled by the
 /// strongest modeled haste so a fully-hasted player never trips, minus a jitter
 /// grace, floored at `HARD_MIN_SWING_SECS`. Only ever used to reject "too fast"
-/// — never "too slow" (the client sends an Attack only on a landed hit, so real
-/// arrivals are already >= the interval).
+/// — never "too slow" (the client sends one Attack per swing at its own
+/// cadence, so real arrivals are already >= the interval).
 ///
 /// Deliberate residual: because we can't tell a hasted client from a non-hasted
 /// one at the gate (haste is client-paced, a server no-op today), we ASSUME max
@@ -1028,6 +1028,32 @@ fn pet_owner_cid(entity: &Entity) -> Option<ClientId> {
 
 /// Who is told an entity is gone for real: the in-world players who could
 /// see its cell, plus a pet's owner wherever they are (`pet_owner_cid`).
+/// Track 18.1 — a swing at a mob trains the hand's weapon skill and defense,
+/// hit or miss, and tells the attacker privately when a roll lands. The skill
+/// key comes from `combat::weapon_skill_key` (the item's skill, or
+/// hand_to_hand).
+fn train_swing_skills(
+    server: &mut RenetServer,
+    connections: &mut HashMap<ClientId, PerConnection>,
+    attacker_cid: ClientId,
+    weapon_skill_key: &str,
+) {
+    let Some(att) = connections.get_mut(&attacker_cid) else {
+        return;
+    };
+    for key in [weapon_skill_key, "defense"] {
+        if let Some(new_score) = skills::try_advance(att, skills::Skill::Weapon, key) {
+            handlers::send_skill_progress_update(
+                server,
+                attacker_cid,
+                skills::Skill::Weapon.as_protocol(),
+                key.to_string(),
+                new_score,
+            );
+        }
+    }
+}
+
 fn despawn_recipients(
     visible: &std::collections::HashSet<EntityId>,
     in_world: &[ClientId],
@@ -3531,9 +3557,10 @@ pub async fn run(
                 // (main = slot 0, off = slot 1) because dual-wield emits two
                 // independent Attack streams that legitimately co-fire in one tick
                 // — a single combined timer would false-throttle a legit
-                // dual-wielder. The client sends an Attack only on a landed hit and
-                // has no burst / catch-up (combat.gd), so arrivals are already >=
-                // its swing interval; we only reject "too fast", never "too slow".
+                // dual-wielder. The client sends an Attack for every swing (the
+                // server rolls the miss, combat.rs) and has no burst / catch-up
+                // (combat.gd), so arrivals are already >= its swing interval; we
+                // only reject "too fast", never "too slow".
                 // Dropped silently (no Miss fan-out — that would reward the spammer
                 // and desync their local timer). The timestamp advances only on an
                 // ACCEPTED swing (below, after calc_swing), so a spammer can't walk
@@ -3656,6 +3683,17 @@ pub async fn run(
                     } else {
                         swing
                     };
+                    // The server's miss roll (combat.rs); a seated target is
+                    // never missed.
+                    if swing.missed {
+                        handlers::fan_out_miss(
+                            &mut server,
+                            &in_world_recipients_now,
+                            intent.attacker,
+                            intent.target_id,
+                        );
+                        continue;
+                    }
                     // Apply damage. Armor reduction matches the
                     // GDScript Combat.receive_player_damage:
                     //   reduction = armor / (armor + ARMOR_DR_DIVISOR)
@@ -3948,6 +3986,31 @@ pub async fn run(
                     );
                     continue;
                 }
+                // The server's miss roll (combat.rs). A miss still angers the
+                // mob (one point of hate, as any swing at it does in EQ),
+                // keeps the pet's assist target, and trains the weapon skill
+                // the client used to train on every swing; it deals nothing.
+                if swing.missed {
+                    *entity.aggro.entry(intent.attacker).or_insert(0.0) += 1.0;
+                    *entity.threat.entry(intent.attacker).or_insert(0.0) += 1.0;
+                    handlers::fan_out_miss(
+                        &mut server,
+                        &in_world_recipients_now,
+                        intent.attacker,
+                        intent.target_id,
+                    );
+                    if let Some(att) = connections.get_mut(&attacker_cid) {
+                        att.last_attacked_enemy = Some(intent.target_id);
+                        att.last_attacked_at = Some(now);
+                    }
+                    train_swing_skills(
+                        &mut server,
+                        &mut connections,
+                        attacker_cid,
+                        &combat::weapon_skill_key(&server_weapon_path),
+                    );
+                    continue;
+                }
                 let amount = swing.amount.max(0);
                 entity.hp = (entity.hp - amount as f32).max(0.0);
                 *entity.aggro.entry(intent.attacker).or_insert(0.0) += amount as f32;
@@ -3964,48 +4027,14 @@ pub async fn run(
                     att.last_attacked_enemy = Some(target_for_pet);
                     att.last_attacked_at = Some(now);
                 }
-                // Track 18.1 — weapon skill advance on a landed hit.
-                // Skill key from the weapon's `skill` field (defaults
-                // to `hand_to_hand` for fists / unrecognised items).
-                // Fan a SkillProgressUpdate privately if the roll
-                // lands; client mirrors the score for the character
-                // window.
-                let weapon_skill_key: String = items::lookup(&server_weapon_path)
-                    .map(|w| {
-                        if w.skill.is_empty() {
-                            "hand_to_hand".to_string()
-                        } else {
-                            w.skill.clone()
-                        }
-                    })
-                    .unwrap_or_else(|| "hand_to_hand".to_string());
-                if let Some(att) = connections.get_mut(&attacker_cid) {
-                    if let Some(new_score) =
-                        skills::try_advance(att, skills::Skill::Weapon, &weapon_skill_key)
-                    {
-                        handlers::send_skill_progress_update(
-                            &mut server,
-                            attacker_cid,
-                            skills::Skill::Weapon.as_protocol(),
-                            weapon_skill_key.clone(),
-                            new_score,
-                        );
-                    }
-                    // Defense skill also advances on a successful
-                    // offensive swing (mirrors the GDScript Combat
-                    // path: defense ticks on connect AND on dodge).
-                    if let Some(new_score) =
-                        skills::try_advance(att, skills::Skill::Weapon, "defense")
-                    {
-                        handlers::send_skill_progress_update(
-                            &mut server,
-                            attacker_cid,
-                            skills::Skill::Weapon.as_protocol(),
-                            "defense".to_string(),
-                            new_score,
-                        );
-                    }
-                }
+                // Track 18.1: the weapon skill (and defense) advance on every
+                // swing at a mob, hit or miss (`train_swing_skills`).
+                train_swing_skills(
+                    &mut server,
+                    &mut connections,
+                    attacker_cid,
+                    &combat::weapon_skill_key(&server_weapon_path),
+                );
                 // PD_W0025 — server-authoritative weapon proc. Roll the equipped
                 // weapon's proc_chance on this landed swing; on a proc, fold the
                 // proc_damage into THIS swing's resolution (same entity borrow +

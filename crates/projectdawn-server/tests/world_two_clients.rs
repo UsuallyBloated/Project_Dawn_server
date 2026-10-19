@@ -794,21 +794,38 @@ async fn two_clients_cast_fanout() {
     assert!(echoed.is_none(), "A should not receive own cast events");
 }
 
-/// Track 4 sub-task 4: combat hit fan-out. A broadcasts a hit on B; B (the
-/// target) and any other observer should receive ServerWorldMsg::Hit
-/// carrying the attacker/target ids and the damage payload. Owner does not
-/// receive own echo.
+/// The client-made HitBroadcast is a dev command (the Test Panel's). A plain
+/// account's forged hit on another player reaches nobody: before, it was
+/// relayed as a real Hit, putting fake combat text on screens and, with the
+/// seated-combat rule, standing the victim up. A GM's still fans to the target
+/// with its payload, and the sender gets no echo.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_clients_hit_fanout() {
     let h = start_both().await;
 
-    let (a_session, a_char_id, a_token) =
+    let (a_session, a_char_id, _stale) =
         provision_client(&h.auth_url, "iota", "Iot", "Human", "Warrior").await;
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "kappa", "Kap", "Elf", "Wizard").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "iota", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+
+    // Only meaningful when the process is not in dev mode, where every
+    // connection may use dev commands.
+    if std::env::var("PD_DEV_CMDS").as_deref() != Ok("1") {
+        b.send_hit(a_char_id as u64, 99, false, DamageType::Physical);
+        b.pump_for(Duration::from_millis(300)).await;
+        let forged = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(1), |m| {
+                matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == b_char_id as u64)
+            })
+            .await;
+        assert!(forged.is_none(), "a plain account's made-up hit reaches nobody");
+    }
 
     a.send_hit(b_char_id as u64, 42, true, DamageType::Fire);
     for _ in 0..4 {

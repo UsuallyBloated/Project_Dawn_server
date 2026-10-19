@@ -686,7 +686,18 @@ pub fn handle_message(
             crit,
             dmg_type,
         } => {
-            if !conn.ready {
+            // A client-made Hit, Miss or Evade is fiction: every real one comes
+            // from the server's own combat (Attack, spells, mobs). Relayed
+            // freely, these put forged combat text on every screen, and since
+            // a Hit stands its target's client (the seated-combat rule), a
+            // forged one could stand another player up, ending their seated
+            // regen and their /camp. Only the Test Panel sends them, so they
+            // are dev commands: gated and audited, ignored for anyone else.
+            if !conn.ready || !conn.can_use_dev_cmds() {
+                return Outcome::Continue;
+            }
+            let args = format!("target={target} amount={amount} crit={crit}");
+            if !dev_cmd_allowed(server, conn, client_id, now, "hit_broadcast", args) {
                 return Outcome::Continue;
             }
             Outcome::HitFanOut {
@@ -698,14 +709,22 @@ pub fn handle_message(
         }
 
         ClientWorldMsg::MissBroadcast { target } => {
-            if !conn.ready {
+            // Dev-only, as HitBroadcast above.
+            if !conn.ready || !conn.can_use_dev_cmds() {
+                return Outcome::Continue;
+            }
+            if !dev_cmd_allowed(server, conn, client_id, now, "miss_broadcast", format!("target={target}")) {
                 return Outcome::Continue;
             }
             Outcome::MissFanOut { target }
         }
 
         ClientWorldMsg::EvadeBroadcast { target } => {
-            if !conn.ready {
+            // Dev-only, as HitBroadcast above.
+            if !conn.ready || !conn.can_use_dev_cmds() {
+                return Outcome::Continue;
+            }
+            if !dev_cmd_allowed(server, conn, client_id, now, "evade_broadcast", format!("target={target}")) {
                 return Outcome::Continue;
             }
             Outcome::EvadeFanOut { target }

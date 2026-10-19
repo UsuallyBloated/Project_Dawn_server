@@ -760,6 +760,12 @@ fn apply_spell_damage_to_enemy(
     dmg_type: DamageType,
     now: Instant,
 ) -> bool {
+    // The spell crit (spell_power.rs), rolled per hit off the caster's INT;
+    // a spell that deals no damage (a pure mez or root) has nothing to crit.
+    let caster_int = connections
+        .get(&(caster_id as ClientId))
+        .map(|c| c.intelligence)
+        .unwrap_or(0);
     let (died, damage_done) = {
         let Some(entity) = enemies.get_mut(&target_id) else {
             return false;
@@ -767,7 +773,12 @@ fn apply_spell_damage_to_enemy(
         if !entity.is_alive() {
             return false;
         }
-        let dmg = spell.base_damage.max(0.0) as i32;
+        let flat = spell.base_damage.max(0.0) as i32;
+        let (dmg, crit) = if flat > 0 {
+            super::spell_power::roll_hit(flat, caster_int, &mut rand::thread_rng())
+        } else {
+            (0, false)
+        };
         let hp_before = entity.hp;
         entity.hp = (entity.hp - dmg as f32).max(0.0);
         let damage_done = (hp_before - entity.hp).max(0.0);
@@ -786,7 +797,7 @@ fn apply_spell_damage_to_enemy(
             caster_id,
             target_id,
             dmg,
-            false,
+            crit,
             dmg_type,
         );
         handlers::fan_out_health_update(
@@ -4475,6 +4486,13 @@ pub async fn run(
                 let mana_cost = spell.mana_cost;
                 let hp_cost = spell.hp_cost;
                 let dmg_type = spells::parse_damage_type(&spell.damage_type);
+                // The caster's power (spell_power.rs: INT on a nuke, WIS on a
+                // heal, the casting-skill multipliers), applied once here so
+                // every arm below reads the empowered numbers. It used to
+                // exist only on the client, so online every spell landed flat.
+                let empowered = super::spell_power::empower(spell, caster_conn);
+                let caster_int = caster_conn.intelligence;
+                let spell = &empowered;
 
                 // Cast pre-flight: presence, reach, the PvP gates and "the
                 // server has no effect for this spell", decided before the mana
@@ -4958,9 +4976,17 @@ pub async fn run(
                             let shield_back: f32;
                             let shield_back_name: Option<String>;
                             let mut absorb_strip_idx: Option<usize> = None;
+                            // The spell crit (spell_power.rs), before the absorb
+                            // shield takes its share, as on the client.
+                            let flat = spell.base_damage.max(0.0) as i32;
+                            let (rolled, crit) = if flat > 0 {
+                                super::spell_power::roll_hit(flat, caster_int, &mut rand::thread_rng())
+                            } else {
+                                (0, false)
+                            };
                             let (final_hp, max_hp, applied) = {
                                 let tc = connections.get_mut(&target_cid).expect("checked");
-                                let mut dmg = spell.base_damage.max(0.0) as i32;
+                                let mut dmg = rolled;
                                 let (after_absorb, exhausted) =
                                     buffs::consume_absorb(&mut tc.active_buffs, dmg);
                                 dmg = after_absorb;
@@ -4996,7 +5022,7 @@ pub async fn run(
                                 intent.caster,
                                 target_id,
                                 applied,
-                                false,
+                                crit,
                                 dmg_type,
                             );
                             handlers::fan_out_health_update(

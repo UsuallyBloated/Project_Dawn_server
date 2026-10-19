@@ -6836,6 +6836,13 @@ async fn hand_eating_is_refused_when_full_and_halved_when_early() {
     let token = request_world_token(&h.auth_url, &session, char_id).await;
     let mut a = WorldClient::start(token, &session, char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
+    // The counter drains from the moment the character enters the world, so
+    // by the time a single eat lands it may be just under the cap, where a
+    // hand-eat is rightly accepted for half (it once raced that way). Two eats
+    // in one packet are handled in the same tick with no drain between them:
+    // if the first finds room it refills to exactly the cap, so the second is
+    // always refused. Either way the second loaf is never eaten.
+    a.send_use_consumable_base(0);
     a.send_use_consumable_base(0);
     let refused = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
@@ -6843,12 +6850,13 @@ async fn hand_eating_is_refused_when_full_and_halved_when_early() {
         })
         .await;
     assert!(refused.is_some(), "full: refused with EQ's line");
-    let taken = a
+    let emptied = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_millis(800), |m| {
-            matches!(m, ServerWorldMsg::InventoryDelta { location, slot, .. } if location == "base" && *slot == 0)
+            matches!(m, ServerWorldMsg::InventoryDelta { location, slot, count, .. }
+                if location == "base" && *slot == 0 && *count == 0)
         })
         .await;
-    assert!(taken.is_none(), "nothing is taken on a refusal");
+    assert!(emptied.is_none(), "nothing is taken on a refusal: the second loaf stays");
     a.send_disconnect();
     a.pump_for(Duration::from_millis(500)).await;
     drop(a);
@@ -6856,7 +6864,9 @@ async fn hand_eating_is_refused_when_full_and_halved_when_early() {
 
     // Early: well below the cap but not hungry. The loaf is taken and feeds
     // for half of 2880.
+    // Two loaves again: the first session may have eaten one.
     set_char_appetite(&h.db_url, char_id, 3000.0, cap, None).await;
+    give_char_item(&h.db_url, char_id, "base", 0, BREAD, 2).await;
     let token = request_world_token(&h.auth_url, &session, char_id).await;
     let mut b = WorldClient::start(token, &session, char_id).await;
     b.pump_for(Duration::from_millis(300)).await;

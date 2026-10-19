@@ -20,6 +20,7 @@ mod clock;
 mod combat;
 mod connection;
 mod corpses;
+pub mod encumbrance;
 mod entity;
 mod groups;
 mod handlers;
@@ -102,8 +103,6 @@ pub const ENEMY_POSITION_KEEPALIVE: Duration = Duration::from_millis(500);
 /// enemies, players in world) that measures the stream above. Skipped while
 /// nobody is in world.
 pub const ENEMY_FAN_REPORT_INTERVAL: Duration = Duration::from_secs(60);
-/// Server-side speed cap for movement intents (m/s). Anything faster
-/// than this gets clamped — server-authoritative, no exceptions.
 /// Where a character with no bind point respawns, and the position a freshly
 /// created character starts at (`create_character` leaves `pos_*` NULL, which
 /// loads as 0,0,0). Keeping the fallback identical to the new-character spawn
@@ -111,7 +110,14 @@ pub const ENEMY_FAN_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 /// beside whatever just killed them.
 pub const STARTER_SPAWN: connection::Vec3f = connection::Vec3f::ZERO;
 
-pub const MAX_MOVE_SPEED: f32 = 7.5;
+/// A player's unbuffed running speed (m/s), the client's `player.gd` SPEED.
+/// The server decides how fast a player moves: this, times the speed buffs
+/// the server itself applied, times snare, times encumbrance. A Move's
+/// direction says only which way and how much of a run (its length is
+/// clamped to 1; a crouch sends a half-length one), never how fast: it used
+/// to carry the client's own speed against a 7.5 m/s ceiling, so a modified
+/// client ran 1.5x and an honest one under Spirit of Wolf got the buff twice.
+pub const RUN_SPEED: f32 = 5.0;
 /// How long we keep integrating the last received direction after the
 /// most recent Move message. Beyond this window, the connection is
 /// treated as idle and integration stops — protects against a crashed

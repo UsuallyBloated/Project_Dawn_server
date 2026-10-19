@@ -10,6 +10,7 @@ item_type = "misc"
 rarity = 2
 stack_size = 10
 vendor_price = 360
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/adamantite_ore.tres"
@@ -18,6 +19,7 @@ item_type = "misc"
 rarity = 2
 stack_size = 20
 vendor_price = 150
+weight = 0.5
 
 [[item]]
 path = "res://data/loot/items/antidote.tres"
@@ -26,6 +28,7 @@ item_type = "consumable"
 stack_size = 10
 heal_on_use = 20.0
 vendor_price = 16
+weight = 0.3
 
 [[item]]
 path = "res://data/loot/items/arrow_bundle.tres"
@@ -33,6 +36,7 @@ name = "Arrow Bundle"
 item_type = "misc"
 stack_size = 20
 vendor_price = 10
+weight = 1.0
 
 [[item]]
 path = "res://data/loot/items/arrow_fletching.tres"
@@ -40,6 +44,7 @@ name = "Arrow Fletching"
 item_type = "misc"
 stack_size = 20
 vendor_price = 5
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/barley.tres"
@@ -47,6 +52,7 @@ name = "Barley"
 item_type = "misc"
 stack_size = 20
 vendor_price = 3
+weight = 0.3
 
 [[item]]
 path = "res://data/loot/items/bat_blood.tres"
@@ -54,6 +60,7 @@ name = "Bat Blood"
 item_type = "misc"
 stack_size = 20
 vendor_price = 5
+weight = 0.3
 
 [[item]]
 path = "res://data/loot/items/bat_wing.tres"
@@ -61,6 +68,7 @@ name = "Bat Wing"
 item_type = "misc"
 stack_size = 20
 vendor_price = 5
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/bear_hide.tres"
@@ -68,6 +76,7 @@ name = "Bear Hide"
 item_type = "misc"
 stack_size = 5
 vendor_price = 14
+weight = 1.5
 
 [[item]]
 path = "res://data/loot/items/bent_dagger.tres"
@@ -77,6 +86,7 @@ stack_size = 1
 dex_bonus = 1
 agi_bonus = 1
 vendor_price = 2
+weight = 2.0
 
 [[item]]
 path = "res://data/loot/items/berry_tart.tres"
@@ -85,6 +95,7 @@ item_type = "consumable"
 stack_size = 20
 heal_on_use = 30.0
 vendor_price = 5
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/bloodmoss.tres"
@@ -92,6 +103,7 @@ name = "Bloodmoss"
 item_type = "misc"
 stack_size = 20
 vendor_price = 6
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/boar_hide.tres"
@@ -99,6 +111,7 @@ name = "Boar Hide"
 item_type = "misc"
 stack_size = 5
 vendor_price = 10
+weight = 0.8
 
 [[item]]
 path = "res://data/loot/items/bone_fragment.tres"
@@ -106,6 +119,7 @@ name = "Bone Fragment"
 item_type = "misc"
 stack_size = 20
 vendor_price = 2
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/bonecrushers_war_axe.tres"
@@ -120,6 +134,7 @@ skill = "2h_blunt"
 is_two_handed = true
 str_bonus = 5
 vendor_price = 220
+weight = 8.0
 
 [[item]]
 path = "res://data/loot/items/bread_loaf.tres"
@@ -130,6 +145,7 @@ vendor_price = 4
 is_food = true
 food_hp_regen = 4.0
 food_duration = 2880.0
+weight = 0.3
 
 [[item]]
 path = "res://data/loot/items/bronze_ingot.tres"
@@ -137,6 +153,7 @@ name = "Bronze Ingot"
 item_type = "misc"
 stack_size = 10
 vendor_price = 22
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/brown_steed_whistle.tres"
@@ -145,6 +162,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 1
 vendor_price = 350
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/carved_staff.tres"
@@ -156,6 +174,7 @@ damage_max = 11
 skill = "2h_blunt"
 int_bonus = 1
 vendor_price = 50
+weight = 5.0
 
 [[item]]
 path = "res://data/loot/items/chitinous_ring.tres"
@@ -167,6 +186,7 @@ agi_bonus = 4
 con_bonus = 3
 max_hp_bonus = 30.0
 vendor_price = 160
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/cloth_cap.tres"
@@ -177,6 +197,7 @@ armor = 2
 armor_type = "cloth"
 max_hp_bonus = 5.0
 vendor_price = 18
+weight = 1.0
 
 [[item]]
 path = "res://data/loot/items/cloth_gloves.tres"
@@ -187,6 +208,7 @@ armor = 2
 armor_type = "cloth"
 max_hp_bonus = 4.0
 vendor_price = 18
+weight = 0.5
 
 [[item]]
 path = "res://data/loot/items/cloth_pants.tres"
@@ -197,6 +219,7 @@ armor = 3
 armor_type = "cloth"
 max_hp_bonus = 6.0
 vendor_price = 28
+weight = 1.5
 
 [[item]]
 path = "res://data/loot/items/cloth_robe.tres"
@@ -208,6 +231,7 @@ armor_type = "cloth"
 int_bonus = 1
 max_hp_bonus = 8.0
 vendor_price = 38
+weight = 2.0
 
 [[item]]
 path = "res://data/loot/items/cloth_scraps.tres"
@@ -215,6 +239,7 @@ name = "Cloth Scraps"
 item_type = "misc"
 stack_size = 20
 vendor_price = 5
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/cloth_slippers.tres"
@@ -225,6 +250,7 @@ armor = 2
 armor_type = "cloth"
 max_hp_bonus = 4.0
 vendor_price = 18
+weight = 0.5
 
 [[item]]
 path = "res://data/loot/items/coal.tres"
@@ -232,6 +258,7 @@ name = "Coal"
 item_type = "misc"
 stack_size = 20
 vendor_price = 4
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/coiled_spring.tres"
@@ -239,6 +266,7 @@ name = "Coiled Spring"
 item_type = "misc"
 stack_size = 20
 vendor_price = 10
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/copper_chain_boots.tres"
@@ -249,6 +277,7 @@ armor = 4
 armor_type = "chain"
 max_hp_bonus = 6.0
 vendor_price = 35
+weight = 2.5
 
 [[item]]
 path = "res://data/loot/items/copper_chain_coif.tres"
@@ -260,6 +289,7 @@ armor_type = "chain"
 con_bonus = 1
 max_hp_bonus = 8.0
 vendor_price = 40
+weight = 2.5
 
 [[item]]
 path = "res://data/loot/items/copper_chain_gloves.tres"
@@ -270,6 +300,7 @@ armor = 4
 armor_type = "chain"
 max_hp_bonus = 6.0
 vendor_price = 35
+weight = 1.5
 
 [[item]]
 path = "res://data/loot/items/copper_chain_leggings.tres"
@@ -281,6 +312,7 @@ armor_type = "chain"
 con_bonus = 1
 max_hp_bonus = 12.0
 vendor_price = 55
+weight = 4.0
 
 [[item]]
 path = "res://data/loot/items/copper_chain_vest.tres"
@@ -292,6 +324,7 @@ armor_type = "chain"
 con_bonus = 1
 max_hp_bonus = 20.0
 vendor_price = 90
+weight = 5.0
 
 [[item]]
 path = "res://data/loot/items/copper_dagger.tres"
@@ -303,6 +336,7 @@ damage_max = 7
 skill = "piercing"
 dex_bonus = 1
 vendor_price = 22
+weight = 2.0
 
 [[item]]
 path = "res://data/loot/items/copper_ingot.tres"
@@ -310,6 +344,7 @@ name = "Copper Ingot"
 item_type = "misc"
 stack_size = 10
 vendor_price = 14
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/copper_ore.tres"
@@ -317,6 +352,7 @@ name = "Copper Ore"
 item_type = "misc"
 stack_size = 20
 vendor_price = 6
+weight = 0.25
 
 [[item]]
 path = "res://data/loot/items/copper_short_sword.tres"
@@ -328,6 +364,7 @@ damage_max = 9
 skill = "1h_slashing"
 str_bonus = 1
 vendor_price = 40
+weight = 4.0
 
 [[item]]
 path = "res://data/loot/items/cracked_leather_vest.tres"
@@ -339,6 +376,7 @@ armor_type = "leather"
 con_bonus = 1
 max_hp_bonus = 8.0
 vendor_price = 3
+weight = 4.0
 
 [[item]]
 path = "res://data/loot/items/cracked_wooden_club.tres"
@@ -347,6 +385,7 @@ item_type = "weapon"
 stack_size = 1
 str_bonus = 1
 vendor_price = 2
+weight = 3.0
 
 [[item]]
 path = "res://data/loot/items/crude_ale.tres"
@@ -355,6 +394,7 @@ item_type = "consumable"
 stack_size = 20
 heal_on_use = 15.0
 vendor_price = 4
+weight = 0.5
 
 [[item]]
 path = "res://data/loot/items/crude_clockwork.tres"
@@ -363,6 +403,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 10
 vendor_price = 160
+weight = 0.5
 
 [[item]]
 path = "res://data/loot/items/crude_health_potion.tres"
@@ -371,6 +412,7 @@ item_type = "consumable"
 stack_size = 10
 heal_on_use = 30.0
 vendor_price = 8
+weight = 0.3
 
 [[item]]
 path = "res://data/loot/items/cured_leather_strip.tres"
@@ -378,6 +420,7 @@ name = "Cured Leather Strip"
 item_type = "misc"
 stack_size = 20
 vendor_price = 10
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/cursed_femur.tres"
@@ -392,6 +435,7 @@ skill = "1h_blunt"
 str_bonus = 6
 max_hp_bonus = 20.0
 vendor_price = 260
+weight = 7.0
 
 [[item]]
 path = "res://data/loot/items/damaged_wolf_pelt.tres"
@@ -399,6 +443,7 @@ name = "Damaged Wolf Pelt"
 item_type = "misc"
 stack_size = 20
 vendor_price = 4
+weight = 0.6
 
 [[item]]
 path = "res://data/loot/items/empty_bottle.tres"
@@ -406,6 +451,7 @@ name = "Empty Bottle"
 item_type = "misc"
 stack_size = 20
 vendor_price = 3
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/empty_vial.tres"
@@ -413,6 +459,7 @@ name = "Empty Vial"
 item_type = "misc"
 stack_size = 20
 vendor_price = 4
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/feather.tres"
@@ -420,6 +467,7 @@ name = "Feather"
 item_type = "misc"
 stack_size = 20
 vendor_price = 3
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/feverfew.tres"
@@ -427,6 +475,7 @@ name = "Feverfew"
 item_type = "misc"
 stack_size = 20
 vendor_price = 5
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/fire_elixir.tres"
@@ -436,6 +485,7 @@ rarity = 1
 stack_size = 10
 mp_on_use = 50.0
 vendor_price = 38
+weight = 0.3
 
 [[item]]
 path = "res://data/loot/items/fire_essence.tres"
@@ -444,6 +494,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 10
 vendor_price = 15
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/fired_clay_bowl.tres"
@@ -451,6 +502,7 @@ name = "Fired Clay Bowl"
 item_type = "misc"
 stack_size = 10
 vendor_price = 8
+weight = 0.4
 
 [[item]]
 path = "res://data/loot/items/flamebrand.tres"
@@ -466,6 +518,7 @@ proc_chance = 0.15
 proc_damage = 25
 proc_damage_type = 0
 proc_name = "Flaming Strike"
+weight = 4.0
 
 [[item]]
 path = "res://data/loot/items/flax.tres"
@@ -473,6 +526,7 @@ name = "Flax"
 item_type = "misc"
 stack_size = 20
 vendor_price = 3
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/flint.tres"
@@ -480,6 +534,7 @@ name = "Flint"
 item_type = "misc"
 stack_size = 20
 vendor_price = 2
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/flint_arrowhead.tres"
@@ -487,6 +542,7 @@ name = "Flint Arrowhead"
 item_type = "misc"
 stack_size = 20
 vendor_price = 4
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/flour.tres"
@@ -494,6 +550,7 @@ name = "Flour"
 item_type = "misc"
 stack_size = 20
 vendor_price = 4
+weight = 0.3
 
 [[item]]
 path = "res://data/loot/items/frayed_cloth_pants.tres"
@@ -504,6 +561,7 @@ armor = 1
 armor_type = "cloth"
 max_hp_bonus = 3.0
 vendor_price = 2
+weight = 1.5
 
 [[item]]
 path = "res://data/loot/items/fresh_wolf_pelt.tres"
@@ -511,6 +569,7 @@ name = "Fresh Wolf Pelt"
 item_type = "misc"
 stack_size = 5
 vendor_price = 10
+weight = 0.6
 
 [[item]]
 path = "res://data/loot/items/gnoll_chiefs_seal.tres"
@@ -519,6 +578,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 1
 vendor_price = 25
+weight = 0.4
 
 [[item]]
 path = "res://data/loot/items/gnoll_meat.tres"
@@ -526,6 +586,7 @@ name = "Gnoll Meat"
 item_type = "misc"
 stack_size = 10
 vendor_price = 2
+weight = 0.25
 
 [[item]]
 path = "res://data/loot/items/gnoll_tooth.tres"
@@ -533,6 +594,7 @@ name = "Gnoll Tooth"
 item_type = "misc"
 stack_size = 20
 vendor_price = 3
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/gold_ingot.tres"
@@ -540,6 +602,7 @@ name = "Gold Ingot"
 item_type = "misc"
 stack_size = 10
 vendor_price = 82
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/gold_ore.tres"
@@ -547,6 +610,7 @@ name = "Gold Ore"
 item_type = "misc"
 stack_size = 20
 vendor_price = 35
+weight = 0.25
 
 [[item]]
 path = "res://data/loot/items/gold_wire.tres"
@@ -555,6 +619,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 20
 vendor_price = 20
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/ground_bone.tres"
@@ -562,6 +627,7 @@ name = "Ground Bone"
 item_type = "misc"
 stack_size = 20
 vendor_price = 4
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/hardwood_shaft.tres"
@@ -569,6 +635,7 @@ name = "Hardwood Shaft"
 item_type = "misc"
 stack_size = 20
 vendor_price = 6
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/healing_potion.tres"
@@ -577,6 +644,7 @@ item_type = "consumable"
 stack_size = 10
 heal_on_use = 150.0
 vendor_price = 28
+weight = 0.3
 
 [[item]]
 path = "res://data/loot/items/honey.tres"
@@ -584,6 +652,7 @@ name = "Honey"
 item_type = "misc"
 stack_size = 20
 vendor_price = 5
+weight = 0.4
 
 [[item]]
 path = "res://data/loot/items/honey_mead.tres"
@@ -593,6 +662,7 @@ stack_size = 20
 heal_on_use = 20.0
 mp_on_use = 20.0
 vendor_price = 6
+weight = 0.5
 
 [[item]]
 path = "res://data/loot/items/hops.tres"
@@ -600,6 +670,7 @@ name = "Hops"
 item_type = "misc"
 stack_size = 20
 vendor_price = 3
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/hunters_medal.tres"
@@ -610,6 +681,7 @@ stack_size = 1
 str_bonus = 2
 con_bonus = 2
 vendor_price = 100
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/hunters_shortbow.tres"
@@ -623,6 +695,7 @@ skill = "archery"
 is_two_handed = true
 is_ranged = true
 vendor_price = 80
+weight = 3.0
 
 [[item]]
 path = "res://data/loot/items/ice_essence.tres"
@@ -631,6 +704,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 10
 vendor_price = 15
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/iron_chain_boots.tres"
@@ -641,6 +715,7 @@ armor = 8
 armor_type = "chain"
 max_hp_bonus = 10.0
 vendor_price = 75
+weight = 3.0
 
 [[item]]
 path = "res://data/loot/items/iron_chain_coif.tres"
@@ -652,6 +727,7 @@ armor_type = "chain"
 con_bonus = 1
 max_hp_bonus = 12.0
 vendor_price = 65
+weight = 3.0
 
 [[item]]
 path = "res://data/loot/items/iron_chain_gloves.tres"
@@ -662,6 +738,7 @@ armor = 7
 armor_type = "chain"
 max_hp_bonus = 10.0
 vendor_price = 65
+weight = 1.5
 
 [[item]]
 path = "res://data/loot/items/iron_chain_leggings.tres"
@@ -673,6 +750,7 @@ armor_type = "chain"
 con_bonus = 1
 max_hp_bonus = 18.0
 vendor_price = 110
+weight = 5.0
 
 [[item]]
 path = "res://data/loot/items/iron_chain_vest.tres"
@@ -685,6 +763,7 @@ str_bonus = 1
 con_bonus = 2
 max_hp_bonus = 25.0
 vendor_price = 130
+weight = 6.0
 
 [[item]]
 path = "res://data/loot/items/iron_dagger.tres"
@@ -697,6 +776,7 @@ skill = "piercing"
 dex_bonus = 1
 agi_bonus = 1
 vendor_price = 55
+weight = 2.0
 
 [[item]]
 path = "res://data/loot/items/iron_ingot.tres"
@@ -704,6 +784,7 @@ name = "Iron Ingot"
 item_type = "misc"
 stack_size = 10
 vendor_price = 22
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/iron_ore.tres"
@@ -711,6 +792,7 @@ name = "Iron Ore"
 item_type = "misc"
 stack_size = 20
 vendor_price = 10
+weight = 0.25
 
 [[item]]
 path = "res://data/loot/items/iron_short_sword.tres"
@@ -722,6 +804,7 @@ damage_max = 15
 skill = "1h_slashing"
 str_bonus = 2
 vendor_price = 90
+weight = 4.0
 
 [[item]]
 path = "res://data/loot/items/leather_boots.tres"
@@ -732,6 +815,7 @@ armor = 4
 armor_type = "leather"
 max_hp_bonus = 7.0
 vendor_price = 40
+weight = 2.0
 
 [[item]]
 path = "res://data/loot/items/leather_cap.tres"
@@ -742,6 +826,7 @@ armor = 4
 armor_type = "leather"
 max_hp_bonus = 8.0
 vendor_price = 35
+weight = 2.0
 
 [[item]]
 path = "res://data/loot/items/leather_gloves.tres"
@@ -752,6 +837,7 @@ armor = 4
 armor_type = "leather"
 max_hp_bonus = 7.0
 vendor_price = 35
+weight = 1.0
 
 [[item]]
 path = "res://data/loot/items/leather_leggings.tres"
@@ -762,6 +848,7 @@ armor = 6
 armor_type = "leather"
 max_hp_bonus = 10.0
 vendor_price = 60
+weight = 3.0
 
 [[item]]
 path = "res://data/loot/items/leather_vest.tres"
@@ -773,6 +860,7 @@ armor_type = "leather"
 agi_bonus = 1
 max_hp_bonus = 15.0
 vendor_price = 70
+weight = 4.0
 
 [[item]]
 path = "res://data/loot/items/linen_thread.tres"
@@ -780,6 +868,7 @@ name = "Linen Thread"
 item_type = "misc"
 stack_size = 20
 vendor_price = 6
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/lump_of_clay.tres"
@@ -787,6 +876,7 @@ name = "Lump of Clay"
 item_type = "misc"
 stack_size = 20
 vendor_price = 3
+weight = 0.5
 
 [[item]]
 path = "res://data/loot/items/mana_potion.tres"
@@ -795,6 +885,7 @@ item_type = "consumable"
 stack_size = 10
 mp_on_use = 80.0
 vendor_price = 22
+weight = 0.3
 
 [[item]]
 path = "res://data/loot/items/meat_pie.tres"
@@ -803,6 +894,7 @@ item_type = "consumable"
 stack_size = 20
 heal_on_use = 40.0
 vendor_price = 6
+weight = 0.5
 
 [[item]]
 path = "res://data/loot/items/mechanical_trap.tres"
@@ -811,6 +903,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 5
 vendor_price = 90
+weight = 3.0
 
 [[item]]
 path = "res://data/loot/items/metal_bits.tres"
@@ -818,6 +911,7 @@ name = "Metal Bits"
 item_type = "misc"
 stack_size = 20
 vendor_price = 4
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/minor_healing_potion.tres"
@@ -826,6 +920,7 @@ item_type = "consumable"
 stack_size = 10
 heal_on_use = 50.0
 vendor_price = 12
+weight = 0.3
 
 [[item]]
 path = "res://data/loot/items/mithril_ingot.tres"
@@ -834,6 +929,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 10
 vendor_price = 180
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/mithril_ore.tres"
@@ -842,6 +938,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 20
 vendor_price = 75
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/mushroom_bread.tres"
@@ -851,6 +948,7 @@ stack_size = 20
 heal_on_use = 25.0
 mp_on_use = 25.0
 vendor_price = 5
+weight = 0.4
 
 [[item]]
 path = "res://data/loot/items/nightshade.tres"
@@ -858,6 +956,7 @@ name = "Nightshade"
 item_type = "misc"
 stack_size = 20
 vendor_price = 8
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/patched_cloth_boots.tres"
@@ -867,6 +966,7 @@ stack_size = 1
 armor = 1
 armor_type = "cloth"
 vendor_price = 2
+weight = 1.0
 
 [[item]]
 path = "res://data/loot/items/pickaxe.tres"
@@ -874,6 +974,7 @@ name = "Pickaxe"
 item_type = "misc"
 stack_size = 1
 vendor_price = 10
+weight = 5.0
 
 [[item]]
 path = "res://data/loot/items/pliable_wood.tres"
@@ -881,6 +982,7 @@ name = "Pliable Wood"
 item_type = "misc"
 stack_size = 10
 vendor_price = 6
+weight = 0.5
 
 [[item]]
 path = "res://data/loot/items/poison_vial.tres"
@@ -889,6 +991,7 @@ item_type = "consumable"
 rarity = 1
 stack_size = 10
 vendor_price = 32
+weight = 0.3
 
 [[item]]
 path = "res://data/loot/items/pottery_sketch.tres"
@@ -896,6 +999,7 @@ name = "Pottery Sketch"
 item_type = "misc"
 stack_size = 1
 vendor_price = 8
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/predators_collar.tres"
@@ -906,6 +1010,7 @@ stack_size = 1
 str_bonus = 3
 agi_bonus = 2
 vendor_price = 85
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/pristine_venom_sac.tres"
@@ -914,6 +1019,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 1
 vendor_price = 35
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/pristine_wolf_pelt.tres"
@@ -922,6 +1028,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 5
 vendor_price = 20
+weight = 0.6
 
 [[item]]
 path = "res://data/loot/items/rat_meat.tres"
@@ -929,6 +1036,7 @@ name = "Rat Meat"
 item_type = "misc"
 stack_size = 10
 vendor_price = 2
+weight = 0.25
 
 [[item]]
 path = "res://data/loot/items/raw_egg.tres"
@@ -936,6 +1044,7 @@ name = "Raw Egg"
 item_type = "misc"
 stack_size = 20
 vendor_price = 3
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/rotfangs_fang.tres"
@@ -944,6 +1053,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 1
 vendor_price = 20
+weight = 0.5
 
 [[item]]
 path = "res://data/loot/items/rough_emerald.tres"
@@ -952,6 +1062,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 10
 vendor_price = 35
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/rough_emerald_ring.tres"
@@ -962,6 +1073,7 @@ stack_size = 1
 agi_bonus = 2
 max_hp_bonus = 8.0
 vendor_price = 120
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/rough_leather_bracers.tres"
@@ -972,6 +1084,7 @@ armor = 2
 armor_type = "leather"
 con_bonus = 1
 vendor_price = 2
+weight = 1.0
 
 [[item]]
 path = "res://data/loot/items/rough_opal.tres"
@@ -980,6 +1093,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 10
 vendor_price = 30
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/rough_opal_ring.tres"
@@ -989,6 +1103,7 @@ rarity = 1
 stack_size = 1
 cha_bonus = 2
 vendor_price = 90
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/rough_ruby.tres"
@@ -997,6 +1112,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 10
 vendor_price = 40
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/rough_ruby_ring.tres"
@@ -1007,6 +1123,7 @@ stack_size = 1
 str_bonus = 2
 max_hp_bonus = 10.0
 vendor_price = 130
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/rough_sapphire.tres"
@@ -1015,6 +1132,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 10
 vendor_price = 35
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/rough_sapphire_ring.tres"
@@ -1025,6 +1143,7 @@ stack_size = 1
 int_bonus = 2
 max_mp_bonus = 10.0
 vendor_price = 115
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/rough_topaz.tres"
@@ -1033,6 +1152,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 10
 vendor_price = 30
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/rough_topaz_ring.tres"
@@ -1043,6 +1163,7 @@ stack_size = 1
 wis_bonus = 2
 max_mp_bonus = 8.0
 vendor_price = 100
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/ruined_metal_scraps.tres"
@@ -1050,6 +1171,7 @@ name = "Ruined Metal Scraps"
 item_type = "misc"
 stack_size = 20
 vendor_price = 1
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/ruined_silk.tres"
@@ -1057,6 +1179,7 @@ name = "Ruined Silk"
 item_type = "misc"
 stack_size = 20
 vendor_price = 1
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/rusted_buckle.tres"
@@ -1064,6 +1187,7 @@ name = "Rusted Buckle"
 item_type = "misc"
 stack_size = 20
 vendor_price = 1
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/rusty_short_sword.tres"
@@ -1072,6 +1196,7 @@ item_type = "weapon"
 stack_size = 1
 str_bonus = 1
 vendor_price = 4
+weight = 4.0
 
 [[item]]
 path = "res://data/loot/items/sable_wing_membrane.tres"
@@ -1080,6 +1205,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 1
 vendor_price = 15
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/salt.tres"
@@ -1087,6 +1213,7 @@ name = "Salt"
 item_type = "misc"
 stack_size = 20
 vendor_price = 3
+weight = 0.3
 
 [[item]]
 path = "res://data/loot/items/scouts_leather_boots.tres"
@@ -1098,6 +1225,7 @@ armor = 6
 armor_type = "leather"
 agi_bonus = 2
 vendor_price = 65
+weight = 2.0
 
 [[item]]
 path = "res://data/loot/items/scraped_leather_boots.tres"
@@ -1107,6 +1235,7 @@ stack_size = 1
 armor = 2
 armor_type = "leather"
 vendor_price = 2
+weight = 2.0
 
 [[item]]
 path = "res://data/loot/items/sewing_needle.tres"
@@ -1114,6 +1243,7 @@ name = "Sewing Needle"
 item_type = "misc"
 stack_size = 5
 vendor_price = 5
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/shadow_draught.tres"
@@ -1123,6 +1253,7 @@ rarity = 1
 stack_size = 10
 mp_on_use = 60.0
 vendor_price = 38
+weight = 0.3
 
 [[item]]
 path = "res://data/loot/items/shadow_essence.tres"
@@ -1131,6 +1262,7 @@ item_type = "misc"
 rarity = 1
 stack_size = 10
 vendor_price = 18
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/shadow_signet.tres"
@@ -1142,6 +1274,7 @@ agi_bonus = 3
 int_bonus = 2
 max_mp_bonus = 20.0
 vendor_price = 120
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/silver_ingot.tres"
@@ -1149,6 +1282,7 @@ name = "Silver Ingot"
 item_type = "misc"
 stack_size = 10
 vendor_price = 42
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/silver_ore.tres"
@@ -1156,6 +1290,7 @@ name = "Silver Ore"
 item_type = "misc"
 stack_size = 20
 vendor_price = 18
+weight = 0.25
 
 [[item]]
 path = "res://data/loot/items/silver_ring.tres"
@@ -1165,6 +1300,7 @@ stack_size = 1
 int_bonus = 1
 wis_bonus = 1
 vendor_price = 55
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/silver_wire.tres"
@@ -1172,6 +1308,7 @@ name = "Silver Wire"
 item_type = "misc"
 stack_size = 20
 vendor_price = 15
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/sinew.tres"
@@ -1179,6 +1316,7 @@ name = "Sinew"
 item_type = "misc"
 stack_size = 20
 vendor_price = 6
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/skinning_knife.tres"
@@ -1186,6 +1324,7 @@ name = "Skinning Knife"
 item_type = "misc"
 stack_size = 1
 vendor_price = 8
+weight = 1.0
 
 [[item]]
 path = "res://data/loot/items/small_gear.tres"
@@ -1193,6 +1332,7 @@ name = "Small Gear"
 item_type = "misc"
 stack_size = 20
 vendor_price = 8
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/small_metal_plate.tres"
@@ -1200,6 +1340,7 @@ name = "Small Metal Plate"
 item_type = "misc"
 stack_size = 20
 vendor_price = 10
+weight = 0.3
 
 [[item]]
 path = "res://data/loot/items/small_metal_sheet.tres"
@@ -1207,6 +1348,7 @@ name = "Small Metal Sheet"
 item_type = "misc"
 stack_size = 20
 vendor_price = 8
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/small_pouch.tres"
@@ -1215,6 +1357,7 @@ item_type = "bag"
 stack_size = 1
 bag_num_slots = 4
 vendor_price = 20
+weight = 0.5
 
 [[item]]
 path = "res://data/loot/items/smithing_hammer.tres"
@@ -1222,6 +1365,7 @@ name = "Smithing Hammer"
 item_type = "misc"
 stack_size = 1
 vendor_price = 15
+weight = 4.0
 
 [[item]]
 path = "res://data/loot/items/snake_meat.tres"
@@ -1229,6 +1373,7 @@ name = "Snake Meat"
 item_type = "misc"
 stack_size = 10
 vendor_price = 3
+weight = 0.25
 
 [[item]]
 path = "res://data/loot/items/snake_skin.tres"
@@ -1236,6 +1381,7 @@ name = "Snake Skin"
 item_type = "misc"
 stack_size = 10
 vendor_price = 5
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/snake_venom_sac.tres"
@@ -1243,6 +1389,7 @@ name = "Snake Venom Sac"
 item_type = "misc"
 stack_size = 10
 vendor_price = 8
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/spider_venom_sac.tres"
@@ -1250,6 +1397,7 @@ name = "Spider Venom Sac"
 item_type = "misc"
 stack_size = 10
 vendor_price = 10
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/spiderling_silk.tres"
@@ -1257,6 +1405,7 @@ name = "Spiderling Silk"
 item_type = "misc"
 stack_size = 20
 vendor_price = 8
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/splintered_staff.tres"
@@ -1265,6 +1414,7 @@ item_type = "weapon"
 stack_size = 1
 int_bonus = 1
 vendor_price = 3
+weight = 5.0
 
 [[item]]
 path = "res://data/loot/items/stale_bread.tres"
@@ -1272,6 +1422,7 @@ name = "Stale Bread"
 item_type = "consumable"
 stack_size = 20
 vendor_price = 1
+weight = 0.3
 
 [[item]]
 path = "res://data/loot/items/tarnished_silver_setting.tres"
@@ -1279,6 +1430,7 @@ name = "Tarnished Silver Setting"
 item_type = "misc"
 stack_size = 10
 vendor_price = 12
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/tarnished_silver_ring.tres"
@@ -1287,6 +1439,7 @@ item_type = "ring"
 stack_size = 1
 agi_bonus = 1
 vendor_price = 30
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/tattered_cloth_tunic.tres"
@@ -1297,6 +1450,7 @@ armor = 2
 armor_type = "cloth"
 max_hp_bonus = 5.0
 vendor_price = 2
+weight = 2.0
 
 [[item]]
 path = "res://data/loot/items/tattered_pelt.tres"
@@ -1304,6 +1458,7 @@ name = "Tattered Pelt"
 item_type = "misc"
 stack_size = 20
 vendor_price = 1
+weight = 0.5
 
 [[item]]
 path = "res://data/loot/items/thick_leather_slab.tres"
@@ -1311,6 +1466,7 @@ name = "Thick Leather Slab"
 item_type = "misc"
 stack_size = 10
 vendor_price = 18
+weight = 1.5
 
 [[item]]
 path = "res://data/loot/items/thick_silk_thread.tres"
@@ -1318,6 +1474,7 @@ name = "Thick Silk Thread"
 item_type = "misc"
 stack_size = 10
 vendor_price = 12
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/tin_ingot.tres"
@@ -1325,6 +1482,7 @@ name = "Tin Ingot"
 item_type = "misc"
 stack_size = 10
 vendor_price = 12
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/tin_ore.tres"
@@ -1332,6 +1490,7 @@ name = "Tin Ore"
 item_type = "misc"
 stack_size = 20
 vendor_price = 5
+weight = 0.25
 
 [[item]]
 path = "res://data/loot/items/tinkering_kit.tres"
@@ -1339,6 +1498,7 @@ name = "Tinkering Kit"
 item_type = "misc"
 stack_size = 1
 vendor_price = 25
+weight = 2.0
 
 [[item]]
 path = "res://data/loot/items/torn_cloth_gloves.tres"
@@ -1348,6 +1508,7 @@ stack_size = 1
 armor = 1
 armor_type = "cloth"
 vendor_price = 2
+weight = 0.5
 
 [[item]]
 path = "res://data/loot/items/undying_marrow.tres"
@@ -1356,6 +1517,7 @@ item_type = "misc"
 rarity = 2
 stack_size = 1
 vendor_price = 60
+weight = 0.4
 
 [[item]]
 path = "res://data/loot/items/unfired_pottery.tres"
@@ -1363,6 +1525,7 @@ name = "Unfired Pottery"
 item_type = "misc"
 stack_size = 5
 vendor_price = 5
+weight = 0.5
 
 [[item]]
 path = "res://data/loot/items/water_flask.tres"
@@ -1373,6 +1536,7 @@ vendor_price = 3
 is_drink = true
 food_mp_regen = 5.0
 food_duration = 2160.0
+weight = 0.5
 
 [[item]]
 path = "res://data/loot/items/wild_berries.tres"
@@ -1380,6 +1544,7 @@ name = "Wild Berries"
 item_type = "misc"
 stack_size = 20
 vendor_price = 4
+weight = 0.2
 
 [[item]]
 path = "res://data/loot/items/wild_fruit.tres"
@@ -1387,6 +1552,7 @@ name = "Wild Fruit"
 item_type = "misc"
 stack_size = 20
 vendor_price = 4
+weight = 0.3
 
 [[item]]
 path = "res://data/loot/items/wild_mushroom.tres"
@@ -1394,6 +1560,7 @@ name = "Wild Mushroom"
 item_type = "misc"
 stack_size = 20
 vendor_price = 4
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/wolf_meat.tres"
@@ -1401,6 +1568,7 @@ name = "Wolf Meat"
 item_type = "misc"
 stack_size = 10
 vendor_price = 4
+weight = 0.25
 
 [[item]]
 path = "res://data/loot/items/wormwood.tres"
@@ -1408,6 +1576,7 @@ name = "Wormwood"
 item_type = "misc"
 stack_size = 20
 vendor_price = 7
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/worn_cloth_cap.tres"
@@ -1418,6 +1587,7 @@ armor = 1
 armor_type = "cloth"
 int_bonus = 1
 vendor_price = 2
+weight = 1.0
 
 [[item]]
 path = "res://data/loot/items/worn_coin_purse.tres"
@@ -1425,6 +1595,7 @@ name = "Worn Coin Purse"
 item_type = "misc"
 stack_size = 10
 vendor_price = 1
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/yeast.tres"
@@ -1437,6 +1608,7 @@ vendor_price = 3
 # Summon Drink, a full meal and a full drink each, with no vendor value so
 # a merchant refuses them ("The merchant won't take that."). Mirrored in
 # data/loot/items/conjured_*.tres on the client.
+weight = 0.1
 [[item]]
 path = "res://data/loot/items/conjured_bread.tres"
 name = "Conjured Bread"
@@ -1445,6 +1617,7 @@ stack_size = 20
 vendor_price = 0
 is_food = true
 food_duration = 2880.0
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/conjured_water.tres"
@@ -1454,3 +1627,4 @@ stack_size = 20
 vendor_price = 0
 is_drink = true
 food_duration = 2160.0
+weight = 0.1

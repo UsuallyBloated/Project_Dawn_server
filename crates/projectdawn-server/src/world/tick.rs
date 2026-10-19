@@ -25,7 +25,7 @@ use super::{
     ENEMY_DESPAWN_LINGER_SECS, GROUP_SHARE_RANGE, INSPECT_RANGE, KICK_FLUSH_GRACE,
     LINKDEAD_SECS,
     LOOT_BAG_LINGER_SECS,
-    LOOT_PICKUP_RANGE, MAX_MOVE_SPEED,
+    LOOT_PICKUP_RANGE, RUN_SPEED,
     RANGED_ATTACK_RANGE, STALE_MOVE_THRESHOLD, TICK_DT,
 };
 use crate::{db, Config};
@@ -9609,15 +9609,19 @@ pub async fn run(
             if dir.x != 0.0 || dir.z != 0.0 {
                 conn.is_sitting = false;
             }
-            // Track 6 sub-task 4c: speed buff (Spirit of Wolf, Selos'
-            // Melody) multiplies MAX_MOVE_SPEED.
-            // Track 6 sub-task 4d: snare multiplies effective speed
-            // by (1 - snare_amount), floored at 10% so the player
-            // can still inch along.
-            let speed_buff = buffs::speed_mult(&conn.active_buffs);
-            let snare = buffs::snare_amount(&conn.active_buffs);
-            let snare_mult = (1.0 - snare).max(0.1);
-            let speed = MAX_MOVE_SPEED * speed_buff * snare_mult;
+            // The server decides the speed (RUN_SPEED's note): its own speed
+            // buff (Spirit of Wolf, Selos' Melody), snare (floored at 10% so
+            // the player can still inch along) and encumbrance. The weight
+            // is only worked out for a player who is actually moving.
+            let speed = if dir.x != 0.0 || dir.z != 0.0 {
+                let speed_buff = buffs::speed_mult(&conn.active_buffs);
+                let snare = buffs::snare_amount(&conn.active_buffs);
+                let snare_mult = (1.0 - snare).max(0.1);
+                let (load_mult, _) = super::encumbrance::for_conn(conn);
+                RUN_SPEED * speed_buff * snare_mult * load_mult
+            } else {
+                0.0
+            };
             conn.pos.x += dir.x * speed * dt;
             conn.pos.z += dir.z * speed * dt;
             // Y is not integrated — server tracks only XZ; gravity is client-side.

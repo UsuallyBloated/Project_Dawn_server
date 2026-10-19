@@ -622,9 +622,9 @@ pub fn handle_message(
             // Store the latest intent for the tick loop to integrate exactly
             // once per tick. Integrating here would advance pos N times when
             // N Moves arrive between ticks — at typical client send rates
-            // that's a ~3× speedup. Server-authoritative speed cap is
-            // enforced by clamping the direction to unit length; the tick
-            // loop multiplies by MAX_MOVE_SPEED × TICK_DT.
+            // that's a ~3× speedup. The direction's length is clamped to 1
+            // (a full run; a crouch sends half); the tick loop decides the
+            // speed itself (RUN_SPEED's note) and multiplies by TICK_DT.
             conn.latest_direction = dir_v;
             conn.last_move_received = Some(now);
             Outcome::Continue

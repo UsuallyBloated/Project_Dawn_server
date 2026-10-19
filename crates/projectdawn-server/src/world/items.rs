@@ -148,6 +148,11 @@ pub struct Item {
     // Vendor
     #[serde(default)]
     pub vendor_price: u32,
+
+    // Carry weight per unit (encumbrance.rs); the .tres `weight`, kept in
+    // lockstep by the client's tools/check_item_lockstep.gd.
+    #[serde(default)]
+    pub weight: f32,
 }
 
 fn items() -> &'static HashMap<String, Item> {

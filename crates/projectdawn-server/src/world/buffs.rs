@@ -50,7 +50,7 @@ pub enum BuffEffect {
     },
     /// Track 6 sub-task 4c — movement speed multiplier. The server's
     /// Move integration applies the highest active multiplier to
-    /// MAX_MOVE_SPEED. Spirit of Wolf = 1.4, Selos' Melody = 1.35.
+    /// RUN_SPEED. Spirit of Wolf = 1.4, Selos' Melody = 1.35.
     Speed { mult: f32 },
     /// Track 6 sub-task 4c — attack speed buff. Tracked for
     /// snapshot completeness but no server-side behavioral effect:
@@ -341,7 +341,7 @@ pub fn res_sickness_buff(level: i32, intrinsic: &crate::char_data::StatBlock, no
 }
 
 /// Track 6 sub-task 4c — highest active Speed multiplier (1.0 if no
-/// Speed buff). Movement integration multiplies MAX_MOVE_SPEED by
+/// Speed buff). Movement integration multiplies RUN_SPEED by
 /// this each tick.
 pub fn speed_mult(buffs: &[ActiveBuff]) -> f32 {
     let mut max_mult: f32 = 1.0;

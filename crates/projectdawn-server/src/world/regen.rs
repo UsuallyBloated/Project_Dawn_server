@@ -164,8 +164,15 @@ pub fn tick_one(conn: &mut PerConnection, dt: f32, now: Instant) -> RegenResult 
         conn.regen_mp_acc = 0.0;
     }
 
-    if conn.stamina < conn.max_stamina && fed_stamina {
-        conn.regen_stamina_acc += STAMINA_REGEN_PER_TICK * scale;
+    // Encumbrance (`encumbrance.rs`): halved while over capacity, none at
+    // double it. Worked out only while there is stamina to regain.
+    let load_mult = if conn.stamina < conn.max_stamina && fed_stamina {
+        super::encumbrance::for_conn(conn).1
+    } else {
+        0.0
+    };
+    if load_mult > 0.0 {
+        conn.regen_stamina_acc += STAMINA_REGEN_PER_TICK * load_mult * scale;
         if conn.regen_stamina_acc >= 1.0 {
             let delta = conn.regen_stamina_acc.floor();
             conn.regen_stamina_acc -= delta;

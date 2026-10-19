@@ -1263,9 +1263,9 @@ async fn aoi_far_apart_clients_dont_see_each_other() {
 /// Track 7 AOI â€” approaching client triggers mutual EntitySpawn on cell
 /// boundary crossing.
 ///
-/// A sits at the origin (cell (0, 0)). B starts at x = 300 (cell (2, 0))
-/// and walks in the âˆ’X direction at MAX_MOVE_SPEED = 7.5 m/s. After
-/// ~8 s B crosses x = 240 (cell (1, 0)), which is adjacent to A's cell.
+/// A sits at the origin (cell (0, 0)). B starts at x = 260 (cell (2, 0))
+/// and runs in the -X direction at RUN_SPEED = 5 m/s. After
+/// ~4 s B crosses x = 240 (cell (1, 0)), which is adjacent to A's cell.
 /// The tick loop's step-5b fan-out must fire mutual EntitySpawn at that
 /// moment. We budget 12 s of walking to absorb test-parallelism jitter.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1278,14 +1278,14 @@ async fn aoi_approaching_client_triggers_entity_spawn() {
         provision_client(&h.auth_url, "aoiappr2", "ApprB", "Elf", "Ranger").await;
 
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_character_position(&pool, b_char_id, 300.0, 0.0, 0.0)
+    db::set_character_position(&pool, b_char_id, 260.0, 0.0, 0.0)
         .await
         .expect("set B starting position");
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
 
-    // Walk B toward A. 300 â†’ 240 = 60 m Ã· 7.5 m/s = 8 s; 12 s covers
+    // Walk B toward A. 260 to 240 = 20 m at 5 m/s = 4 s; 12 s covers
     // the full crossing with margin. Both transports are pumped each tick:
     // without pumping A's transport for ~12 s the server's 15 s netcode
     // timeout would fire and disconnect A before we can assert.
@@ -2154,10 +2154,12 @@ async fn a_mob_nuked_from_beyond_its_old_leash_turns_on_the_caster() {
     };
 
     // The dev spawn lands 3 m ahead (-Z at yaw 0); back off to about 20 m:
-    // outside the old 16 m leash, inside the 25 m spell reach. 46 Moves at
-    // 7.5 m/s, 50 ms each.
+    // outside the old 16 m leash, inside the 25 m spell reach. 14.5 m of
+    // Moves at RUN_SPEED, plus the 3 m and the ~2.5 m the server keeps
+    // integrating after the last Move (STALE_MOVE_THRESHOLD).
+    let moves = (14.5 / (world::RUN_SPEED * 0.05)).ceil() as u32;
     let mut seq: u32 = 1;
-    for _ in 0..46 {
+    for _ in 0..moves {
         a.send_move(seq, Vec3 { x: 0.0, y: 0.0, z: 1.0 });
         seq += 1;
         tick_one(&mut a.client, &mut a.transport);
@@ -2714,7 +2716,7 @@ async fn a_weaker_slow_is_refused_while_a_stronger_one_holds() {
     assert!(refused.is_some(), "Slow is refused while Torpor holds the target");
 }
 
-/// Walk `metres` east in 7.5 m/s Moves, then let the park settle.
+/// Walk `metres` east in full-run Moves (RUN_SPEED), then let the park settle.
 async fn walk_east(c: &mut WorldClient, seq: &mut u32, metres: f32) {
     walk_dir(c, seq, Vec3 { x: 1.0, y: 0.0, z: 0.0 }, metres).await;
 }
@@ -2731,7 +2733,7 @@ async fn walk_east(c: &mut WorldClient, seq: &mut u32, metres: f32) {
 /// load. Fine for walking AWAY from something; to ARRIVE within reach of
 /// something, use `walk_until_within`.
 async fn walk_dir(c: &mut WorldClient, seq: &mut u32, dir: Vec3, metres: f32) {
-    let moves = (metres / (world::MAX_MOVE_SPEED * 0.05)).ceil() as u32;
+    let moves = (metres / (world::RUN_SPEED * 0.05)).ceil() as u32;
     for _ in 0..moves {
         c.send_move(*seq, dir);
         *seq += 1;
@@ -4063,8 +4065,8 @@ async fn cast_spell_rejected_when_caster_moved_during_cast() {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
-    // Walk forward for the full cast duration. MAX_MOVE_SPEED Ã— 1.1 s
-    // â‰ˆ 8 m on the server â€” well past the 1 m gate.
+    // Walk forward for the full cast duration. RUN_SPEED x 1.1 s
+    // = 5.5 m on the server, well past the 1 m gate.
     for seq in 1..=22u32 {
         a.send_move(seq, Vec3 { x: 0.0, y: 0.0, z: 1.0 });
         tick_one(&mut a.client, &mut a.transport);
@@ -4841,7 +4843,8 @@ async fn idle_enemy_position_fan_is_gated() {
 // Geometry shared by the tests below. STARTER_SPAWN is (0,0,0) = cell (0,0)
 // and CELL_SIZE is 120 m, so a character seeded at x=248 sits in cell (2,0):
 // two cells from spawn, outside its 3x3, invisible to anyone there. Walking
-// 15 m west (40 Moves at 7.5 m/s) crosses the x=240 line into cell (1,0),
+// west (40 Moves at 5 m/s is 10 m, plus the ~2.5 m the server keeps
+// integrating after the last one) crosses the x=240 line into cell (1,0),
 // which IS adjacent to (0,0). The server derives the AOI cell from the
 // position it loads at EnterWorld, so the DB seed is all it takes.
 
@@ -5022,8 +5025,8 @@ async fn enemy_crossing_a_cell_boundary_spawns_and_despawns_for_players() {
 
     // The runner spawns ~3 m from B, inside aggro, so it closes on B at once
     // and follows when B walks; 1 dmg swings are harmless. Chase leashes on
-    // distance to the TARGET (aggro x 2), and B at 7.5 m/s opens the gap by
-    // 4.5 m per wall-clock second of walking, so aggro is set to the 50 cap
+    // distance to the TARGET (aggro x 2), and B at 5 m/s opens the gap by
+    // 2 m per wall-clock second of walking, so aggro is set to the 50 cap
     // (100 m leash) to keep a slow test loop from leashing it home.
     b.send_dev_spawn("Border Runner", 1, 10.0, 1, 3.0, 50.0);
     let spawn_evt = b
@@ -5677,7 +5680,8 @@ async fn charm_converts_a_camp_mob_that_is_fighting_someone_else() {
     let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
     let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
     let mut seq: u32 = 1;
-    walk_pumping(&mut b, &mut a, &mut seq, dir, 48).await;
+    let moves = (18.0 / (world::RUN_SPEED * 0.05)).ceil() as u32;
+    walk_pumping(&mut b, &mut a, &mut seq, dir, moves).await;
     b.send_move(seq, Vec3 { x: 0.0, y: 0.0, z: 0.0 });
 
     let hit_evt = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_secs(35), |m| {
@@ -6449,8 +6453,8 @@ async fn a_dot_ends_when_its_caster_gates() {
 }
 
 /// Ledger rule: a mob that starts leashing home sheds its DoTs. A chasing
-/// dummy (aggro 10, 2 m/s) is tagged and the caster runs 40 m east at
-/// 7.5 m/s; past the 30 m leash the mob turns home and the DoT is gone,
+/// dummy (aggro 10, 2 m/s) is tagged and the caster runs 50 m west at
+/// 5 m/s; past the 30 m leash the mob turns home and the DoT is gone,
 /// so no tick lands in the eight seconds after the run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dot_ends_when_the_mob_leashes() {
@@ -6479,8 +6483,8 @@ async fn a_dot_ends_when_the_mob_leashes() {
     };
     a.send_cast_spell("Entangle", Some(dummy));
     a.pump_for(Duration::from_millis(300)).await;
-    // 50 m west at 7.5 m/s (the west side of the z = 0 line is clear of
-    // camps; east past x = 28 is the gnoll camp): about 7 s. The first tick,
+    // 50 m west at 5 m/s (the west side of the z = 0 line is clear of
+    // camps; east past x = 28 is the gnoll camp): about 10 s. The first tick,
     // at three seconds, lands on the way out and is queued; drain it before
     // watching, so only ticks after the leash count.
     walk_dir(&mut a, &mut seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 }, 50.0).await;
@@ -7391,5 +7395,81 @@ async fn summon_food_conjures_bread_that_scales_with_level() {
     a.send_disconnect();
     b.send_disconnect();
     a.pump_for(Duration::from_millis(200)).await;
+    b.pump_for(Duration::from_millis(200)).await;
+}
+
+/// Send a Move along `dir` every tick for `ticks` ticks and return the median
+/// distance the server moved this player between consecutive Positions of its
+/// own. The server integrates a fixed TICK_DT and fans a moving player's
+/// Position each tick, so one step is speed x 0.05 whatever the wall clock
+/// does; the median shrugs off a skipped or doubled tick.
+async fn median_step(c: &mut WorldClient, char_id: i64, seq: &mut u32, dir: Vec3, ticks: u32) -> f32 {
+    let mut xs: Vec<f32> = Vec::new();
+    for _ in 0..ticks {
+        c.send_move(*seq, dir);
+        *seq += 1;
+        tick_one(&mut c.client, &mut c.transport);
+        while let Some(bytes) = c.client.receive_message(CHANNEL_POSITION) {
+            if let Ok((ServerWorldMsg::Position { id, pos, .. }, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
+                if id == char_id as u64 {
+                    xs.push(pos.x);
+                }
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    let mut steps: Vec<f32> = xs
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .filter(|d| *d > 0.001)
+        .collect();
+    assert!(steps.len() >= 5, "too few moving Positions to measure ({})", steps.len());
+    steps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    steps[steps.len() / 2]
+}
+
+/// Client-authority audit fix 2: the server decides how fast a player moves.
+/// A full-length Move is a 5 m/s run (0.25 m a tick), where it used to be the
+/// 7.5 m/s ceiling the client scaled its own speed against, so a modified
+/// client ran 1.5x; a forged over-long direction is no faster; and a heavily
+/// overloaded character crawls at the encumbrance floor (a quarter speed),
+/// which the client alone used to decide.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_server_decides_run_speed() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "runner", "Runna", "Human", "Warrior").await;
+    let (b_session, b_char_id, _stale) =
+        provision_client(&h.auth_url, "hoarder", "Hoarda", "Human", "Warrior").await;
+    // Forty thousand copper weigh 800, far past any level 1 capacity.
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    sqlx::query("UPDATE characters SET copper = 40000 WHERE id = ?1")
+        .bind(b_char_id)
+        .execute(&pool)
+        .await
+        .expect("seed coins");
+    let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+    let mut seq = 1u32;
+    let east = Vec3 { x: 1.0, y: 0.0, z: 0.0 };
+    let run = median_step(&mut a, a_char_id, &mut seq, east, 30).await;
+    assert!((run - 0.25).abs() < 0.02, "a full-length Move runs 5 m/s, 0.25 m a tick: {run}");
+    let forged = Vec3 { x: 3.0, y: 0.0, z: 0.0 };
+    let forged_run = median_step(&mut a, a_char_id, &mut seq, forged, 30).await;
+    assert!((forged_run - 0.25).abs() < 0.02, "an over-long direction is no faster: {forged_run}");
+    a.send_disconnect();
+    a.pump_for(Duration::from_millis(200)).await;
+
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    b.pump_for(Duration::from_millis(300)).await;
+    let mut seq = 1u32;
+    let crawl = median_step(&mut b, b_char_id, &mut seq, east, 30).await;
+    let floor = 0.25 * projectdawn_server::world::encumbrance::MIN_SPEED_MULT;
+    assert!((crawl - floor).abs() < 0.01, "an overloaded character crawls at the floor: {crawl}");
+    b.send_disconnect();
     b.pump_for(Duration::from_millis(200)).await;
 }

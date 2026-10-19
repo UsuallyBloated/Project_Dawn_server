@@ -1029,19 +1029,25 @@ fn pet_owner_cid(entity: &Entity) -> Option<ClientId> {
 /// Who is told an entity is gone for real: the in-world players who could
 /// see its cell, plus a pet's owner wherever they are (`pet_owner_cid`).
 /// Track 18.1 — a swing at a mob trains the hand's weapon skill and defense,
-/// hit or miss, and tells the attacker privately when a roll lands. The skill
-/// key comes from `combat::weapon_skill_key` (the item's skill, or
-/// hand_to_hand).
+/// hit or miss, and an off-hand swing trains dual wield too (as the client
+/// always did); tells the attacker privately when a roll lands. The skill key
+/// comes from `combat::weapon_skill_key` (the item's skill, or hand_to_hand).
 fn train_swing_skills(
     server: &mut RenetServer,
     connections: &mut HashMap<ClientId, PerConnection>,
     attacker_cid: ClientId,
     weapon_skill_key: &str,
+    is_offhand: bool,
 ) {
     let Some(att) = connections.get_mut(&attacker_cid) else {
         return;
     };
-    for key in [weapon_skill_key, "defense"] {
+    let keys: &[&str] = if is_offhand {
+        &[weapon_skill_key, "defense", "dual_wield"]
+    } else {
+        &[weapon_skill_key, "defense"]
+    };
+    for &key in keys {
         if let Some(new_score) = skills::try_advance(att, skills::Skill::Weapon, key) {
             handlers::send_skill_progress_update(
                 server,
@@ -3543,12 +3549,30 @@ pub async fn run(
                 // an off-hand Attack with an EMPTY slot 1 is a forged free second
                 // damage stream (it would otherwise resolve to a 1-4 fist swing x the
                 // off-hand mult). A bare hand is not an off-hand weapon — reject it.
-                if intent.is_offhand && server_weapon_path.is_empty() {
-                    tracing::info!(
-                        attacker = intent.attacker,
-                        "Attack rejected — off-hand swing with no off-hand weapon equipped"
-                    );
-                    continue;
+                // Dual wield is earned (user, 2026-10-19): no off-hand swing
+                // before the class's level (skills::dual_wield_level), and
+                // never for a class without it. A Monk fights with both
+                // fists, so with BOTH hands empty a Monk's off hand punches;
+                // everyone else still needs a real off-hand weapon.
+                if intent.is_offhand {
+                    if !skills::can_dual_wield(&attacker_conn.class, attacker_conn.level) {
+                        tracing::info!(
+                            attacker = intent.attacker,
+                            class = %attacker_conn.class,
+                            level = attacker_conn.level,
+                            "Attack rejected — off-hand swing before the class can dual wield"
+                        );
+                        continue;
+                    }
+                    let monk_fists = attacker_conn.class == "Monk"
+                        && attacker_conn.equipped_weapon_path(false).is_empty();
+                    if server_weapon_path.is_empty() && !monk_fists {
+                        tracing::info!(
+                            attacker = intent.attacker,
+                            "Attack rejected — off-hand swing with no off-hand weapon equipped"
+                        );
+                        continue;
+                    }
                 }
                 // Phase 1 exploit gate — melee swing-rate limit. No swing timer
                 // existed, so a modified client could spam Attack for an
@@ -4008,6 +4032,7 @@ pub async fn run(
                         &mut connections,
                         attacker_cid,
                         &combat::weapon_skill_key(&server_weapon_path),
+                        intent.is_offhand,
                     );
                     continue;
                 }
@@ -4034,6 +4059,7 @@ pub async fn run(
                     &mut connections,
                     attacker_cid,
                     &combat::weapon_skill_key(&server_weapon_path),
+                    intent.is_offhand,
                 );
                 // PD_W0025 — server-authoritative weapon proc. Roll the equipped
                 // weapon's proc_chance on this landed swing; on a proc, fold the

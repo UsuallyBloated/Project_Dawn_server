@@ -57,7 +57,7 @@ const WEAPON_CAPS: CapTable<'static> = &[
     ("Shadow Knight", &[("1h_slashing", 225), ("2h_slashing", 225), ("1h_blunt", 225), ("2h_blunt", 225), ("piercing", 150), ("hand_to_hand",  75), ("archery",  50), ("defense", 225), ("dodge", 175), ("dual_wield", 150)]),
     ("Bard",          &[("1h_slashing", 200), ("2h_slashing", 150), ("1h_blunt", 175), ("2h_blunt", 150), ("piercing", 200), ("hand_to_hand", 100), ("archery",  75), ("defense", 175), ("dodge", 200), ("dual_wield", 175)]),
     ("Ranger",        &[("1h_slashing", 225), ("2h_slashing", 225), ("1h_blunt", 175), ("2h_blunt", 175), ("piercing", 225), ("hand_to_hand", 100), ("archery", 250), ("defense", 200), ("dodge", 225), ("dual_wield", 225)]),
-    ("Monk",          &[("1h_slashing",  50), ("2h_slashing",   0), ("1h_blunt", 200), ("2h_blunt", 100), ("piercing",   0), ("hand_to_hand", 250), ("archery",   0), ("defense", 250), ("dodge", 250), ("dual_wield",   0)]),
+    ("Monk",          &[("1h_slashing",  50), ("2h_slashing",   0), ("1h_blunt", 200), ("2h_blunt", 100), ("piercing",   0), ("hand_to_hand", 250), ("archery",   0), ("defense", 250), ("dodge", 250), ("dual_wield", 250)]),
     ("Witch Hunter",  &[("1h_slashing", 200), ("2h_slashing", 150), ("1h_blunt", 100), ("2h_blunt",   0), ("piercing", 225), ("hand_to_hand", 125), ("archery", 150), ("defense", 200), ("dodge", 200), ("dual_wield", 200)]),
     ("Beast Master",  &[("1h_slashing", 150), ("2h_slashing", 100), ("1h_blunt", 150), ("2h_blunt", 100), ("piercing", 125), ("hand_to_hand", 200), ("archery", 100), ("defense", 200), ("dodge", 175), ("dual_wield", 150)]),
 ];
@@ -143,6 +143,26 @@ fn max_cap(skill: Skill, player_class: &str, key: &str) -> i32 {
         .find(|(k, _)| *k == key)
         .map(|(_, v)| *v)
         .unwrap_or(0)
+}
+
+/// The level at which a class may first swing its off hand (user,
+/// 2026-10-19: Rangers earliest, the cap table's order after that; Monks are
+/// born with it, as in classic EQ). `None`: the class never dual wields.
+/// Kept in lockstep by hand with `DUAL_WIELD_LEVELS` in the client's
+/// `data/weapon_skill_definitions.gd`.
+pub fn dual_wield_level(player_class: &str) -> Option<i32> {
+    match player_class {
+        "Monk" => Some(1),
+        "Ranger" | "Rogue" => Some(13),
+        "Warrior" | "Witch Hunter" | "Bard" => Some(15),
+        "Shadow Knight" | "Beast Master" => Some(20),
+        _ => None,
+    }
+}
+
+/// Whether a character may swing its off hand now.
+pub fn can_dual_wield(player_class: &str, level: i32) -> bool {
+    dual_wield_level(player_class).is_some_and(|l| level >= l)
 }
 
 /// Cap for a (class, level, skill_key). Mirrors the GDScript
@@ -461,4 +481,30 @@ mod tests {
         // Unknown falls back to evocation
         assert_eq!(discipline_for_spell("Bogus Made-Up Spell"), "evocation");
     }
+
+    #[test]
+    fn dual_wield_is_earned_by_class_and_level() {
+        assert_eq!(dual_wield_level("Monk"), Some(1));
+        assert_eq!(dual_wield_level("Ranger"), Some(13));
+        assert_eq!(dual_wield_level("Rogue"), Some(13));
+        assert_eq!(dual_wield_level("Warrior"), Some(15));
+        assert_eq!(dual_wield_level("Witch Hunter"), Some(15));
+        assert_eq!(dual_wield_level("Bard"), Some(15));
+        assert_eq!(dual_wield_level("Shadow Knight"), Some(20));
+        assert_eq!(dual_wield_level("Beast Master"), Some(20));
+        assert_eq!(dual_wield_level("Paladin"), None);
+        assert_eq!(dual_wield_level("Wizard"), None);
+        assert!(!can_dual_wield("Warrior", 14));
+        assert!(can_dual_wield("Warrior", 15));
+        assert!(can_dual_wield("Monk", 1));
+        assert!(!can_dual_wield("Cleric", 60));
+        // Every class that dual wields can train the skill, and no other can.
+        for class in ["Monk", "Ranger", "Rogue", "Warrior", "Witch Hunter", "Bard", "Shadow Knight", "Beast Master"] {
+            assert!(cap_for(Skill::Weapon, class, 60, "dual_wield") > 0, "{class} trains dual wield");
+        }
+        for class in ["Paladin", "Wizard", "Cleric", "Druid"] {
+            assert_eq!(cap_for(Skill::Weapon, class, 60, "dual_wield"), 0, "{class} does not");
+        }
+    }
 }
+

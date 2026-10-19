@@ -8515,3 +8515,71 @@ async fn the_server_rolls_the_melee_miss() {
     assert_eq!(misses + hits, 8, "every swing was answered: {misses} misses, {hits} hits");
     assert!(misses >= 1, "the server rolled at least one miss ({hits} hits)");
 }
+
+/// Send one Attack from `c` and report whether the server answered it with a
+/// Hit or a Miss from `attacker` within 1.2 s (a refused swing gets nothing).
+async fn swing_answered(c: &mut WorldClient, attacker: i64, target: u64, offhand: bool) -> bool {
+    c.send_attack(target, "", offhand, DamageType::Physical);
+    let answer = c
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(1_200), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker: a, target: t, .. }
+                | ServerWorldMsg::Miss { attacker: a, target: t }
+                if *a == attacker as u64 && *t == target)
+        })
+        .await;
+    answer.is_some()
+}
+
+/// Dual wield is earned (user, 2026-10-19): Monks are born with it (bare
+/// fists in both hands), Warriors get it at 15. A Warrior 1 with a sword in
+/// each hand: the main hand is answered, the off hand is not; leveled past 15
+/// (the GM XP tool), the off hand is answered. A bare-handed Monk 1's off hand
+/// is answered. On the previous code any class's off hand swung from level 1,
+/// and a Monk's empty off hand was refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dual_wield_is_earned_by_class_and_level() {
+    const SWORD: &str = "res://data/loot/items/iron_short_sword.tres";
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "dwwarrior", "Duala", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "dwmonk", "Dualb", "Human", "Monk").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "dwwarrior", true).await.expect("set is_gm");
+    give_char_item(&h.db_url, a_char_id, "equip", 0, SWORD, 1).await;
+    give_char_item(&h.db_url, a_char_id, "equip", 1, SWORD, 1).await;
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    a.send_dev_spawn("Dual Dummy", 1, 100_000.0, 0, 0.0, 0.0);
+    let spawn = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Dual Dummy")
+    })
+    .await
+    .expect("the dummy spawns");
+    let (dummy, dummy_pos) = match spawn {
+        ServerWorldMsg::EnemySpawn { id, pos, .. } => (id, pos),
+        _ => unreachable!(),
+    };
+    let origin = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    let (mut sa, mut sb) = (1u32, 1u32);
+    walk_until_within(&mut a, &mut sa, a_char_id, origin, dummy_pos, 1.0).await;
+    walk_until_within(&mut b, &mut sb, b_char_id, origin, dummy_pos, 1.0).await;
+    b.send_heartbeat();
+
+    assert!(swing_answered(&mut a, a_char_id, dummy, false).await, "the Warrior's main hand swings");
+    assert!(!swing_answered(&mut a, a_char_id, dummy, true).await, "a Warrior 1's off hand does not");
+    assert!(swing_answered(&mut b, b_char_id, dummy, true).await, "a bare-handed Monk 1's off hand punches");
+
+    a.send_grant_quest_xp(20_000_000);
+    let leveled = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::LevelUp { new_level, .. } if *new_level >= 15)
+        })
+        .await;
+    assert!(leveled.is_some(), "the GM XP grant takes the Warrior past 15");
+    a.pump_for(Duration::from_millis(1_100)).await;
+    assert!(swing_answered(&mut a, a_char_id, dummy, true).await, "past 15, the Warrior's off hand swings");
+}

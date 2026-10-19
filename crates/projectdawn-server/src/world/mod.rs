@@ -39,6 +39,7 @@ mod safe_areas;
 // `pub` so the persistence layer (`crate::db::load_character`) can read MAX_LEVEL
 // to clamp a stored level into the cap on load.
 pub mod skills;
+mod spell_gems;
 mod spell_power;
 mod spawn_points;
 mod spells;
@@ -255,6 +256,17 @@ fn connection_config() -> ConnectionConfig {
 /// Bind the world UDP socket. Separated from `serve_with_socket` so tests
 /// can grab an ephemeral port and read the bound address before starting
 /// the tick task.
+/// Every spell a class can ever cast (any level), by name. For tools and
+/// tests that need a class's whole spell list.
+pub fn class_spell_names(class: &str) -> Vec<String> {
+    let mut names: Vec<String> = spells::all()
+        .filter(|s| s.classes.iter().any(|c| c == class))
+        .map(|s| s.name.clone())
+        .collect();
+    names.sort();
+    names
+}
+
 pub fn bind_world_socket(world_bind: &str) -> std::io::Result<UdpSocket> {
     let socket = UdpSocket::bind(world_bind)?;
     socket.set_nonblocking(true)?;

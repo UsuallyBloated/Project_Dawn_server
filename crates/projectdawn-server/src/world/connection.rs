@@ -314,6 +314,19 @@ pub struct PerConnection {
     /// Track 6: sitting state. Flipped by the `Sit` / `Stand` client
     /// intents; multiplies regen rate per `regen::SITTING_HP_MULT` etc.
     pub is_sitting: bool,
+    /// When the character last sat down. A memorize must stay seated from
+    /// its start, so standing and sitting again in between voids it.
+    pub sat_at: Option<Instant>,
+
+    /// The memorized spell bar (client-authority audit fix 5): gem to spell
+    /// name. Loaded from `character_spell_gems` at entry, changed only by a
+    /// memorize, a forget or the one-time seed; a cast of a spell not in it is
+    /// refused.
+    pub spell_gems: std::collections::BTreeMap<i32, String>,
+    /// The server holds this character's bar (after a memorize or the seed).
+    pub spell_gems_seeded: bool,
+    /// A memorize in progress: (gem, spell name, when it began).
+    pub memorize_pending: Option<(i32, String, Instant)>,
 
     /// Track 6 sub-task 3 — sum of armor_class across equipped armor.
     /// Updated by `EquipUpdate` intents; consumed by the damage formula
@@ -623,6 +636,10 @@ impl PerConnection {
             charisma: spawn.charisma,
             constitution: spawn.constitution,
             is_sitting: false,
+            sat_at: None,
+            spell_gems: std::collections::BTreeMap::new(),
+            spell_gems_seeded: false,
+            memorize_pending: None,
             equipped_armor: 0,
             pvp_override_on: false,
             is_dev: dev_cmds_enabled(),

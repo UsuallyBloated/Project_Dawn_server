@@ -1622,6 +1622,7 @@ vendor_price = 0
 is_food = true
 food_duration = 2880.0
 weight = 0.1
+no_rent = true
 
 [[item]]
 path = "res://data/loot/items/conjured_water.tres"
@@ -1632,3 +1633,4 @@ vendor_price = 0
 is_drink = true
 food_duration = 2160.0
 weight = 0.1
+no_rent = true

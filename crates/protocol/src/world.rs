@@ -140,7 +140,9 @@ use serde::{Deserialize, Serialize};
 /// players who can see the jumper, so a jump no longer reads as a slide.
 /// It also appends the dev-gated `DevDespawnEnemies` after `TradeCancel`, so
 /// the Test Panel's "Despawn All Enemies" removes the mobs on the server
-/// instead of only hiding them on one client.
+/// instead of only hiding them on one client; then the server-held spell bar
+/// (`MemorizeStart` / `MemorizeFinish` / `ForgetSpell` / `SeedSpellGems` after
+/// it, and `SpellGems` after `PlayerJumped`).
 pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3238; // "PD_W0028"
 
 pub type EntityId = u64;
@@ -990,6 +992,29 @@ pub enum ClientWorldMsg {
     /// free only the client's own nodes while the server kept the mobs. Pays
     /// nothing, drops nothing; camp mobs respawn on their camp's timer.
     DevDespawnEnemies,
+
+    // ── The server-held spell bar (client-authority audit fix 5) ──
+    /// Begin memorizing `spell_name` into `gem` (0-based). The server checks
+    /// the caster sits, the gem is unlocked at their level and the spell is
+    /// theirs to cast, and remembers when it began.
+    MemorizeStart {
+        gem: u8,
+        spell_name: String,
+    },
+    /// The memorize bar ran out on the client. The server fills the gem only
+    /// if the memorize it began has run its time with the caster seated
+    /// throughout, charging half the spell's mana; it answers with SpellGems.
+    MemorizeFinish,
+    /// Empty a gem. Free.
+    ForgetSpell {
+        gem: u8,
+    },
+    /// The bar this character already had on the player's machine (index =
+    /// gem, "" = empty), accepted once, for a character the server has never
+    /// held a bar for; every spell is checked as a memorize would check it.
+    SeedSpellGems {
+        gems: Vec<String>,
+    },
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────
@@ -1582,6 +1607,15 @@ pub enum ServerWorldMsg {
     /// flag can make a player look silly and nothing more.
     PlayerJumped {
         id: EntityId,
+    },
+    /// The character's memorized spell bar as the server holds it (index =
+    /// gem, "" = empty): on entering the world and after every change. The
+    /// client's bar adopts it. `seeded` false means the server has never
+    /// held a bar for this character, so the client may offer its own once
+    /// (`SeedSpellGems`).
+    SpellGems {
+        gems: Vec<String>,
+        seeded: bool,
     },
 }
 

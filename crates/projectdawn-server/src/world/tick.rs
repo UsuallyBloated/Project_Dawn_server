@@ -1028,6 +1028,14 @@ fn pet_owner_cid(entity: &Entity) -> Option<ClientId> {
 
 /// Who is told an entity is gone for real: the in-world players who could
 /// see its cell, plus a pet's owner wherever they are (`pet_owner_cid`).
+/// Wall-clock unix seconds (the logout stamp for NO RENT items).
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Track 18.1 — a swing at a mob trains the hand's weapon skill and defense,
 /// hit or miss, and an off-hand swing trains dual wield too (as the client
 /// always did); tells the attacker privately when a roll lands. The skill key
@@ -1427,6 +1435,13 @@ async fn reap_connection(
                 }
             }
         }
+        // The moment the character left, for NO RENT items (purged at the
+        // next login once thirty minutes have passed). Every departure comes
+        // through here: a clean logout, or a linkdead body at the end of its
+        // linger. A crash writes nothing, which only ever spares the items.
+        if let Err(e) = db::set_logged_out_at(pool, conn.char_id, unix_now_secs()).await {
+            tracing::warn!(char_id = conn.char_id, error = %e, "set_logged_out_at failed");
+        }
         // Resources (hp / mp / stamina / xp / level) — a kill's XP or a de-level
         // right before logout shouldn't roll back either.
         if conn.is_dirty_for_resource_persist() {
@@ -1786,6 +1801,24 @@ pub async fn run(
                                         Vec::new()
                                     }
                                 };
+                            // The server-held spell bar and the last logout
+                            // time (migration 0015). Same non-fatal stance:
+                            // a failed read leaves an empty, unseeded bar (the
+                            // client may then seed it) and no NO RENT purge.
+                            let (gem_rows, gems_seeded) = match db::load_spell_gems(&pool, char_id).await {
+                                Ok(g) => g,
+                                Err(e) => {
+                                    tracing::warn!(char_id, error = %e, "load_spell_gems failed; empty bar");
+                                    (Vec::new(), false)
+                                }
+                            };
+                            let logged_out_at = match db::load_logged_out_at(&pool, char_id).await {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    tracing::warn!(char_id, error = %e, "load_logged_out_at failed; no NO RENT purge");
+                                    None
+                                }
+                            };
                             connections.insert(
                                 client_id,
                                 PerConnection::from_spawn(spawn, now),
@@ -1831,6 +1864,24 @@ pub async fn run(
                                     };
                                     if let Some(m) = map {
                                         m.insert(row.key.clone(), row.score);
+                                    }
+                                }
+                                conn.spell_gems = gem_rows.into_iter().collect();
+                                conn.spell_gems_seeded = gems_seeded;
+                                // NO RENT: out for thirty minutes or more, its
+                                // NO RENT items are gone (the bank's too, so a
+                                // vault is no way to keep them). Marked dirty
+                                // so the next checkpoint writes the loss.
+                                let away = logged_out_at.map(|t| unix_now_secs() - t);
+                                if away.is_some_and(|a| a >= items::NO_RENT_AFTER_SECS) {
+                                    let gone = conn.inventory.purge_no_rent()
+                                        + conn.bank_items.purge_no_rent()
+                                        + conn.account_bank_items.purge_no_rent();
+                                    if gone > 0 {
+                                        conn.inventory_dirty = true;
+                                        conn.bank_items_dirty = true;
+                                        conn.account_bank_items_dirty = true;
+                                        tracing::info!(char_id, gone, away_secs = away, "NO RENT items purged at login");
                                     }
                                 }
                             }
@@ -2036,6 +2087,9 @@ pub async fn run(
         // The Test Panel's "Despawn All Enemies": the GM and their position,
         // applied with the dev spawns.
         let mut dev_despawn_intents: Vec<(ClientId, Vec3f)> = Vec::new();
+        // Spell bar writes (a memorize, a forget, the one-time seed), applied
+        // after dispatch where the pool is.
+        let mut spell_gem_saves: Vec<(i64, Vec<(i32, String)>, bool)> = Vec::new();
         // PD_W0023 — quest turn-ins (responder, quest_id), applied after dispatch
         // where the DB pool is in scope (the completion persists before the award).
         let mut complete_quest_intents: Vec<(u64, String)> = Vec::new();
@@ -2541,6 +2595,9 @@ pub async fn run(
                         Outcome::DevDespawnEnemiesIntent { requester, pos } => {
                             dev_despawn_intents.push((requester, pos));
                         }
+                        Outcome::SpellGemsChanged { char_id, gems, seeded } => {
+                            spell_gem_saves.push((char_id, gems, seeded));
+                        }
                         Outcome::CompleteQuestIntent { responder, quest_id } => {
                             complete_quest_intents.push((responder, quest_id));
                         }
@@ -2837,6 +2894,9 @@ pub async fn run(
             // first advance fires.
             if let Some(new_conn) = connections.get(new_id) {
                 handlers::send_skill_progress_snapshot(&mut server, *new_id, new_conn);
+                // The server-held spell bar (audit fix 5): the client's bar
+                // adopts it, or seeds it once if the server holds none yet.
+                handlers::send_spell_gems(&mut server, *new_id, new_conn);
             }
             // PD_W0024 — seed the joiner's quest journal: every active quest
             // with its per-objective progress, plus the full completed set
@@ -4360,6 +4420,21 @@ pub async fn run(
                         refuse_cast(&mut server, &connections, caster_cid, intent.caster, reason);
                         continue;
                     }
+                }
+                // The memorized bar (client-authority audit fix 5): a spell in
+                // no gem is refused before anything is spent. Until the server
+                // held the bar, only the client knew what was memorized.
+                let memorized = connections
+                    .get(&caster_cid)
+                    .is_some_and(|c| super::spell_gems::is_memorized(&c.spell_gems, &spell.name));
+                if !memorized {
+                    tracing::info!(
+                        caster = intent.caster,
+                        spell = %spell.name,
+                        "CastSpell rejected — spell not memorized"
+                    );
+                    refuse_cast(&mut server, &connections, caster_cid, intent.caster, "You have not memorized that spell.");
+                    continue;
                 }
                 // Track 10 — cast-time gate. Instant casts (cast_time
                 // == 0) skip; for timed casts we require a matching
@@ -9328,6 +9403,13 @@ pub async fn run(
         //      an ungraceful shutdown (there is no SIGTERM handler) would respawn
         //      the player somewhere they explicitly chose not to be — the exact
         //      failure this feature exists to prevent.
+        // The spell bar, written as soon as it changes (a memorize is
+        // deliberate and rare; the 60 s checkpoint would lose one to a crash).
+        for (char_id, gems, seeded) in spell_gem_saves.drain(..) {
+            if let Err(e) = db::save_spell_gems(&pool, char_id, &gems, seeded).await {
+                tracing::warn!(char_id, error = %e, "save_spell_gems failed; the bar is live in memory but not persisted");
+            }
+        }
         for (char_id, zone, pos) in bind_intents.drain(..) {
             if let Err(e) = db::set_bind_point(&pool, char_id, zone.as_deref(), pos).await {
                 tracing::warn!(char_id, error = %e, "set_bind_point failed; bind is live in memory but not persisted");

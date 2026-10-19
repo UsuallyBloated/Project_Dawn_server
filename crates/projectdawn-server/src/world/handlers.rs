@@ -401,6 +401,13 @@ pub enum Outcome {
         requester: ClientId,
         pos: super::connection::Vec3f,
     },
+    /// The spell bar changed (a memorize, a forget or the one-time seed): the
+    /// tick loop writes it to `character_spell_gems`, where the pool is.
+    SpellGemsChanged {
+        char_id: i64,
+        gems: Vec<(i32, String)>,
+        seeded: bool,
+    },
     /// PD_W0023 — server-authoritative quest turn-in. The tick loop validates
     /// against the server quest table + the character's completed set +
     /// (PD_W0024) full objective progress, persists the completion FIRST,
@@ -1092,6 +1099,100 @@ pub fn handle_message(
             Outcome::DevDespawnEnemiesIntent { requester: client_id, pos }
         }
 
+        // ── The server-held spell bar (client-authority audit fix 5) ──
+        // The rules are spell_gems.rs; these arms only apply them. A refusal
+        // answers with a line and the true bar, so a client that drifted is
+        // put right.
+        ClientWorldMsg::MemorizeStart { gem, spell_name } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            conn.memorize_pending = None;
+            if !conn.is_sitting {
+                send_refusal(server, client_id, "You must be sitting to memorize spells.");
+                return Outcome::Continue;
+            }
+            match super::spell_gems::check_gem(conn, gem as i32, &spell_name) {
+                Ok(_) => conn.memorize_pending = Some((gem as i32, spell_name, now)),
+                Err(line) => {
+                    send_refusal(server, client_id, line);
+                    send_spell_gems(server, client_id, conn);
+                }
+            }
+            Outcome::Continue
+        }
+
+        ClientWorldMsg::MemorizeFinish => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            let Some((gem, spell_name, began)) = conn.memorize_pending.take() else {
+                return Outcome::Continue;
+            };
+            // Seated the whole way: sitting now, and not stood up and sat
+            // down again since the memorize began.
+            let seated_throughout = conn.is_sitting && conn.sat_at.is_some_and(|t| t <= began);
+            let ran = now.duration_since(began).as_secs_f32();
+            let refusal = if !seated_throughout {
+                Some("You stop memorizing.")
+            } else if ran < super::spell_gems::MEMORIZE_SECS - super::spell_gems::MEMORIZE_GRACE_SECS {
+                Some("You have not finished memorizing.")
+            } else {
+                None
+            };
+            let spell = match (refusal, super::spell_gems::check_gem(conn, gem, &spell_name)) {
+                (Some(line), _) | (None, Err(line)) => {
+                    tracing::info!(char_id = conn.char_id, gem, spell = %spell_name, ran, line, "memorize refused");
+                    send_refusal(server, client_id, line);
+                    send_spell_gems(server, client_id, conn);
+                    return Outcome::Continue;
+                }
+                (None, Ok(spell)) => spell,
+            };
+            let cost = spell.mana_cost * super::spell_gems::MEMORIZE_COST_FACTOR;
+            if conn.mp < cost {
+                send_refusal(server, client_id, "You do not have enough mana to memorize that.");
+                send_spell_gems(server, client_id, conn);
+                return Outcome::Continue;
+            }
+            conn.mp -= cost;
+            super::regen::mark_dirty(conn);
+            fan_out_mana_update(server, &[client_id], conn.char_id as u64, conn.mp, conn.max_mp);
+            conn.spell_gems.insert(gem, spell_name.clone());
+            conn.spell_gems_seeded = true;
+            tracing::info!(char_id = conn.char_id, gem, spell = %spell_name, cost, "spell memorized");
+            send_spell_gems(server, client_id, conn);
+            spell_gems_changed(conn)
+        }
+
+        ClientWorldMsg::ForgetSpell { gem } => {
+            if !conn.in_world || gem as i32 >= super::spell_gems::GEM_COUNT {
+                return Outcome::Continue;
+            }
+            conn.spell_gems.remove(&(gem as i32));
+            conn.spell_gems_seeded = true;
+            send_spell_gems(server, client_id, conn);
+            spell_gems_changed(conn)
+        }
+
+        ClientWorldMsg::SeedSpellGems { gems } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            // Once only, and only for a character the server holds no bar
+            // for: a second seed would be a free memorize of anything.
+            if conn.spell_gems_seeded {
+                send_spell_gems(server, client_id, conn);
+                return Outcome::Continue;
+            }
+            let offered = gems.len();
+            let taken = super::spell_gems::seed(conn, &gems);
+            conn.spell_gems_seeded = true;
+            tracing::info!(char_id = conn.char_id, offered, taken, "spell bar seeded from the client's copy");
+            send_spell_gems(server, client_id, conn);
+            spell_gems_changed(conn)
+        }
+
         ClientWorldMsg::DamageSelf { amount } => {
             if !conn.in_world
                 || conn.hp <= 0.0
@@ -1311,6 +1412,9 @@ pub fn handle_message(
             // dropped on the wire.
             if !conn.ready {
                 return Outcome::Continue;
+            }
+            if !conn.is_sitting {
+                conn.sat_at = Some(now);
             }
             conn.is_sitting = true;
             Outcome::Continue
@@ -2794,6 +2898,26 @@ pub fn send_bank_rejected(server: &mut RenetServer, client_id: ClientId, reason:
 /// Track 18.1 — fan a per-skill advance event privately to the
 /// owning client. Called from the attack / cast / armor-hit paths
 /// when `skills::try_advance` returns Some.
+/// The server-held spell bar, to its owner only.
+pub fn send_spell_gems(server: &mut RenetServer, client_id: ClientId, conn: &PerConnection) {
+    let msg = ServerWorldMsg::SpellGems {
+        gems: super::spell_gems::snapshot(&conn.spell_gems),
+        seeded: conn.spell_gems_seeded,
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(client_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// The outcome that has the tick loop write the bar as it now stands.
+fn spell_gems_changed(conn: &PerConnection) -> Outcome {
+    Outcome::SpellGemsChanged {
+        char_id: conn.char_id,
+        gems: conn.spell_gems.iter().map(|(g, s)| (*g, s.clone())).collect(),
+        seeded: conn.spell_gems_seeded,
+    }
+}
+
 pub fn send_skill_progress_update(
     server: &mut RenetServer,
     client_id: ClientId,

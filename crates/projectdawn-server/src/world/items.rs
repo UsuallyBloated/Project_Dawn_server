@@ -153,6 +153,22 @@ pub struct Item {
     // lockstep by the client's tools/check_item_lockstep.gd.
     #[serde(default)]
     pub weight: f32,
+
+    // NO RENT (EverQuest's TEMPORARY tag, user 2026-10-19): destroyed once its
+    // owner has been logged out for `NO_RENT_AFTER_SECS` (purged at the next
+    // login). Conjured food and water.
+    #[serde(default)]
+    pub no_rent: bool,
+}
+
+/// How long a character may be logged out before its NO RENT items go:
+/// thirty minutes, EverQuest's rule (Allakhazam's item-tag reference), so a
+/// quick relog or a crash keeps them.
+pub const NO_RENT_AFTER_SECS: i64 = 30 * 60;
+
+/// Whether the item at `path` is NO RENT. An unknown path is not.
+pub fn is_no_rent(path: &str) -> bool {
+    lookup(path).is_some_and(|i| i.no_rent)
 }
 
 fn items() -> &'static HashMap<String, Item> {

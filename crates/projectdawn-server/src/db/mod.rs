@@ -1628,6 +1628,78 @@ pub struct SkillRow {
     pub score: i32,
 }
 
+/// The server-held spell bar (client-authority audit fix 5, migration 0015):
+/// the character's filled gems as (gem, spell name), and whether the server has
+/// ever held a bar for it (the one-time seed from the player's own copy).
+pub async fn load_spell_gems(
+    pool: &SqlitePool,
+    char_id: i64,
+) -> AuthResult<(Vec<(i32, String)>, bool)> {
+    let rows: Vec<(i32, String)> = sqlx::query_as(
+        "SELECT gem, spell_name FROM character_spell_gems WHERE char_id = ?1 ORDER BY gem",
+    )
+    .bind(char_id)
+    .fetch_all(pool)
+    .await?;
+    let seeded: i64 = sqlx::query_scalar("SELECT spell_gems_seeded FROM characters WHERE id = ?1")
+        .bind(char_id)
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or(0);
+    Ok((rows, seeded != 0))
+}
+
+/// Replace the character's spell bar and record that the server now holds it.
+/// One transaction: the bar is never half written.
+pub async fn save_spell_gems(
+    pool: &SqlitePool,
+    char_id: i64,
+    gems: &[(i32, String)],
+    seeded: bool,
+) -> AuthResult<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM character_spell_gems WHERE char_id = ?1")
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await?;
+    for (gem, name) in gems {
+        sqlx::query("INSERT INTO character_spell_gems (char_id, gem, spell_name) VALUES (?1, ?2, ?3)")
+            .bind(char_id)
+            .bind(gem)
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("UPDATE characters SET spell_gems_seeded = ?1 WHERE id = ?2")
+        .bind(seeded as i64)
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// When the character last left the world, unix seconds (NO RENT items,
+/// migration 0015); `None` until it first does.
+pub async fn load_logged_out_at(pool: &SqlitePool, char_id: i64) -> AuthResult<Option<i64>> {
+    let at: Option<i64> = sqlx::query_scalar("SELECT logged_out_at FROM characters WHERE id = ?1")
+        .bind(char_id)
+        .fetch_optional(pool)
+        .await?
+        .flatten();
+    Ok(at)
+}
+
+/// Stamp the moment a character leaves the world.
+pub async fn set_logged_out_at(pool: &SqlitePool, char_id: i64, at: i64) -> AuthResult<()> {
+    sqlx::query("UPDATE characters SET logged_out_at = ?1 WHERE id = ?2")
+        .bind(at)
+        .bind(char_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn load_skills(
     pool: &SqlitePool,
     char_id: i64,

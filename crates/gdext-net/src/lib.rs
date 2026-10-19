@@ -353,6 +353,12 @@ impl NetClient {
     #[signal]
     fn player_jumped(id: i64);
 
+    /// The memorized spell bar as the server holds it (index = gem, "" =
+    /// empty); `seeded` false means the server holds none yet and the client
+    /// may offer its own once. Client-authority audit fix 5.
+    #[signal]
+    fn spell_gems(gems: PackedStringArray, seeded: bool);
+
     /// Track 5 sub-task 4 — private confirmation that the local
     /// player's LootItem / LootAll intent landed and the server has
     /// transferred `count` of `item_path` into our inventory. The
@@ -933,6 +939,41 @@ impl NetClient {
     #[func]
     fn send_dev_despawn_enemies(&mut self) -> bool {
         self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::DevDespawnEnemies)
+    }
+
+    /// The server-held spell bar (client-authority audit fix 5): begin
+    /// memorizing `spell_name` into `gem` (0-based).
+    #[func]
+    fn send_memorize_start(&mut self, gem: i64, spell_name: GString) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::MemorizeStart {
+                gem: gem.clamp(0, u8::MAX as i64) as u8,
+                spell_name: spell_name.to_string(),
+            },
+        )
+    }
+
+    /// The memorize bar ran out here; the server decides whether it took.
+    #[func]
+    fn send_memorize_finish(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::MemorizeFinish)
+    }
+
+    /// Empty a gem.
+    #[func]
+    fn send_forget_spell(&mut self, gem: i64) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::ForgetSpell { gem: gem.clamp(0, u8::MAX as i64) as u8 },
+        )
+    }
+
+    /// Offer this machine's bar once, for a character the server holds none for.
+    #[func]
+    fn send_seed_spell_gems(&mut self, gems: PackedStringArray) -> bool {
+        let gems: Vec<String> = gems.to_vec().iter().map(|g| g.to_string()).collect();
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::SeedSpellGems { gems })
     }
 
     /// Track 6 — owning client respawned (local death-timer elapsed).
@@ -1707,6 +1748,10 @@ enum Incoming {
     PlayerJumped {
         id: i64,
     },
+    SpellGems {
+        gems: Vec<String>,
+        seeded: bool,
+    },
     LootGranted {
         item_path: String,
         count: u32,
@@ -2360,6 +2405,14 @@ impl NetClient {
                 Incoming::PlayerJumped { id } => {
                     self.base_mut().emit_signal("player_jumped", &[id.to_variant()]);
                 }
+                Incoming::SpellGems { gems, seeded } => {
+                    let mut names = PackedStringArray::new();
+                    for g in &gems {
+                        names.push(&GString::from(g.as_str()));
+                    }
+                    self.base_mut()
+                        .emit_signal("spell_gems", &[names.to_variant(), seeded.to_variant()]);
+                }
                 Incoming::HungerUpdate { hunger_secs, thirst_secs, cap_secs, drain_per_sec } => {
                     self.base_mut().emit_signal(
                         "hunger_update",
@@ -2895,6 +2948,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             Incoming::HungerUpdate { hunger_secs, thirst_secs, cap_secs, drain_per_sec }
         }
         ServerWorldMsg::PlayerJumped { id } => Incoming::PlayerJumped { id: id as i64 },
+        ServerWorldMsg::SpellGems { gems, seeded } => Incoming::SpellGems { gems, seeded },
         ServerWorldMsg::LootGranted { item_path, count } => Incoming::LootGranted {
             item_path,
             count,

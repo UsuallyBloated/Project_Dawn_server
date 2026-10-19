@@ -266,6 +266,19 @@ impl ItemVault {
         Self { slots: vec![None; n] }
     }
 
+    /// NO RENT: empty every slot holding a NO RENT item. Returns how many
+    /// stacks went.
+    pub fn purge_no_rent(&mut self) -> usize {
+        let mut gone = 0;
+        for slot in self.slots.iter_mut() {
+            if slot.as_ref().is_some_and(|e| super::items::is_no_rent(&e.item_path)) {
+                *slot = None;
+                gone += 1;
+            }
+        }
+        gone
+    }
+
     /// Hydrate from DB rows; out-of-range / empty rows are dropped (same
     /// tolerance as `PlayerInventory::from_rows`).
     pub fn from_rows(n: usize, rows: &[BankItemRow]) -> Self {
@@ -611,6 +624,38 @@ impl PlayerInventory {
             out.push(("cursor".to_string(), 0, entry.item_path.clone(), entry.count));
         }
         out
+    }
+
+    /// NO RENT: remove every NO RENT stack the character carries (base slots,
+    /// worn gear, every bag including a held one, the cursor). Returns how
+    /// many stacks went.
+    pub fn purge_no_rent(&mut self) -> usize {
+        let doomed = |e: &InventoryEntry| super::items::is_no_rent(&e.item_path);
+        let mut gone = 0;
+        for slot in self.base.iter_mut() {
+            if slot.as_ref().is_some_and(doomed) {
+                *slot = None;
+                gone += 1;
+            }
+        }
+        let worn: Vec<u8> = self.equipment.iter().filter(|(_, e)| doomed(e)).map(|(k, _)| *k).collect();
+        for k in worn {
+            self.equipment.remove(&k);
+            gone += 1;
+        }
+        for arr in self.bags.values_mut() {
+            for slot in arr.iter_mut() {
+                if slot.as_ref().is_some_and(doomed) {
+                    *slot = None;
+                    gone += 1;
+                }
+            }
+        }
+        if self.cursor.as_ref().is_some_and(doomed) {
+            self.cursor = None;
+            gone += 1;
+        }
+        gone
     }
 
     /// Every item stack the player carries (equipped + base + inside bags + the

@@ -80,12 +80,42 @@ async fn start_both() -> Harness {
         .expect("world serve_with_socket");
     let (auth_addr, _auth_handle) = auth::serve_bound(cfg, pool).await.expect("auth bind");
 
+    let auth_url = format!("ws://{auth_addr}");
+    DB_FOR_AUTH.lock().unwrap().insert(auth_url.clone(), url.clone());
     Harness {
-        auth_url: format!("ws://{auth_addr}"),
+        auth_url,
         db_url: url,
         _world_addr: world_addr,
         _tmp: tmp,
     }
+}
+
+/// Which database each harness's auth server writes, so `provision_client`
+/// (which only knows the auth URL) can prepare the character's rows.
+static DB_FOR_AUTH: std::sync::Mutex<std::collections::BTreeMap<String, String>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Put every spell the class can ever cast into the character's server-held
+/// spell bar (one gem each, past the ten a player has: the server trusts its
+/// own rows), marked as held. The server refuses a cast of a spell not
+/// memorized (client-authority audit fix 5), so without this every casting
+/// test would first have to memorize. The spell bar's own tests start from
+/// `forget_all_spells`.
+async fn memorize_whole_class(db_url: &str, char_id: i64, class: &str) {
+    let gems: Vec<(i32, String)> = world::class_spell_names(class)
+        .into_iter()
+        .enumerate()
+        .map(|(i, n)| (i as i32, n))
+        .collect();
+    let pool = db::open(db_url).await.expect("open pool");
+    db::save_spell_gems(&pool, char_id, &gems, true).await.expect("memorize the class");
+}
+
+/// Empty a character's spell bar and mark it never held, as a character from
+/// before the server held bars would be.
+async fn forget_all_spells(db_url: &str, char_id: i64) {
+    let pool = db::open(db_url).await.expect("open pool");
+    db::save_spell_gems(&pool, char_id, &[], false).await.expect("forget all spells");
 }
 
 /// Register + login + char-create + request-token for one client. Returns
@@ -126,6 +156,10 @@ async fn provision_client(
     })).await;
     assert_eq!(resp["type"], "CharCreated", "charcreate {char_name}: {resp}");
     let char_id = resp["char_id"].as_i64().unwrap();
+    let db_url = DB_FOR_AUTH.lock().unwrap().get(auth_url).cloned();
+    if let Some(db_url) = db_url {
+        memorize_whole_class(&db_url, char_id, class).await;
+    }
 
     let resp = rpc(&mut ws, serde_json::json!({
         "type": "RequestWorldToken",
@@ -464,6 +498,27 @@ impl WorldClient {
 
     fn send_sit(&mut self) {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Sit);
+    }
+
+    fn send_stand(&mut self) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Stand);
+    }
+
+    fn send_memorize_start(&mut self, gem: u8, spell: &str) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::MemorizeStart { gem, spell_name: spell.into() },
+        );
+    }
+
+    fn send_memorize_finish(&mut self) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::MemorizeFinish);
+    }
+
+    fn send_seed_spell_gems(&mut self, gems: &[&str]) {
+        let gems = gems.iter().map(|g| g.to_string()).collect();
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::SeedSpellGems { gems });
     }
 
     /// `/camp`: the one intent that needs the SERVER's seated flag, which
@@ -8640,4 +8695,197 @@ async fn a_nuke_reaches_thirty_metres() {
         })
         .await;
     assert!(refused.is_some(), "past 30 m the Smite is refused");
+}
+
+/// Wait for the next SpellGems and return (gems, seeded).
+async fn next_spell_gems(c: &mut WorldClient) -> Option<(Vec<String>, bool)> {
+    match c
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| matches!(m, ServerWorldMsg::SpellGems { .. }))
+        .await
+    {
+        Some(ServerWorldMsg::SpellGems { gems, seeded }) => Some((gems, seeded)),
+        _ => None,
+    }
+}
+
+/// Client-authority audit fix 5: the server refuses a cast of a spell in no
+/// gem, before anything is spent. A Cleric whose bar the server never held
+/// (as every character was before migration 0015) enters with an empty,
+/// unseeded bar and casts Smite: refused with the line and the true mana.
+/// The old server cast any spell the class and level allowed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_spell_not_memorized_is_refused() {
+    let h = start_both().await;
+    let (session, char_id, token) =
+        provision_client(&h.auth_url, "unmem", "Unmema", "Human", "Cleric").await;
+    forget_all_spells(&h.db_url, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    let (gems, seeded) = next_spell_gems(&mut a).await.expect("the bar arrives on entry");
+    assert!(gems.iter().all(|g| g.is_empty()) && !seeded, "an empty bar the server never held");
+
+    a.send_cast_spell("Smite", None);
+    let refused = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == char_id as u64 && reason == "You have not memorized that spell.")
+        })
+        .await;
+    assert!(refused.is_some(), "a spell in no gem is refused");
+    let mana = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == char_id as u64)
+        })
+        .await;
+    assert!(
+        matches!(mana, Some(ServerWorldMsg::ManaUpdate { mp, max_mp, .. }) if mp == max_mp),
+        "and nothing was spent"
+    );
+}
+
+/// Memorizing is the server's: seated two seconds, half the spell's mana, an
+/// open gem. Finishing early is refused, so is standing up in between, so is a
+/// gem not yet open; a memorize that runs its time fills the gem, charges
+/// half of Smite's 20 mana, and the cast then gets past the memorize gate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memorizing_takes_two_seated_seconds_and_half_the_mana() {
+    let h = start_both().await;
+    let (session, char_id, token) =
+        provision_client(&h.auth_url, "memer", "Memera", "Human", "Cleric").await;
+    forget_all_spells(&h.db_url, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    next_spell_gems(&mut a).await.expect("the bar arrives on entry");
+    a.send_sit();
+    a.pump_for(Duration::from_millis(200)).await;
+
+    // A gem not open at level 1 (three are).
+    a.send_memorize_start(3, "Smite");
+    let (gems, _) = next_spell_gems(&mut a).await.expect("a refusal answers with the bar");
+    assert!(gems[3].is_empty(), "gem 3 is not open at level 1");
+
+    // Finished too early.
+    a.send_memorize_start(0, "Smite");
+    a.pump_for(Duration::from_millis(300)).await;
+    a.send_memorize_finish();
+    let (gems, _) = next_spell_gems(&mut a).await.expect("a refusal answers with the bar");
+    assert!(gems[0].is_empty(), "a third of a second is not a memorize");
+
+    // Stood up and sat down again in between.
+    a.send_memorize_start(0, "Smite");
+    a.pump_for(Duration::from_millis(300)).await;
+    a.send_stand();
+    a.pump_for(Duration::from_millis(200)).await;
+    a.send_sit();
+    a.pump_for(Duration::from_millis(1_800)).await;
+    a.send_memorize_finish();
+    let (gems, _) = next_spell_gems(&mut a).await.expect("a refusal answers with the bar");
+    assert!(gems[0].is_empty(), "standing up voids the memorize");
+
+    // The real thing.
+    a.send_memorize_start(0, "Smite");
+    a.pump_for(Duration::from_millis(2_150)).await;
+    a.send_memorize_finish();
+    let mana = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == char_id as u64)
+        })
+        .await;
+    let Some(ServerWorldMsg::ManaUpdate { mp, max_mp, .. }) = mana else { panic!("the memorize charges mana") };
+    assert!((max_mp - mp - 10.0).abs() < 0.01, "half of Smite's 20 mana: {mp} of {max_mp}");
+    let (gems, seeded) = next_spell_gems(&mut a).await.expect("the new bar");
+    assert_eq!(gems[0], "Smite");
+    assert!(seeded, "the server holds the bar now");
+
+    a.send_cast_spell("Smite", None);
+    let fail = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == char_id as u64)
+        })
+        .await;
+    let Some(ServerWorldMsg::CastFail { reason, .. }) = fail else { panic!("an untargeted Smite still fails") };
+    assert_ne!(reason, "You have not memorized that spell.", "the memorize gate lets it through ({reason})");
+}
+
+/// The bars players already had lived on their own machines: a character the
+/// server never held a bar for may hand its bar over once, every spell checked
+/// as a memorize would check it (Fireball is no Cleric's; gem 3 is not open at
+/// level 1). A second seed changes nothing, and the bar is the same after a
+/// relog.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_bar_seeds_once_and_survives_a_relog() {
+    let h = start_both().await;
+    let (session, char_id, token) =
+        provision_client(&h.auth_url, "seeder", "Seeda", "Human", "Cleric").await;
+    forget_all_spells(&h.db_url, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    next_spell_gems(&mut a).await.expect("the bar arrives on entry");
+
+    a.send_seed_spell_gems(&["Smite", "Fireball", "", "Healing Light"]);
+    let (gems, seeded) = next_spell_gems(&mut a).await.expect("the seeded bar");
+    assert_eq!(gems[0], "Smite");
+    assert!(gems[1].is_empty() && gems[3].is_empty(), "another class's spell and a closed gem are dropped");
+    assert!(seeded);
+
+    a.send_seed_spell_gems(&["Healing Light"]);
+    let (gems, _) = next_spell_gems(&mut a).await.expect("a second seed answers with the bar");
+    assert_eq!(gems[0], "Smite", "a second seed changes nothing");
+
+    a.send_disconnect();
+    a.pump_for(Duration::from_millis(500)).await;
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut b = WorldClient::start(token, &session, char_id).await;
+    let (gems, seeded) = next_spell_gems(&mut b).await.expect("the bar arrives again");
+    assert_eq!(gems[0], "Smite");
+    assert!(seeded, "and is still the server's");
+}
+
+/// NO RENT (EverQuest's TEMPORARY tag; user 2026-10-19): a character logged
+/// out for thirty minutes loses its NO RENT items at the next login; ten
+/// minutes away keeps them; an ordinary item is never touched. Logging out
+/// stamps the time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_rent_items_go_after_thirty_minutes_logged_out() {
+    const CONJURED: &str = "res://data/loot/items/conjured_bread.tres";
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    let h = start_both().await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "longgone", "Longa", "Human", "Magician").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "quickrelog", "Quicka", "Human", "Magician").await;
+    for (id, secs_ago) in [(a_char_id, 31 * 60), (b_char_id, 10 * 60)] {
+        give_char_item(&h.db_url, id, "base", 0, CONJURED, 4).await;
+        give_char_item(&h.db_url, id, "base", 1, BREAD, 2).await;
+        sqlx::query("UPDATE characters SET logged_out_at = ?1 WHERE id = ?2")
+            .bind(now - secs_ago)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .expect("stamp the logout");
+    }
+
+    let mut paths_of = Vec::new();
+    for (session, id, token) in [(a_session, a_char_id, a_token), (b_session, b_char_id, b_token)] {
+        let mut c = WorldClient::start(token, &session, id).await;
+        let snap = c
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| matches!(m, ServerWorldMsg::InventorySnapshot { .. }))
+            .await;
+        let Some(ServerWorldMsg::InventorySnapshot { entries }) = snap else { panic!("an inventory on entry") };
+        paths_of.push(entries.into_iter().map(|e| e.2).collect::<Vec<String>>());
+        c.send_disconnect();
+        c.pump_for(Duration::from_millis(500)).await;
+    }
+    assert!(!paths_of[0].iter().any(|p| p == CONJURED), "thirty minutes away: the conjured bread is gone");
+    assert!(paths_of[0].iter().any(|p| p == BREAD), "an ordinary loaf stays");
+    assert!(paths_of[1].iter().any(|p| p == CONJURED), "ten minutes away: the conjured bread stays");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let stamped: Option<i64> = sqlx::query_scalar("SELECT logged_out_at FROM characters WHERE id = ?1")
+        .bind(b_char_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the stamp");
+    assert!(stamped.is_some_and(|t| (t - now).abs() < 30), "logging out stamped the time: {stamped:?}");
 }

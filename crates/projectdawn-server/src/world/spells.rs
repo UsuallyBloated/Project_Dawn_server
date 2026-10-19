@@ -185,7 +185,19 @@ pub struct Spell {
     pub silence_duration: f32,
     #[serde(default)]
     pub is_dispel: bool,
+    /// How far this spell reaches its target, metres; 0 means
+    /// `DEFAULT_SPELL_RANGE` (use `reach()`). Per-spell since 2026-10-19
+    /// (user, on Monsters and Memories' baseline: every single-target spell
+    /// reaches 30 m, heals and nukes alike). An area spell's own size is
+    /// `aoe_radius`, separate from this.
+    #[serde(default)]
+    pub range: f32,
 }
+
+/// The reach of a spell that names none: Monsters and Memories' 30 m for every
+/// single-target spell (their wiki, re-checked 2026-10-19). Must stay inside
+/// `MIN_LEASH_RANGE`, or a mob could be hit from beyond its own leash.
+pub const DEFAULT_SPELL_RANGE: f32 = 30.0;
 
 fn default_min_level() -> i32 { 1 }
 
@@ -208,6 +220,12 @@ fn spells() -> &'static HashMap<String, Spell> {
 /// rejects the cast (logged at debug level).
 pub fn lookup(name: &str) -> Option<&'static Spell> {
     spells().get(name)
+}
+
+/// Every spell the server knows (the tests that hold a rule over all of
+/// them, such as reach inside the leash floor).
+pub fn all() -> impl Iterator<Item = &'static Spell> {
+    spells().values()
 }
 
 /// Map a weapon's `proc_damage_type` (a `u8` authored in the client's
@@ -465,6 +483,12 @@ mod tests {
 }
 
 impl Spell {
+    /// How far this spell reaches its target: its own `range`, else the
+    /// default. The one reach every targeted cast is checked against.
+    pub fn reach(&self) -> f32 {
+        if self.range > 0.0 { self.range } else { DEFAULT_SPELL_RANGE }
+    }
+
     /// The level `class` needs for this spell: its own entry in
     /// `class_min_levels`, else `min_level`.
     pub fn required_level(&self, class: &str) -> i32 {
@@ -517,4 +541,16 @@ mod summon_tests {
         assert_eq!(drink.summon_max, 10);
         assert!(drink.summon_item.ends_with("conjured_water.tres"));
     }
+
+    #[test]
+    fn a_spell_reaches_its_own_range_or_thirty_metres() {
+        let smite = lookup("Smite").expect("Smite in spells.toml");
+        assert_eq!(smite.range, 0.0, "no spell names its own range yet");
+        assert_eq!(smite.reach(), DEFAULT_SPELL_RANGE);
+        assert_eq!(DEFAULT_SPELL_RANGE, 30.0);
+        let mut far = smite.clone();
+        far.range = 12.0;
+        assert_eq!(far.reach(), 12.0);
+    }
 }
+

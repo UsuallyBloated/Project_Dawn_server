@@ -8583,3 +8583,61 @@ async fn dual_wield_is_earned_by_class_and_level() {
     a.pump_for(Duration::from_millis(1_100)).await;
     assert!(swing_answered(&mut a, a_char_id, dummy, true).await, "past 15, the Warrior's off hand swings");
 }
+
+/// Per-spell ranges (user, 2026-10-19, on Monsters and Memories' 30 m
+/// baseline): a hostile spell reaches 30 m, as friendly ones already did. A
+/// GM Cleric backs off from a dummy to about 28 m and Smites it: it lands,
+/// where the old server's 25 m hostile reach refused it. At about 33 m the
+/// same Smite is refused, before any mana comes off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_nuke_reaches_thirty_metres() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "reacher", "Reacha", "Human", "Cleric").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "reacher", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    a.send_dev_spawn("Reach Dummy", 1, 100_000.0, 0, 0.0, 0.0);
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Reach Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let (dummy, dummy_pos) = match spawn {
+        ServerWorldMsg::EnemySpawn { id, pos, .. } => (id, pos),
+        _ => unreachable!(),
+    };
+    let origin = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    let mut seq = 1u32;
+    let at = |d: f32| Vec3 { x: dummy_pos.x, y: 0.0, z: dummy_pos.z + d };
+
+    let stood = walk_until_within(&mut a, &mut seq, a_char_id, origin, at(28.0), 0.3).await;
+    let dist = ((stood.x - dummy_pos.x).powi(2) + (stood.z - dummy_pos.z).powi(2)).sqrt();
+    assert!((27.0..29.5).contains(&dist), "test setup: the caster stands at about 28 m, is at {dist:.1}");
+    a.send_cast_spell("Smite", Some(dummy));
+    let landed = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
+                if *attacker == a_char_id as u64 && *target == dummy)
+        })
+        .await;
+    assert!(landed.is_some(), "a Smite at about 28 m lands (the old 25 m reach refused it)");
+
+    // Past 30 m: refused. Smite's own 3 s cooldown runs out on the walk.
+    a.pump_for(Duration::from_millis(3_100)).await;
+    let stood = walk_until_within(&mut a, &mut seq, a_char_id, stood, at(33.0), 0.3).await;
+    let dist = ((stood.x - dummy_pos.x).powi(2) + (stood.z - dummy_pos.z).powi(2)).sqrt();
+    assert!(dist > 31.0, "test setup: the caster stands past 30 m, is at {dist:.1}");
+    a.send_cast_spell("Smite", Some(dummy));
+    let refused = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, reason }
+                if *caster == a_char_id as u64 && reason.contains("too far away"))
+        })
+        .await;
+    assert!(refused.is_some(), "past 30 m the Smite is refused");
+}

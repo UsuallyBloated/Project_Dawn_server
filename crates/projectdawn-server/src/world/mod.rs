@@ -162,10 +162,12 @@ pub const ATTACK_RANGE_TOLERANCE: f32 = 1.5;
 /// defaults to twice the aggro radius, so a mob with a small radius (8 to
 /// 12 m) could be nuked from 17 to 24 m out and never respond: inside spell
 /// reach, outside its leash. Seen in play 2026-10-06 (a Wild Boar, leash
-/// 20 m). The floor sits past `RANGED_ATTACK_RANGE` so nothing a spell or a
-/// bow can reach is out of a mob's reach back. Mobs with an aggro radius of
-/// 0 (dev-spawned dummies) are left passive.
-pub const MIN_LEASH_RANGE: f32 = 30.0;
+/// 20 m). The floor sits past every spell's reach (`Spell::reach`, 30 m by
+/// default since 2026-10-19; a unit test checks every spell in spells.toml)
+/// and past `RANGED_ATTACK_RANGE`, so nothing a spell or a bow can reach is
+/// out of a mob's reach back. 30 m until spells reached 30 m themselves.
+/// Mobs with an aggro radius of 0 (dev-spawned dummies) are left passive.
+pub const MIN_LEASH_RANGE: f32 = 35.0;
 /// Maximum distance a ranged attack (`weapon.is_ranged == true`) can
 /// connect at. Mirrors the GDScript `Combat.RANGED_RANGE = 25.0` so
 /// bows / crossbows feel the same on server-authoritative combat. The
@@ -192,10 +194,6 @@ pub const LOOT_PICKUP_RANGE: f32 = 6.0;
 /// camps nearest town. See docs/design/group_loot_and_coin.md.
 pub const GROUP_SHARE_RANGE: f32 = 200.0;
 
-/// How far a friendly spell (ALLY: heals and buffs on a player or a pet;
-/// PET_HEAL) reaches, metres. Hostile spells keep `RANGED_ATTACK_RANGE`.
-/// Decided 2026-10-05 (user: 30 m); the client checks one metre inside it.
-pub const FRIENDLY_SPELL_RANGE: f32 = 30.0;
 
 /// The global cooldown (spell batch step 4, decided 2026-10-05): after any
 /// accepted cast, no spell may START for this long, Bard songs excepted on

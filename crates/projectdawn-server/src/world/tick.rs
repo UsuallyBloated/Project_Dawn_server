@@ -5697,7 +5697,7 @@ pub async fn run(
                                             && c.linkdead_since.is_none()
                                             && c.hp > 0.0
                                             && !c.death_processed
-                                            && c.pos.distance_to(caster_pos_now) <= super::FRIENDLY_SPELL_RANGE
+                                            && c.pos.distance_to(caster_pos_now) <= spell.reach()
                                     });
                                     if eligible {
                                         movers.push(m);
@@ -11440,9 +11440,6 @@ const TARGET_UNREACHABLE: &str = "That target is too far away or no longer here.
 /// no arm (BIND, PORT), an AOE with no radius, a summon with no known pet.
 const NO_EFFECT_YET: &str = "That magic has no effect here yet.";
 
-/// How close (metres) a resurrection's caster must be to the corpse.
-const RES_CAST_RANGE: f32 = 30.0;
-
 /// What the cast pre-flight resolved the cast to, for the arm to act on
 /// without looking the target up a second time or re-deciding reach,
 /// liveness or the PvP gates. The pre-flight and the arm run back to back for
@@ -11477,9 +11474,8 @@ enum ResolvedTarget {
 ///    spells against a player had no range check at all, so a modified client
 ///    could heal a friend in a dungeon from town, or nuke a PvP-flagged player
 ///    from across the world, by naming an id. Every targeted cast now needs
-///    its target within reach (`RANGED_ATTACK_RANGE`, or
-///    `FRIENDLY_SPELL_RANGE` for a friendly cast), the one spell reach until
-///    spells carry their own. Written keep-only-when-in-reach, so a
+///    its target within the spell's own reach (`Spell::reach`, 30 m unless
+///    the spell names its own). Written keep-only-when-in-reach, so a
 ///    non-finite distance refuses.
 /// 2. **Order.** The handler takes the mana, stamps the cooldown and rolls the
 ///    casting skill before its arms run. A refusal inside an arm could hand
@@ -11512,12 +11508,9 @@ fn cast_target_refusal(
     let Some(caster) = connections.get(&caster_cid) else {
         return Err(TARGET_UNREACHABLE.to_string());
     };
-    // Friendly spells reach further than hostile ones (spell batch step 1);
-    // binding a group member is a friendly cast too.
-    let reach = match spell.target_type.as_str() {
-        "ALLY" | "PET_HEAL" | "BIND" => super::FRIENDLY_SPELL_RANGE,
-        _ => RANGED_ATTACK_RANGE,
-    };
+    // Each spell's own reach (per-spell ranges, 2026-10-19); binding a
+    // group member reaches as far as the bind spell does.
+    let reach = spell.reach();
     let in_reach = |pos: Vec3f| pos.distance_to(caster_pos) <= reach;
     let unreachable = || Err(TARGET_UNREACHABLE.to_string());
     let no_effect = || Err(NO_EFFECT_YET.to_string());
@@ -11635,7 +11628,7 @@ fn cast_target_refusal(
             let Some(corpse) = corpses.get(&corpse_id) else {
                 return Err("That is not a corpse.".to_string());
             };
-            if !(corpse.pos.distance_to(caster_pos) <= RES_CAST_RANGE) {
+            if !(corpse.pos.distance_to(caster_pos) <= reach) {
                 return Err("You are too far from the corpse.".to_string());
             }
             if corpse.resurrected {
@@ -12133,7 +12126,8 @@ mod tests {
             let mob_id = add(mob_at(at(12.0), None));
             let own_pet_id = add(mob_at(at(3.0), Some(caster)));
             let rival_pet_id = add(mob_at(at(14.0), Some(rival)));
-            let far_mob_id = add(mob_at(at(26.0), None));
+            // Just past the 30 m default reach (it was 26 m when hostile spells reached 25).
+            let far_mob_id = add(mob_at(at(31.0), None));
 
             let corpse_id = LOOT_BAG_ID_BASE + 7;
             let mut corpses = HashMap::new();

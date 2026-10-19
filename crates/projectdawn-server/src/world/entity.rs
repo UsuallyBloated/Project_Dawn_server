@@ -1484,8 +1484,16 @@ mod tests {
         assert!((e.leash_range() - super::super::MIN_LEASH_RANGE).abs() < 1e-6);
         assert!(
             super::super::MIN_LEASH_RANGE > super::super::RANGED_ATTACK_RANGE,
-            "the floor must sit past spell reach or the hole stays open"
+            "the floor must sit past bow reach or the hole stays open"
         );
+        for spell in super::super::spells::all() {
+            assert!(
+                super::super::MIN_LEASH_RANGE > spell.reach(),
+                "{} reaches {} m, past the leash floor: a mob could be hit from beyond its own leash",
+                spell.name,
+                spell.reach()
+            );
+        }
         let mut wide = template();
         wide.aggro = 20.0;
         wide.leash = None;

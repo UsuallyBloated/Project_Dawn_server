@@ -101,8 +101,9 @@ pub enum BuffEffect {
     /// Evade / Primal Instinct: every melee swing at the bearer is deflected
     /// (fanned as an Evade, no damage) while it holds.
     EvadeAll,
-    /// Hide: idle mobs do not notice the bearer. The bearer's first swing,
-    /// skill or hostile cast ends it.
+    /// Hide: idle mobs do not notice the bearer. Moving ends it (classic
+    /// EQ's Hide, with no Sneak to pair it with), and so does the bearer's
+    /// first swing, damage skill or hostile cast.
     Stealth,
     /// Shield Bash on a player: the bearer cannot move, swing, cast or use a
     /// skill while it holds. Unlike mez, damage does not end it.
@@ -468,11 +469,13 @@ pub fn break_stealth(buffs: &mut Vec<ActiveBuff>) -> bool {
     buffs.len() != before
 }
 
-/// Standing up ends a feign death (any movement), and only the feign: a
-/// hidden rogue may still creep. Returns whether anything was removed.
-pub fn end_feign(buffs: &mut Vec<ActiveBuff>) -> bool {
+/// Moving ends a feign death (standing up) and a hide alike: classic EQ's
+/// Hide held only while you stood still, and a hide that survived walking
+/// would be a free pass through every camp (its cooldown is shorter than its
+/// duration). Returns whether anything was removed.
+pub fn end_on_move(buffs: &mut Vec<ActiveBuff>) -> bool {
     let before = buffs.len();
-    buffs.retain(|b| !matches!(b.effect, BuffEffect::Feigned));
+    buffs.retain(|b| !matches!(b.effect, BuffEffect::Feigned | BuffEffect::Stealth));
     buffs.len() != before
 }
 

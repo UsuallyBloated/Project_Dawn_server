@@ -75,7 +75,8 @@ pub enum Effect {
     Stun,
     /// A roll; on success every mob forgets the user.
     FeignDeath,
-    /// Idle mobs do not notice the user for `stealth_duration`.
+    /// Idle mobs do not notice the user for `stealth_duration`, or until
+    /// they move, swing, use a damage skill or cast at a mob.
     Stealth,
     /// The swing never misses.
     Truesight,

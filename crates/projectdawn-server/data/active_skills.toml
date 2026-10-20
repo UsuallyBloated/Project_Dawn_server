@@ -10,8 +10,9 @@
 # Effects the server models: STUN (the target cannot move, swing or cast for
 # stun_duration; damage does not end it), EVADE_BOOST (every melee swing at
 # the user is deflected for effect_duration), ABSORB_SHIELD (a pool of
-# absorb_amount, used up by damage), STEALTH (idle mobs do not notice the
-# user for stealth_duration; the first swing, skill or hostile cast ends it),
+# absorb_amount, used up by damage; refused while the pool holds), STEALTH
+# (idle mobs do not notice the user for stealth_duration; moving, the first
+# swing, a damage skill or a hostile cast ends it, as classic EQ's Hide did),
 # FEIGN_DEATH (an 80% chance every mob drops the user), WARDER_FURY (the hit,
 # then the user's pet is sent at the target), TRUESIGHT (the hit never misses).
 #

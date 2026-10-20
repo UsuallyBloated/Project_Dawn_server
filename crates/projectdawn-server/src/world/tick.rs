@@ -2336,7 +2336,16 @@ pub async fn run(
                             });
                         }
                         Outcome::UseSkillIntent { user, skill_name, target_id } => {
-                            use_skill_intents.push(UseSkillIntent { user, skill_name, target_id });
+                            // One UseSkill per user per tick (the CastSpell
+                            // rule): the handler stamps no cooldown, so every
+                            // copy in a forged datagram would pass it and be
+                            // answered, a reply amplifier. An honest client
+                            // never sends two in one tick; extras are dropped.
+                            if use_skill_intents.iter().any(|i| i.user == user) {
+                                tracing::debug!(user, skill = %skill_name, "UseSkill dropped — one per tick");
+                            } else {
+                                use_skill_intents.push(UseSkillIntent { user, skill_name, target_id });
+                            }
                         }
                         Outcome::CastSpellIntent {
                             caster,
@@ -3628,41 +3637,47 @@ pub async fn run(
                         handlers::send_skill_fail(&mut server, user_cid, &skill.name, "You have no target.");
                         continue;
                     };
+                    // Presence, liveness and reach share ONE line, so an id
+                    // probed from across the world learns nothing (the
+                    // 2026-10-02 rule: no refusal is an is-online or
+                    // PvP-flag oracle); the PvP gate answers only for a
+                    // target in reach, which is on the user's screen anyway.
+                    // Pets inherit their owner's flag, as for a plain swing.
+                    const NOT_HERE: &str = "That target is not here.";
                     let check: Result<(), &str> = if target_id < protocol::world::ENEMY_ID_BASE {
                         if target_id == intent.user {
                             Err("You cannot use that on yourself.")
                         } else {
+                            let allowed = if ranged { RANGED_ATTACK_RANGE } else { 3.0 * ATTACK_RANGE_TOLERANCE };
                             match connections.get(&(target_id as ClientId)) {
-                                Some(t) if t.in_world && t.hp > 0.0 => {
-                                    if !combat::can_attack(user, t, user_zone.as_deref(), t.zone.as_deref()) {
-                                        Err("Unable to attack that target.")
+                                Some(t) if t.in_world && t.hp > 0.0 && t.pos.distance_to(user_pos) <= allowed => {
+                                    if combat::can_attack(user, t, user_zone.as_deref(), t.zone.as_deref()) {
+                                        Ok(())
                                     } else {
-                                        let allowed = if ranged { RANGED_ATTACK_RANGE } else { 3.0 * ATTACK_RANGE_TOLERANCE };
-                                        if t.pos.distance_to(user_pos) <= allowed { Ok(()) } else { Err("That target is too far away.") }
+                                        Err("Unable to attack that target.")
                                     }
                                 }
-                                _ => Err("That target is not here."),
+                                _ => Err(NOT_HERE),
                             }
                         }
                     } else {
                         match enemies.get(&target_id) {
                             Some(e) if e.is_alive() => {
-                                // Pets inherit their owner's PvP flag (as the
-                                // plain swing's gate).
-                                let pvp_ok = match e.owner {
-                                    None => Ok(()),
-                                    Some(owner) if owner as ClientId == user_cid => Err("You cannot attack your own pet."),
-                                    Some(owner) => match connections.get(&(owner as ClientId)) {
-                                        Some(o) if combat::can_attack(user, o, user_zone.as_deref(), o.zone.as_deref()) => Ok(()),
-                                        _ => Err("Unable to attack that target."),
-                                    },
-                                };
-                                pvp_ok.and_then(|_| {
-                                    let allowed = if ranged { RANGED_ATTACK_RANGE } else { e.melee_range() * ATTACK_RANGE_TOLERANCE };
-                                    if e.pos.distance_to(user_pos) <= allowed { Ok(()) } else { Err("That target is too far away.") }
-                                })
+                                let allowed = if ranged { RANGED_ATTACK_RANGE } else { e.melee_range() * ATTACK_RANGE_TOLERANCE };
+                                if e.pos.distance_to(user_pos) > allowed {
+                                    Err(NOT_HERE)
+                                } else {
+                                    match e.owner {
+                                        None => Ok(()),
+                                        Some(owner) if owner as ClientId == user_cid => Err("You cannot attack your own pet."),
+                                        Some(owner) => match connections.get(&(owner as ClientId)) {
+                                            Some(o) if combat::can_attack(user, o, user_zone.as_deref(), o.zone.as_deref()) => Ok(()),
+                                            _ => Err("Unable to attack that target."),
+                                        },
+                                    }
+                                }
                             }
-                            _ => Err("That target is not here."),
+                            _ => Err(NOT_HERE),
                         }
                     };
                     if let Err(line) = check {
@@ -3671,9 +3686,30 @@ pub async fn run(
                     }
                 }
 
-                // Charged: the stamina (fanned at once, so a group-mate's
-                // panel moves with it), the cooldown, and the user stands.
-                // A damage skill also marks them in combat; a Hide does not.
+                // A SELF skill whose effect still holds is refused, not
+                // refreshed: a Holy Shield re-pressed on cooldown would refill
+                // its pool for 10 stamina (the pool lasts until spent, as the
+                // absorb spells do), and a second Hide while hidden buys
+                // nothing.
+                let holding: Option<&str> = match effect {
+                    active_skills::Effect::AbsorbShield
+                        if user.active_buffs.iter().any(|b| matches!(b.effect, buffs::BuffEffect::Absorb { pool } if pool > 0.0)) =>
+                    {
+                        Some("Your shield still holds.")
+                    }
+                    active_skills::Effect::Stealth if buffs::is_hidden(&user.active_buffs) => Some("You are already hidden."),
+                    _ => None,
+                };
+                if let Some(line) = holding {
+                    handlers::send_skill_fail(&mut server, user_cid, &skill.name, line);
+                    continue;
+                }
+
+                // Charged: the stamina (mark_dirty has the regen loop fan it,
+                // a spend past 5% of the bar on the next tick, so a
+                // group-mate's panel moves with it), the cooldown, and the
+                // user stands. A damage skill also marks them in combat; a
+                // Hide does not.
                 if let Some(u) = connections.get_mut(&user_cid) {
                     u.stamina = (u.stamina - skill.stamina_cost).max(0.0);
                     regen::mark_dirty(u);
@@ -3682,8 +3718,6 @@ pub async fn run(
                     if skill.is_damage() {
                         u.last_attack_at = Some(now);
                     }
-                    let (st, mx) = (u.stamina, u.max_stamina);
-                    handlers::fan_out_stamina_update(&mut server, &in_world_recipients_now, intent.user, st, mx);
                 }
                 tracing::info!(user = intent.user, skill = %skill.name, cost = skill.stamina_cost, "skill used");
 
@@ -3725,7 +3759,7 @@ pub async fn run(
                             u.active_buffs.push(ActiveBuff::new_stealth(skill.name.clone(), skill.stealth_duration, now));
                             snapshot_changed = true;
                         }
-                        handlers::send_refusal(&mut server, user_cid, "You have hidden yourself from view.");
+                        handlers::send_system_line(&mut server, user_cid, "You have hidden yourself from view.");
                     }
                     active_skills::Effect::FeignDeath => {
                         let roll: f32 = rand::thread_rng().gen();
@@ -3750,10 +3784,10 @@ pub async fn run(
                                 ));
                                 snapshot_changed = true;
                             }
-                            handlers::send_refusal(&mut server, user_cid, "You feign death successfully.");
+                            handlers::send_system_line(&mut server, user_cid, "You feign death successfully.");
                             tracing::info!(user = intent.user, "feign death succeeded");
                         } else {
-                            handlers::send_refusal(&mut server, user_cid, "Your feign death fails!");
+                            handlers::send_system_line(&mut server, user_cid, "Your feign death fails!");
                             tracing::info!(user = intent.user, "feign death failed");
                         }
                     }
@@ -3949,8 +3983,13 @@ pub async fn run(
                         })
                         .unwrap_or(false);
                     if !allowed_pvp {
+                        // Named only when in reach and alive (on the
+                        // attacker's screen anyway); a far or absent id gets
+                        // the generic line, so a swing at an id is no
+                        // char-id-to-name map (review, 2026-10-19).
                         let name = connections
                             .get(&target_cid)
+                            .filter(|_| target_in_range_alive)
                             .map(|c| c.name.clone())
                             .unwrap_or_else(|| "that target".to_string());
                         handlers::fan_out_chat_message(
@@ -4204,9 +4243,30 @@ pub async fn run(
                     // name shows on their frame).
                     if let Some(sk) = intent.skill.as_ref() {
                         if sk.effect == active_skills::Effect::Stun {
+                            let mut interrupted: Option<String> = None;
                             if let Some(tc) = connections.get_mut(&target_cid) {
                                 tc.active_buffs.retain(|b| !matches!(b.effect, buffs::BuffEffect::Stun));
                                 tc.active_buffs.push(ActiveBuff::new_stun("Stunned".to_string(), sk.stun_duration, now));
+                                // A stun ends a running cast outright (the
+                                // hit's own channeling roll may have let it
+                                // through); no mana charge, since a stun is
+                                // not damage.
+                                if !tc.cast_spell_name.is_empty() {
+                                    interrupted = Some(tc.cast_spell_name.clone());
+                                    tc.cast_spell_name.clear();
+                                    tc.cast_total_duration = 0.0;
+                                    tc.cast_set_at = None;
+                                    tc.cast_interrupted_at = Some(now);
+                                }
+                            }
+                            if let Some(spell) = interrupted {
+                                handlers::fan_out_cast_fail(
+                                    &mut server,
+                                    &in_world_recipients_now,
+                                    intent.target_id,
+                                    "interrupted (stunned)".to_string(),
+                                );
+                                tracing::info!(caster = intent.target_id, spell = %spell, "PvP cast interrupted by a stun");
                             }
                             if let Some(tc) = connections.get(&target_cid) {
                                 fan_out_server_buff_snapshot(&mut server, &in_world_recipients_now, tc);
@@ -10871,9 +10931,10 @@ pub async fn run(
             // seated while they're running around.
             if dir.x != 0.0 || dir.z != 0.0 {
                 conn.is_sitting = false;
-                // Standing up ends a feign death (active skills): the mobs
-                // that forgot the player may notice them again.
-                if buffs::end_feign(&mut conn.active_buffs) {
+                // Moving ends a feign death (standing up) and a hide (active
+                // skills): the mobs that forgot or never noticed the player
+                // may notice them now.
+                if buffs::end_on_move(&mut conn.active_buffs) {
                     fan_out_server_buff_snapshot(&mut server, &in_world_recipients_now, conn);
                 }
             }
@@ -12222,14 +12283,6 @@ fn tell_interrupt_charge(
     );
 }
 
-/// Refuse a cast privately and hand the caster the server's true mana. The
-/// client spent its mana and started a cooldown when it sent the cast, so the
-/// CastFail is its signal to undo that and the ManaUpdate the value to settle
-/// on. Nobody else is told: a refusal is the caster's business, and peers'
-/// copies of a refused bar run out on their own (accepted 2026-10-02). The
-/// three ways a RUNNING cast ends that peers can see (an interrupt, silence,
-/// mez) keep their fan to peers so the bar they drew cancels; they reach the
-/// caster too. Spell batch step 0.
 /// An active skill's swing (client-authority audit item 6): the ordinary
 /// roll times the skill's multiplier, never below one point; Truesight
 /// Strike never misses. A plain swing passes through unchanged.
@@ -12243,6 +12296,14 @@ fn skill_swing(swing: combat::Swing, skill: Option<&SkillSwing>) -> combat::Swin
     out
 }
 
+/// Refuse a cast privately and hand the caster the server's true mana. The
+/// client spent its mana and started a cooldown when it sent the cast, so the
+/// CastFail is its signal to undo that and the ManaUpdate the value to settle
+/// on. Nobody else is told: a refusal is the caster's business, and peers'
+/// copies of a refused bar run out on their own (accepted 2026-10-02). The
+/// three ways a RUNNING cast ends that peers can see (an interrupt, silence,
+/// mez) keep their fan to peers so the bar they drew cancels; they reach the
+/// caster too. Spell batch step 0.
 fn refuse_cast(
     server: &mut RenetServer,
     connections: &HashMap<ClientId, PerConnection>,

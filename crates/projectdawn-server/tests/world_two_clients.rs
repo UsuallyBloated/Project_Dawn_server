@@ -583,13 +583,33 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
+    /// Pump for `d` with a heartbeat every 2 s, so a quiet wait longer than
+    /// the server's 10 s `HEARTBEAT_TIMEOUT` does not read as a drop.
+    async fn pump_alive_for(&mut self, d: Duration) {
+        let end = Instant::now() + d;
+        let mut next_beat = Instant::now();
+        while Instant::now() < end {
+            if Instant::now() >= next_beat {
+                self.send_heartbeat();
+                next_beat = Instant::now() + Duration::from_secs(2);
+            }
+            tick_one(&mut self.client, &mut self.transport);
+            tokio::time::sleep(TICK_DT).await;
+        }
+    }
+
     /// Pump for `d`, keeping every SYSTEM message that arrives meanwhile (a
     /// `wait_for` drops what it does not match; a window that must count
-    /// several kinds needs them all).
+    /// several kinds needs them all). Heartbeats every 2 s, as above.
     async fn collect_for(&mut self, d: Duration) -> Vec<ServerWorldMsg> {
         let end = Instant::now() + d;
+        let mut next_beat = Instant::now();
         let mut out = Vec::new();
         while Instant::now() < end {
+            if Instant::now() >= next_beat {
+                self.send_heartbeat();
+                next_beat = Instant::now() + Duration::from_secs(2);
+            }
             tick_one(&mut self.client, &mut self.transport);
             while let Some(bytes) = self.client.receive_message(CHANNEL_SYSTEM) {
                 if let Ok((msg, _)) =
@@ -8995,8 +9015,13 @@ async fn backstab_is_tripled_charged_and_gated() {
     let mut answered = false;
     for m in &msgs {
         match m {
-            ServerWorldMsg::Hit { attacker, target, amount, .. } if *attacker == a_id as u64 && *target == dummy => {
-                assert!(*amount >= 9, "fists 1-4 plus STR/5, times three: {amount}");
+            ServerWorldMsg::Hit { attacker, target, amount, crit, .. } if *attacker == a_id as u64 && *target == dummy => {
+                // A plain non-crit fist swing tops out at 6 (1-4 plus STR/5,
+                // times the skill's 1.15), so 9 pins the multiplier; a crit
+                // (1.5 to 2x) could reach it on its own and proves nothing.
+                if !*crit {
+                    assert!(*amount >= 9, "fists 1-4 plus STR/5, times three: {amount}");
+                }
                 answered = true;
             }
             ServerWorldMsg::Miss { attacker, target } if *attacker == a_id as u64 && *target == dummy => answered = true, // the 5% floor
@@ -9051,7 +9076,7 @@ async fn shield_bash_holds_the_mob_for_three_seconds() {
         if let Some(ServerWorldMsg::SkillFail { reason, .. }) = window.iter().find(|m| matches!(m, ServerWorldMsg::SkillFail { .. })) {
             panic!("Shield Bash refused: {reason}");
         }
-        a.pump_for(Duration::from_millis(6_000)).await;
+        a.pump_alive_for(Duration::from_millis(6_000)).await;
     }
     let landed_at = landed_at.expect("three Shield Bashes in a row cannot all miss at 5%");
     assert!(snapshot_names(&window[landed_at..], dummy, "Stunned"), "the mob's frame says Stunned");
@@ -9060,47 +9085,63 @@ async fn shield_bash_holds_the_mob_for_three_seconds() {
     assert!(mob_hits_on(&after, dummy, a_id) >= 1, "it swings again once the stun runs out");
 }
 
-/// Feign Death: the roll runs on the server and its outcome is told. On a
-/// success the mob drops the monk and does not notice them lying there, until
-/// the monk moves. Either way the 20 stamina is charged.
+/// Feign Death: the roll runs on the server and its outcome is told, and the
+/// 20 stamina is charged either way. A failure changes nothing (the mob keeps
+/// swinging). A success drops the monk from the mob, which does not notice
+/// them lying there until they move. The roll is 80%, so fresh monks try
+/// until one succeeds: six in a row failing is one run in fifteen thousand,
+/// and every attempt checks its own outcome.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn feign_death_is_rolled_told_and_held_until_a_move() {
     let h = start_both().await;
-    let (mut a, a_id, dummy) = gm_beside_dummy(&h, "player", "Monk", "Fd Dummy", 1, 5.0).await;
-    let first = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(6), |m| matches!(m, ServerWorldMsg::Hit { attacker, target, .. } if *attacker == dummy && *target == a_id as u64))
-        .await;
-    assert!(first.is_some(), "the dummy is swinging at the monk");
-    a.send_use_skill("Feign Death", None);
-    let msgs = a.collect_for(Duration::from_millis(1_500)).await;
-    let line = msgs.iter().find_map(|m| match m {
-        ServerWorldMsg::ChatMessage { text, .. } if text.contains("feign death") => Some(text.clone()),
-        _ => None,
-    });
-    let line = line.expect("the outcome is told");
-    assert!(msgs.iter().any(|m| matches!(m, ServerWorldMsg::StaminaUpdate { id, stamina, max } if *id == a_id as u64 && (max - stamina - 20.0).abs() < 0.5)),
-        "the attempt costs 20 stamina either way");
-    if line == "You feign death successfully." {
-        assert!(msgs.iter().any(|m| matches!(m, ServerWorldMsg::EntityTarget { id, target: None } if *id == dummy)), "the mob drops the monk");
-        assert!(snapshot_names(&msgs, a_id as u64, "Feigned Death"));
-        let quiet = a.collect_for(Duration::from_millis(3_000)).await;
-        assert_eq!(mob_hits_on(&quiet, dummy, a_id), 0, "lying still beside it, unnoticed");
-        a.send_move(10_000, Vec3 { x: 1.0, y: 0.0, z: 0.0 });
-        let noticed = a
-            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(t) } if *id == dummy && *t == a_id as u64))
+    let mut succeeded = false;
+    // Letters only: character names take no digits.
+    for user in ["feigna", "feignb", "feignc", "feignd", "feigne", "feignf"] {
+        let (mut a, a_id, dummy) = gm_beside_dummy(&h, user, "Monk", "Fd Dummy", 1, 5.0).await;
+        let first = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(6), |m| matches!(m, ServerWorldMsg::Hit { attacker, target, .. } if *attacker == dummy && *target == a_id as u64))
             .await;
-        assert!(noticed.is_some(), "standing up, the monk is noticed again");
-    } else {
-        assert_eq!(line, "Your feign death fails!");
-        let after = a.collect_for(Duration::from_millis(4_000)).await;
-        assert!(mob_hits_on(&after, dummy, a_id) >= 1, "a failed feign changes nothing");
+        assert!(first.is_some(), "the dummy is swinging at the monk");
+        a.send_use_skill("Feign Death", None);
+        let msgs = a.collect_for(Duration::from_millis(1_500)).await;
+        let line = msgs.iter().find_map(|m| match m {
+            ServerWorldMsg::ChatMessage { text, .. } if text.contains("feign death") => Some(text.clone()),
+            _ => None,
+        });
+        let line = line.expect("the outcome is told");
+        assert!(msgs.iter().any(|m| matches!(m, ServerWorldMsg::StaminaUpdate { id, stamina, max } if *id == a_id as u64 && (max - stamina - 20.0).abs() < 0.5)),
+            "the attempt costs 20 stamina either way");
+        if line == "You feign death successfully." {
+            assert!(msgs.iter().any(|m| matches!(m, ServerWorldMsg::EntityTarget { id, target: None } if *id == dummy)), "the mob drops the monk");
+            assert!(snapshot_names(&msgs, a_id as u64, "Feigned Death"));
+            let quiet = a.collect_for(Duration::from_millis(3_000)).await;
+            assert_eq!(mob_hits_on(&quiet, dummy, a_id), 0, "lying still beside it, unnoticed");
+            a.send_move(10_000, Vec3 { x: 1.0, y: 0.0, z: 0.0 });
+            let noticed = a
+                .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(t) } if *id == dummy && *t == a_id as u64))
+                .await;
+            assert!(noticed.is_some(), "standing up, the monk is noticed again");
+            succeeded = true;
+        } else {
+            assert_eq!(line, "Your feign death fails!");
+            let after = a.collect_for(Duration::from_millis(4_000)).await;
+            assert!(mob_hits_on(&after, dummy, a_id) >= 1, "a failed feign changes nothing");
+        }
+        a.send_disconnect();
+        a.pump_for(Duration::from_millis(300)).await;
+        if succeeded {
+            break;
+        }
     }
+    assert!(succeeded, "six feigns in a row failed at 80%: the roll is wrong");
 }
 
-/// Hide: an idle mob with the rogue inside its aggro radius does not notice
-/// them; the rogue's first swing ends the hide and the mob turns.
+/// Hide: an idle mob spawned with the hidden rogue inside its aggro radius
+/// does not notice them; the rogue's first swing ends the hide and the mob
+/// turns. A second hide (after its cooldown) ends on the first step, and a
+/// fresh idle mob notices the rogue then; a hide while hidden is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hide_keeps_an_idle_mob_from_noticing_until_the_first_swing() {
+async fn hide_keeps_an_idle_mob_from_noticing_until_a_swing_or_a_step() {
     let h = start_both().await;
     let (session, a_id, _stale) = provision_client(&h.auth_url, "sneak", "Sneaka", "Human", "Rogue").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
@@ -9108,15 +9149,16 @@ async fn hide_keeps_an_idle_mob_from_noticing_until_the_first_swing() {
     let token = request_world_token(&h.auth_url, &session, a_id).await;
     let mut a = WorldClient::start(token, &session, a_id).await;
     a.pump_for(Duration::from_millis(300)).await;
-    // Aggro 1 m: idle with the rogue 3 m off.
-    let (dummy, dummy_pos) = spawn_dummy(&mut a, "Watch Dummy", 0, 1.0).await;
+
     a.send_use_skill("Hide", None);
     let told = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "You have hidden yourself from view."))
         .await;
     assert!(told.is_some());
-    let mut seq: u32 = 1;
-    walk_until_within(&mut a, &mut seq, a_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, dummy_pos, 0.5).await;
+    // The cooldown (10 s) answers first for a second Hide straight after.
+    assert_eq!(skill_answer(&mut a, a_id, "Hide", 0).await, Err("You cannot use that yet.".into()));
+    // Aggro 5 m, spawned 3 m ahead of a hidden rogue: idle, unnoticing.
+    let (dummy, _) = spawn_dummy(&mut a, "Watch Dummy", 0, 5.0).await;
     let quiet = a.collect_for(Duration::from_millis(1_500)).await;
     assert!(!quiet.iter().any(|m| matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(_) } if *id == dummy)),
         "inside its radius, hidden: unnoticed");
@@ -9126,6 +9168,27 @@ async fn hide_keeps_an_idle_mob_from_noticing_until_the_first_swing() {
         "the swing ends the hide and the mob turns");
     assert!(msgs.iter().any(|m| matches!(m, ServerWorldMsg::BuffSnapshot { target, buffs } if *target == a_id as u64 && !buffs.iter().any(|(n, _)| n == "Hide"))),
         "the snapshot without Hide fans");
+
+    // Hide again once its 10 s cooldown has run. With the cooldown over and
+    // the hide (30 s) still holding, a third Hide is refused as pointless;
+    // then a step ends it.
+    a.pump_alive_for(Duration::from_millis(7_000)).await;
+    a.send_use_skill("Hide", None);
+    let told = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "You have hidden yourself from view."))
+        .await;
+    assert!(told.is_some(), "hidden again after the cooldown");
+    a.pump_alive_for(Duration::from_millis(10_300)).await;
+    assert_eq!(skill_answer(&mut a, a_id, "Hide", 0).await, Err("You are already hidden.".into()));
+    let (watcher, _) = spawn_dummy(&mut a, "Second Watcher", 0, 5.0).await;
+    let quiet = a.collect_for(Duration::from_millis(1_000)).await;
+    assert!(!quiet.iter().any(|m| matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(_) } if *id == watcher)),
+        "still unnoticed while standing still");
+    a.send_move(10_000, Vec3 { x: 1.0, y: 0.0, z: 0.0 });
+    let noticed = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(t) } if *id == watcher && *t == a_id as u64))
+        .await;
+    assert!(noticed.is_some(), "a step ends the hide and the watcher notices");
 }
 
 /// Evade: for its 5 s every swing at the rogue fans as an Evade and lands

@@ -701,6 +701,23 @@ pub fn handle_message(
             if !conn.ready {
                 return Outcome::Continue;
             }
+            // A stunned or mesmerized caster starts no bar (review of the
+            // active skills, 2026-10-19): the CastSpell gate refused only a
+            // release inside the stun, so a bar begun under one and released
+            // after it went through. Private, as the global cooldown's refusal.
+            let cc_reason = if super::buffs::is_stunned(&conn.active_buffs) {
+                Some("You are stunned.")
+            } else if super::buffs::is_mezzed(&conn.active_buffs) {
+                Some("Mesmerized.")
+            } else {
+                None
+            };
+            if let Some(reason) = cc_reason {
+                let caster = conn.char_id as u64;
+                fan_out_cast_fail(server, &[client_id], caster, reason.to_string());
+                fan_out_mana_update(server, &[client_id], caster, conn.mp, conn.max_mp);
+                return Outcome::Continue;
+            }
             // The global cooldown (spell batch step 4): a timed cast that
             // would START inside it is refused here, before any bar runs,
             // so the caster loses no cast time; nothing is cached, so a
@@ -2412,36 +2429,6 @@ pub fn fan_out_entity_target(
 /// Uses the System chat channel, which already exists, is already decoded, and
 /// already renders as an unattributed line — so reporting a refusal costs no
 /// protocol bump, no gdext rebuild and no client re-export.
-/// Refuse a `UseSkill` privately (client-authority audit item 6): the reason
-/// for the chat line and the skill's name, so the client drops the cooldown
-/// it started. The server stamped nothing and charged nothing.
-pub fn send_skill_fail(server: &mut RenetServer, recipient: ClientId, skill_name: &str, reason: &str) {
-    let msg = ServerWorldMsg::SkillFail {
-        skill_name: skill_name.to_string(),
-        reason: reason.to_string(),
-    };
-    if let Some(bytes) = encode(&msg) {
-        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
-    }
-}
-
-/// One player's stamina to everyone in the world, at once: a skill's cost
-/// should show on a group-mate's panel the moment it is paid (the regen
-/// loop would fan it within its gap anyway).
-pub fn fan_out_stamina_update(
-    server: &mut RenetServer,
-    recipients: &[ClientId],
-    id: u64,
-    stamina: f32,
-    max: f32,
-) {
-    let msg = ServerWorldMsg::StaminaUpdate { id, stamina, max };
-    let Some(bytes) = encode(&msg) else { return };
-    for recipient in recipients {
-        server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
-    }
-}
-
 pub fn send_refusal(server: &mut RenetServer, recipient: ClientId, text: &str) {
     fan_out_chat_message(
         server,
@@ -2456,6 +2443,19 @@ pub fn send_refusal(server: &mut RenetServer, recipient: ClientId, text: &str) {
 /// `send_refusal`; the separate name keeps success paths reading honestly.
 pub fn send_system_line(server: &mut RenetServer, recipient: ClientId, text: &str) {
     send_refusal(server, recipient, text);
+}
+
+/// Refuse a `UseSkill` privately (client-authority audit item 6): the reason
+/// for the chat line and the skill's name, so the client drops the cooldown
+/// it started. The server stamped nothing and charged nothing.
+pub fn send_skill_fail(server: &mut RenetServer, recipient: ClientId, skill_name: &str, reason: &str) {
+    let msg = ServerWorldMsg::SkillFail {
+        skill_name: skill_name.to_string(),
+        reason: reason.to_string(),
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
 }
 
 pub fn fan_out_chat_message(

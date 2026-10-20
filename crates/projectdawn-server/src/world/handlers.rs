@@ -1552,6 +1552,21 @@ pub fn handle_message(
             }
         }
 
+        ClientWorldMsg::StopSong => {
+            // The Bard song rework: the server pulses the song, so stopping
+            // it is this message (re-clicking the song, /stopsong). The
+            // lingering effects run out on their own, as in EQ.
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            if let Some(song) = conn.active_song.take() {
+                conn.song_next_pulse_at = None;
+                send_system_line(server, client_id, &format!("You stop singing {song}."));
+                tracing::info!(singer = conn.char_id, %song, "song stopped");
+            }
+            Outcome::Continue
+        }
+
         ClientWorldMsg::GroupInvite { name } => {
             if !conn.in_world {
                 return Outcome::Continue;

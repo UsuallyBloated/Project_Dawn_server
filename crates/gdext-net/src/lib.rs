@@ -961,6 +961,13 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// Stop the song being sung (the Bard song rework): the server pulses
+    /// the song, so ending it is a message, not another sing.
+    #[func]
+    fn send_stop_song(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::StopSong)
+    }
+
     /// The server-held spell bar (client-authority audit fix 5): begin
     /// memorizing `spell_name` into `gem` (0-based).
     #[func]

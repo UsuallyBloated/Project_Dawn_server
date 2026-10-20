@@ -800,10 +800,17 @@ cooldown = 6.0
 min_level = 1
 classes = ["Bard"]
 
-# Twist songs — server gates the cast (mana, cooldown, class) but the
-# per-pulse effects (speed, accuracy/crit, heal, haste, mp regen, attack
-# slow) are applied client-side by the BardSongs autoload, so base_damage
-# and heal_amount stay 0 here.
+# Twist songs (the Bard song rework, 2026-10-20; user decisions, classic
+# EQ's rules as Project 1999 keeps them): a song takes 3 s to sing, costs no
+# mana, and the SERVER pulses it every SONG_PULSE_SECS (6 s), each effect
+# lingering SONG_LINGER_SECS (12 s) after the last pulse; one song at a time,
+# a new song replacing the current one while the old one's effect lingers
+# (twisting). Every effect below is the LEVEL-50 value: a song runs at
+# SONG_SCALE_AT_LEARN (0.4) of it when first learned and climbs to the full
+# value at SONG_FULL_AT_LEVEL (world/songs.rs), so a level 1 bard is not a
+# level 50 one. Mana Weave is P99's mana song: 6 mana per 6 s tick
+# (mp_regen_hps 1.0; EQ gave it to the group and not the bard, so when group
+# songs come, follow that). Durations are the linger constant, not fields.
 [[spell]]
 name = "Selos' Melody"
 is_song = true
@@ -811,10 +818,11 @@ target_type = "SELF"
 damage_type = "ARCANE"
 base_damage = 0.0
 heal_amount = 0.0
-mana_cost = 10.0
-cast_time = 0.0
+mana_cost = 0.0
+cast_time = 3.0
 cooldown = 0.5
 min_level = 1
+move_speed_mult = 1.35
 classes = ["Bard"]
 
 [[spell]]
@@ -824,10 +832,12 @@ target_type = "SELF"
 damage_type = "SPIRIT"
 base_damage = 0.0
 heal_amount = 0.0
-mana_cost = 10.0
-cast_time = 0.0
+mana_cost = 0.0
+cast_time = 3.0
 cooldown = 0.5
 min_level = 8
+accuracy_buff = 0.12
+crit_buff = 0.08
 classes = ["Bard"]
 
 [[spell]]
@@ -836,9 +846,11 @@ is_song = true
 target_type = "SELF"
 damage_type = "SPIRIT"
 base_damage = 0.0
-heal_amount = 0.0
-mana_cost = 10.0
-cast_time = 0.0
+# Per pulse: a heal-over-time of heal_amount / SONG_PULSE_SECS a second for
+# the linger (EQ's Hymn of Restoration: 2 a tick at 6 to 13 at 60).
+heal_amount = 8.0
+mana_cost = 0.0
+cast_time = 3.0
 cooldown = 0.5
 min_level = 4
 classes = ["Bard"]
@@ -850,10 +862,11 @@ target_type = "SELF"
 damage_type = "SPIRIT"
 base_damage = 0.0
 heal_amount = 0.0
-mana_cost = 10.0
-cast_time = 0.0
+mana_cost = 0.0
+cast_time = 3.0
 cooldown = 0.5
 min_level = 6
+haste_amount = 0.12
 classes = ["Bard"]
 
 [[spell]]
@@ -864,9 +877,11 @@ damage_type = "ARCANE"
 base_damage = 0.0
 heal_amount = 0.0
 mana_cost = 0.0
-cast_time = 0.0
+cast_time = 3.0
 cooldown = 0.5
 min_level = 10
+# Was 12.0 (twelve times P99's mana song); 1.0 a second is 6 per pulse.
+mp_regen_hps = 1.0
 classes = ["Bard"]
 
 [[spell]]
@@ -876,14 +891,15 @@ target_type = "ENEMY"
 damage_type = "ARCANE"
 base_damage = 0.0
 heal_amount = 0.0
-mana_cost = 10.0
-cast_time = 0.0
+mana_cost = 0.0
+cast_time = 3.0
 cooldown = 0.5
-# 8% (user 2026-10-07: "on par with Slow and Torpor; 35% is a nutty slow"). The
-# song's pulses are still client-side, so the server applies this once per cast,
-# for Slow's 30 s.
+# 8% (user 2026-10-07: "on par with Slow and Torpor; 35% is a nutty slow").
+# Pulsed on the bard's current target while it is in reach, lingering the
+# song linger like the rest (the duration field is the same number, for the
+# lockstep check).
 attack_slow_amount = 0.08
-attack_slow_duration = 30.0
+attack_slow_duration = 12.0
 min_level = 16
 classes = ["Bard"]
 

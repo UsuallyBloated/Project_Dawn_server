@@ -436,6 +436,13 @@ pub struct PerConnection {
     /// disconnect with the connection, as the spell cooldowns are.
     pub skill_cooldowns: HashMap<String, Instant>,
 
+    /// Bard songs (the rework of 2026-10-20): the one song being sung, if
+    /// any, and when it next pulses. Set when a song's cast lands, cleared by
+    /// re-singing it, `StopSong`, any non-song cast, death, or the
+    /// connection going (the body never sings).
+    pub active_song: Option<String>,
+    pub song_next_pulse_at: Option<Instant>,
+
     /// The global cooldown (spell batch step 4): no spell may START inside
     /// `GLOBAL_COOLDOWN` of the last accepted cast, Bard songs excepted on
     /// both sides (twisting is casting songs back to back). Stamped when a
@@ -675,6 +682,8 @@ impl PerConnection {
             cast_interrupted_at: None,
             spell_cooldowns: HashMap::new(),
             skill_cooldowns: HashMap::new(),
+            active_song: None,
+            song_next_pulse_at: None,
             gcd_until: None,
             buff_snapshot: Vec::new(),
             buff_snapshot_set: false,

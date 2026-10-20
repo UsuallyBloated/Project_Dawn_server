@@ -4870,7 +4870,10 @@ pub async fn run(
                         let dx = caster_conn_now.pos.x - intent.cast_start_pos_at_dispatch.x;
                         let dz = caster_conn_now.pos.z - intent.cast_start_pos_at_dispatch.z;
                         let moved = (dx * dx + dz * dz).sqrt();
-                        if moved > MAX_CAST_MOVE_DISTANCE {
+                        // A song is sung on the move (Selos' is a running
+                        // song; EQ never interrupted a song for movement),
+                        // so the gate passes songs through.
+                        if moved > MAX_CAST_MOVE_DISTANCE && !spell.is_song {
                             tracing::info!(
                                 caster = intent.caster,
                                 spell = %spell.name,
@@ -5102,6 +5105,33 @@ pub async fn run(
                             new_score,
                         );
                     }
+                }
+
+                // Bard songs (the rework of 2026-10-20): a song's cast is its
+                // sing. It starts the one active song, which the server
+                // pulses from here (step 4s), or, sung again, stops it; any
+                // other cast stops a song (EQ's rule). The ENEMY song's
+                // target was checked by the pre-flight; its slow lands on
+                // the pulse, so the per-target-type arms are skipped.
+                if spell.is_song {
+                    let same = connections
+                        .get(&caster_cid)
+                        .is_some_and(|c| c.active_song.as_deref() == Some(spell.name.as_str()));
+                    if same {
+                        stop_song(&mut server, &mut connections, caster_cid);
+                    } else {
+                        if let Some(cc) = connections.get_mut(&caster_cid) {
+                            cc.active_song = Some(spell.name.clone());
+                            cc.song_next_pulse_at = Some(now + Duration::from_secs_f32(super::SONG_PULSE_SECS));
+                        }
+                        handlers::send_system_line(&mut server, caster_cid, &format!("You begin singing {}.", spell.name));
+                        tracing::info!(singer = intent.caster, song = %spell.name, "song started");
+                        song_pulse(&mut server, &in_world_recipients_now, &mut connections, &mut enemies, caster_cid, spell, now);
+                    }
+                    continue;
+                }
+                if connections.get(&caster_cid).is_some_and(|c| c.active_song.is_some()) {
+                    stop_song(&mut server, &mut connections, caster_cid);
                 }
 
                 match spell.target_type.as_str() {
@@ -11085,6 +11115,25 @@ pub async fn run(
             }
         }
 
+        // 4s. Bard song pulses (the rework of 2026-10-20): every singer whose
+        //     next pulse is due gets the song's effects again, the ordinary
+        //     buffs lingering SONG_LINGER_SECS, and the ENEMY song's slow on
+        //     the bard's current target. A dead or absent singer sings
+        //     nothing (death clears the song; a reap drops the connection).
+        let due_singers: Vec<(ClientId, String)> = connections
+            .iter()
+            .filter(|(_, c)| c.ready && c.in_world && c.hp > 0.0 && !c.death_processed)
+            .filter(|(_, c)| c.song_next_pulse_at.is_some_and(|t| now >= t))
+            .filter_map(|(id, c)| c.active_song.clone().map(|s| (*id, s)))
+            .collect();
+        for (cid, song) in due_singers {
+            let Some(spell) = spells::lookup(&song) else { continue };
+            if let Some(c) = connections.get_mut(&cid) {
+                c.song_next_pulse_at = Some(now + Duration::from_secs_f32(super::SONG_PULSE_SECS));
+            }
+            song_pulse(&mut server, &in_world_recipients_now, &mut connections, &mut enemies, cid, spell, now);
+        }
+
         // 5a. Track 6 sub-task 4a buff tick — process HoT / MP regen
         //     for each connection's active_buffs. Decrements
         //     remaining, applies per-tick effects, removes expired
@@ -11389,6 +11438,10 @@ pub async fn run(
             if conn.in_world && conn.hp <= 0.0 && !conn.death_processed {
                 super::progression::kill_player(&mut server, conn);
                 conn.death_processed = true;
+                // The dead sing nothing (Bard songs): the lingering effects
+                // run out on their own.
+                conn.active_song = None;
+                conn.song_next_pulse_at = None;
                 handlers::fan_out_entity_died(&mut server, &death_recipients, conn.char_id as u64);
                 newly_dead.push(conn.char_id as u64);
                 tracing::info!(
@@ -12281,6 +12334,87 @@ fn tell_interrupt_charge(
         caster_cid,
         &format!("Your concentration breaks: {} mana lost.", mana_charged.round() as i32),
     );
+}
+
+/// Stop a bard's song: clear the state and tell them. The lingering effects
+/// run out on their own (EQ's rule). Nothing happens when nothing is sung.
+fn stop_song(
+    server: &mut RenetServer,
+    connections: &mut HashMap<ClientId, PerConnection>,
+    cid: ClientId,
+) {
+    let Some(c) = connections.get_mut(&cid) else { return };
+    let Some(song) = c.active_song.take() else { return };
+    c.song_next_pulse_at = None;
+    let singer = c.char_id;
+    handlers::send_system_line(server, cid, &format!("You stop singing {song}."));
+    tracing::info!(singer, %song, "song stopped");
+}
+
+/// One pulse of a bard's song (the rework of 2026-10-20): the level-scaled
+/// effects (`songs::pulse_effects`) as the ordinary buffs, each lingering
+/// `SONG_LINGER_SECS` and refreshed by name on every pulse, fanned as a
+/// snapshot when any landed. The ENEMY song's slow lands on the bard's
+/// current target while it is a live mob in reach (out of reach, the pulse
+/// is skipped; dead or gone, the song stops: EQ's invalid-target rule). A
+/// PvP target is not a mob, so the song stops on one too (flagged).
+fn song_pulse(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    connections: &mut HashMap<ClientId, PerConnection>,
+    enemies: &mut HashMap<EntityId, Entity>,
+    cid: ClientId,
+    spell: &spells::Spell,
+    now: Instant,
+) {
+    let linger = super::SONG_LINGER_SECS;
+    let (effects, target, singer_pos) = {
+        let Some(c) = connections.get(&cid) else { return };
+        (super::songs::pulse_effects(spell, c.level, &c.class), c.current_target, c.pos)
+    };
+    let name = spell.name.clone();
+    let mut changed = false;
+    if let Some(c) = connections.get_mut(&cid) {
+        if effects.hot_hps > 0.0 {
+            apply_buff(c, ActiveBuff::new_hot(name.clone(), effects.hot_hps, linger, now));
+            changed = true;
+        }
+        if effects.speed_mult > 1.0 {
+            apply_buff(c, ActiveBuff::new_speed(name.clone(), effects.speed_mult, linger, now));
+            changed = true;
+        }
+        if effects.mp_regen_hps > 0.0 {
+            apply_mp_regen_exclusive(c, ActiveBuff::new_mp_regen(name.clone(), effects.mp_regen_hps, linger, now));
+            changed = true;
+        }
+        if effects.haste > 0.0 {
+            apply_buff(c, ActiveBuff::new_haste(name.clone(), effects.haste, linger, now));
+            changed = true;
+        }
+        if effects.accuracy > 0.0 || effects.crit > 0.0 {
+            apply_buff(c, ActiveBuff::new_accuracy_crit(name.clone(), effects.accuracy, effects.crit, linger, now));
+            changed = true;
+        }
+    }
+    if changed {
+        if let Some(c) = connections.get(&cid) {
+            fan_out_server_buff_snapshot(server, recipients, c);
+        }
+    }
+    if effects.attack_slow > 0.0 {
+        let target_stands = match target.and_then(|t| enemies.get_mut(&t)) {
+            Some(e) if e.is_alive() => {
+                if e.pos.distance_to(singer_pos) <= spell.reach() {
+                    e.apply_cc(ActiveCc::new_attack_slow(effects.attack_slow, linger));
+                }
+                true
+            }
+            _ => false,
+        };
+        if !target_stands {
+            stop_song(server, connections, cid);
+        }
+    }
 }
 
 /// An active skill's swing (client-authority audit item 6): the ordinary

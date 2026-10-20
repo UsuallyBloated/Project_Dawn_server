@@ -16,6 +16,7 @@
 mod active_skills;
 mod aoi;
 mod buffs;
+mod songs;
 mod cast_gate;
 mod clock;
 mod combat;
@@ -207,6 +208,25 @@ pub const GROUP_SHARE_RANGE: f32 = 200.0;
 /// that quarter second over an honest one. (EQ's gem refresh is quoted at
 /// 1.5 to 2.25 s across eras.)
 pub const GLOBAL_COOLDOWN: Duration = Duration::from_millis(2_000);
+
+/// Bard songs (the rework of 2026-10-20, classic EQ's rules as Project 1999
+/// keeps them, user decisions): the server pulses the bard's one active song
+/// every `SONG_PULSE_SECS` (EQ's 6 s tick), and each pulse's effect lingers
+/// `SONG_LINGER_SECS` after it (the low end of EQ's 12 to 18 s, so a
+/// four-song twist on 3 s sings holds and a fifth song drops). The sing time
+/// is the song's `cast_time` (3 s) and the cast-time gate enforces it, which
+/// is what makes twisting a skill and an instant cycle a forgery. Movement
+/// never interrupts a song (Selos' is a running song).
+pub const SONG_PULSE_SECS: f32 = 6.0;
+pub const SONG_LINGER_SECS: f32 = 12.0;
+/// A song's strength grows with the bard's level (user, 2026-10-20: a level 1
+/// bard must not be a level 50 one, and EQ scaled each song by level rather
+/// than by rank): this fraction of the listed effect at the level the class
+/// learns the song, climbing to the full effect at `SONG_FULL_AT_LEVEL`. The
+/// data carries the level-50 values. Both knobs; the client mirrors them in
+/// `bard_songs.gd` for the offline pulse and the buff bar.
+pub const SONG_SCALE_AT_LEARN: f32 = 0.4;
+pub const SONG_FULL_AT_LEVEL: i32 = 50;
 
 /// How often a damage-over-time spell ticks on a mob, a pet or a player
 /// (spell batch step 5, decided 2026-10-05): every three seconds, dealing

@@ -145,6 +145,7 @@ use serde::{Deserialize, Serialize};
 /// it, and `SpellGems` after `PlayerJumped`). `UseSkill`, declared but never
 /// sent before, carries a `skill_name` now (the server resolves active
 /// skills by name, as spells), and `SkillFail` is appended after `SpellGems`.
+/// `StopSong` is appended after `SeedSpellGems` (the Bard song rework).
 pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3238; // "PD_W0028"
 
 pub type EntityId = u64;
@@ -1026,6 +1027,11 @@ pub enum ClientWorldMsg {
     SeedSpellGems {
         gems: Vec<String>,
     },
+    /// Stop the song being sung (the Bard song rework, 2026-10-20): the
+    /// server pulses a bard's one active song itself, so a client that wants
+    /// it to end (re-clicking the song, `/stopsong`) says so instantly instead
+    /// of singing it again. No-op when nothing is sung.
+    StopSong,
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────

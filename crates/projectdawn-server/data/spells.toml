@@ -822,7 +822,8 @@ mana_cost = 0.0
 cast_time = 3.0
 cooldown = 0.5
 min_level = 1
-move_speed_mult = 1.35
+# EQ's Selo's Accelerando: +65% at 50 (user, 2026-10-20); +20% when learned, through the scale.
+move_speed_mult = 1.65
 classes = ["Bard"]
 
 [[spell]]

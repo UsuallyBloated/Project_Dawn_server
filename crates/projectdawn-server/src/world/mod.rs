@@ -223,9 +223,12 @@ pub const SONG_LINGER_SECS: f32 = 12.0;
 /// bard must not be a level 50 one, and EQ scaled each song by level rather
 /// than by rank): this fraction of the listed effect at the level the class
 /// learns the song, climbing to the full effect at `SONG_FULL_AT_LEVEL`. The
+/// fraction is Selo's own: EQ's Selo's Accelerando ran +20% when learned and
+/// +65% at 50, and the user set every song to that shape (2026-10-20: "our
+/// scaling should match Selos Melody scaling"; 20/65 = 0.31). The
 /// data carries the level-50 values. Both knobs; the client mirrors them in
 /// `bard_songs.gd` for the offline pulse and the buff bar.
-pub const SONG_SCALE_AT_LEARN: f32 = 0.4;
+pub const SONG_SCALE_AT_LEARN: f32 = 0.31;
 pub const SONG_FULL_AT_LEVEL: i32 = 50;
 
 /// How often a damage-over-time spell ticks on a mob, a pet or a player

@@ -64,7 +64,7 @@ mod tests {
         assert!((song_scale(50, 1) - 1.0).abs() < 1e-6, "full at 50");
         assert!((song_scale(60, 1) - 1.0).abs() < 1e-6, "and past it");
         let mid = song_scale(25, 1);
-        assert!(mid > 0.65 && mid < 0.75, "about 0.7 halfway: {mid}");
+        assert!(mid > 0.6 && mid < 0.7, "about 0.65 halfway: {mid}");
         assert!(song_scale(10, 10) < song_scale(10, 1), "a song learned later starts lower at the same level");
         assert!((song_scale(4, 10) - SONG_SCALE_AT_LEARN).abs() < 1e-6, "below the learn level counts as the learn level");
     }
@@ -75,8 +75,8 @@ mod tests {
         let selos = super::super::spells::lookup("Selos' Melody").expect("Selos' Melody");
         let at1 = pulse_effects(selos, 1, "Bard");
         let at50 = pulse_effects(selos, 50, "Bard");
-        assert!((at50.speed_mult - 1.35).abs() < 1e-6, "the listed value at 50");
-        assert!((at1.speed_mult - 1.14).abs() < 1e-6, "0.4 of the bonus at level 1: {}", at1.speed_mult);
+        assert!((at50.speed_mult - 1.65).abs() < 1e-6, "the listed value at 50, EQ's Selo's +65%");
+        assert!((at1.speed_mult - 1.2015).abs() < 1e-4, "0.31 of the bonus at level 1, EQ's +20%: {}", at1.speed_mult);
         let mending = super::super::spells::lookup("Poet's Mending").expect("Poet's Mending");
         let heal50 = pulse_effects(mending, 50, "Bard");
         assert!((heal50.hot_hps - 8.0 / SONG_PULSE_SECS).abs() < 1e-6, "8 a pulse as HP a second");

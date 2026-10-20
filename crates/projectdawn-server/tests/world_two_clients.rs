@@ -9386,8 +9386,8 @@ async fn twisting_holds_two_songs_and_a_nuke_ends_the_song() {
 }
 
 /// A song is sung on the move (the movement gate passes songs), and a level 1
-/// bard's Selos' is 0.4 of the listed bonus: 1.14x run speed, 0.285 m a tick,
-/// where the flat data gave 1.35x (0.3375 m) at any level.
+/// bard's Selos' is EQ's +20%: 0.31 of the listed +65%, 1.2015x run speed,
+/// 0.300 m a tick, where the flat data would give 1.65x (0.4125 m) at any level.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_bard_sings_while_running_and_a_young_bard_runs_slower_than_the_data() {
     let h = start_both().await;
@@ -9411,5 +9411,5 @@ async fn a_bard_sings_while_running_and_a_young_bard_runs_slower_than_the_data()
     assert!(!begun.iter().any(|m| matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_id as u64)));
 
     let step = median_step(&mut a, a_id, &mut seq, east, 30).await;
-    assert!((step - 0.285).abs() < 0.015, "a level 1 Selos' runs 1.14x, 0.285 m a tick: {step}");
+    assert!((step - 0.300).abs() < 0.012, "a level 1 Selos' runs 1.2x, 0.300 m a tick: {step}");
 }

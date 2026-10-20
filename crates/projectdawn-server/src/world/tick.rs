@@ -3,6 +3,7 @@
 //! pipeline.
 
 use super::{
+    active_skills,
     aoi::{self, AoiGrid},
     buffs::{self, ActiveBuff},
     clock,
@@ -62,6 +63,28 @@ struct AttackIntent {
     // (0 main / 1 off) and applies the off-hand damage penalty.
     is_offhand: bool,
     dmg_type: protocol::world::DamageType,
+    /// `Some` when this swing is an active skill's (client-authority audit
+    /// item 6): the ordinary main-hand roll times the skill's multiplier,
+    /// outside the auto-attack swing-rate limiter (the skill's own cooldown
+    /// paces it), with the skill's effect on a landed hit. The stamina and
+    /// the cooldown were charged when the intent was resolved.
+    skill: Option<SkillSwing>,
+}
+
+/// The part of an active skill that rides a swing.
+struct SkillSwing {
+    mult: f32,
+    effect: active_skills::Effect,
+    stun_duration: f32,
+}
+
+/// A `UseSkill` the handler accepted, resolved in step 4g: the target
+/// checked, the stamina and cooldown charged, then a SELF effect applied or
+/// a skill swing queued for step 4h.
+struct UseSkillIntent {
+    user: u64,
+    skill_name: String,
+    target_id: Option<protocol::world::EntityId>,
 }
 
 // ── Melee swing-rate limit (Phase 1 exploit gate) ───────────────────────────
@@ -2048,6 +2071,7 @@ pub async fn run(
         // a distinct event; coalescing would silently drop multi-hit
         // combos).
         let mut attack_intents: Vec<AttackIntent> = Vec::new();
+        let mut use_skill_intents: Vec<UseSkillIntent> = Vec::new();
         let mut cast_spell_intents: Vec<CastSpellIntent> = Vec::new();
         // Casters already told this tick that an extra CastSpell was dropped.
         let mut cast_overflow_told: Vec<ClientId> = Vec::new();
@@ -2308,7 +2332,11 @@ pub async fn run(
                                 target_id,
                                 is_offhand,
                                 dmg_type,
+                                skill: None,
                             });
+                        }
+                        Outcome::UseSkillIntent { user, skill_name, target_id } => {
+                            use_skill_intents.push(UseSkillIntent { user, skill_name, target_id });
                         }
                         Outcome::CastSpellIntent {
                             caster,
@@ -3559,6 +3587,186 @@ pub async fn run(
             tracing::info!(pet_id, mob_id, charmer = ?charmer, "charm expired — mob returned hostile");
         }
 
+        // 4g. Active skills (client-authority audit item 6). The handler
+        //     checked the skill, the class, the crowd control, the cooldown
+        //     and the stamina; here the target is checked, the stamina and
+        //     the cooldown are charged, and then a SELF skill's effect is
+        //     applied or a damage skill becomes a swing for step 4h with the
+        //     skill's multiplier and effect riding it. A refusal costs nothing
+        //     and answers with SkillFail, so the client drops the cooldown it
+        //     started.
+        if !use_skill_intents.is_empty() {
+            for intent in use_skill_intents.drain(..) {
+                let user_cid = intent.user as ClientId;
+                let Some(skill) = active_skills::lookup(&intent.skill_name) else { continue };
+                let Some(user) = connections.get(&user_cid) else { continue };
+                // A dead user uses nothing (as a dead caster casts nothing).
+                if !user.in_world || user.hp <= 0.0 || user.death_processed {
+                    continue;
+                }
+                // Checked again against this tick's state: two UseSkills in
+                // one datagram passed the handler on the same stamina.
+                if active_skills::on_cooldown(user.skill_cooldowns.get(&skill.name).copied(), now) {
+                    handlers::send_skill_fail(&mut server, user_cid, &skill.name, "You cannot use that yet.");
+                    continue;
+                }
+                if user.stamina < skill.stamina_cost {
+                    handlers::send_skill_fail(&mut server, user_cid, &skill.name, "You are too tired.");
+                    continue;
+                }
+                let user_pos = user.pos;
+                let user_zone = user.zone.clone();
+                let effect = skill.effect();
+
+                if skill.is_damage() {
+                    // The reach of the main-hand weapon, as the swing it
+                    // becomes will check again (step 4h fans a Miss for a
+                    // target out of reach; the skill refuses before any cost).
+                    let weapon_path = user.equipped_weapon_path(false);
+                    let ranged = items::lookup(&weapon_path).is_some_and(|w| w.is_ranged);
+                    let Some(target_id) = intent.target_id else {
+                        handlers::send_skill_fail(&mut server, user_cid, &skill.name, "You have no target.");
+                        continue;
+                    };
+                    let check: Result<(), &str> = if target_id < protocol::world::ENEMY_ID_BASE {
+                        if target_id == intent.user {
+                            Err("You cannot use that on yourself.")
+                        } else {
+                            match connections.get(&(target_id as ClientId)) {
+                                Some(t) if t.in_world && t.hp > 0.0 => {
+                                    if !combat::can_attack(user, t, user_zone.as_deref(), t.zone.as_deref()) {
+                                        Err("Unable to attack that target.")
+                                    } else {
+                                        let allowed = if ranged { RANGED_ATTACK_RANGE } else { 3.0 * ATTACK_RANGE_TOLERANCE };
+                                        if t.pos.distance_to(user_pos) <= allowed { Ok(()) } else { Err("That target is too far away.") }
+                                    }
+                                }
+                                _ => Err("That target is not here."),
+                            }
+                        }
+                    } else {
+                        match enemies.get(&target_id) {
+                            Some(e) if e.is_alive() => {
+                                // Pets inherit their owner's PvP flag (as the
+                                // plain swing's gate).
+                                let pvp_ok = match e.owner {
+                                    None => Ok(()),
+                                    Some(owner) if owner as ClientId == user_cid => Err("You cannot attack your own pet."),
+                                    Some(owner) => match connections.get(&(owner as ClientId)) {
+                                        Some(o) if combat::can_attack(user, o, user_zone.as_deref(), o.zone.as_deref()) => Ok(()),
+                                        _ => Err("Unable to attack that target."),
+                                    },
+                                };
+                                pvp_ok.and_then(|_| {
+                                    let allowed = if ranged { RANGED_ATTACK_RANGE } else { e.melee_range() * ATTACK_RANGE_TOLERANCE };
+                                    if e.pos.distance_to(user_pos) <= allowed { Ok(()) } else { Err("That target is too far away.") }
+                                })
+                            }
+                            _ => Err("That target is not here."),
+                        }
+                    };
+                    if let Err(line) = check {
+                        handlers::send_skill_fail(&mut server, user_cid, &skill.name, line);
+                        continue;
+                    }
+                }
+
+                // Charged: the stamina (fanned at once, so a group-mate's
+                // panel moves with it), the cooldown, and the user stands.
+                // A damage skill also marks them in combat; a Hide does not.
+                if let Some(u) = connections.get_mut(&user_cid) {
+                    u.stamina = (u.stamina - skill.stamina_cost).max(0.0);
+                    regen::mark_dirty(u);
+                    u.skill_cooldowns.insert(skill.name.clone(), now + skill.cooldown_duration());
+                    u.is_sitting = false;
+                    if skill.is_damage() {
+                        u.last_attack_at = Some(now);
+                    }
+                    let (st, mx) = (u.stamina, u.max_stamina);
+                    handlers::fan_out_stamina_update(&mut server, &in_world_recipients_now, intent.user, st, mx);
+                }
+                tracing::info!(user = intent.user, skill = %skill.name, cost = skill.stamina_cost, "skill used");
+
+                if skill.is_damage() {
+                    attack_intents.push(AttackIntent {
+                        attacker: intent.user,
+                        target_id: intent.target_id.unwrap_or(0),
+                        is_offhand: false,
+                        dmg_type: DamageType::Physical,
+                        skill: Some(SkillSwing {
+                            mult: skill.damage_multiplier,
+                            effect,
+                            stun_duration: skill.stun_duration,
+                        }),
+                    });
+                    continue;
+                }
+
+                // SELF skills: a buff on the user, or a feign death.
+                let mut snapshot_changed = false;
+                match effect {
+                    active_skills::Effect::EvadeBoost => {
+                        if let Some(u) = connections.get_mut(&user_cid) {
+                            u.active_buffs.retain(|b| b.name != skill.name);
+                            u.active_buffs.push(ActiveBuff::new_evade_all(skill.name.clone(), skill.effect_duration, now));
+                            snapshot_changed = true;
+                        }
+                    }
+                    active_skills::Effect::AbsorbShield => {
+                        if let Some(u) = connections.get_mut(&user_cid) {
+                            u.active_buffs.retain(|b| b.name != skill.name);
+                            u.active_buffs.push(ActiveBuff::new_absorb(skill.name.clone(), skill.absorb_amount, now));
+                            snapshot_changed = true;
+                        }
+                    }
+                    active_skills::Effect::Stealth => {
+                        if let Some(u) = connections.get_mut(&user_cid) {
+                            u.active_buffs.retain(|b| b.name != skill.name);
+                            u.active_buffs.push(ActiveBuff::new_stealth(skill.name.clone(), skill.stealth_duration, now));
+                            snapshot_changed = true;
+                        }
+                        handlers::send_refusal(&mut server, user_cid, "You have hidden yourself from view.");
+                    }
+                    active_skills::Effect::FeignDeath => {
+                        let roll: f32 = rand::thread_rng().gen();
+                        if active_skills::feign_death_succeeds(roll) {
+                            // Every mob forgets the user (their DoTs end with
+                            // their hate, so a feigned player is paid nothing
+                            // by what they left ticking), and the mobs that
+                            // lost their target are fanned as such.
+                            for mob_id in wipe_hate(&mut enemies, &[intent.user]) {
+                                handlers::fan_out_entity_target(&mut server, &in_world_recipients_now, mob_id, None);
+                            }
+                            // And they lie unnoticed until they stand (any
+                            // movement), swing, use a skill or cast at a mob,
+                            // or two minutes pass; otherwise a mob with an
+                            // aggro radius would turn straight back on them.
+                            if let Some(u) = connections.get_mut(&user_cid) {
+                                u.active_buffs.retain(|b| !matches!(b.effect, buffs::BuffEffect::Feigned));
+                                u.active_buffs.push(ActiveBuff::new_feigned(
+                                    "Feigned Death".to_string(),
+                                    active_skills::FEIGN_DEATH_HOLD_SECS,
+                                    now,
+                                ));
+                                snapshot_changed = true;
+                            }
+                            handlers::send_refusal(&mut server, user_cid, "You feign death successfully.");
+                            tracing::info!(user = intent.user, "feign death succeeded");
+                        } else {
+                            handlers::send_refusal(&mut server, user_cid, "Your feign death fails!");
+                            tracing::info!(user = intent.user, "feign death failed");
+                        }
+                    }
+                    _ => {}
+                }
+                if snapshot_changed {
+                    if let Some(u) = connections.get(&user_cid) {
+                        fan_out_server_buff_snapshot(&mut server, &in_world_recipients_now, u);
+                    }
+                }
+            }
+        }
+
         // 4h. Apply player → server attack intents. The handler queued
         //     these without touching the enemies map; here we run the
         //     server-authoritative damage formula against the attacker's
@@ -3654,7 +3862,10 @@ pub async fn run(
                     .map(|w| w.weapon_delay)
                     .unwrap_or(FIST_WEAPON_DELAY);
                 let min_interval = min_swing_interval_secs(base_delay, intent.is_offhand);
-                if swing_too_fast(attacker_conn.last_swing_at[hand], now, min_interval) {
+                // A skill's swing is outside the auto-attack limiter: its own
+                // cooldown paces it (step 4g charged it), and it neither reads
+                // nor advances the hand's timer.
+                if intent.skill.is_none() && swing_too_fast(attacker_conn.last_swing_at[hand], now, min_interval) {
                     tracing::info!(
                         attacker = intent.attacker,
                         is_offhand = intent.is_offhand,
@@ -3672,13 +3883,27 @@ pub async fn run(
                     &server_weapon_path,
                     intent.is_offhand,
                 );
+                // An active skill's swing: the ordinary roll times its
+                // multiplier; Truesight Strike never misses.
+                let swing = skill_swing(swing, intent.skill.as_ref());
                 // Swing accepted at a legal cadence — advance THIS hand's timer.
                 // Stamped here on cadence-acceptance (before the range / hit / PvP
                 // resolution below) because the client paces by swing attempt, not
                 // by landed hit; the attacker_conn immutable borrow ends at
                 // calc_swing above, so this get_mut is clear.
-                if let Some(a) = connections.get_mut(&attacker_cid) {
-                    a.last_swing_at[hand] = Some(now);
+                if intent.skill.is_none() {
+                    if let Some(a) = connections.get_mut(&attacker_cid) {
+                        a.last_swing_at[hand] = Some(now);
+                    }
+                }
+                // The first swing from the shadows ends a Hide, skill or not.
+                let stealth_broken = connections
+                    .get_mut(&attacker_cid)
+                    .is_some_and(|a| buffs::break_stealth(&mut a.active_buffs));
+                if stealth_broken {
+                    if let Some(a) = connections.get(&attacker_cid) {
+                        fan_out_server_buff_snapshot(&mut server, &in_world_recipients_now, a);
+                    }
                 }
 
                 // Track 6 sub-task 3: player-target branch (PvP). The
@@ -3751,6 +3976,16 @@ pub async fn run(
                         );
                         continue;
                     }
+                    // Evade (active skills): every melee swing at the bearer
+                    // is deflected while it holds, except Truesight Strike's.
+                    let target_evading = connections
+                        .get(&target_cid)
+                        .is_some_and(|t| buffs::is_evading(&t.active_buffs));
+                    let truesight = intent.skill.as_ref().is_some_and(|s| s.effect == active_skills::Effect::Truesight);
+                    if target_evading && !truesight {
+                        handlers::fan_out_evade(&mut server, &in_world_recipients_now, intent.attacker, intent.target_id);
+                        continue;
+                    }
                     // Seated-combat rule (classic EQ, user call 2026-10-14):
                     // a sitting target takes the top of the attacker's band
                     // with no armor; the hit then stands them
@@ -3762,11 +3997,20 @@ pub async fn run(
                     let swing = if target_seated {
                         connections
                             .get(&attacker_cid)
-                            .map(|a| combat::calc_swing_max(a, &server_weapon_path, intent.is_offhand))
+                            .map(|a| skill_swing(combat::calc_swing_max(a, &server_weapon_path, intent.is_offhand), intent.skill.as_ref()))
                             .unwrap_or(swing)
                     } else {
                         swing
                     };
+                    // Warder's Fury commands the warder whether the blow lands
+                    // or not (the /pet attack path PvP-gates it again).
+                    if intent.skill.as_ref().is_some_and(|s| s.effect == active_skills::Effect::WarderFury) {
+                        pet_command_intents.push(PetCommandI {
+                            owner: intent.attacker,
+                            command: protocol::world::pet_command::ATTACK,
+                            target_id: Some(intent.target_id),
+                        });
+                    }
                     // The server's miss roll (combat.rs); a seated target is
                     // never missed.
                     if swing.missed {
@@ -3955,6 +4199,20 @@ pub async fn run(
                         new_hp,
                         max_hp,
                     );
+                    // The skill's effect on a landed PvP hit: Shield Bash
+                    // stuns the player (no move, swing, cast or skill; the
+                    // name shows on their frame).
+                    if let Some(sk) = intent.skill.as_ref() {
+                        if sk.effect == active_skills::Effect::Stun {
+                            if let Some(tc) = connections.get_mut(&target_cid) {
+                                tc.active_buffs.retain(|b| !matches!(b.effect, buffs::BuffEffect::Stun));
+                                tc.active_buffs.push(ActiveBuff::new_stun("Stunned".to_string(), sk.stun_duration, now));
+                            }
+                            if let Some(tc) = connections.get(&target_cid) {
+                                fan_out_server_buff_snapshot(&mut server, &in_world_recipients_now, tc);
+                            }
+                        }
+                    }
                     continue;
                 }
 
@@ -4070,6 +4328,15 @@ pub async fn run(
                     );
                     continue;
                 }
+                // Warder's Fury commands the warder at the target whether the
+                // user's own blow lands or not (the command is not the blow).
+                if intent.skill.as_ref().is_some_and(|s| s.effect == active_skills::Effect::WarderFury) {
+                    pet_command_intents.push(PetCommandI {
+                        owner: intent.attacker,
+                        command: protocol::world::pet_command::ATTACK,
+                        target_id: Some(intent.target_id),
+                    });
+                }
                 // The server's miss roll (combat.rs). A miss still angers the
                 // mob (one point of hate, as any swing at it does in EQ),
                 // keeps the pet's assist target, and trains the weapon skill
@@ -4121,6 +4388,16 @@ pub async fn run(
                     &combat::weapon_skill_key(&server_weapon_path),
                     intent.is_offhand,
                 );
+                // The skill's effect on a landed hit: Shield Bash stuns the
+                // mob (frozen like mez, but damage does not wake it; the AI
+                // sweep fans "Stunned" on its frame).
+                if let Some(sk) = intent.skill.as_ref() {
+                    if sk.effect == active_skills::Effect::Stun {
+                        entity.apply_cc(ActiveCc::new_stun(sk.stun_duration));
+                        tracing::info!(attacker = intent.attacker, target = intent.target_id,
+                            secs = sk.stun_duration, "mob stunned");
+                    }
+                }
                 // PD_W0025 — server-authoritative weapon proc. Roll the equipped
                 // weapon's proc_chance on this landed swing; on a proc, fold the
                 // proc_damage into THIS swing's resolution (same entity borrow +
@@ -4724,6 +5001,18 @@ pub async fn run(
                     new_mp,
                     caster_max_mp,
                 );
+                // A hostile cast from the shadows ends a Hide (active
+                // skills), as a swing does.
+                if matches!(spell.target_type.as_str(), "ENEMY" | "AOE" | "PET_CHARM") {
+                    let stealth_broken = connections
+                        .get_mut(&caster_cid)
+                        .is_some_and(|c| buffs::break_stealth(&mut c.active_buffs));
+                    if stealth_broken {
+                        if let Some(c) = connections.get(&caster_cid) {
+                            fan_out_server_buff_snapshot(&mut server, &in_world_recipients_now, c);
+                        }
+                    }
+                }
                 if hp_cost > 0.0 {
                     handlers::fan_out_health_update(
                         &mut server,
@@ -8436,6 +8725,13 @@ pub async fn run(
             // melee range / chase behaviour with players from the
             // enemy's POV; the new enemy→pet hit dispatch below
             // applies damage to pets.
+            // Players a Hide holds (active skills): an idle mob's proximity
+            // scan passes over them; a provoked mob still finds them.
+            let hidden_players: Vec<EntityId> = connections
+                .values()
+                .filter(|c| c.in_world && buffs::is_hidden(&c.active_buffs))
+                .map(|c| c.char_id as u64)
+                .collect();
             let mut targets_for_enemy_ai: Vec<(EntityId, Vec3f)> = player_snapshots.clone();
             for (id, entity) in enemies.iter() {
                 if entity.is_pet() && entity.is_alive() {
@@ -8626,7 +8922,7 @@ pub async fn run(
                     continue;
                 }
                 let old_enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
-                let events = entity.tick_ai(&targets_for_enemy_ai, &enemy_target_snapshots, dt, now);
+                let events = entity.tick_ai(&targets_for_enemy_ai, &enemy_target_snapshots, &hidden_players, dt, now);
                 if let Some(new_target) = events.target_changed {
                     target_changes.push((entity.id, new_target));
                 }
@@ -9119,10 +9415,17 @@ pub async fn run(
                 let mut shield_to_attacker: f32 = 0.0;
                 let mut shield_name_pve: Option<String> = None;
                 let mut absorb_buff_to_strip: Option<usize> = None;
+                // Evade (active skills, 2026-10-19): while it holds, every
+                // melee swing at the player is deflected, fanned as an Evade
+                // with nothing applied.
+                let evaded = hit.target < protocol::world::ENEMY_ID_BASE
+                    && connections
+                        .get(&(hit.target as ClientId))
+                        .is_some_and(|t| t.in_world && t.hp > 0.0 && buffs::is_evading(&t.active_buffs));
                 let final_amount = if hit.target < protocol::world::ENEMY_ID_BASE {
                     let target_cid = hit.target as ClientId;
                     if let Some(target_conn) = connections.get_mut(&target_cid) {
-                        if target_conn.in_world && target_conn.hp > 0.0 {
+                        if target_conn.in_world && target_conn.hp > 0.0 && !evaded {
                             // Seated-combat rule (classic EQ): a sitting
                             // target takes the swing with no armor, and a
                             // mob's swing is flat, so its max IS the amount.
@@ -9339,15 +9642,19 @@ pub async fn run(
                         );
                     }
                 }
-                handlers::fan_out_hit(
-                    &mut server,
-                    &in_world_recipients_now,
-                    attacker,
-                    hit.target,
-                    final_amount,
-                    false,
-                    DamageType::Physical,
-                );
+                if evaded {
+                    handlers::fan_out_evade(&mut server, &in_world_recipients_now, attacker, hit.target);
+                } else {
+                    handlers::fan_out_hit(
+                        &mut server,
+                        &in_world_recipients_now,
+                        attacker,
+                        hit.target,
+                        final_amount,
+                        false,
+                        DamageType::Physical,
+                    );
+                }
                 if let Some(target_id) = damaged_player {
                     // Server's regen broadcast loop (step 4l) would catch
                     // this within MAX_BROADCAST_GAP, but a fresh HP fan-out
@@ -10564,6 +10871,11 @@ pub async fn run(
             // seated while they're running around.
             if dir.x != 0.0 || dir.z != 0.0 {
                 conn.is_sitting = false;
+                // Standing up ends a feign death (active skills): the mobs
+                // that forgot the player may notice them again.
+                if buffs::end_feign(&mut conn.active_buffs) {
+                    fan_out_server_buff_snapshot(&mut server, &in_world_recipients_now, conn);
+                }
             }
             // The server decides the speed (RUN_SPEED's note): its own speed
             // buff (Spirit of Wolf, Selos' Melody), snare (floored at 10% so
@@ -10820,7 +11132,11 @@ pub async fn run(
                     | buffs::BuffEffect::Root
                     | buffs::BuffEffect::Snare { .. }
                     | buffs::BuffEffect::AttackSlow { .. }
-                    | buffs::BuffEffect::Silence => {
+                    | buffs::BuffEffect::Silence
+                    | buffs::BuffEffect::EvadeAll
+                    | buffs::BuffEffect::Stealth
+                    | buffs::BuffEffect::Stun
+                    | buffs::BuffEffect::Feigned => {
                         // Track 6 sub-task 4c/4d — duration-only
                         // buffs. Effects applied at read sites
                         // (movement integration / damage-shield
@@ -11914,6 +12230,19 @@ fn tell_interrupt_charge(
 /// three ways a RUNNING cast ends that peers can see (an interrupt, silence,
 /// mez) keep their fan to peers so the bar they drew cancels; they reach the
 /// caster too. Spell batch step 0.
+/// An active skill's swing (client-authority audit item 6): the ordinary
+/// roll times the skill's multiplier, never below one point; Truesight
+/// Strike never misses. A plain swing passes through unchanged.
+fn skill_swing(swing: combat::Swing, skill: Option<&SkillSwing>) -> combat::Swing {
+    let Some(sk) = skill else { return swing };
+    let mut out = swing;
+    out.amount = ((swing.amount.max(0) as f32) * sk.mult).round().max(1.0) as i32;
+    if sk.effect == active_skills::Effect::Truesight {
+        out.missed = false;
+    }
+    out
+}
+
 fn refuse_cast(
     server: &mut RenetServer,
     connections: &HashMap<ClientId, PerConnection>,

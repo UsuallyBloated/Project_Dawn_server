@@ -31,6 +31,9 @@ pub enum CcKind {
     Root,
     Snare { factor_pct: u8 }, // 0–100; 50 = half speed
     AttackSlow { factor_pct: u8 }, // extra delay fraction × 100
+    /// Shield Bash (active skills, 2026-10-19): frozen like mez, but damage
+    /// does not end it.
+    Stun,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +78,9 @@ impl ActiveCc {
     }
     pub fn new_root(duration: f32) -> Self {
         Self { kind: CcKind::Root, remaining: duration }
+    }
+    pub fn new_stun(duration: f32) -> Self {
+        Self { kind: CcKind::Stun, remaining: duration }
     }
     pub fn new_snare(slow_amount: f32, duration: f32) -> Self {
         let factor_pct = (slow_amount.clamp(0.0, 1.0) * 100.0) as u8;
@@ -791,6 +797,7 @@ impl Entity {
                 CcKind::Root => "Rooted",
                 CcKind::Snare { .. } => "Snared",
                 CcKind::AttackSlow { .. } => "Slowed",
+                CcKind::Stun => "Stunned",
             };
             pairs.push((label.to_string(), cc.remaining.max(0.0)));
         }
@@ -803,6 +810,10 @@ impl Entity {
 
     pub fn is_rooted(&self) -> bool {
         self.active_cc.iter().any(|c| matches!(c.kind, CcKind::Root))
+    }
+
+    pub fn is_stunned(&self) -> bool {
+        self.active_cc.iter().any(|c| matches!(c.kind, CcKind::Stun))
     }
 
     /// Speed multiplier from snare (0.0 = full speed, 0.5 = half speed).
@@ -869,18 +880,22 @@ impl Entity {
     /// has no caster or healer mobs (all 9 archetypes are melee). When
     /// those land, branch on `mob.spell_damage > 0` / `mob.healer_flee_hp
     /// > 0.0` here.
+    /// `hidden` names the players a Hide holds: an idle mob's proximity scan
+    /// passes over them (a mob already provoked still finds them through its
+    /// threat table, and the first swing ends the hide anyway).
     pub fn tick_ai(
         &mut self,
         targets: &[(EntityId, Vec3f)],
         enemy_targets: &[(EntityId, Vec3f, bool)],
+        hidden: &[EntityId],
         dt: f32,
         now: Instant,
     ) -> AiEvents {
         self.tick_cc(dt);
         let prev_target = self.target;
         let mut events = AiEvents::default();
-        // Mez skips the entire state machine (mob stands frozen).
-        if self.is_mezzed() {
+        // Mez and stun skip the entire state machine (mob stands frozen).
+        if self.is_mezzed() || self.is_stunned() {
             return events;
         }
         // Track 11 — pets run a distinct state machine. They follow
@@ -891,7 +906,7 @@ impl Entity {
             self.tick_pet_ai(targets, enemy_targets, dt, now, &mut events);
         } else {
             match self.state {
-                EnemyState::Idle => self.tick_idle(targets, now),
+                EnemyState::Idle => self.tick_idle(targets, hidden, now),
                 EnemyState::Chase => self.tick_chase(targets, dt, now),
                 EnemyState::Attack => self.tick_attack(targets, now, &mut events),
                 EnemyState::Leash => self.tick_leash(dt, now),
@@ -1002,8 +1017,8 @@ impl Entity {
         }
     }
 
-    fn tick_idle(&mut self, targets: &[(EntityId, Vec3f)], now: Instant) {
-        if let Some((id, _)) = nearest_target_within(self.pos, targets, self.mob.aggro) {
+    fn tick_idle(&mut self, targets: &[(EntityId, Vec3f)], hidden: &[EntityId], now: Instant) {
+        if let Some((id, _)) = nearest_target_within(self.pos, targets, self.mob.aggro, hidden) {
             self.target = Some(id);
             self.transition(EnemyState::Chase, now);
             return;
@@ -1167,13 +1182,18 @@ impl Entity {
     }
 }
 
+/// The nearest target inside `radius`, passing over the `hidden` ones.
 fn nearest_target_within(
     origin: Vec3f,
     targets: &[(EntityId, Vec3f)],
     radius: f32,
+    hidden: &[EntityId],
 ) -> Option<(EntityId, f32)> {
     let mut best: Option<(EntityId, f32)> = None;
     for &(id, pos) in targets {
+        if hidden.contains(&id) {
+            continue;
+        }
         let d = origin.distance_to(pos);
         if d > radius {
             continue;
@@ -1446,7 +1466,7 @@ mod tests {
         let pet_id = PET_ID_BASE + 17;
         let targets = vec![(pet_id, Vec3f { x: 2.0, y: 0.0, z: 0.0 })];
         let enemy_targets: Vec<(EntityId, Vec3f, bool)> = vec![];
-        let _events = e.tick_ai(&targets, &enemy_targets, 0.05, now);
+        let _events = e.tick_ai(&targets, &enemy_targets, &[], 0.05, now);
         assert_eq!(e.target, Some(pet_id), "enemy should aggro on nearest target regardless of id partition");
         assert!(matches!(e.state, EnemyState::Chase), "transitioning Idle → Chase on acquisition");
     }
@@ -1466,9 +1486,58 @@ mod tests {
         e.threat.insert(attacker, 12.0);
         let targets = vec![(attacker, pos)];
         let enemy_targets: Vec<(EntityId, Vec3f, bool)> = vec![];
-        let _ = e.tick_ai(&targets, &enemy_targets, 0.05, now);
+        let _ = e.tick_ai(&targets, &enemy_targets, &[], 0.05, now);
         assert_eq!(e.target, Some(attacker), "damage must provoke the mob");
         assert!(matches!(e.state, EnemyState::Chase));
+    }
+
+    /// Hide (active skills, 2026-10-19): an idle mob's proximity scan passes
+    /// over a hidden player, but its threat table still finds them (being
+    /// attacked is aggro, hidden or not).
+    #[test]
+    fn an_idle_mob_does_not_notice_a_hidden_player_but_still_feels_a_hit() {
+        let now = Instant::now();
+        let mut e = Entity::from_spawn(0, Vec3f::ZERO, template(), now);
+        let rogue: EntityId = 7;
+        let targets = vec![(rogue, Vec3f { x: 2.0, y: 0.0, z: 0.0 })];
+        let enemy_targets: Vec<(EntityId, Vec3f, bool)> = vec![];
+        let _ = e.tick_ai(&targets, &enemy_targets, &[rogue], 0.05, now);
+        assert_eq!(e.target, None, "a hidden rogue two metres away goes unnoticed");
+        assert!(matches!(e.state, EnemyState::Idle));
+        e.threat.insert(rogue, 5.0);
+        let _ = e.tick_ai(&targets, &enemy_targets, &[rogue], 0.05, now);
+        assert_eq!(e.target, Some(rogue), "a hit from the shadows still provokes the mob");
+    }
+
+    /// Shield Bash's stun freezes the state machine like mez, and taking
+    /// damage does not end it (only mez breaks on damage).
+    #[test]
+    fn a_stunned_mob_neither_moves_nor_swings_and_a_hit_does_not_wake_it() {
+        let now = Instant::now();
+        let mut e = Entity::from_spawn(0, Vec3f::ZERO, template(), now);
+        let player: EntityId = 1;
+        let targets = vec![(player, Vec3f { x: 1.0, y: 0.0, z: 0.0 })];
+        let enemy_targets: Vec<(EntityId, Vec3f, bool)> = vec![];
+        let _ = e.tick_ai(&targets, &enemy_targets, &[], 0.05, now);
+        assert_eq!(e.target, Some(player));
+        e.apply_cc(ActiveCc::new_stun(3.0));
+        e.clear_mez();
+        assert!(e.is_stunned(), "damage clears mez, never a stun");
+        assert!(e.status_pairs().iter().any(|(n, _)| n == "Stunned"), "the frame says so");
+        let mut swung = false;
+        for _ in 0..55 {
+            let ev = e.tick_ai(&targets, &enemy_targets, &[], 0.05, now);
+            swung |= ev.hit.is_some();
+        }
+        assert!(!swung, "2.75 s of ticks inside the 3 s stun: no swing");
+        assert!(e.pos.distance_to(Vec3f::ZERO) < 1e-3, "and it did not move");
+        let mut swung_after = false;
+        for _ in 0..30 {
+            let ev = e.tick_ai(&targets, &enemy_targets, &[], 0.05, now);
+            swung_after |= ev.hit.is_some();
+        }
+        assert!(swung_after, "once the stun runs out the mob swings again");
+        assert!(!e.is_stunned());
     }
 
     /// A small aggro radius used to mean a short leash: 8 m aggro, 16 m leash,
@@ -1518,7 +1587,7 @@ mod tests {
         e.threat.insert(attacker, 12.0);
         let targets = vec![(attacker, pos)];
         let enemy_targets: Vec<(EntityId, Vec3f, bool)> = vec![];
-        let _ = e.tick_ai(&targets, &enemy_targets, 0.05, now);
+        let _ = e.tick_ai(&targets, &enemy_targets, &[], 0.05, now);
         assert_eq!(e.target, None, "beyond leash: stand and wait, don't flap");
         assert!(matches!(e.state, EnemyState::Idle));
     }

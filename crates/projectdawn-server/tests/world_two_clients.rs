@@ -230,6 +230,17 @@ async fn master_weapon_skill(db_url: &str, char_id: i64, key: &str) {
     .expect("master weapon skill");
 }
 
+/// Set a character's persisted stamina (read at login).
+async fn set_char_stamina(db_url: &str, char_id: i64, stamina: f32) {
+    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    sqlx::query("UPDATE characters SET stamina = ?1 WHERE id = ?2")
+        .bind(stamina)
+        .bind(char_id)
+        .execute(&pool)
+        .await
+        .expect("set stamina");
+}
+
 /// Put a stack straight into a character's inventory row (read at login).
 async fn give_char_item(db_url: &str, char_id: i64, location: &str, slot: u32, path: &str, count: u32) {
     let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
@@ -565,6 +576,31 @@ impl WorldClient {
     fn send_pet_command(&mut self, command: u8, target_id: Option<u64>) {
         let msg = ClientWorldMsg::PetCommand { command, target_id };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
+    fn send_use_skill(&mut self, skill_name: &str, target_id: Option<u64>) {
+        let msg = ClientWorldMsg::UseSkill { skill_name: skill_name.into(), target_id };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
+    /// Pump for `d`, keeping every SYSTEM message that arrives meanwhile (a
+    /// `wait_for` drops what it does not match; a window that must count
+    /// several kinds needs them all).
+    async fn collect_for(&mut self, d: Duration) -> Vec<ServerWorldMsg> {
+        let end = Instant::now() + d;
+        let mut out = Vec::new();
+        while Instant::now() < end {
+            tick_one(&mut self.client, &mut self.transport);
+            while let Some(bytes) = self.client.receive_message(CHANNEL_SYSTEM) {
+                if let Ok((msg, _)) =
+                    bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+                {
+                    out.push(msg);
+                }
+            }
+            tokio::time::sleep(TICK_DT).await;
+        }
+        out
     }
 
     fn send_use_consumable_base(&mut self, idx: u8) {
@@ -8888,4 +8924,281 @@ async fn no_rent_items_go_after_thirty_minutes_logged_out() {
         .await
         .expect("read the stamp");
     assert!(stamped.is_some_and(|t| (t - now).abs() < 30), "logging out stamped the time: {stamped:?}");
+}
+
+// ── Active skills on the server (audit item 6, 2026-10-19) ─────────────────
+// None of these pass on the previous server: it had no UseSkill handler.
+
+async fn spawn_dummy(c: &mut WorldClient, name: &str, dmg: i32, aggro: f32) -> (u64, Vec3) {
+    c.send_dev_spawn(name, 1, 100_000.0, dmg, 0.0, aggro);
+    let spawn = c
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == name)
+        })
+        .await
+        .expect("the dummy spawns");
+    match spawn {
+        ServerWorldMsg::EnemySpawn { id, pos, .. } => (id, pos),
+        _ => unreachable!(),
+    }
+}
+
+/// A GM of `class`, fists mastered, standing within 1 m of a fresh dummy.
+async fn gm_beside_dummy(h: &Harness, user: &str, class: &str, dummy: &str, dmg: i32, aggro: f32) -> (WorldClient, i64, u64) {
+    let (session, char_id, _stale) = provision_client(&h.auth_url, user, &format!("{user}a"), "Human", class).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, user, true).await.expect("set is_gm");
+    master_weapon_skill(&h.db_url, char_id, "hand_to_hand").await;
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut c = WorldClient::start(token, &session, char_id).await;
+    c.pump_for(Duration::from_millis(300)).await;
+    let (id, pos) = spawn_dummy(&mut c, dummy, dmg, aggro).await;
+    let mut seq: u32 = 1;
+    walk_until_within(&mut c, &mut seq, char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, pos, 1.0).await;
+    (c, char_id, id)
+}
+
+/// The server's answer to a skill swing within 1.5 s: Ok(Some(amount)) for a
+/// Hit, Ok(None) for a Miss, Err(reason) for a SkillFail.
+async fn skill_answer(c: &mut WorldClient, user: i64, skill: &str, target: u64) -> Result<Option<i32>, String> {
+    c.send_use_skill(skill, Some(target));
+    for m in c.collect_for(Duration::from_millis(1_500)).await {
+        match m {
+            ServerWorldMsg::Hit { attacker, target: t, amount, .. } if attacker == user as u64 && t == target => return Ok(Some(amount)),
+            ServerWorldMsg::Miss { attacker, target: t } if attacker == user as u64 && t == target => return Ok(None),
+            ServerWorldMsg::SkillFail { skill_name, reason } if skill_name == skill => return Err(reason),
+            _ => {}
+        }
+    }
+    Err("no answer".into())
+}
+
+fn mob_hits_on(msgs: &[ServerWorldMsg], mob: u64, player: i64) -> usize {
+    msgs.iter()
+        .filter(|m| matches!(m, ServerWorldMsg::Hit { attacker, target, .. } if *attacker == mob && *target == player as u64))
+        .count()
+}
+
+fn snapshot_names(msgs: &[ServerWorldMsg], who: u64, name: &str) -> bool {
+    msgs.iter().any(|m| matches!(m, ServerWorldMsg::BuffSnapshot { target, buffs }
+        if *target == who && buffs.iter().any(|(n, _)| n == name)))
+}
+
+/// Backstab: three times a swing, 20 stamina fanned at once, refused inside
+/// its cooldown; not a Cleric's skill; refused as too tired at 10 stamina.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn backstab_is_tripled_charged_and_gated() {
+    let h = start_both().await;
+    let (mut a, a_id, dummy) = gm_beside_dummy(&h, "bstab", "Rogue", "Skill Dummy", 0, 0.0).await;
+    a.send_use_skill("Backstab", Some(dummy));
+    let msgs = a.collect_for(Duration::from_millis(1_500)).await;
+    let mut answered = false;
+    for m in &msgs {
+        match m {
+            ServerWorldMsg::Hit { attacker, target, amount, .. } if *attacker == a_id as u64 && *target == dummy => {
+                assert!(*amount >= 9, "fists 1-4 plus STR/5, times three: {amount}");
+                answered = true;
+            }
+            ServerWorldMsg::Miss { attacker, target } if *attacker == a_id as u64 && *target == dummy => answered = true, // the 5% floor
+            ServerWorldMsg::SkillFail { reason, .. } => panic!("a Rogue's Backstab beside the dummy was refused: {reason}"),
+            _ => {}
+        }
+    }
+    assert!(answered, "the swing was answered");
+    let st = msgs.iter().find_map(|m| match m {
+        ServerWorldMsg::StaminaUpdate { id, stamina, max } if *id == a_id as u64 => Some((*stamina, *max)),
+        _ => None,
+    });
+    let (stamina, max) = st.expect("the stamina spend fans at once");
+    assert!((max - stamina - 20.0).abs() < 0.5, "20 of {max} stamina: {stamina}");
+    assert_eq!(skill_answer(&mut a, a_id, "Backstab", dummy).await, Err("You cannot use that yet.".into()));
+
+    let (b_session, b_id, b_token) = provision_client(&h.auth_url, "notarogue", "Notaroguea", "Human", "Cleric").await;
+    let mut b = WorldClient::start(b_token, &b_session, b_id).await;
+    b.pump_for(Duration::from_millis(300)).await;
+    assert_eq!(skill_answer(&mut b, b_id, "Backstab", dummy).await, Err("You cannot use that skill.".into()));
+
+    let (c_session, c_id, _stale) = provision_client(&h.auth_url, "winded", "Windeda", "Human", "Rogue").await;
+    set_char_stamina(&h.db_url, c_id, 10.0).await;
+    let c_token = request_world_token(&h.auth_url, &c_session, c_id).await;
+    let mut c = WorldClient::start(c_token, &c_session, c_id).await;
+    c.pump_for(Duration::from_millis(300)).await;
+    assert_eq!(skill_answer(&mut c, c_id, "Backstab", dummy).await, Err("You are too tired.".into()));
+}
+
+/// Shield Bash: the mob's frame says Stunned and it swings at nobody for the
+/// 3 s, then swings again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shield_bash_holds_the_mob_for_three_seconds() {
+    let h = start_both().await;
+    let (mut a, a_id, dummy) = gm_beside_dummy(&h, "basher", "Warrior", "Bash Dummy", 1, 5.0).await;
+    let first = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(6), |m| matches!(m, ServerWorldMsg::Hit { attacker, target, .. } if *attacker == dummy && *target == a_id as u64))
+        .await;
+    assert!(first.is_some(), "the dummy is swinging at the warrior");
+    // One window of 2.6 s from the send, inside the 3 s stun: the bash lands,
+    // the frame says Stunned, and nothing comes back from the mob after the
+    // landing. A Miss (the 5% floor) waits out the cooldown and tries again.
+    let mut landed_at: Option<usize> = None;
+    let mut window: Vec<ServerWorldMsg> = Vec::new();
+    for _ in 0..3 {
+        a.send_use_skill("Shield Bash", Some(dummy));
+        window = a.collect_for(Duration::from_millis(2_600)).await;
+        if let Some(i) = window.iter().position(|m| matches!(m, ServerWorldMsg::Hit { attacker, target, .. } if *attacker == a_id as u64 && *target == dummy)) {
+            landed_at = Some(i);
+            break;
+        }
+        if let Some(ServerWorldMsg::SkillFail { reason, .. }) = window.iter().find(|m| matches!(m, ServerWorldMsg::SkillFail { .. })) {
+            panic!("Shield Bash refused: {reason}");
+        }
+        a.pump_for(Duration::from_millis(6_000)).await;
+    }
+    let landed_at = landed_at.expect("three Shield Bashes in a row cannot all miss at 5%");
+    assert!(snapshot_names(&window[landed_at..], dummy, "Stunned"), "the mob's frame says Stunned");
+    assert_eq!(mob_hits_on(&window[landed_at..], dummy, a_id), 0, "no swing while stunned");
+    let after = a.collect_for(Duration::from_millis(4_000)).await;
+    assert!(mob_hits_on(&after, dummy, a_id) >= 1, "it swings again once the stun runs out");
+}
+
+/// Feign Death: the roll runs on the server and its outcome is told. On a
+/// success the mob drops the monk and does not notice them lying there, until
+/// the monk moves. Either way the 20 stamina is charged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn feign_death_is_rolled_told_and_held_until_a_move() {
+    let h = start_both().await;
+    let (mut a, a_id, dummy) = gm_beside_dummy(&h, "player", "Monk", "Fd Dummy", 1, 5.0).await;
+    let first = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(6), |m| matches!(m, ServerWorldMsg::Hit { attacker, target, .. } if *attacker == dummy && *target == a_id as u64))
+        .await;
+    assert!(first.is_some(), "the dummy is swinging at the monk");
+    a.send_use_skill("Feign Death", None);
+    let msgs = a.collect_for(Duration::from_millis(1_500)).await;
+    let line = msgs.iter().find_map(|m| match m {
+        ServerWorldMsg::ChatMessage { text, .. } if text.contains("feign death") => Some(text.clone()),
+        _ => None,
+    });
+    let line = line.expect("the outcome is told");
+    assert!(msgs.iter().any(|m| matches!(m, ServerWorldMsg::StaminaUpdate { id, stamina, max } if *id == a_id as u64 && (max - stamina - 20.0).abs() < 0.5)),
+        "the attempt costs 20 stamina either way");
+    if line == "You feign death successfully." {
+        assert!(msgs.iter().any(|m| matches!(m, ServerWorldMsg::EntityTarget { id, target: None } if *id == dummy)), "the mob drops the monk");
+        assert!(snapshot_names(&msgs, a_id as u64, "Feigned Death"));
+        let quiet = a.collect_for(Duration::from_millis(3_000)).await;
+        assert_eq!(mob_hits_on(&quiet, dummy, a_id), 0, "lying still beside it, unnoticed");
+        a.send_move(10_000, Vec3 { x: 1.0, y: 0.0, z: 0.0 });
+        let noticed = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(t) } if *id == dummy && *t == a_id as u64))
+            .await;
+        assert!(noticed.is_some(), "standing up, the monk is noticed again");
+    } else {
+        assert_eq!(line, "Your feign death fails!");
+        let after = a.collect_for(Duration::from_millis(4_000)).await;
+        assert!(mob_hits_on(&after, dummy, a_id) >= 1, "a failed feign changes nothing");
+    }
+}
+
+/// Hide: an idle mob with the rogue inside its aggro radius does not notice
+/// them; the rogue's first swing ends the hide and the mob turns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hide_keeps_an_idle_mob_from_noticing_until_the_first_swing() {
+    let h = start_both().await;
+    let (session, a_id, _stale) = provision_client(&h.auth_url, "sneak", "Sneaka", "Human", "Rogue").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "sneak", true).await.expect("set is_gm");
+    let token = request_world_token(&h.auth_url, &session, a_id).await;
+    let mut a = WorldClient::start(token, &session, a_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+    // Aggro 1 m: idle with the rogue 3 m off.
+    let (dummy, dummy_pos) = spawn_dummy(&mut a, "Watch Dummy", 0, 1.0).await;
+    a.send_use_skill("Hide", None);
+    let told = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "You have hidden yourself from view."))
+        .await;
+    assert!(told.is_some());
+    let mut seq: u32 = 1;
+    walk_until_within(&mut a, &mut seq, a_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, dummy_pos, 0.5).await;
+    let quiet = a.collect_for(Duration::from_millis(1_500)).await;
+    assert!(!quiet.iter().any(|m| matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(_) } if *id == dummy)),
+        "inside its radius, hidden: unnoticed");
+    a.send_attack(dummy, "", false, DamageType::Physical);
+    let msgs = a.collect_for(Duration::from_millis(2_000)).await;
+    assert!(msgs.iter().any(|m| matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(t) } if *id == dummy && *t == a_id as u64)),
+        "the swing ends the hide and the mob turns");
+    assert!(msgs.iter().any(|m| matches!(m, ServerWorldMsg::BuffSnapshot { target, buffs } if *target == a_id as u64 && !buffs.iter().any(|(n, _)| n == "Hide"))),
+        "the snapshot without Hide fans");
+}
+
+/// Evade: for its 5 s every swing at the rogue fans as an Evade and lands
+/// nothing; afterwards the swings land again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evade_deflects_every_swing_while_it_holds() {
+    let h = start_both().await;
+    let (mut a, a_id, dummy) = gm_beside_dummy(&h, "dodger", "Rogue", "Evade Dummy", 1, 5.0).await;
+    let first = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(6), |m| matches!(m, ServerWorldMsg::Hit { attacker, target, .. } if *attacker == dummy && *target == a_id as u64))
+        .await;
+    assert!(first.is_some());
+    a.send_use_skill("Evade", None);
+    let window = a.collect_for(Duration::from_millis(4_500)).await;
+    let evades = window.iter().filter(|m| matches!(m, ServerWorldMsg::Evade { attacker, target } if *attacker == dummy && *target == a_id as u64)).count();
+    assert!(evades >= 1, "a 2.5 s swing inside 4.5 s was deflected");
+    assert_eq!(mob_hits_on(&window, dummy, a_id), 0, "nothing lands while Evade holds");
+    assert!(snapshot_names(&window, a_id as u64, "Evade"));
+    a.pump_for(Duration::from_millis(1_000)).await;
+    let after = a.collect_for(Duration::from_millis(4_000)).await;
+    assert!(mob_hits_on(&after, dummy, a_id) >= 1, "once it runs out the swings land again");
+}
+
+/// Holy Shield: a pool of 60 takes the next swings (fanned as hits of 0) and
+/// the paladin's HP does not move.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn holy_shield_absorbs_the_next_swings() {
+    let h = start_both().await;
+    let (mut a, a_id, dummy) = gm_beside_dummy(&h, "warded", "Paladin", "Ward Dummy", 1, 5.0).await;
+    let first = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(6), |m| matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_id as u64))
+        .await;
+    let Some(ServerWorldMsg::HealthUpdate { hp: hp_before, .. }) = first else { panic!("the first swing lands") };
+    a.send_use_skill("Holy Shield", None);
+    let window = a.collect_for(Duration::from_millis(6_000)).await;
+    assert!(snapshot_names(&window, a_id as u64, "Holy Shield"));
+    let zero_hits = window.iter().filter(|m| matches!(m, ServerWorldMsg::Hit { attacker, target, amount, .. } if *attacker == dummy && *target == a_id as u64 && *amount == 0)).count();
+    assert!(zero_hits >= 2, "two swings in 6 s, both absorbed: {zero_hits}");
+    for m in &window {
+        if let ServerWorldMsg::HealthUpdate { id, hp, .. } = m {
+            if *id == a_id as u64 {
+                assert!(*hp >= hp_before, "HP never drops behind the shield: {hp} < {hp_before}");
+            }
+        }
+    }
+}
+
+/// Warder's Fury: the hit, then the warder is sent at the target.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warders_fury_sends_the_warder_at_the_target() {
+    let h = start_both().await;
+    let (session, a_id, _stale) = provision_client(&h.auth_url, "furious", "Furiousa", "Human", "Beast Master").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "furious", true).await.expect("set is_gm");
+    master_weapon_skill(&h.db_url, a_id, "hand_to_hand").await;
+    let token = request_world_token(&h.auth_url, &session, a_id).await;
+    let mut a = WorldClient::start(token, &session, a_id).await;
+    let pet = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(4), |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_id as u64))
+        .await;
+    let Some(ServerWorldMsg::PetSpawn { id: warder, .. }) = pet else { panic!("the warder comes") };
+    let (dummy, dummy_pos) = spawn_dummy(&mut a, "Fury Dummy", 0, 0.0).await;
+    let mut seq: u32 = 1;
+    walk_until_within(&mut a, &mut seq, a_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, dummy_pos, 1.0).await;
+    // Guard stance: a guarding warder never inherits the owner's target on
+    // its own (the follow-stance assist), so a swing from it here is the
+    // skill's command and nothing else.
+    a.send_pet_command(protocol::world::pet_command::GUARD, None);
+    a.pump_for(Duration::from_millis(500)).await;
+    a.send_use_skill("Warder's Fury", Some(dummy));
+    let msgs = a.collect_for(Duration::from_millis(8_000)).await;
+    assert!(msgs.iter().any(|m| matches!(m, ServerWorldMsg::Hit { attacker, target, .. } | ServerWorldMsg::Miss { attacker, target } if *attacker == a_id as u64 && *target == dummy)),
+        "the user's own blow");
+    assert!(msgs.iter().any(|m| matches!(m, ServerWorldMsg::Hit { attacker, target, .. } if *attacker == warder && *target == dummy)),
+        "and the guarding warder, sent at the target, strikes it");
 }

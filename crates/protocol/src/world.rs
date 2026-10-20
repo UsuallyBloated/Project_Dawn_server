@@ -142,7 +142,9 @@ use serde::{Deserialize, Serialize};
 /// the Test Panel's "Despawn All Enemies" removes the mobs on the server
 /// instead of only hiding them on one client; then the server-held spell bar
 /// (`MemorizeStart` / `MemorizeFinish` / `ForgetSpell` / `SeedSpellGems` after
-/// it, and `SpellGems` after `PlayerJumped`).
+/// it, and `SpellGems` after `PlayerJumped`). `UseSkill`, declared but never
+/// sent before, carries a `skill_name` now (the server resolves active
+/// skills by name, as spells), and `SkillFail` is appended after `SpellGems`.
 pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3238; // "PD_W0028"
 
 pub type EntityId = u64;
@@ -504,8 +506,17 @@ pub enum ClientWorldMsg {
         spell_name: String,
         target_id: Option<EntityId>,
     },
+    /// Use an active skill (Backstab, Shield Bash, Hide, Feign Death, ...),
+    /// keyed by name like `CastSpell` (client-authority audit item 6,
+    /// 2026-10-19). The server owns the whole thing: the class gate, the
+    /// cooldown, the stamina, the swing roll and the skill's multiplier,
+    /// and the effect (a stun on the target, a hide, an evade or an absorb
+    /// on the user, a feign death). A damage skill needs `target_id`; a
+    /// SELF skill ignores it. A refusal costs nothing and answers with
+    /// `SkillFail`. Replaces the never-sent `skill_id: u32` form under the
+    /// same unshipped PD_W0028.
     UseSkill {
-        skill_id: u32,
+        skill_name: String,
         target_id: Option<EntityId>,
     },
     CancelCast,
@@ -1616,6 +1627,14 @@ pub enum ServerWorldMsg {
     SpellGems {
         gems: Vec<String>,
         seeded: bool,
+    },
+    /// The server refused a `UseSkill`, privately to its sender: the reason
+    /// for the chat line, and the skill's name so the client drops the
+    /// cooldown it started optimistically (the server stamped none). A
+    /// refused skill costs nothing.
+    SkillFail {
+        skill_name: String,
+        reason: String,
     },
 }
 

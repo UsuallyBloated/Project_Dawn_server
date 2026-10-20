@@ -91,6 +91,17 @@ pub enum Outcome {
         dmg_type: protocol::world::DamageType,
     },
 
+    /// An active skill (client-authority audit item 6). The handler has
+    /// checked the skill is known, the class has it, the user is not
+    /// stunned or mesmerized, the cooldown has run and the stamina is there;
+    /// the tick loop resolves the target, charges the stamina, stamps the
+    /// cooldown and runs the swing or the effect.
+    UseSkillIntent {
+        user: u64,
+        skill_name: String,
+        target_id: Option<protocol::world::EntityId>,
+    },
+
     /// Track 6 sub-task 3b — player → server spell-cast intent. The
     /// tick loop resolves the spell name in spells.toml, validates
     /// mana / target, applies the authoritative damage or heal, and
@@ -659,6 +670,7 @@ pub fn handle_message(
             // out-of-order detection stays correct.
             let dir_v = if super::buffs::is_mezzed(&conn.active_buffs)
                 || super::buffs::is_rooted(&conn.active_buffs)
+                || super::buffs::is_stunned(&conn.active_buffs)
             {
                 Vec3f::ZERO
             } else {
@@ -1466,8 +1478,10 @@ pub fn handle_message(
                 // legitimate UI interactions).
                 return Outcome::Continue;
             }
-            // Track 6 sub-task 4d — Mez gates Attack.
-            if super::buffs::is_mezzed(&conn.active_buffs) {
+            // Track 6 sub-task 4d — Mez gates Attack; so does a stun.
+            if super::buffs::is_mezzed(&conn.active_buffs)
+                || super::buffs::is_stunned(&conn.active_buffs)
+            {
                 return Outcome::Continue;
             }
             Outcome::AttackIntent {
@@ -1475,6 +1489,49 @@ pub fn handle_message(
                 target_id,
                 is_offhand,
                 dmg_type,
+            }
+        }
+
+        ClientWorldMsg::UseSkill { skill_name, target_id } => {
+            // Active skills (client-authority audit item 6). Everything the
+            // client used to decide for itself is checked here or in the
+            // tick loop, and a refusal answers privately with SkillFail and
+            // costs nothing: the client drops the cooldown it started.
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            let Some(skill) = super::active_skills::lookup(&skill_name) else {
+                send_skill_fail(server, client_id, &skill_name, "That skill isn't known here yet.");
+                return Outcome::Continue;
+            };
+            // Alignment variants (Paladin_Fallen, Shadow Knight_Redeemed) fall
+            // here for everyone until alignment lives on the server.
+            if !skill.usable_by(&conn.class) {
+                tracing::info!(user = conn.char_id, skill = %skill.name, class = %conn.class,
+                    "UseSkill rejected — class");
+                send_skill_fail(server, client_id, &skill.name, "You cannot use that skill.");
+                return Outcome::Continue;
+            }
+            if super::buffs::is_stunned(&conn.active_buffs) {
+                send_skill_fail(server, client_id, &skill.name, "You are stunned.");
+                return Outcome::Continue;
+            }
+            if super::buffs::is_mezzed(&conn.active_buffs) {
+                send_skill_fail(server, client_id, &skill.name, "Mesmerized.");
+                return Outcome::Continue;
+            }
+            if super::active_skills::on_cooldown(conn.skill_cooldowns.get(&skill.name).copied(), now) {
+                send_skill_fail(server, client_id, &skill.name, "You cannot use that yet.");
+                return Outcome::Continue;
+            }
+            if conn.stamina < skill.stamina_cost {
+                send_skill_fail(server, client_id, &skill.name, "You are too tired.");
+                return Outcome::Continue;
+            }
+            Outcome::UseSkillIntent {
+                user: conn.char_id as u64,
+                skill_name: skill.name.clone(),
+                target_id,
             }
         }
 
@@ -1551,6 +1608,8 @@ pub fn handle_message(
                 Some("Silenced.")
             } else if super::buffs::is_mezzed(&conn.active_buffs) {
                 Some("Mesmerized.")
+            } else if super::buffs::is_stunned(&conn.active_buffs) {
+                Some("You are stunned.")
             } else {
                 None
             };
@@ -2353,6 +2412,36 @@ pub fn fan_out_entity_target(
 /// Uses the System chat channel, which already exists, is already decoded, and
 /// already renders as an unattributed line — so reporting a refusal costs no
 /// protocol bump, no gdext rebuild and no client re-export.
+/// Refuse a `UseSkill` privately (client-authority audit item 6): the reason
+/// for the chat line and the skill's name, so the client drops the cooldown
+/// it started. The server stamped nothing and charged nothing.
+pub fn send_skill_fail(server: &mut RenetServer, recipient: ClientId, skill_name: &str, reason: &str) {
+    let msg = ServerWorldMsg::SkillFail {
+        skill_name: skill_name.to_string(),
+        reason: reason.to_string(),
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// One player's stamina to everyone in the world, at once: a skill's cost
+/// should show on a group-mate's panel the moment it is paid (the regen
+/// loop would fan it within its gap anyway).
+pub fn fan_out_stamina_update(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    id: u64,
+    stamina: f32,
+    max: f32,
+) {
+    let msg = ServerWorldMsg::StaminaUpdate { id, stamina, max };
+    let Some(bytes) = encode(&msg) else { return };
+    for recipient in recipients {
+        server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
 pub fn send_refusal(server: &mut RenetServer, recipient: ClientId, text: &str) {
     fan_out_chat_message(
         server,

@@ -1,0 +1,259 @@
+# Active skills, the server's copy (client-authority audit item 6, 2026-10-19).
+#
+# Mirror of Project_Dawn/data/skill_definitions.gd's `ALL` array, every entry,
+# with the fields the server reads: the cooldown, the stamina cost, the damage
+# multiplier (0 = a SELF skill with no swing), the classes, and the effect.
+# `desc` is the client's own. Kept in step by hand and checked by
+# Project_Dawn/tools/check_active_skill_lockstep.gd, which exits 1 on any
+# difference, either side.
+#
+# Effects the server models: STUN (the target cannot move, swing or cast for
+# stun_duration; damage does not end it), EVADE_BOOST (every melee swing at
+# the user is deflected for effect_duration), ABSORB_SHIELD (a pool of
+# absorb_amount, used up by damage), STEALTH (idle mobs do not notice the
+# user for stealth_duration; the first swing, skill or hostile cast ends it),
+# FEIGN_DEATH (an 80% chance every mob drops the user), WARDER_FURY (the hit,
+# then the user's pet is sent at the target), TRUESIGHT (the hit never misses).
+#
+# The four alignment variants carry a class no character has on the server
+# (Paladin_Fallen, Shadow Knight_Redeemed): the class gate refuses them until
+# alignment is server-side. Listed so the lockstep check stays clean.
+
+[[skill]]
+name = "Slash"
+cooldown = 3.0
+stamina_cost = 8.0
+damage_multiplier = 1.5
+classes = ["Warrior", "Rogue"]
+
+[[skill]]
+name = "Hide"
+cooldown = 10.0
+stamina_cost = 15.0
+damage_multiplier = 0.0
+effect_type = "STEALTH"
+stealth_duration = 30.0
+classes = ["Rogue"]
+
+[[skill]]
+name = "Shield Bash"
+cooldown = 8.0
+stamina_cost = 15.0
+damage_multiplier = 1.2
+effect_type = "STUN"
+stun_duration = 3.0
+classes = ["Warrior"]
+
+[[skill]]
+name = "Backstab"
+cooldown = 6.0
+stamina_cost = 20.0
+damage_multiplier = 3.0
+classes = ["Rogue"]
+
+[[skill]]
+name = "Evade"
+cooldown = 12.0
+stamina_cost = 10.0
+damage_multiplier = 0.0
+effect_type = "EVADE_BOOST"
+effect_duration = 5.0
+classes = ["Rogue"]
+
+[[skill]]
+name = "Pummel"
+cooldown = 5.0
+stamina_cost = 12.0
+damage_multiplier = 1.0
+classes = ["Warrior"]
+
+[[skill]]
+name = "Holy Strike"
+cooldown = 5.0
+stamina_cost = 10.0
+damage_multiplier = 1.3
+classes = ["Cleric"]
+
+[[skill]]
+name = "Primal Strike"
+cooldown = 4.0
+stamina_cost = 12.0
+damage_multiplier = 1.4
+classes = ["Shaman"]
+
+[[skill]]
+name = "Divine Blow"
+cooldown = 5.0
+stamina_cost = 12.0
+damage_multiplier = 1.4
+classes = ["Paladin"]
+
+[[skill]]
+name = "Holy Shield"
+cooldown = 15.0
+stamina_cost = 10.0
+damage_multiplier = 0.0
+effect_type = "ABSORB_SHIELD"
+absorb_amount = 60.0
+classes = ["Paladin"]
+
+[[skill]]
+name = "Dark Strike"
+cooldown = 5.0
+stamina_cost = 12.0
+damage_multiplier = 1.4
+classes = ["Shadow Knight"]
+
+[[skill]]
+name = "Harm Touch"
+cooldown = 12.0
+stamina_cost = 25.0
+damage_multiplier = 2.5
+classes = ["Shadow Knight"]
+
+[[skill]]
+name = "Swindler's Strike"
+cooldown = 4.0
+stamina_cost = 10.0
+damage_multiplier = 1.2
+classes = ["Bard"]
+
+[[skill]]
+name = "Double Strike"
+cooldown = 2.5
+stamina_cost = 8.0
+damage_multiplier = 1.1
+classes = ["Ranger"]
+
+[[skill]]
+name = "True Shot"
+cooldown = 8.0
+stamina_cost = 20.0
+damage_multiplier = 2.0
+classes = ["Ranger"]
+
+[[skill]]
+name = "Aimed Shot"
+cooldown = 20.0
+stamina_cost = 35.0
+damage_multiplier = 3.0
+classes = ["Ranger"]
+
+[[skill]]
+name = "Rapid Shot"
+cooldown = 12.0
+stamina_cost = 25.0
+damage_multiplier = 2.1
+classes = ["Ranger"]
+
+[[skill]]
+name = "Dual Flurry"
+cooldown = 10.0
+stamina_cost = 18.0
+damage_multiplier = 1.3
+classes = ["Ranger"]
+
+[[skill]]
+name = "Tiger Claw"
+cooldown = 3.0
+stamina_cost = 10.0
+damage_multiplier = 1.2
+classes = ["Monk"]
+
+[[skill]]
+name = "Roundhouse"
+cooldown = 6.0
+stamina_cost = 15.0
+damage_multiplier = 1.6
+classes = ["Monk"]
+
+[[skill]]
+name = "Flying Kick"
+cooldown = 10.0
+stamina_cost = 20.0
+damage_multiplier = 2.2
+classes = ["Monk"]
+
+[[skill]]
+name = "Feign Death"
+cooldown = 60.0
+stamina_cost = 20.0
+damage_multiplier = 0.0
+effect_type = "FEIGN_DEATH"
+classes = ["Monk"]
+
+[[skill]]
+name = "Silver Bolt"
+cooldown = 5.0
+stamina_cost = 12.0
+damage_multiplier = 1.5
+classes = ["Witch Hunter"]
+
+[[skill]]
+name = "Exploit Weakness"
+cooldown = 15.0
+stamina_cost = 20.0
+damage_multiplier = 1.8
+classes = ["Witch Hunter"]
+
+[[skill]]
+name = "Truesight Strike"
+cooldown = 8.0
+stamina_cost = 10.0
+damage_multiplier = 1.2
+effect_type = "TRUESIGHT"
+classes = ["Witch Hunter"]
+
+[[skill]]
+name = "Claw Rake"
+cooldown = 4.0
+stamina_cost = 15.0
+damage_multiplier = 1.6
+classes = ["Beast Master"]
+
+[[skill]]
+name = "Warder's Fury"
+cooldown = 8.0
+stamina_cost = 20.0
+damage_multiplier = 2.0
+effect_type = "WARDER_FURY"
+classes = ["Beast Master"]
+
+[[skill]]
+name = "Primal Instinct"
+cooldown = 15.0
+stamina_cost = 10.0
+damage_multiplier = 0.0
+effect_type = "EVADE_BOOST"
+effect_duration = 5.0
+classes = ["Beast Master"]
+
+[[skill]]
+name = "Profane Strike"
+cooldown = 5.0
+stamina_cost = 12.0
+damage_multiplier = 1.6
+classes = ["Paladin_Fallen"]
+
+[[skill]]
+name = "Dark Ward"
+cooldown = 15.0
+stamina_cost = 10.0
+damage_multiplier = 0.0
+effect_type = "ABSORB_SHIELD"
+absorb_amount = 60.0
+classes = ["Paladin_Fallen"]
+
+[[skill]]
+name = "Redeemed Strike"
+cooldown = 5.0
+stamina_cost = 12.0
+damage_multiplier = 1.4
+classes = ["Shadow Knight_Redeemed"]
+
+[[skill]]
+name = "Penitent's Touch"
+cooldown = 12.0
+stamina_cost = 25.0
+damage_multiplier = 2.5
+classes = ["Shadow Knight_Redeemed"]

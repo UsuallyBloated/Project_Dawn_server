@@ -154,6 +154,12 @@ impl NetClient {
     #[signal]
     fn cast_fail(caster: i64, reason: GString);
 
+    /// The server refused one of our `UseSkill`s (client-authority audit
+    /// item 6): the skill's name, so the client drops the cooldown it
+    /// started, and the reason for the chat line.
+    #[signal]
+    fn skill_fail(skill_name: GString, reason: GString);
+
     /// Track 4 sub-task 4 combat events. `dmg_type` is the u8
     /// discriminant of `protocol::world::DamageType` (mirror of
     /// NetProtocol.DamageType on the GDScript side).
@@ -939,6 +945,20 @@ impl NetClient {
     #[func]
     fn send_dev_despawn_enemies(&mut self) -> bool {
         self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::DevDespawnEnemies)
+    }
+
+    /// Use an active skill by name (client-authority audit item 6). A damage
+    /// skill names its target; a SELF skill passes 0. The server owns the
+    /// stamina, the cooldown, the swing and the effect, and answers a
+    /// refusal with `skill_fail`.
+    #[func]
+    fn send_use_skill(&mut self, skill_name: GString, target_id: i64) -> bool {
+        let target = if target_id == 0 { None } else { Some(target_id as u64) };
+        let msg = ClientWorldMsg::UseSkill {
+            skill_name: skill_name.to_string(),
+            target_id: target,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
     /// The server-held spell bar (client-authority audit fix 5): begin
@@ -1752,6 +1772,10 @@ enum Incoming {
         gems: Vec<String>,
         seeded: bool,
     },
+    SkillFail {
+        skill_name: String,
+        reason: String,
+    },
     LootGranted {
         item_path: String,
         count: u32,
@@ -2413,6 +2437,15 @@ impl NetClient {
                     self.base_mut()
                         .emit_signal("spell_gems", &[names.to_variant(), seeded.to_variant()]);
                 }
+                Incoming::SkillFail { skill_name, reason } => {
+                    self.base_mut().emit_signal(
+                        "skill_fail",
+                        &[
+                            GString::from(skill_name.as_str()).to_variant(),
+                            GString::from(reason.as_str()).to_variant(),
+                        ],
+                    );
+                }
                 Incoming::HungerUpdate { hunger_secs, thirst_secs, cap_secs, drain_per_sec } => {
                     self.base_mut().emit_signal(
                         "hunger_update",
@@ -2949,6 +2982,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
         }
         ServerWorldMsg::PlayerJumped { id } => Incoming::PlayerJumped { id: id as i64 },
         ServerWorldMsg::SpellGems { gems, seeded } => Incoming::SpellGems { gems, seeded },
+        ServerWorldMsg::SkillFail { skill_name, reason } => Incoming::SkillFail { skill_name, reason },
         ServerWorldMsg::LootGranted { item_path, count } => Incoming::LootGranted {
             item_path,
             count,

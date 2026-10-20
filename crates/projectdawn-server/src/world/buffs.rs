@@ -97,6 +97,20 @@ pub enum BuffEffect {
     /// Track 6 sub-task 4d — Silence. Target can't cast spells.
     /// Server drops CastSpell intents from a silenced player.
     Silence,
+    // ── Active skills (client-authority audit item 6, 2026-10-19) ──
+    /// Evade / Primal Instinct: every melee swing at the bearer is deflected
+    /// (fanned as an Evade, no damage) while it holds.
+    EvadeAll,
+    /// Hide: idle mobs do not notice the bearer. The bearer's first swing,
+    /// skill or hostile cast ends it.
+    Stealth,
+    /// Shield Bash on a player: the bearer cannot move, swing, cast or use a
+    /// skill while it holds. Unlike mez, damage does not end it.
+    Stun,
+    /// Feign Death took: every mob forgot the bearer, and idle mobs do not
+    /// notice them lying there. Standing up (any movement), a swing, a skill
+    /// or a hostile cast ends it, as in EQ.
+    Feigned,
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +256,22 @@ impl ActiveBuff {
 
     pub fn new_silence(name: String, duration: f32, now: Instant) -> Self {
         Self { name, effect: BuffEffect::Silence, remaining: duration, tick_acc: 0.0, applied_at: now }
+    }
+
+    pub fn new_evade_all(name: String, duration: f32, now: Instant) -> Self {
+        Self { name, effect: BuffEffect::EvadeAll, remaining: duration, tick_acc: 0.0, applied_at: now }
+    }
+
+    pub fn new_stealth(name: String, duration: f32, now: Instant) -> Self {
+        Self { name, effect: BuffEffect::Stealth, remaining: duration, tick_acc: 0.0, applied_at: now }
+    }
+
+    pub fn new_stun(name: String, duration: f32, now: Instant) -> Self {
+        Self { name, effect: BuffEffect::Stun, remaining: duration, tick_acc: 0.0, applied_at: now }
+    }
+
+    pub fn new_feigned(name: String, duration: f32, now: Instant) -> Self {
+        Self { name, effect: BuffEffect::Feigned, remaining: duration, tick_acc: 0.0, applied_at: now }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -412,6 +442,40 @@ pub fn is_silenced(buffs: &[ActiveBuff]) -> bool {
     buffs.iter().any(|b| matches!(b.effect, BuffEffect::Silence))
 }
 
+/// True while an Evade-type skill holds: every melee swing at the bearer
+/// is deflected.
+pub fn is_evading(buffs: &[ActiveBuff]) -> bool {
+    buffs.iter().any(|b| matches!(b.effect, BuffEffect::EvadeAll))
+}
+
+/// True while the bearer is hidden or feigning death: idle mobs do not
+/// notice them.
+pub fn is_hidden(buffs: &[ActiveBuff]) -> bool {
+    buffs.iter().any(|b| matches!(b.effect, BuffEffect::Stealth | BuffEffect::Feigned))
+}
+
+/// True while the bearer is stunned: no move, swing, cast or skill.
+pub fn is_stunned(buffs: &[ActiveBuff]) -> bool {
+    buffs.iter().any(|b| matches!(b.effect, BuffEffect::Stun))
+}
+
+/// End the bearer's stealth and feign (their first swing, skill or hostile
+/// cast). Returns whether anything was removed, so the caller re-fans the
+/// snapshot only when it changed.
+pub fn break_stealth(buffs: &mut Vec<ActiveBuff>) -> bool {
+    let before = buffs.len();
+    buffs.retain(|b| !matches!(b.effect, BuffEffect::Stealth | BuffEffect::Feigned));
+    buffs.len() != before
+}
+
+/// Standing up ends a feign death (any movement), and only the feign: a
+/// hidden rogue may still creep. Returns whether anything was removed.
+pub fn end_feign(buffs: &mut Vec<ActiveBuff>) -> bool {
+    let before = buffs.len();
+    buffs.retain(|b| !matches!(b.effect, BuffEffect::Feigned));
+    buffs.len() != before
+}
+
 /// Track 6 sub-task 4d — highest active snare amount (0.0 if none).
 /// Movement integration multiplies effective speed by
 /// (1 - snare_amount), clamped to a 10% floor so the player can
@@ -442,7 +506,8 @@ pub fn first_dispellable_index(buffs: &[ActiveBuff]) -> Option<usize> {
     buffs.iter().position(|b| !matches!(
         b.effect,
         BuffEffect::Mez | BuffEffect::Root | BuffEffect::Snare { .. }
-            | BuffEffect::AttackSlow { .. } | BuffEffect::Silence
+            | BuffEffect::AttackSlow { .. } | BuffEffect::Silence | BuffEffect::Stun
+            | BuffEffect::Feigned
     ))
 }
 

@@ -430,6 +430,12 @@ pub struct PerConnection {
     /// `connections.remove(&cid)`.
     pub spell_cooldowns: HashMap<String, Instant>,
 
+    /// Active skills (client-authority audit item 6): the instant each used
+    /// skill is ready again, by name. A `UseSkill` inside it (less
+    /// `active_skills::COOLDOWN_GRACE`) is refused at no cost. Cleared on
+    /// disconnect with the connection, as the spell cooldowns are.
+    pub skill_cooldowns: HashMap<String, Instant>,
+
     /// The global cooldown (spell batch step 4): no spell may START inside
     /// `GLOBAL_COOLDOWN` of the last accepted cast, Bard songs excepted on
     /// both sides (twisting is casting songs back to back). Stamped when a
@@ -668,6 +674,7 @@ impl PerConnection {
             cast_start_pos: Vec3f::ZERO,
             cast_interrupted_at: None,
             spell_cooldowns: HashMap::new(),
+            skill_cooldowns: HashMap::new(),
             gcd_until: None,
             buff_snapshot: Vec::new(),
             buff_snapshot_set: false,

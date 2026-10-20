@@ -222,13 +222,14 @@ pub const SONG_LINGER_SECS: f32 = 12.0;
 /// A song's strength grows with the bard's level (user, 2026-10-20: a level 1
 /// bard must not be a level 50 one, and EQ scaled each song by level rather
 /// than by rank): this fraction of the listed effect at the level the class
-/// learns the song, climbing to the full effect at `SONG_FULL_AT_LEVEL`. The
-/// fraction is Selo's own: EQ's Selo's Accelerando ran +20% when learned and
-/// +65% at 50, and the user set every song to that shape (2026-10-20: "our
-/// scaling should match Selos Melody scaling"; 20/65 = 0.31). The
-/// data carries the level-50 values. Both knobs; the client mirrors them in
-/// `bard_songs.gd` for the offline pulse and the buff bar.
-pub const SONG_SCALE_AT_LEARN: f32 = 0.31;
+/// learns the song, climbing to the full effect at `SONG_FULL_AT_LEVEL`. A
+/// song may carry its own start fraction (`Spell::song_scale_at_learn`):
+/// Selos' Melody does, EQ's Selo's curve (+20% when learned of +65% at 50;
+/// user, 2026-10-20: "our speed spell should match the scaling of the EQ
+/// Selos'"); the rest use this. The data carries the level-50 values. Both
+/// knobs; the client mirrors them in `bard_songs.gd` for the offline pulse
+/// and the buff bar.
+pub const SONG_SCALE_AT_LEARN: f32 = 0.4;
 pub const SONG_FULL_AT_LEVEL: i32 = 50;
 
 /// How often a damage-over-time spell ticks on a mob, a pet or a player

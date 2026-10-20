@@ -62,6 +62,13 @@ pub struct Spell {
     /// and by the summon count's base; the client carries the same table.
     #[serde(default)]
     pub class_min_levels: std::collections::HashMap<String, i32>,
+    /// A Bard song's own start fraction: the share of its listed (level-50)
+    /// effect it has at the level the class learns it, climbing to the full
+    /// effect at `SONG_FULL_AT_LEVEL`. 0 means the global `SONG_SCALE_AT_LEARN`.
+    /// Selos' Melody carries EQ's Selo's curve (+20% when learned of +65% at
+    /// 50: 0.3077); the other songs use the global shape (user, 2026-10-20).
+    #[serde(default)]
+    pub song_scale_at_learn: f32,
 
     // Track 6 sub-task 4a — buff fields applied to the target (or
     // caster for SELF spells) after the immediate damage/heal lands.

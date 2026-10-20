@@ -822,8 +822,11 @@ mana_cost = 0.0
 cast_time = 3.0
 cooldown = 0.5
 min_level = 1
-# EQ's Selo's Accelerando: +65% at 50 (user, 2026-10-20); +20% when learned, through the scale.
+# EQ's Selo's Accelerando: +65% at 50 and +20% when learned (user, 2026-10-20: "our speed
+# spell should match the scaling of the EQ Selos'"), so this song carries its own start
+# fraction, 20/65; the other songs use the global SONG_SCALE_AT_LEARN.
 move_speed_mult = 1.65
+song_scale_at_learn = 0.3077
 classes = ["Bard"]
 
 [[spell]]
@@ -848,8 +851,9 @@ target_type = "SELF"
 damage_type = "SPIRIT"
 base_damage = 0.0
 # Per pulse: a heal-over-time of heal_amount / SONG_PULSE_SECS a second for
-# the linger (EQ's Hymn of Restoration: 2 a tick at 6 to 13 at 60).
-heal_amount = 8.0
+# the linger. Matched to EQ's Hymn of Restoration (2 a tick at 6 to 13 at 60:
+# about 11 at 50; user, 2026-10-20), about 4 a pulse when learned at 4.
+heal_amount = 11.0
 mana_cost = 0.0
 cast_time = 3.0
 cooldown = 0.5
@@ -867,7 +871,8 @@ mana_cost = 0.0
 cast_time = 3.0
 cooldown = 0.5
 min_level = 6
-haste_amount = 0.12
+# Matched to EQ's Anthem de Arms (+10% attack speed; user, 2026-10-20).
+haste_amount = 0.10
 classes = ["Bard"]
 
 [[spell]]

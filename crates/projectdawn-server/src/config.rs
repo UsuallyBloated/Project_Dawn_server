@@ -19,6 +19,11 @@ pub struct Config {
     /// 32-byte private key for renet `Secure` connection tokens. Shared by
     /// the auth (mints tokens) and world (validates) services.
     pub netcode_private_key: [u8; 32],
+    /// Whether casts can fizzle (`cast_gate::roll_fizzle`). Always on for a
+    /// running server, with no env var to turn it off: only the integration
+    /// harness sets it false, so its hundred single-cast tests are not a coin
+    /// flip each, and turns it back on for the one test that is about fizzles.
+    pub fizzles: bool,
 }
 
 // We don't pull in the `semver` crate yet — implement the bare-minimum
@@ -84,6 +89,7 @@ impl Config {
             database_url,
             min_client_version,
             netcode_private_key,
+            fizzles: true,
         })
     }
 }

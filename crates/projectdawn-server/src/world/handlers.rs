@@ -742,6 +742,34 @@ pub fn handle_message(
                     }
                 }
             }
+            // The fizzle (the EQ parity audit, 2026-10-20), rolled as EQ
+            // rolled it: at the cast's start, before any bar, on the casting
+            // skill against the spell's level. A fizzle burns a quarter of
+            // the mana, starts the gem's refresh (the global cooldown; P99's
+            // spell pages list a 2.25 s "fizzle time"), caches no bar and
+            // trains nothing. Private, as the refusals above. An instant
+            // spell has no CastStart and rolls at its CastSpell instead.
+            if let Some(spell) = super::spells::lookup(&spell_name) {
+                if conn.fizzles && super::cast_gate::roll_fizzle(conn, spell) {
+                    let burned = super::cast_gate::fizzle_mana(spell.mana_cost, conn.mp);
+                    conn.mp -= burned;
+                    conn.gcd_until = Some(now + super::GLOBAL_COOLDOWN);
+                    conn.cast_spell_name.clear();
+                    conn.cast_total_duration = 0.0;
+                    conn.cast_set_at = None;
+                    super::regen::mark_dirty(conn);
+                    tracing::info!(
+                        caster = conn.char_id,
+                        spell = %spell_name,
+                        burned,
+                        "CastStart fizzled"
+                    );
+                    let caster = conn.char_id as u64;
+                    fan_out_cast_fail(server, &[client_id], caster, super::cast_gate::FIZZLE_LINE.to_string());
+                    fan_out_mana_update(server, &[client_id], caster, conn.mp, conn.max_mp);
+                    return Outcome::Continue;
+                }
+            }
             conn.cast_spell_name = spell_name.clone();
             conn.cast_total_duration = duration;
             conn.cast_set_at = Some(now);

@@ -290,15 +290,17 @@ mod tests {
     /// regenerated toml that drops one fails here instead of in play.
     #[test]
     fn ported_direct_damage_spells_resolve() {
+        // The level 1 to 10 numbers are the EQ parity audit's (2026-10-20);
+        // the 12+ spells kept theirs.
         let expected: [(&str, &str, i32, f32, &str); 9] = [
-            ("Blizzard", "Wizard", 8, 65.0, "ICE"),
-            ("Thunder Clap", "Wizard", 10, 100.0, "LIGHTNING"),
-            ("Bloodfire", "Sorcerer", 4, 40.0, "FIRE"),
-            ("Void Lance", "Sorcerer", 6, 55.0, "ARCANE"),
-            ("Tempest Bolt", "Sorcerer", 10, 65.0, "LIGHTNING"),
+            ("Blizzard", "Wizard", 8, 36.0, "ICE"),
+            ("Thunder Clap", "Wizard", 10, 65.0, "LIGHTNING"),
+            ("Bloodfire", "Sorcerer", 4, 15.0, "FIRE"),
+            ("Void Lance", "Sorcerer", 6, 24.0, "ARCANE"),
+            ("Tempest Bolt", "Sorcerer", 10, 60.0, "LIGHTNING"),
             ("Cascade of Stars", "Enchanter", 12, 55.0, "ARCANE"),
-            ("Chorus of Misery", "Bard", 10, 45.0, "ARCANE"),
-            ("Feral Shriek", "Beast Master", 4, 35.0, "SPIRIT"),
+            ("Chorus of Misery", "Bard", 10, 25.0, "ARCANE"),
+            ("Feral Shriek", "Beast Master", 4, 14.0, "SPIRIT"),
             ("Judgment", "Paladin", 12, 80.0, "HOLY"),
         ];
         for (name, class, level, damage, dtype) in expected {
@@ -343,7 +345,7 @@ mod tests {
     fn warders_mend_resolves_as_a_pet_heal() {
         let s = lookup("Warder's Mend").expect("Warder's Mend in spells.toml");
         assert_eq!(s.target_type, "PET_HEAL");
-        assert!((s.heal_amount - 60.0).abs() < 0.01);
+        assert!((s.heal_amount - 12.0).abs() < 0.01, "the parity audit's number");
         assert_eq!(s.classes, vec!["Beast Master".to_string()]);
         assert_eq!(s.min_level, 1);
     }
@@ -379,15 +381,15 @@ mod tests {
         let s = lookup("Fireball").expect("Fireball in table");
         assert_eq!(s.target_type, "ENEMY");
         assert_eq!(s.damage_type, "FIRE");
-        assert!((s.base_damage - 50.0).abs() < 0.01);
-        assert!((s.mana_cost - 30.0).abs() < 0.01);
+        assert!((s.base_damage - 12.0).abs() < 0.01, "the parity audit's number");
+        assert!((s.mana_cost - 10.0).abs() < 0.01, "EQ's Frost Bolt-sized cost");
     }
 
     #[test]
     fn healing_light_is_ally_heal() {
         let s = lookup("Healing Light").expect("Healing Light in table");
         assert_eq!(s.target_type, "ALLY");
-        assert!((s.heal_amount - 60.0).abs() < 0.01);
+        assert!((s.heal_amount - 10.0).abs() < 0.01, "EQ's Minor Healing at level 1");
     }
 
     #[test]

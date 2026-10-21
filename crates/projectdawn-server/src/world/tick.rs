@@ -1556,7 +1556,6 @@ pub async fn run(
     mut server: RenetServer,
     mut transport: NetcodeServerTransport,
 ) -> anyhow::Result<()> {
-    let _ = cfg; // Reserved for future config-driven tuning (max_clients live-reload, etc.).
 
     // Track 18.1 — build the spell discipline lookup once at startup
     // so casting-skill advance dispatch is a HashMap hit per cast.
@@ -1842,10 +1841,9 @@ pub async fn run(
                                     None
                                 }
                             };
-                            connections.insert(
-                                client_id,
-                                PerConnection::from_spawn(spawn, now),
-                            );
+                            let mut fresh = PerConnection::from_spawn(spawn, now);
+                            fresh.fizzles = cfg.fizzles;
+                            connections.insert(client_id, fresh);
                             // Set the real AOI cell from spawn position +
                             // populate the inventory snapshot. Track 14.2:
                             // run the stat recompute pass so persisted
@@ -4956,13 +4954,10 @@ pub async fn run(
                 let mana_cost = spell.mana_cost;
                 let hp_cost = spell.hp_cost;
                 let dmg_type = spells::parse_damage_type(&spell.damage_type);
-                // The caster's power (spell_power.rs: INT on a nuke, WIS on a
-                // heal, the casting-skill multipliers), applied once here so
-                // every arm below reads the empowered numbers. It used to
-                // exist only on the client, so online every spell landed flat.
-                let empowered = super::spell_power::empower(spell, caster_conn);
+                // A spell does exactly its listed number, as in classic EQ
+                // (the parity audit of 2026-10-20); the caster's INT feeds
+                // only the crit roll (spell_power.rs).
                 let caster_int = caster_conn.intelligence;
-                let spell = &empowered;
 
                 // Cast pre-flight: presence, reach, the PvP gates and "the
                 // server has no effect for this spell", decided before the mana
@@ -5019,6 +5014,34 @@ pub async fn run(
                     continue;
                     }
                 };
+
+                // The fizzle of an INSTANT spell (a timed one rolled at its
+                // CastStart): EQ's roll on the casting skill against the
+                // spell's level, after the target checks, before the mana.
+                // A fizzle burns a quarter of the mana, starts the gem's
+                // refresh (the global cooldown) and trains nothing.
+                if spell.cast_time <= 0.0 && caster_conn.fizzles && super::cast_gate::roll_fizzle(caster_conn, spell) {
+                    let (mp_after, max_mp) = {
+                        let cc = connections.get_mut(&caster_cid).expect("checked");
+                        let burned = super::cast_gate::fizzle_mana(spell.mana_cost, cc.mp);
+                        cc.mp -= burned;
+                        cc.gcd_until = Some(now + super::GLOBAL_COOLDOWN);
+                        cc.cast_spell_name.clear();
+                        cc.cast_total_duration = 0.0;
+                        cc.cast_set_at = None;
+                        regen::mark_dirty(cc);
+                        tracing::info!(caster = intent.caster, spell = %spell.name, burned, "CastSpell fizzled");
+                        (cc.mp, cc.max_mp)
+                    };
+                    handlers::fan_out_cast_fail(
+                        &mut server,
+                        &[caster_cid],
+                        intent.caster,
+                        super::cast_gate::FIZZLE_LINE.to_string(),
+                    );
+                    handlers::fan_out_mana_update(&mut server, &[caster_cid], intent.caster, mp_after, max_mp);
+                    continue;
+                }
 
                 // Deduct mana (+ optional hp_cost for blood / fallen
                 // spells). Both are caster-side; target-side effects

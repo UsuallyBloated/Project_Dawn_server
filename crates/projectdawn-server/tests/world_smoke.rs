@@ -60,6 +60,7 @@ async fn start_both() -> Harness {
             patch: 0,
         },
         netcode_private_key: netcode_key,
+        fizzles: true,
     };
     let cfg = Arc::new(cfg);
 

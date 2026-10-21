@@ -29,6 +29,7 @@ async fn start_server() -> (String, TempDir) {
         // Fixed bytes — auth tests never actually mint a token, so the
         // value doesn't matter; we just need *some* 32-byte array.
         netcode_private_key: [0xA5; 32],
+        fizzles: true,
     };
 
     let pool = db::open(&url).await.expect("open pool");

@@ -13,9 +13,10 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 pub const BASE: i32 = 10;
-pub const BASE_HP: f32 = 100.0;
-pub const BASE_MP: f32 = 100.0;
 pub const BASE_ST: f32 = 100.0;
+/// The pure melee classes have no mana in EQ; they keep a token pool here so
+/// nothing that divides by a maximum (bars, regen) meets a zero.
+pub const MIN_MANA: f32 = 20.0;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StatBlock {
@@ -52,16 +53,15 @@ impl StatBlock {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ClassData {
     pub bonuses: StatBlock,
-    pub hp_bonus: f32,
-    pub mp_bonus: f32,
     pub stamina_bonus: f32,
 }
 
+/// What a level adds: the class's stat growth and its stamina. Hit points
+/// and mana are not gains; they are recomputed from the level and the stats
+/// by EQ's formulas (`base_hp`, `base_mana`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LevelGain {
     pub stats: StatBlock,
-    pub max_hp: f32,
-    pub max_mp: f32,
     pub max_stamina: f32,
 }
 
@@ -156,75 +156,75 @@ fn classes() -> &'static HashMap<&'static str, ClassData> {
         let mut m = HashMap::new();
         m.insert("Warrior", ClassData {
             bonuses: StatBlock { strength: 10, constitution: 8, ..Default::default() },
-            hp_bonus: 50.0, mp_bonus: 0.0, stamina_bonus: 20.0,
+            stamina_bonus: 20.0,
         });
         m.insert("Magician", ClassData {
             bonuses: StatBlock { intelligence: 15, wisdom: 10, ..Default::default() },
-            hp_bonus: -10.0, mp_bonus: 100.0, stamina_bonus: 0.0,
+            stamina_bonus: 0.0,
         });
         m.insert("Wizard", ClassData {
             bonuses: StatBlock { intelligence: 18, wisdom: 5, ..Default::default() },
-            hp_bonus: -15.0, mp_bonus: 110.0, stamina_bonus: 0.0,
+            stamina_bonus: 0.0,
         });
         m.insert("Sorcerer", ClassData {
             bonuses: StatBlock { intelligence: 10, charisma: 15, wisdom: 5, ..Default::default() },
-            hp_bonus: -5.0, mp_bonus: 90.0, stamina_bonus: 0.0,
+            stamina_bonus: 0.0,
         });
         m.insert("Rogue", ClassData {
             bonuses: StatBlock { dexterity: 15, agility: 10, ..Default::default() },
-            hp_bonus: 20.0, mp_bonus: 0.0, stamina_bonus: 20.0,
+            stamina_bonus: 20.0,
         });
         m.insert("Cleric", ClassData {
             bonuses: StatBlock { wisdom: 12, constitution: 8, ..Default::default() },
-            hp_bonus: 30.0, mp_bonus: 60.0, stamina_bonus: 0.0,
+            stamina_bonus: 0.0,
         });
         m.insert("Druid", ClassData {
             bonuses: StatBlock { wisdom: 10, intelligence: 8, ..Default::default() },
-            hp_bonus: 10.0, mp_bonus: 70.0, stamina_bonus: 0.0,
+            stamina_bonus: 0.0,
         });
         m.insert("Shaman", ClassData {
             bonuses: StatBlock { wisdom: 10, constitution: 8, strength: 5, ..Default::default() },
-            hp_bonus: 30.0, mp_bonus: 40.0, stamina_bonus: 15.0,
+            stamina_bonus: 15.0,
         });
         m.insert("Beast Master", ClassData {
             bonuses: StatBlock { strength: 8, constitution: 8, agility: 5, wisdom: 5, ..Default::default() },
-            hp_bonus: 30.0, mp_bonus: 30.0, stamina_bonus: 20.0,
+            stamina_bonus: 20.0,
         });
         m.insert("Blood Mage", ClassData {
             bonuses: StatBlock { intelligence: 15, constitution: 5, ..Default::default() },
-            hp_bonus: 0.0, mp_bonus: 80.0, stamina_bonus: 0.0,
+            stamina_bonus: 0.0,
         });
         m.insert("Paladin", ClassData {
             bonuses: StatBlock { strength: 10, wisdom: 8, constitution: 5, ..Default::default() },
-            hp_bonus: 40.0, mp_bonus: 30.0, stamina_bonus: 15.0,
+            stamina_bonus: 15.0,
         });
         m.insert("Shadow Knight", ClassData {
             bonuses: StatBlock { strength: 10, intelligence: 8, constitution: 5, ..Default::default() },
-            hp_bonus: 35.0, mp_bonus: 30.0, stamina_bonus: 10.0,
+            stamina_bonus: 10.0,
         });
         m.insert("Necromancer", ClassData {
             bonuses: StatBlock { intelligence: 15, wisdom: 5, ..Default::default() },
-            hp_bonus: -10.0, mp_bonus: 100.0, stamina_bonus: 0.0,
+            stamina_bonus: 0.0,
         });
         m.insert("Enchanter", ClassData {
             bonuses: StatBlock { intelligence: 12, charisma: 12, wisdom: 5, ..Default::default() },
-            hp_bonus: -10.0, mp_bonus: 90.0, stamina_bonus: 0.0,
+            stamina_bonus: 0.0,
         });
         m.insert("Bard", ClassData {
             bonuses: StatBlock { dexterity: 8, charisma: 12, agility: 5, ..Default::default() },
-            hp_bonus: 20.0, mp_bonus: 30.0, stamina_bonus: 20.0,
+            stamina_bonus: 20.0,
         });
         m.insert("Ranger", ClassData {
             bonuses: StatBlock { dexterity: 12, agility: 8, wisdom: 5, ..Default::default() },
-            hp_bonus: 20.0, mp_bonus: 20.0, stamina_bonus: 20.0,
+            stamina_bonus: 20.0,
         });
         m.insert("Monk", ClassData {
             bonuses: StatBlock { strength: 8, dexterity: 8, agility: 8, ..Default::default() },
-            hp_bonus: 25.0, mp_bonus: 10.0, stamina_bonus: 30.0,
+            stamina_bonus: 30.0,
         });
         m.insert("Witch Hunter", ClassData {
             bonuses: StatBlock { intelligence: 8, constitution: 8, wisdom: 8, ..Default::default() },
-            hp_bonus: 20.0, mp_bonus: 40.0, stamina_bonus: 10.0,
+            stamina_bonus: 10.0,
         });
         m
     })
@@ -236,75 +236,75 @@ fn level_gains() -> &'static HashMap<&'static str, LevelGain> {
         let mut m = HashMap::new();
         m.insert("Warrior", LevelGain {
             stats: StatBlock { strength: 2, constitution: 2, ..Default::default() },
-            max_hp: 20.0, max_mp: 2.0, max_stamina: 8.0,
+            max_stamina: 8.0,
         });
         m.insert("Magician", LevelGain {
             stats: StatBlock { intelligence: 3, wisdom: 2, ..Default::default() },
-            max_hp: 5.0, max_mp: 25.0, max_stamina: 2.0,
+            max_stamina: 2.0,
         });
         m.insert("Wizard", LevelGain {
             stats: StatBlock { intelligence: 4, wisdom: 1, ..Default::default() },
-            max_hp: 3.0, max_mp: 28.0, max_stamina: 1.0,
+            max_stamina: 1.0,
         });
         m.insert("Sorcerer", LevelGain {
             stats: StatBlock { charisma: 2, intelligence: 2, ..Default::default() },
-            max_hp: 5.0, max_mp: 22.0, max_stamina: 2.0,
+            max_stamina: 2.0,
         });
         m.insert("Rogue", LevelGain {
             stats: StatBlock { dexterity: 2, agility: 2, ..Default::default() },
-            max_hp: 12.0, max_mp: 3.0, max_stamina: 10.0,
+            max_stamina: 10.0,
         });
         m.insert("Cleric", LevelGain {
             stats: StatBlock { wisdom: 3, constitution: 1, ..Default::default() },
-            max_hp: 12.0, max_mp: 20.0, max_stamina: 2.0,
+            max_stamina: 2.0,
         });
         m.insert("Druid", LevelGain {
             stats: StatBlock { wisdom: 2, intelligence: 2, ..Default::default() },
-            max_hp: 8.0, max_mp: 22.0, max_stamina: 2.0,
+            max_stamina: 2.0,
         });
         m.insert("Shaman", LevelGain {
             stats: StatBlock { wisdom: 2, constitution: 1, strength: 1, ..Default::default() },
-            max_hp: 12.0, max_mp: 15.0, max_stamina: 5.0,
+            max_stamina: 5.0,
         });
         m.insert("Beast Master", LevelGain {
             stats: StatBlock { strength: 2, constitution: 1, agility: 1, wisdom: 1, ..Default::default() },
-            max_hp: 14.0, max_mp: 10.0, max_stamina: 6.0,
+            max_stamina: 6.0,
         });
         m.insert("Blood Mage", LevelGain {
             stats: StatBlock { intelligence: 3, constitution: 1, ..Default::default() },
-            max_hp: 7.0, max_mp: 22.0, max_stamina: 2.0,
+            max_stamina: 2.0,
         });
         m.insert("Paladin", LevelGain {
             stats: StatBlock { strength: 2, wisdom: 2, constitution: 1, ..Default::default() },
-            max_hp: 15.0, max_mp: 12.0, max_stamina: 5.0,
+            max_stamina: 5.0,
         });
         m.insert("Shadow Knight", LevelGain {
             stats: StatBlock { strength: 2, intelligence: 2, constitution: 1, ..Default::default() },
-            max_hp: 14.0, max_mp: 12.0, max_stamina: 4.0,
+            max_stamina: 4.0,
         });
         m.insert("Necromancer", LevelGain {
             stats: StatBlock { intelligence: 3, wisdom: 2, ..Default::default() },
-            max_hp: 3.0, max_mp: 25.0, max_stamina: 1.0,
+            max_stamina: 1.0,
         });
         m.insert("Enchanter", LevelGain {
             stats: StatBlock { intelligence: 3, charisma: 2, ..Default::default() },
-            max_hp: 3.0, max_mp: 23.0, max_stamina: 1.0,
+            max_stamina: 1.0,
         });
         m.insert("Bard", LevelGain {
             stats: StatBlock { dexterity: 2, charisma: 2, agility: 1, ..Default::default() },
-            max_hp: 10.0, max_mp: 8.0, max_stamina: 8.0,
+            max_stamina: 8.0,
         });
         m.insert("Ranger", LevelGain {
             stats: StatBlock { dexterity: 2, agility: 2, wisdom: 1, ..Default::default() },
-            max_hp: 10.0, max_mp: 8.0, max_stamina: 8.0,
+            max_stamina: 8.0,
         });
         m.insert("Monk", LevelGain {
             stats: StatBlock { strength: 2, dexterity: 2, agility: 1, ..Default::default() },
-            max_hp: 12.0, max_mp: 4.0, max_stamina: 10.0,
+            max_stamina: 10.0,
         });
         m.insert("Witch Hunter", LevelGain {
             stats: StatBlock { intelligence: 2, wisdom: 2, constitution: 1, ..Default::default() },
-            max_hp: 10.0, max_mp: 15.0, max_stamina: 4.0,
+            max_stamina: 4.0,
         });
         m
     })
@@ -313,9 +313,110 @@ fn level_gains() -> &'static HashMap<&'static str, LevelGain> {
 fn default_level_gain() -> LevelGain {
     LevelGain {
         stats: StatBlock::default(),
-        max_hp: 10.0,
-        max_mp: 10.0,
         max_stamina: 5.0,
+    }
+}
+
+/// EverQuest's class factor for hit points at a level (EQEmu's
+/// `Mob::GetClassLevelFactor`, the `lm` of the classic HP formula). Our own
+/// classes take the EQ class they are shaped after: Sorcerer and Blood Mage
+/// the pure casters', Beast Master the Beastlord's, Witch Hunter the
+/// Ranger's; anything unknown gets EQEmu's default band.
+pub fn hp_level_factor(class: &str, level: i32) -> i32 {
+    match class {
+        "Warrior" => match level {
+            l if l < 20 => 220,
+            l if l < 30 => 230,
+            l if l < 40 => 250,
+            l if l < 53 => 270,
+            l if l < 57 => 280,
+            l if l < 60 => 290,
+            l if l < 70 => 300,
+            _ => 311,
+        },
+        "Cleric" | "Druid" | "Shaman" => if level < 70 { 150 } else { 157 },
+        "Paladin" | "Shadow Knight" => match level {
+            l if l < 35 => 210,
+            l if l < 45 => 220,
+            l if l < 51 => 230,
+            l if l < 56 => 240,
+            l if l < 60 => 250,
+            l if l < 68 => 260,
+            _ => 270,
+        },
+        "Monk" | "Bard" | "Rogue" | "Beast Master" => match level {
+            l if l < 51 => 180,
+            l if l < 58 => 190,
+            l if l < 70 => 200,
+            _ => 210,
+        },
+        "Ranger" | "Witch Hunter" => match level {
+            l if l < 58 => 200,
+            l if l < 70 => 210,
+            _ => 220,
+        },
+        "Magician" | "Wizard" | "Necromancer" | "Enchanter" | "Sorcerer" | "Blood Mage" => {
+            if level < 70 { 120 } else { 127 }
+        }
+        _ => match level {
+            l if l < 35 => 210,
+            l if l < 45 => 220,
+            l if l < 51 => 230,
+            l if l < 56 => 240,
+            l if l < 60 => 250,
+            _ => 260,
+        },
+    }
+}
+
+/// The stat a class builds its mana on (EQEmu's `GetCasterClass`): INT for
+/// the arcane classes and the Bard, WIS for the priests and their hybrids,
+/// none for the pure melee. Witch Hunter, ours, casts on INT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManaStat {
+    Int,
+    Wis,
+}
+
+pub fn mana_stat(class: &str) -> Option<ManaStat> {
+    match class {
+        "Wizard" | "Magician" | "Necromancer" | "Enchanter" | "Shadow Knight" | "Bard"
+        | "Sorcerer" | "Blood Mage" | "Witch Hunter" => Some(ManaStat::Int),
+        "Cleric" | "Druid" | "Shaman" | "Paladin" | "Ranger" | "Beast Master" => Some(ManaStat::Wis),
+        _ => None,
+    }
+}
+
+/// Classic EverQuest's base hit points (EQEmu's `Client::CalcBaseHP`, the
+/// pre-SoF branch): `5 + level x factor / 10 + STA x level x factor / 3000`
+/// in integer arithmetic, with our CON in STA's place. EQ's STA ran 75 to
+/// 255 and never grew with level; ours starts near 20 and grows, so the
+/// stat term is small at level 1 and the level term carries the curve (a
+/// Human Warrior 28 at 1, about 1,890 at 50; EQ's 32 and 1,692). The EQ
+/// parity audit of 2026-10-20, recommendation 1.
+pub fn base_hp(class: &str, level: i32, constitution: i32) -> i32 {
+    let lm = hp_level_factor(class, level);
+    let con = constitution.max(0);
+    (5 + level * lm / 10 + con * level * lm / 3000).max(1)
+}
+
+/// Classic EverQuest's base mana (EQEmu's `Client::CalcBaseMana`, the
+/// classic branch) from the class's mana stat: `22.5 x level` at a stat of
+/// 100, less below it, more above, with the top end flattened past 199.
+/// Integer arithmetic in EQEmu's order. Zero for a class with no mana stat.
+pub fn base_mana(class: &str, level: i32, intelligence: i32, wisdom: i32) -> i32 {
+    let stat = match mana_stat(class) {
+        Some(ManaStat::Int) => intelligence,
+        Some(ManaStat::Wis) => wisdom,
+        None => return 0,
+    };
+    let stat = stat.max(0);
+    let lesser = ((stat - 199) / 2).max(0);
+    let mind = stat - lesser;
+    if stat > 100 {
+        (5 * (mind + 20)) / 2 * 3 * level / 40
+    } else {
+        (5 * (mind + 200)) / 2 * 3 * level / 100
     }
 }
 
@@ -359,21 +460,21 @@ pub fn compute(race: &str, class: &str, level: i32) -> ComputedCharacter {
     let cls = classes().get(class).copied().unwrap_or_default();
     stats = stats.add(cls.bonuses);
 
-    let con_hp_bonus = (stats.constitution as f32 - 10.0) * 5.0;
-    let mut max_hp = (BASE_HP + cls.hp_bonus + con_hp_bonus).max(50.0);
-    let mut max_mp = (BASE_MP + cls.mp_bonus).max(20.0);
     let mut max_stamina = (BASE_ST + cls.stamina_bonus).max(20.0);
 
     let gain = level_gains().get(class).copied().unwrap_or_else(default_level_gain);
     let lvl = level.clamp(1, 99);
     for _ in 1..lvl {
-        let con_before = stats.constitution;
         stats = stats.add(gain.stats);
-        max_hp += gain.max_hp;
-        max_mp += gain.max_mp;
         max_stamina += gain.max_stamina;
-        max_hp += (stats.constitution - con_before) as f32 * 5.0;
     }
+    // Hit points and mana are EQ's formulas over the level and the grown
+    // stats, not a sum of per-level gains, so a level change recomputes them.
+    let max_hp = base_hp(class, lvl, stats.constitution) as f32;
+    let max_mp = match base_mana(class, lvl, stats.intelligence, stats.wisdom) {
+        0 => MIN_MANA,
+        mana => mana as f32,
+    };
 
     let xp_to_next = xp_to_next_for(level);
 
@@ -443,10 +544,10 @@ mod tests {
         // STR: BASE(10) + Human(2) + Warrior(10) = 22
         assert_eq!(c.stats.strength, 22);
         assert_eq!(c.stats.constitution, 20); // 10 + 2 + 8
-        // max_hp: BASE_HP(100) + Warrior(50) + con_bonus(20-10)*5 = 200
-        assert!((c.max_hp - 200.0).abs() < 0.01, "max_hp = {}", c.max_hp);
-        // max_mp: BASE_MP(100) + Warrior(0) = 100
-        assert!((c.max_mp - 100.0).abs() < 0.01);
+        // EQ's formula: 5 + 1 x 220 / 10 + 20 x 1 x 220 / 3000 = 5 + 22 + 1
+        assert!((c.max_hp - 28.0).abs() < 0.01, "max_hp = {}", c.max_hp);
+        // A Warrior has no mana stat: the token minimum.
+        assert!((c.max_mp - MIN_MANA).abs() < 0.01);
         // max_stamina: BASE_ST(100) + Warrior(20) = 120
         assert!((c.max_stamina - 120.0).abs() < 0.01);
     }
@@ -458,8 +559,10 @@ mod tests {
         assert_eq!(c.stats.wisdom, 27);
         // CON: 10 - 5 + 8 = 13
         assert_eq!(c.stats.constitution, 13);
-        // max_hp: 100 + 30 + (13-10)*5 = 145
-        assert!((c.max_hp - 145.0).abs() < 0.01, "max_hp = {}", c.max_hp);
+        // 5 + 150 / 10 + 13 x 150 / 3000 = 5 + 15 + 0
+        assert!((c.max_hp - 20.0).abs() < 0.01, "max_hp = {}", c.max_hp);
+        // WIS 27: (5 x 227) / 2 = 567, x 3 = 1701, x 1 / 100 = 17
+        assert!((c.max_mp - 17.0).abs() < 0.01, "max_mp = {}", c.max_mp);
     }
 
     #[test]
@@ -468,9 +571,33 @@ mod tests {
         let c5 = compute("Human", "Warrior", 5);
         // 4 level-ups × +2 STR each = +8 over level 1
         assert_eq!(c5.stats.strength, c1.stats.strength + 8);
-        // 4 level-ups × +20 max_hp + 4 × con-gain×5 (=2 con × 5 = 10)
-        // = 80 + 40 = 120 over level 1
-        assert!((c5.max_hp - c1.max_hp - 120.0).abs() < 0.01);
+        // CON 28 at 5: 5 + 5 x 220 / 10 + 28 x 5 x 220 / 3000 = 5 + 110 + 10
+        assert!((c5.max_hp - 125.0).abs() < 0.01, "max_hp = {}", c5.max_hp);
+    }
+
+    /// The EQ parity audit's anchors (2026-10-20): a level 1 Warrior dies to
+    /// a dozen hits as on P99, level 50 lands near EQ's 1,692, and the
+    /// casters start with EQ's twenty-odd mana instead of two hundred.
+    #[test]
+    fn pools_follow_eq_at_both_ends() {
+        let w50 = compute("Human", "Warrior", 50);
+        // CON 118, factor 270: 5 + 1350 + 118 x 50 x 270 / 3000 (= 531)
+        assert!((w50.max_hp - 1886.0).abs() < 0.01, "max_hp = {}", w50.max_hp);
+        let wiz1 = compute("Human", "Wizard", 1);
+        // CON 12, factor 120: 5 + 12 + 0; INT 30: (5 x 230) / 2 x 3 / 100 = 17
+        assert!((wiz1.max_hp - 17.0).abs() < 0.01, "max_hp = {}", wiz1.max_hp);
+        assert!((wiz1.max_mp - 17.0).abs() < 0.01, "max_mp = {}", wiz1.max_mp);
+        // At a stat of exactly 100 the classic branch is 22.5 x level.
+        assert_eq!(base_mana("Wizard", 50, 100, 10), 1125);
+        assert_eq!(base_mana("Cleric", 40, 10, 100), 900);
+        // Past 100 the upper branch continues the line (101 -> 22.69 x level).
+        assert_eq!(base_mana("Wizard", 100, 101, 10), 2265);
+        // The top end flattens past 199: 250 counts as 225.
+        assert_eq!(base_mana("Wizard", 1, 250, 10), (5 * 245) / 2 * 3 / 40);
+        assert_eq!(base_mana("Rogue", 50, 200, 200), 0, "no mana stat");
+        assert_eq!(hp_level_factor("Warrior", 19), 220);
+        assert_eq!(hp_level_factor("Warrior", 50), 270);
+        assert_eq!(hp_level_factor("Witch Hunter", 10), 200, "the Ranger's band");
     }
 
     #[test]
@@ -505,9 +632,10 @@ mod tests {
     #[test]
     fn unknown_inputs_fall_back_safely() {
         let c = compute("Goblin", "Cardsharp", 3);
-        // All-10 base, no class bonuses applied. Level 3 with default
-        // gain (no stat stats, +10 hp per level).
+        // All-10 base, no class bonuses applied; EQEmu's default HP band
+        // (210 at level 3): 5 + 63 + 10 x 3 x 210 / 3000 = 70; no mana stat.
         assert_eq!(c.stats.strength, 10);
-        assert!((c.max_hp - 120.0).abs() < 0.01); // 100 + 2*10
+        assert!((c.max_hp - 70.0).abs() < 0.01, "max_hp = {}", c.max_hp);
+        assert!((c.max_mp - MIN_MANA).abs() < 0.01);
     }
 }

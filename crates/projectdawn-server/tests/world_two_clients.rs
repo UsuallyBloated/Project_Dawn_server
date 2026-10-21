@@ -39,7 +39,14 @@ struct Harness {
     _tmp: TempDir,
 }
 
+/// A server with fizzles OFF: a cast fizzles about one time in ten at par
+/// (`cast_gate::fizzle_chance`), which would make every single-cast test here
+/// a coin flip. The one test about fizzles starts with `start_both_opts(true)`.
 async fn start_both() -> Harness {
+    start_both_opts(false).await
+}
+
+async fn start_both_opts(fizzles: bool) -> Harness {
     // Opt-in server tracing for triage: RUST_LOG=info cargo test ... --nocapture
     // makes the in-process server's tracing lines visible. try_init so the
     // second test in the process doesn't panic on double-init.
@@ -70,6 +77,7 @@ async fn start_both() -> Harness {
             patch: 0,
         },
         netcode_private_key: netcode_key,
+        fizzles,
     });
 
     let pool = db::open(&url).await.expect("open pool");
@@ -228,6 +236,20 @@ async fn master_weapon_skill(db_url: &str, char_id: i64, key: &str) {
     .execute(&pool)
     .await
     .expect("master weapon skill");
+}
+
+/// Set a character's persisted casting skill score (read at login).
+async fn set_casting_skill(db_url: &str, char_id: i64, key: &str, score: i32) {
+    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    sqlx::query(
+        "INSERT OR REPLACE INTO character_skills (char_id, kind, key, score) VALUES (?1, 'casting', ?2, ?3)",
+    )
+    .bind(char_id)
+    .bind(key)
+    .bind(score)
+    .execute(&pool)
+    .await
+    .expect("set casting skill");
 }
 
 /// Set a character's persisted stamina (read at login).
@@ -483,6 +505,11 @@ impl WorldClient {
     /// Dev/GM command: take `amount` damage. Gated like the other dev tools.
     fn send_damage_self(&mut self, amount: i32) {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::DamageSelf { amount });
+    }
+
+    /// The Test Panel's Full Heal: tops HP, mana and stamina off (GM only).
+    fn send_heal_self(&mut self) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::HealSelf { amount: 0 });
     }
 
     fn send_inspect_player(&mut self, target_char_id: i64) {
@@ -886,10 +913,10 @@ async fn two_clients_server_authoritative_resources() {
         tokio::time::sleep(TICK_DT).await;
     }
 
-    // Track 6 sub-task 2 â€” A is Human Warrior, so char_data::compute
-    // gives max_hp=200 (BASE_HP 100 + Warrior 50 + CON-bonus 50),
-    // max_mp=100 (BASE_MP 100 + 0), max_stamina=120 (BASE_ST 100 +
-    // Warrior 20). `create_character` seeds current = max.
+    // A is a Human Warrior, so char_data::compute gives EQ's pools (the
+    // parity audit, 2026-10-20): max_hp 28 (5 + 220 / 10 + CON 20 x 220 /
+    // 3000), max_mp the token 20 (no mana stat), max_stamina 120 (BASE_ST
+    // 100 + Warrior 20). `create_character` seeds current = max.
     let h_at_b = b
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_char_id as u64)
@@ -897,8 +924,8 @@ async fn two_clients_server_authoritative_resources() {
         .await
         .expect("B receives HealthUpdate for A via DB-seeded fan-out");
     if let ServerWorldMsg::HealthUpdate { hp, max_hp, .. } = h_at_b {
-        assert!((hp - 200.0).abs() < 0.01, "Warrior hp: {hp}");
-        assert!((max_hp - 200.0).abs() < 0.01, "Warrior max_hp: {max_hp}");
+        assert!((hp - 28.0).abs() < 0.01, "Warrior hp: {hp}");
+        assert!((max_hp - 28.0).abs() < 0.01, "Warrior max_hp: {max_hp}");
     }
 
     let m_at_b = b
@@ -908,8 +935,8 @@ async fn two_clients_server_authoritative_resources() {
         .await
         .expect("B receives ManaUpdate for A via DB-seeded fan-out");
     if let ServerWorldMsg::ManaUpdate { mp, max_mp, .. } = m_at_b {
-        assert!((mp - 100.0).abs() < 0.01, "Warrior mp: {mp}");
-        assert!((max_mp - 100.0).abs() < 0.01, "Warrior max_mp: {max_mp}");
+        assert!((mp - 20.0).abs() < 0.01, "Warrior mp: {mp}");
+        assert!((max_mp - 20.0).abs() < 0.01, "Warrior max_mp: {max_mp}");
     }
 
     let s_at_b = b
@@ -1101,43 +1128,43 @@ async fn two_clients_buff_snapshot_fanout() {
 
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "eta", "Eta", "Human", "Shaman").await;
-    // Healing Wave requires level 4; provisioned characters start at 1.
-    set_char_level(&h.db_url, a_char_id, 4).await;
+    // Spirit of the Bear requires level 10; provisioned characters start at 1.
+    set_char_level(&h.db_url, a_char_id, 10).await;
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "theta", "The", "Elf", "Druid").await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
 
-    // A casts Healing Wave (ALLY, 15 immediate heal + 4 hps Ã— 18s HoT,
+    // A casts Spirit of the Bear (ALLY, 15 immediate heal + 4 hps Ã— 18s HoT,
     // cast_time 1.0s). Track 10 â€” the cast-time gate now rejects
     // CastSpell unless a matching CastStart ran long enough, so we
     // pump CastStart out first (transport doesn't advance during a
     // bare tokio sleep), then wait the cast time, then send CastSpell.
     // Server applies the HoT to A.active_buffs and fans BuffSnapshot
     // to all in-world peers including B.
-    a.send_cast_start("Healing Wave", 1.0);
+    a.send_cast_start("Spirit of the Bear", 2.0);
     for _ in 0..3 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
-    a.pump_for(Duration::from_millis(1100)).await;
-    a.send_cast_spell("Healing Wave", None);
+    a.pump_for(Duration::from_millis(2100)).await;
+    a.send_cast_spell("Spirit of the Bear", None);
     for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
 
-    // Filter for the Healing Wave entry so we don't latch onto the
+    // Filter for the Spirit of the Bear entry so we don't latch onto the
     // empty seed snapshot the server fans at step-4a join time.
     let _ = b
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(m, ServerWorldMsg::BuffSnapshot { target, buffs }
                 if *target == a_char_id as u64
-                    && buffs.iter().any(|(n, _)| n == "Healing Wave"))
+                    && buffs.iter().any(|(n, _)| n == "Spirit of the Bear"))
         })
         .await
-        .expect("B receives server-driven BuffSnapshot containing Healing Wave");
+        .expect("B receives server-driven BuffSnapshot containing Spirit of the Bear");
 }
 
 /// Track 5 sub-task 1C: AI state machine drives Idle â†’ Chase â†’ Attack
@@ -1580,9 +1607,8 @@ async fn aoe_spell_damages_nearby_enemies() {
     }
 
     // Inferno must fan at least one Hit with attacker=a, target=enemy,
-    // dmg_type=Fire. The server applies the caster's spell power
-    // (spell_power.rs): 45 + INT x 0.5, times the evocation multiplier
-    // (1.0 up to 1.15), and a crit takes that 1.5x to 2x.
+    // dmg_type=Fire. A spell does exactly its listed number (45, the parity
+    // audit of 2026-10-20); only a crit changes it, 1.5x to 2x.
     let aoe_hit = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
             matches!(
@@ -1595,16 +1621,11 @@ async fn aoe_spell_damages_nearby_enemies() {
         })
         .await
         .expect("Inferno fans a Fire Hit to the enemy standing 3 m away");
-    // Stats are derived from race, class and level at load, as here.
-    let int = char_data::compute("Human", "Magician", 12).stats.intelligence;
-    let low = 45.0 + int as f32 * 0.5;
-    let high = low * 1.15;
     if let ServerWorldMsg::Hit { amount, crit, .. } = aoe_hit {
-        let amount = amount as f32;
         if crit {
-            assert!(amount >= (low * 1.5).floor() && amount <= (high * 2.0).ceil(), "a crit: {amount}");
+            assert!((67..=90).contains(&amount), "a crit of 45: {amount}");
         } else {
-            assert!(amount >= low.floor() && amount <= high.ceil(), "45 + INT {int} x 0.5, evocation: {amount}");
+            assert_eq!(amount, 45, "Inferno's listed 45, nothing added");
         }
     }
 }
@@ -1671,8 +1692,8 @@ async fn cast_spell_accepted_after_cast_time() {
 
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "nuu", "Nura", "Human", "Shaman").await;
-    // Healing Wave requires level 4; provisioned characters start at 1.
-    set_char_level(&h.db_url, a_char_id, 4).await;
+    // Spirit of the Bear requires level 10; provisioned characters start at 1.
+    set_char_level(&h.db_url, a_char_id, 10).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
@@ -1689,32 +1710,32 @@ async fn cast_spell_accepted_after_cast_time() {
     // tokio::time::sleep alone doesn't advance the transport â€” we'd
     // otherwise be measuring "time until the test got around to
     // ticking" not "time the cast bar ran on the server".
-    a.send_cast_start("Healing Wave", 1.0);
+    a.send_cast_start("Spirit of the Bear", 2.0);
     for _ in 0..3 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
-    // Now wait past the cast time (1.0 s) on the server's wall clock.
-    // 1100 ms includes a 100 ms cushion above the gate's tolerance.
-    a.pump_for(Duration::from_millis(1100)).await;
-    a.send_cast_spell("Healing Wave", None);
+    // Now wait past the cast time (2.0 s) on the server's wall clock.
+    // 2100 ms includes a 100 ms cushion above the gate's tolerance.
+    a.pump_for(Duration::from_millis(2100)).await;
+    a.send_cast_spell("Spirit of the Bear", None);
     for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
 
-    // Healing Wave applies a 4 hps Ã— 18 s HoT; the server fans a
-    // BuffSnapshot containing "Healing Wave" once the cast lands.
+    // Spirit of the Bear applies a 4 hps Ã— 18 s HoT; the server fans a
+    // BuffSnapshot containing "Spirit of the Bear" once the cast lands.
     // That's the cleanest "cast actually applied server-side" signal
     // and doesn't race against regen ticks like HealthUpdate would.
     let snap = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(m, ServerWorldMsg::BuffSnapshot { target, buffs }
                 if *target == a_char_id as u64
-                    && buffs.iter().any(|(n, _)| n == "Healing Wave"))
+                    && buffs.iter().any(|(n, _)| n == "Spirit of the Bear"))
         })
         .await
-        .expect("Healing Wave applies once cast bar has run");
+        .expect("Spirit of the Bear applies once the cast bar has run");
     let _ = snap;
 
     // No CastFail should have fired.
@@ -1789,11 +1810,12 @@ async fn pet_summon_visible_to_peer() {
             (3..=5).contains(&level),
             "owner-6 skeleton rolls level 3-5 (got {level})"
         );
-        // Stats ride the camp curve at PET_STAT_SCALAR (70%).
+        // Stats ride the camp curve at PET_STAT_SCALAR (70%); the curve's
+        // low levels are the parity audit's (37, 52 and 64 at 3, 4 and 5).
         let expected_hp = match level {
-            3 => 39.9,
-            4 => 49.0,
-            5 => 63.0,
+            3 => 25.9,
+            4 => 36.4,
+            5 => 44.8,
             _ => unreachable!(),
         };
         assert!(
@@ -2743,8 +2765,8 @@ async fn grouped_pair_with_dummy(
     a.pump_for(Duration::from_millis(400)).await;
     b.pump_for(Duration::from_millis(400)).await;
 
-    // 30 hp: one Smite (35) kills it.
-    a.send_dev_spawn("Charm Dummy", 1, 30.0, 0, 0.0, 0.0);
+    // 5 hp: one Smite (7, the parity audit's number) kills it.
+    a.send_dev_spawn("Charm Dummy", 1, 5.0, 0, 0.0, 0.0);
     let spawn = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
@@ -2816,6 +2838,10 @@ async fn heals_reach_30_m_and_not_past_it() {
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "patient30", "Patient", "Human", "Warrior").await;
     set_char_pos(&h.db_url, b_char_id, 28.0, 0.0).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "healer30", true).await.expect("set is_gm");
+    // The GM flag rides the connect token: mint it after the grant.
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -2843,6 +2869,10 @@ async fn heals_reach_30_m_and_not_past_it() {
     }
     a.pump_for(Duration::from_millis(5_200)).await;
     b.pump_for(Duration::from_millis(100)).await;
+    // A level 1 pool (about 16) does not hold two Healing Lights (10 each),
+    // and the mana gate runs before the reach gate: top it off first.
+    a.send_heal_self();
+    a.pump_for(Duration::from_millis(200)).await;
     a.send_cast_start("Healing Light", 1.2);
     a.pump_for(Duration::from_millis(1_400)).await;
     a.send_cast_spell("Healing Light", Some(b_char_id as u64));
@@ -3793,7 +3823,7 @@ async fn lifesteal_spell_heals_caster() {
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "lsk", "Lifedrinker", "Human", "Shadow Knight").await;
     let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
-    sqlx::query("UPDATE characters SET level = 10, hp = 5.0 WHERE id = ?1")
+    sqlx::query("UPDATE characters SET level = 10, hp = 40.0, mp = 99999.0 WHERE id = ?1")
         .bind(a_char_id)
         .execute(&pool)
         .await
@@ -3862,24 +3892,24 @@ async fn lifesteal_spell_heals_caster() {
     }
 
     // The lifesteal should bump caster HP well above baseline +
-    // regen-this-tick. Lifetap Rk. II heals up to 35; we require
-    // at least +20 to stay comfortably above any regen drift the
+    // regen-this-tick. Lifetap Rk. II heals 20 (the parity audit's number);
+    // we require at least +10 to stay comfortably above any regen drift the
     // tick loop ran in the meantime.
     let post = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(
                 m,
                 ServerWorldMsg::HealthUpdate { id, hp, .. }
-                    if *id == a_char_id as u64 && *hp >= baseline_hp + 20.0
+                    if *id == a_char_id as u64 && *hp >= baseline_hp + 10.0
             )
         })
         .await
         .expect("caster HealthUpdate with lifesteal heal");
     if let ServerWorldMsg::HealthUpdate { hp, .. } = post {
         assert!(
-            hp >= baseline_hp + 20.0,
-            "expected hp >= {} (baseline {} + â‰¥20 lifesteal); got {}",
-            baseline_hp + 20.0,
+            hp >= baseline_hp + 10.0,
+            "expected hp >= {} (baseline {} + at least 10 of the 20 lifesteal); got {}",
+            baseline_hp + 10.0,
             baseline_hp,
             hp,
         );
@@ -3951,7 +3981,8 @@ async fn bag_contents_persist_across_reconnect() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn equip_increases_max_hp() {
     const VEST: &str = "res://data/loot/items/iron_chain_vest.tres";
-    const HUMAN_WARRIOR_BASE_MAX_HP: f32 = 200.0;
+    // EQ's formula (the parity audit, 2026-10-20): 5 + 220 / 10 + 20 x 220 / 3000.
+    const HUMAN_WARRIOR_BASE_MAX_HP: f32 = 28.0;
     const EXPECTED_MAX_HP: f32 = HUMAN_WARRIOR_BASE_MAX_HP + 25.0;
     let h = start_both().await;
     let (a_session, a_char_id, a_token) =
@@ -3997,7 +4028,7 @@ async fn equip_increases_max_hp() {
     if let ServerWorldMsg::HealthUpdate { max_hp, .. } = post {
         assert!(
             (max_hp - EXPECTED_MAX_HP).abs() < 0.1,
-            "expected max_hp = {EXPECTED_MAX_HP} (base 200 + 25 from vest), got {max_hp}"
+            "expected max_hp = {EXPECTED_MAX_HP} (base 28 + 25 from vest), got {max_hp}"
         );
     }
 }
@@ -4167,9 +4198,8 @@ async fn cast_spell_rejected_during_cooldown() {
     let h = start_both().await;
 
     let (a_session, a_char_id, a_token) =
-        provision_client(&h.auth_url, "cdc", "Cooler", "Human", "Shaman").await;
-    // Healing Wave requires level 4; provisioned characters start at 1.
-    set_char_level(&h.db_url, a_char_id, 4).await;
+        provision_client(&h.auth_url, "cdc", "Cooler", "Human", "Enchanter").await;
+    // Rune requires level 4; provisioned characters start at 1.
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     for _ in 0..4 {
@@ -4178,27 +4208,27 @@ async fn cast_spell_rejected_during_cooldown() {
     }
 
     // First cast â€” full gate flow (CastStart â†’ wait â†’ CastSpell).
-    a.send_cast_start("Healing Wave", 1.0);
+    a.send_cast_start("Rune", 0.0);
     for _ in 0..3 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
     a.pump_for(Duration::from_millis(1100)).await;
-    a.send_cast_spell("Healing Wave", None);
+    a.send_cast_spell("Rune", None);
     for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
 
-    // Confirm the first cast landed (BuffSnapshot includes Healing Wave).
+    // Confirm the first cast landed (BuffSnapshot includes Rune).
     let _snap = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(m, ServerWorldMsg::BuffSnapshot { target, buffs }
                 if *target == a_char_id as u64
-                    && buffs.iter().any(|(n, _)| n == "Healing Wave"))
+                    && buffs.iter().any(|(n, _)| n == "Rune"))
         })
         .await
-        .expect("first Healing Wave cast lands");
+        .expect("the first Rune lands (its absorb shows in the snapshot)");
 
     // The global cooldown (2 s) has to pass, or the second start itself is
     // refused and the per-spell cooldown is never reached.
@@ -4206,13 +4236,13 @@ async fn cast_spell_rejected_during_cooldown() {
 
     // Second cast â€” same full flow, fired well inside the 6 s
     // cooldown window. Should be rejected with the cooldown reason.
-    a.send_cast_start("Healing Wave", 1.0);
+    a.send_cast_start("Rune", 0.0);
     for _ in 0..3 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
     a.pump_for(Duration::from_millis(1100)).await;
-    a.send_cast_spell("Healing Wave", None);
+    a.send_cast_spell("Rune", None);
     for _ in 0..6 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
@@ -6571,7 +6601,7 @@ async fn ally_heal_refuses_out_of_range_and_costs_nothing() {
 #[tokio::test]
 async fn pvp_nuke_refuses_out_of_range() {
     let h = start_both().await;
-    // Smite: level 1 Cleric, instant, 35 damage.
+    // Smite: level 1 Cleric, instant, 7 damage.
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "farnuke", "Farnuke", "Human", "Cleric").await;
     let (b_session, b_char_id, b_token) =
@@ -6979,7 +7009,7 @@ async fn an_interrupted_cast_costs_mana_in_proportion() {
     }
     assert!(interrupted, "a hit during the bar interrupts the cast");
     let n = charged.expect("the caster is told what the interrupt cost");
-    assert!((1..=30).contains(&n), "the charge is a fraction of Bind Affinity's 30 mana, got {n}");
+    assert!((1..=10).contains(&n), "the charge is a fraction of Bind Affinity's 10 mana, got {n}");
     let (mp, max_mp) = settled.expect("the true mana follows the CastFail");
     assert!(
         ((max_mp - mp) - n as f32).abs() < 1.5,
@@ -7121,11 +7151,11 @@ fn song_remaining(msgs: &[ServerWorldMsg], who: u64, song: &str) -> Option<f32> 
 
 /// Spell batch step 5: a DoT ticks on the server every three seconds, the
 /// caster sees each tick as a named line, and a tick that kills pays exactly
-/// what a direct hit would (XP through the one kill step). Druid 6's Entangle:
-/// 10 + INT x 0.5 direct (spell_power.rs; a crit doubles it at most), then 15
-/// per tick (5 dps x 3 s). The dummy has one HP more than the largest direct
-/// hit can take, so a tick always does the killing, crit or not. On the
-/// previous code Entangle was an unknown spell.
+/// what a direct hit would (XP through the one kill step). Druid 6's Entangle
+/// (the parity audit's numbers, 2026-10-20): 5 direct (a crit doubles it at
+/// most), then 3 per tick (1 dps x 3 s). The dummy has one HP more than the
+/// largest direct hit can take, so a tick always does the killing, crit or
+/// not. On the previous code Entangle was an unknown spell.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dot_kills_with_the_same_rewards_as_a_hit() {
     let h = start_both().await;
@@ -7138,10 +7168,8 @@ async fn a_dot_kills_with_the_same_rewards_as_a_hit() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
 
-    // Stats are derived from race, class and level at load, as here.
-    let int = char_data::compute("Human", "Druid", 6).stats.intelligence;
-    let biggest_direct = 2.0 * (10.0 + int as f32 * 0.5);
-    a.send_dev_spawn("Charm Dummy", 1, biggest_direct.floor() + 1.0, 0, 0.0, 1.0);
+    // Entangle's direct hit is its listed 5; a crit takes it to 10 at most.
+    a.send_dev_spawn("Charm Dummy", 1, 11.0, 0, 0.0, 1.0);
     let spawn = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
@@ -7154,7 +7182,8 @@ async fn a_dot_kills_with_the_same_rewards_as_a_hit() {
     };
     a.send_cast_spell("Entangle", Some(dummy));
 
-    let end = Instant::now() + Duration::from_secs(9);
+    // Four ticks of 3 to clear 11 HP: 12 s of ticking, with room to spare.
+    let end = Instant::now() + Duration::from_secs(16);
     let (mut ticks_seen, mut died, mut xp) = (0, false, 0i64);
     while Instant::now() < end && !(died && xp > 0) {
         tick_one(&mut a.client, &mut a.transport);
@@ -7166,7 +7195,7 @@ async fn a_dot_kills_with_the_same_rewards_as_a_hit() {
                 ServerWorldMsg::ProcTriggered { target, proc_name, amount, .. }
                     if target == dummy && proc_name == "Entangle" =>
                 {
-                    assert_eq!(amount, 15, "a tick is dps x 3");
+                    assert_eq!(amount, 3, "a tick is dps x 3");
                     ticks_seen += 1;
                 }
                 ServerWorldMsg::EntityDied { id } if id == dummy => died = true,
@@ -8548,11 +8577,13 @@ async fn dev_despawn_removes_enemies_on_the_server() {
 
 /// Client-authority audit fix 3, the user's decision of 2026-10-19 ("move the
 /// wisdom bonus on to the server"): a heal adds the caster's WIS x 0.3. B, a
-/// GM Warrior beside A, takes 150 dev damage; A, a Cleric, casts Healing
-/// Light (60) on B; B's HP comes back by 60 + WIS x 0.3, where it used to
-/// come back by the flat 60 while only the client knew the WIS term.
+/// GM Warrior beside A, takes 15 dev damage of its 28; A, a Cleric, casts
+/// Healing Light (10) on B; B's HP comes back by exactly 10. A heal is its
+/// listed number and nothing more (the EQ parity audit of 2026-10-20): fix 3
+/// of the client-authority audit used to add WIS x 0.3, which classic EQ
+/// never did.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_heal_adds_the_casters_wisdom() {
+async fn a_heal_is_its_listed_number() {
     let h = start_both().await;
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "wisheal", "Wisa", "Human", "Cleric").await;
@@ -8565,7 +8596,7 @@ async fn a_heal_adds_the_casters_wisdom() {
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
     pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
 
-    b.send_damage_self(150);
+    b.send_damage_self(15);
     let hurt = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
         matches!(m, ServerWorldMsg::HealthUpdate { id, hp, max_hp } if *id == b_char_id as u64 && *hp < *max_hp)
     })
@@ -8582,14 +8613,12 @@ async fn a_heal_adds_the_casters_wisdom() {
     .await
     .expect("the heal lands");
     let ServerWorldMsg::HealthUpdate { hp: healed_hp, .. } = healed else { unreachable!() };
-    let wis = char_data::compute("Human", "Cleric", 1).stats.wisdom;
-    let expected = 60.0 + wis as f32 * 0.3;
     // B's own regen may add a point or two in the 1.4 s before the heal; the
-    // flat 60 the old server healed stays well below the window either way.
+    // old server's 10 + WIS x 0.3 (WIS 24: 17) sits above the window.
     let gained = healed_hp - hurt_hp;
     assert!(
-        gained >= expected - 0.01 && gained <= expected + 2.01,
-        "healed {gained} (WIS {wis}); 60 + WIS x 0.3 is {expected}"
+        gained >= 10.0 - 0.01 && gained <= 12.01,
+        "healed {gained}; Healing Light's listed 10 and nothing more"
     );
 }
 
@@ -8764,6 +8793,10 @@ async fn a_nuke_reaches_thirty_metres() {
     let stood = walk_until_within(&mut a, &mut seq, a_char_id, stood, at(33.0), 0.3).await;
     let dist = ((stood.x - dummy_pos.x).powi(2) + (stood.z - dummy_pos.z).powi(2)).sqrt();
     assert!(dist > 31.0, "test setup: the caster stands past 30 m, is at {dist:.1}");
+    // A level 1 pool (about 16) does not hold two Smites (12 each), and the
+    // mana gate runs before the reach gate: top it off first.
+    a.send_heal_self();
+    a.pump_for(Duration::from_millis(200)).await;
     a.send_cast_spell("Smite", Some(dummy));
     let refused = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
@@ -8822,7 +8855,7 @@ async fn a_spell_not_memorized_is_refused() {
 /// Memorizing is the server's: seated two seconds, half the spell's mana, an
 /// open gem. Finishing early is refused, so is standing up in between, so is a
 /// gem not yet open; a memorize that runs its time fills the gem, charges
-/// half of Smite's 20 mana, and the cast then gets past the memorize gate.
+/// half of Smite's 12 mana, and the cast then gets past the memorize gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn memorizing_takes_two_seated_seconds_and_half_the_mana() {
     let h = start_both().await;
@@ -8867,7 +8900,7 @@ async fn memorizing_takes_two_seated_seconds_and_half_the_mana() {
         })
         .await;
     let Some(ServerWorldMsg::ManaUpdate { mp, max_mp, .. }) = mana else { panic!("the memorize charges mana") };
-    assert!((max_mp - mp - 10.0).abs() < 0.01, "half of Smite's 20 mana: {mp} of {max_mp}");
+    assert!((max_mp - mp - 6.0).abs() < 0.01, "half of Smite's 12 mana: {mp} of {max_mp}");
     let (gems, seeded) = next_spell_gems(&mut a).await.expect("the new bar");
     assert_eq!(gems[0], "Smite");
     assert!(seeded, "the server holds the bar now");
@@ -9412,4 +9445,87 @@ async fn a_bard_sings_while_running_and_a_young_bard_runs_slower_than_the_data()
 
     let step = median_step(&mut a, a_id, &mut seq, east, 30).await;
     assert!((step - 0.300).abs() < 0.012, "a level 1 Selos' runs 1.2x, 0.300 m a tick: {step}");
+}
+
+/// The EQ parity audit (2026-10-20): a cast can FIZZLE, rolled by the server
+/// at the cast's start on the casting skill against the spell's level (the
+/// P99 rule the casting skills follow now, in place of scaling the effect).
+/// A level 16 Magician with no evocation at all starts Fireball Rk. III (a
+/// level 16 spell, about one start in four fizzling) until one does: the
+/// start is refused with EQ's line, a quarter of the spell's mana is gone
+/// (42, so 10.5) and the gem is on its refresh (a start inside the global
+/// cooldown is refused). Then the instant Frost Bolt Rk. III fizzles the same
+/// way from its CastSpell, the mana topped off between tries. On the previous
+/// server no cast ever fizzled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cast_can_fizzle_on_a_low_casting_skill() {
+    let h = start_both_opts(true).await;
+    let (a_session, a_char_id, _stale) =
+        provision_client(&h.auth_url, "fizzler", "Fizzlebeth", "Human", "Magician").await;
+    set_char_level(&h.db_url, a_char_id, 16).await;
+    set_casting_skill(&h.db_url, a_char_id, "evocation", 0).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "fizzler", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+    let full_mp = char_data::compute("Human", "Magician", 16).max_mp;
+    let me = a_char_id as u64;
+    let is_fizzle = |m: &ServerWorldMsg| {
+        matches!(m, ServerWorldMsg::CastFail { caster, reason } if *caster == me && reason == "Your spell fizzles!")
+    };
+
+    // Timed: a start that does not fizzle only caches a bar the next start
+    // replaces, so nothing is spent until one does.
+    let mut mp_after_fizzle: Option<f32> = None;
+    for _ in 0..40 {
+        a.send_cast_start("Fireball Rk. III", 1.5);
+        let msgs = a.collect_for(Duration::from_millis(150)).await;
+        if msgs.iter().any(is_fizzle) {
+            mp_after_fizzle = msgs.iter().find_map(|m| match m {
+                ServerWorldMsg::ManaUpdate { id, mp, .. } if *id == me => Some(*mp),
+                _ => None,
+            });
+            assert!(mp_after_fizzle.is_some(), "the fizzle comes with the true mana");
+            break;
+        }
+    }
+    let mp = mp_after_fizzle.expect("forty starts with no evocation at all and not one fizzle");
+    assert!((full_mp - mp - 10.5).abs() < 0.01, "a quarter of 42 burned: {full_mp} -> {mp}");
+    a.send_cast_start("Fireball Rk. III", 1.5);
+    let again = a.collect_for(Duration::from_millis(200)).await;
+    assert!(
+        again.iter().any(|m| matches!(m, ServerWorldMsg::CastFail { caster, reason } if *caster == me && reason == "You cannot cast again yet.")),
+        "the fizzle started the gem's refresh"
+    );
+
+    // Instant: Frost Bolt Rk. III at a dummy, rolled at its CastSpell. Every
+    // try, landed or fizzled, starts the global cooldown, so each waits it out.
+    a.send_dev_spawn("Fizzle Dummy", 1, 100_000.0, 0, 0.0, 0.0);
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Fizzle Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let dummy = match spawn {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    a.pump_alive_for(Duration::from_millis(2_200)).await;
+    let mut fizzled = false;
+    for _ in 0..40 {
+        a.send_heal_self();
+        a.send_cast_spell("Frost Bolt Rk. III", Some(dummy));
+        let msgs = a.collect_for(Duration::from_millis(2_300)).await;
+        assert!(
+            !msgs.iter().any(|m| matches!(m, ServerWorldMsg::CastFail { caster, reason } if *caster == me && reason == "Not enough mana.")),
+            "the mana was topped off before each try"
+        );
+        if msgs.iter().any(is_fizzle) {
+            fizzled = true;
+            break;
+        }
+    }
+    assert!(fizzled, "forty instant casts with no evocation at all and not one fizzle");
 }

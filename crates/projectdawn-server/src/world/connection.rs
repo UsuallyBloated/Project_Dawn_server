@@ -347,6 +347,11 @@ pub struct PerConnection {
     /// `can_use_dev_cmds`, not this field directly.
     pub is_dev: bool,
 
+    /// Whether this caster's spells can fizzle: `Config::fizzles`, stamped at
+    /// the connect site. Always true on a running server; the integration
+    /// harness turns it off for every test but the fizzle test.
+    pub fizzles: bool,
+
     /// Per-account GM flag, carried from the signed connect token's `user_data`
     /// (the auth service reads it from `accounts.is_gm` at token mint). Unlike
     /// `is_dev`, this is per-connection, so a hosted server run with
@@ -656,6 +661,7 @@ impl PerConnection {
             equipped_armor: 0,
             pvp_override_on: false,
             is_dev: dev_cmds_enabled(),
+            fizzles: true,
             // Defaulted here; the real value is stamped from the connect
             // token's user_data at the connect site in tick.rs (from_spawn
             // only sees the character spawn, not the account's GM flag).

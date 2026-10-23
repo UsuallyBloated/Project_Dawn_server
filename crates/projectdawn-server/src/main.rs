@@ -5,10 +5,19 @@ use anyhow::Context;
 use projectdawn_server::{auth, db, world, Config};
 use tracing_subscriber::EnvFilter;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// A plain synchronous `main`, so `.env` is loaded before the tokio runtime
+/// (and its worker threads) exist: `dotenv_load` calls `std::env::set_var`,
+/// which is only sound while the process is single-threaded.
+fn main() -> anyhow::Result<()> {
     let _ = dotenv_load();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building the tokio runtime")?
+        .block_on(run())
+}
 
+async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()

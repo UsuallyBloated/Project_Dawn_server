@@ -1690,3 +1690,72 @@ mod coin_breaking_tests {
         assert_eq!(purse.total_copper(), 1_000_000 - 100);
     }
 }
+
+/// Property tests for the coin arithmetic: whatever the purse and the request,
+/// value is never created or destroyed and no tier goes negative. Coin is the
+/// thing a dupe or a rounding bug would make, so these search the space rather
+/// than check a handful of examples.
+#[cfg(test)]
+mod coin_properties {
+    use super::Coins;
+    use proptest::prelude::*;
+
+    fn purse() -> impl Strategy<Value = Coins> {
+        (0i64..1_000_000, 0i64..1_000_000, 0i64..1_000_000, 0i64..100_000).prop_map(
+            |(copper, silver, gold, platinum)| Coins { copper, silver, gold, platinum },
+        )
+    }
+
+    fn no_negative_tier(c: Coins) -> bool {
+        !c.has_negative()
+    }
+
+    proptest! {
+        /// An exchange keeps the purse's total value, or refuses and leaves it as it was.
+        #[test]
+        fn an_exchange_never_changes_the_total(mut p in purse(), from in 0u8..5, to in 0u8..5, qty in 0u32..2_000_000) {
+            let before = p;
+            match p.exchange(from, to, qty) {
+                Ok(()) => {
+                    prop_assert_eq!(p.total_copper(), before.total_copper());
+                    prop_assert!(no_negative_tier(p));
+                }
+                Err(_) => prop_assert_eq!(p, before),
+            }
+        }
+
+        /// A spend takes exactly its cost, or refuses and takes nothing.
+        #[test]
+        fn a_spend_takes_exactly_its_cost(mut p in purse(), cost in -10i64..2_000_000_000) {
+            let before = p;
+            if p.spend(cost) {
+                prop_assert_eq!(p.total_copper(), before.total_copper() - cost);
+                prop_assert!(no_negative_tier(p));
+            } else {
+                prop_assert_eq!(p, before);
+                prop_assert!(cost < 0 || before.total_copper() < cost);
+            }
+        }
+
+        /// Paying the value of some coins takes exactly that value, or nothing.
+        #[test]
+        fn paying_a_value_takes_exactly_that_value(mut p in purse(), want in purse()) {
+            let before = p;
+            if p.pay_value_of(want) {
+                prop_assert_eq!(p.total_copper(), before.total_copper() - want.total_copper());
+                prop_assert!(no_negative_tier(p));
+            } else {
+                prop_assert_eq!(p, before);
+            }
+        }
+
+        /// A payout adds exactly its amount.
+        #[test]
+        fn a_payout_adds_exactly_its_amount(mut p in purse(), amount in 0i64..1_000_000_000) {
+            let before = p.total_copper();
+            p.add_payout(amount);
+            prop_assert_eq!(p.total_copper(), before + amount);
+            prop_assert!(no_negative_tier(p));
+        }
+    }
+}

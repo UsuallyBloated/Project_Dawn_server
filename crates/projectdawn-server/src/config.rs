@@ -4,7 +4,7 @@
 use anyhow::Result;
 use std::env;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     pub auth_bind: String,
     /// What the renet UDP listener binds to. Always 0.0.0.0 in production
@@ -19,6 +19,21 @@ pub struct Config {
     /// 32-byte private key for renet `Secure` connection tokens. Shared by
     /// the auth (mints tokens) and world (validates) services.
     pub netcode_private_key: [u8; 32],
+}
+
+/// Written by hand so the netcode private key can never reach a log: anyone
+/// holding it can mint connect tokens for any account, GM flag included.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("auth_bind", &self.auth_bind)
+            .field("world_bind", &self.world_bind)
+            .field("world_endpoint", &self.world_endpoint)
+            .field("database_url", &self.database_url)
+            .field("min_client_version", &self.min_client_version)
+            .field("netcode_private_key", &"<redacted>")
+            .finish()
+    }
 }
 
 // We don't pull in the `semver` crate yet — implement the bare-minimum
@@ -110,4 +125,25 @@ fn load_netcode_key() -> Result<[u8; 32]> {
         )
     })?;
     Ok(arr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_output_never_shows_the_netcode_key() {
+        let cfg = Config {
+            auth_bind: "127.0.0.1:0".into(),
+            world_bind: "127.0.0.1:0".into(),
+            world_endpoint: "127.0.0.1:7777".into(),
+            database_url: "sqlite::memory:".into(),
+            min_client_version: semver::Version { major: 0, minor: 1, patch: 0 },
+            netcode_private_key: [0xAB; 32],
+        };
+        let shown = format!("{cfg:?}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+        assert!(!shown.contains("171"), "the key's bytes leaked: {shown}");
+        assert!(!shown.to_lowercase().contains("ab, ab"), "the key's bytes leaked: {shown}");
+    }
 }

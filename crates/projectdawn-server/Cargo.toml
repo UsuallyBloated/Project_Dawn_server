@@ -50,3 +50,4 @@ renet_netcode = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 tempfile = "3.13.0"
+proptest = { workspace = true }

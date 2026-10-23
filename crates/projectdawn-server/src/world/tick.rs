@@ -118,6 +118,33 @@ const SWING_RATE_GRACE_SECS: f32 = 0.35;
 /// 0.4s (0.5 minus jitter) is a safe unconditional forgery line.
 const HARD_MIN_SWING_SECS: f32 = 0.4;
 
+/// What a player is told when the server shuts down cleanly (a deploy or any
+/// `systemctl stop`/`restart`) and their character was saved. Rides
+/// `KickCode::Restart`, sent only after the save landed so it is true.
+const SHUTDOWN_MESSAGE: &str =
+    "The world is being restarted. Your progress has been saved; please log in again in a minute.";
+/// The same, for a player whose save did not land within the shutdown budget.
+const SHUTDOWN_UNSAVED_MESSAGE: &str =
+    "The world is being restarted. Your last few moments could not be saved; please log in again in a minute.";
+/// How long a clean shutdown keeps retrying saves that failed, inside
+/// systemd's 20 s `TimeoutStopSec`.
+const SHUTDOWN_SAVE_BUDGET: Duration = Duration::from_secs(12);
+
+/// How often a logout whose save did not fully land is retried.
+const PENDING_SAVE_RETRY: Duration = Duration::from_secs(1);
+/// How long a failing logout save is retried before it is given up (logged
+/// as an error) and the account may log in again, to its last saved state.
+/// That state is whole (drops, trades and loot are saved as they happen), so
+/// giving up loses progress but cannot duplicate anything; holding the
+/// account forever would lock the player out for the life of the process.
+const PENDING_SAVE_GIVE_UP: Duration = Duration::from_secs(120);
+
+/// A character whose logout save did not fully land, and when it was queued.
+struct PendingSave {
+    conn: PerConnection,
+    since: Instant,
+}
+
 /// How many DropItem intents one player may have applied per tick. Each
 /// dropper's drops are saved in one commit per tick; the cap bounds what a
 /// forged burst can make that commit (and the bag fan) carry. An honest
@@ -1350,6 +1377,7 @@ fn return_charmed_mob(
 /// duplicate login never inserted): every step degrades to a no-op. Does NOT
 /// call `server.disconnect` — the transport is already torn down by the time
 /// we get here on either path.
+#[allow(clippy::too_many_arguments)] // the tick loop's state, passed piecewise
 async fn reap_connection(
     server: &mut RenetServer,
     connections: &mut HashMap<ClientId, PerConnection>,
@@ -1359,6 +1387,7 @@ async fn reap_connection(
     pool: &SqlitePool,
     client_id: ClientId,
     now: std::time::Instant,
+    pending_saves: &mut Vec<PendingSave>,
 ) {
     // Track 7: remove the leaver from the AOI grid BEFORE computing recipients
     // so entities_visible_from gives the correct set of peers who could see
@@ -1454,143 +1483,122 @@ async fn reap_connection(
         collect_gm_audit(&mut conn, Instant::now(), true, &mut audit_rows);
         write_gm_audit(pool, &audit_rows).await;
 
-        // One last save for the road. Failure is non-fatal — worst case the
-        // player rolls back to the last 60 s checkpoint.
-        if conn.is_dirty_for_persist() {
-            let zone = conn.zone.clone();
-            if let Err(e) = db::checkpoint_position(
-                pool,
-                conn.char_id,
-                zone.as_deref(),
-                conn.pos.into_tuple(),
-                conn.yaw,
-            )
-            .await
-            {
-                tracing::warn!(
-                    char_id = conn.char_id,
-                    error = %e,
-                    "final checkpoint on disconnect failed"
-                );
-            } else {
-                conn.mark_persisted();
-            }
-        }
-        // Every item/coin store flushes on the way out, in ONE transaction, so
-        // a logout right after a vendor run or a bank deposit doesn't roll back
-        // to the last 60 s checkpoint. Same helper as the periodic sweep.
-        if let Err(e) = persistence::persist_dirty_stores(pool, &mut conn).await {
-            tracing::warn!(
-                char_id = conn.char_id,
-                error = %e,
-                "final store save on disconnect failed"
-            );
-        }
         // The moment the character left, for NO RENT items (purged at the
         // next login once thirty minutes have passed). Every departure comes
         // through here: a clean logout, or a linkdead body at the end of its
-        // linger. A crash writes nothing, which only ever spares the items.
+        // linger (the clean shutdown stamps its own). A crash writes nothing,
+        // which only ever spares the items.
         if let Err(e) = db::set_logged_out_at(pool, conn.char_id, unix_now_secs()).await {
             tracing::warn!(char_id = conn.char_id, error = %e, "set_logged_out_at failed");
         }
-        // Resources (hp / mp / stamina / xp / level) — a kill's XP or a de-level
-        // right before logout shouldn't roll back either.
-        if conn.is_dirty_for_resource_persist() {
-            if let Err(e) = db::checkpoint_resources(
-                pool,
-                conn.char_id,
-                conn.hp,
-                conn.mp,
-                conn.stamina,
-                conn.xp,
-                conn.xp_to_next,
-                conn.level,
-                conn.hunger_secs,
-                conn.thirst_secs,
-                conn.alignment,
-            )
-            .await
-            {
-                tracing::warn!(
-                    char_id = conn.char_id,
-                    error = %e,
-                    "final resource save on disconnect failed"
-                );
-            } else {
-                conn.mark_resources_persisted();
-            }
-        }
-        // Passive skill scores — an advance (weapon / armor / casting) that
-        // landed since the last checkpoint shouldn't roll back on relog.
-        if conn.skills_dirty {
-            let mut rows: Vec<db::SkillRow> = Vec::new();
-            for (key, score) in &conn.weapon_skills {
-                rows.push(db::SkillRow {
-                    kind: "weapon".to_string(),
-                    key: key.clone(),
-                    score: *score,
-                });
-            }
-            for (key, score) in &conn.armor_skills {
-                rows.push(db::SkillRow {
-                    kind: "armor".to_string(),
-                    key: key.clone(),
-                    score: *score,
-                });
-            }
-            for (key, score) in &conn.casting_skills {
-                rows.push(db::SkillRow {
-                    kind: "casting".to_string(),
-                    key: key.clone(),
-                    score: *score,
-                });
-            }
-            if let Err(e) = db::save_skills(pool, conn.char_id, &rows).await {
-                tracing::warn!(
-                    char_id = conn.char_id,
-                    error = %e,
-                    "final skill save on disconnect failed"
-                );
-            } else {
-                conn.skills_dirty = false;
-            }
-        }
-        // Faction standings: a kill's hit right before logout shouldn't roll
-        // back either.
-        if conn.factions_dirty {
-            let rows = conn.faction_rows();
-            if let Err(e) = db::save_factions(pool, conn.char_id, &rows).await {
-                tracing::warn!(
-                    char_id = conn.char_id,
-                    error = %e,
-                    "final faction save on disconnect failed"
-                );
-            } else {
-                conn.factions_dirty = false;
-            }
-        }
-        // PD_W0024 — reconcile quest state touched this tick on the way out (a
-        // reap can run before the end-of-tick flush reaches this connection;
-        // after removal from the map that flush won't see it). Same rule as
-        // step 6-ter: upsert if the quest is still active, else delete the row.
-        let dirty_quests: Vec<String> = conn.quests_dirty.drain().collect();
-        for quest_id in dirty_quests {
-            let result = match conn.active_quests.get(&quest_id) {
-                Some(progress) => {
-                    db::save_quest_progress(pool, conn.char_id, &quest_id, progress).await
-                }
-                None => db::delete_active_quest(pool, conn.char_id, &quest_id).await,
-            };
-            if let Err(e) = result {
-                tracing::warn!(
-                    char_id = conn.char_id,
-                    quest_id = %quest_id,
-                    error = %e,
-                    "final quest state flush on disconnect failed"
-                );
-            }
+        // One last save for the road, through the same flush as the checkpoint.
+        // A character whose save did not fully land is NOT dropped: it waits in
+        // `pending_saves`, retried every PENDING_SAVE_RETRY, and its account's
+        // relogin is refused until it lands. Dropping it (as this used to)
+        // lost everything since the last checkpoint, and letting the player
+        // back in early would load the older saved state over it.
+        if !persistence::flush_connection(pool, &mut conn, "logout").await {
+            tracing::error!(
+                char_id = conn.char_id,
+                "logout save incomplete; queued for retry, relogin held until it lands"
+            );
+            pending_saves.push(PendingSave { conn, since: Instant::now() });
         }
     }
+}
+
+/// The clean end of the world loop (a stop signal). Every character in the
+/// world (linkdead bodies and the logout retry queue included) is saved first,
+/// failed saves retried until `SHUTDOWN_SAVE_BUDGET`; the queued GM audit rows
+/// are written; then each connected player is told the world is restarting,
+/// with the line that is true for them (saved or not), and every connection is
+/// closed. Returns how many characters could not be saved. systemd allows
+/// 20 s (`TimeoutStopSec`); a healthy shutdown takes well under a second.
+async fn shut_down_world(
+    server: &mut RenetServer,
+    transport: &mut NetcodeServerTransport,
+    connections: &mut HashMap<ClientId, PerConnection>,
+    pending_saves: &mut [PendingSave],
+    pool: &SqlitePool,
+) -> u32 {
+    tracing::info!(
+        connections = connections.len(),
+        pending_saves = pending_saves.len(),
+        "stop signal: saving everyone and closing the world"
+    );
+    let mut audit_rows = Vec::new();
+    for conn in connections.values_mut() {
+        collect_gm_audit(conn, Instant::now(), true, &mut audit_rows);
+    }
+    write_gm_audit(pool, &audit_rows).await;
+
+    let deadline = Instant::now() + SHUTDOWN_SAVE_BUDGET;
+    loop {
+        let mut all_saved = true;
+        for conn in connections
+            .values_mut()
+            .chain(pending_saves.iter_mut().map(|p| &mut p.conn))
+        {
+            if persistence::has_unsaved_state(conn)
+                && !persistence::flush_connection(pool, conn, "shutdown").await
+            {
+                all_saved = false;
+            }
+        }
+        if all_saved || Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // A shutdown is a departure for everyone in the world: stamp the logout
+    // time NO RENT items are judged by, as a logout does.
+    for conn in connections.values() {
+        if let Err(e) = db::set_logged_out_at(pool, conn.char_id, unix_now_secs()).await {
+            tracing::warn!(char_id = conn.char_id, error = %e, "set_logged_out_at failed at shutdown");
+        }
+    }
+
+    let mut unsaved = 0u32;
+    for conn in connections
+        .values()
+        .chain(pending_saves.iter().map(|p| &p.conn))
+    {
+        if persistence::has_unsaved_state(conn) {
+            unsaved += 1;
+            tracing::error!(char_id = conn.char_id, "shutdown save incomplete; progress since the last save is lost");
+        }
+    }
+    for (client_id, conn) in connections.iter() {
+        if conn.linkdead_since.is_some() {
+            continue;
+        }
+        let line = if persistence::has_unsaved_state(conn) {
+            SHUTDOWN_UNSAVED_MESSAGE
+        } else {
+            SHUTDOWN_MESSAGE
+        };
+        handlers::send_kick(server, *client_id, KickCode::Restart, line);
+    }
+
+    // A few ticks of transport service so the reliable kicks are delivered
+    // (and resent if one was lost), then close every connection.
+    for _ in 0..5 {
+        transport.send_packets(server);
+        tokio::time::sleep(TICK_DT).await;
+        if let Err(e) = transport.update(TICK_DT, server) {
+            tracing::warn!(error = %e, "transport update error during shutdown");
+        }
+        server.update(TICK_DT);
+    }
+    transport.send_packets(server);
+    transport.disconnect_all(server);
+    tracing::info!(
+        saved = connections.len() + pending_saves.len() - unsaved as usize,
+        unsaved,
+        "world closed"
+    );
+    unsaved
 }
 
 pub async fn run(
@@ -1598,6 +1606,7 @@ pub async fn run(
     pool: SqlitePool,
     mut server: RenetServer,
     mut transport: NetcodeServerTransport,
+    shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
 
     // Track 18.1 — build the spell discipline lookup once at startup
@@ -1614,6 +1623,11 @@ pub async fn run(
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let mut last_checkpoint = Instant::now();
+    // Characters whose logout save did not fully land (see reap_connection):
+    // retried every PENDING_SAVE_RETRY, their accounts' relogins refused
+    // until the save lands, and flushed again at shutdown.
+    let mut pending_saves: Vec<PendingSave> = Vec::new();
+    let mut last_pending_retry = Instant::now();
     // Bandwidth counter for the enemy Position stream (step 6b): sends in the
     // current report window, logged every ENEMY_FAN_REPORT_INTERVAL.
     let mut enemy_pos_sent: u64 = 0;
@@ -1688,6 +1702,21 @@ pub async fn run(
     loop {
         interval.tick().await;
         let now = Instant::now();
+
+        // 0. A stop signal (SIGTERM from systemd, or Ctrl-C) ends the world
+        //    cleanly: everyone is told, everyone is saved, then the loop
+        //    returns. Checked at the top of a tick, so the state saved is
+        //    whole, never half a tick.
+        if *shutdown.borrow() {
+            let unsaved =
+                shut_down_world(&mut server, &mut transport, &mut connections, &mut pending_saves, &pool)
+                    .await;
+            if unsaved > 0 {
+                // A non-zero exit, so the journal and systemd both show it.
+                anyhow::bail!("{unsaved} character(s) could not be saved at shutdown");
+            }
+            return Ok(());
+        }
 
         // 1. Advance the transport (reads UDP packets, processes netcode handshakes).
         if let Err(e) = transport.update(TICK_DT, &mut server) {
@@ -1788,6 +1817,24 @@ pub async fn run(
                                     KickCode::DuplicateLogin,
                                     &reason,
                                     reconnect_after_secs,
+                                );
+                                continue;
+                            }
+                            // The account's last character is still being saved
+                            // (its logout save failed and waits in the retry
+                            // queue). Letting it in now would load the older
+                            // saved state, and the retry would then write over
+                            // whatever this session did. Same no-disconnect kick
+                            // as the duplicate-login refusal, with a short retry.
+                            // No countdown: when the save lands is not known, and
+                            // the client draws one as "log in again in N s".
+                            if pending_saves.iter().any(|p| p.conn.account_id == account_id) {
+                                tracing::warn!(account_id, char_id, "relogin refused — the last session's save is still pending");
+                                handlers::send_kick(
+                                    &mut server,
+                                    client_id,
+                                    KickCode::DuplicateLogin,
+                                    "Your last session is still being saved. Please try again in a moment.",
                                 );
                                 continue;
                             }
@@ -2007,6 +2054,7 @@ pub async fn run(
                             &pool,
                             client_id,
                             now,
+                            &mut pending_saves,
                         )
                         .await;
                     } else {
@@ -2742,6 +2790,7 @@ pub async fn run(
                 &pool,
                 client_id,
                 now,
+                &mut pending_saves,
             )
             .await;
         }
@@ -10040,11 +10089,6 @@ pub async fn run(
             spawner.on_enemy_died(entity.spawn_point_idx, now);
         }
 
-        // 4k-bind. Persist bind points immediately rather than waiting for the
-        //      60 s checkpoint. Binding is deliberate and rare, and losing it to
-        //      an ungraceful shutdown (there is no SIGTERM handler) would respawn
-        //      the player somewhere they explicitly chose not to be — the exact
-        //      failure this feature exists to prevent.
         // The spell bar, written as soon as it changes (a memorize is
         // deliberate and rare; the 60 s checkpoint would lose one to a crash).
         for (char_id, gems, seeded) in spell_gem_saves.drain(..) {
@@ -10052,6 +10096,12 @@ pub async fn run(
                 tracing::warn!(char_id, error = %e, "save_spell_gems failed; the bar is live in memory but not persisted");
             }
         }
+
+        // 4k-bind. Persist bind points immediately rather than waiting for the
+        //      60 s checkpoint. Binding is deliberate and rare, and losing it to
+        //      a crash (a clean stop saves everyone, but a crash does not) would
+        //      respawn the player somewhere they explicitly chose not to be —
+        //      the exact failure this feature exists to prevent.
         for (char_id, zone, pos) in bind_intents.drain(..) {
             if let Err(e) = db::set_bind_point(&pool, char_id, zone.as_deref(), pos).await {
                 tracing::warn!(char_id, error = %e, "set_bind_point failed; bind is live in memory but not persisted");
@@ -10115,9 +10165,19 @@ pub async fn run(
             };
             // Persist the rezzed flag FIRST — only grant the res once it's durable,
             // so a write failure can't hand out a refund that a restart would let
-            // the player claim a second time. On failure, skip the grant (a fresh
-            // cast can retry); the offer was already consumed above.
-            if let Err(e) = db::set_corpse_resurrected(&pool, corpse_id as i64).await {
+            // the player claim a second time. The refunded XP is written in the
+            // same transaction, so a crash cannot spend the resurrection and lose
+            // the refund. On failure, skip the grant (a fresh cast can retry).
+            let refund = ((lost_xp as f32) * (xp_percent as f32 / 100.0)).round() as i32;
+            let Some(after_refund) = connections
+                .get(&responder_cid)
+                .map(|c| super::progression::progress_after(c, refund.max(0)))
+            else {
+                continue;
+            };
+            if let Err(e) =
+                db::set_corpse_resurrected(&pool, corpse_id as i64, responder as i64, after_refund).await
+            {
                 tracing::error!(corpse_id, error = %e, "set_corpse_resurrected failed — res not granted");
                 // Transient, and NOT decisive: the offer stays live so the player
                 // can simply accept again, rather than needing the cleric to
@@ -10137,8 +10197,7 @@ pub async fn run(
                 c.resurrected = true;
             }
             // Summon the living player to their corpse + refund the xp (award_xp
-            // re-levels + fans XpGained/LevelUp).
-            let refund = ((lost_xp as f32) * (xp_percent as f32 / 100.0)).round() as i32;
+            // re-levels + fans XpGained/LevelUp, landing on `after_refund`).
             if let Some(conn) = connections.get_mut(&responder_cid) {
                 conn.pos = corpse_pos;
                 handlers::send_teleport(&mut server, responder_cid, corpse_pos);
@@ -10305,7 +10364,11 @@ pub async fn run(
                 handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Your inventory is full — make room and try again.", false);
                 continue;
             }
-            if let Err(e) = db::record_quest_completion(&pool, responder as i64, &quest_id).await
+            // The reward XP is written in the completion's own transaction:
+            // award_xp below lands on these same numbers in memory.
+            let after_reward = super::progression::progress_after(conn_ro, reward);
+            if let Err(e) =
+                db::record_quest_completion(&pool, responder as i64, &quest_id, after_reward).await
             {
                 tracing::error!(char_id = responder, quest_id = %quest_id, error = %e, "record_quest_completion failed — reward not granted");
                 handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Server error — try again.", false);
@@ -11830,7 +11893,7 @@ pub async fn run(
             if let Some(c) = connections.get_mut(&client_id) {
                 c.corpse_pending = false;
             }
-            let (owner_name, zone, pos, items, coins, lost_xp) = match connections.get(&client_id) {
+            let (owner_name, zone, pos, items, coins, lost_xp, after_death) = match connections.get(&client_id) {
                 Some(c) => (
                     c.name.clone(),
                     c.zone.clone().unwrap_or_default(),
@@ -11838,6 +11901,7 @@ pub async fn run(
                     c.inventory.corpse_stacks(),
                     c.coins,
                     c.death_lost_xp,
+                    super::progression::current_progress(c),
                 ),
                 None => continue,
             };
@@ -11878,6 +11942,10 @@ pub async fn run(
                 &items,
                 lost_xp,
                 true, // strip the owner in the same transaction
+                // The death penalty's XP, with the corpse that records the loss:
+                // a crash cannot hand the XP back while the corpse still holds
+                // its refund.
+                Some(after_death),
             )
             .await
             {
@@ -12200,22 +12268,8 @@ pub async fn run(
         //    amplify into an awaited write per message. A failed write
         //    re-queues for next tick.
         for conn in connections.values_mut() {
-            if conn.quests_dirty.is_empty() {
-                continue;
-            }
-            let dirty: Vec<String> = conn.quests_dirty.drain().collect();
-            for quest_id in dirty {
-                let result = match conn.active_quests.get(&quest_id) {
-                    Some(progress) => {
-                        db::save_quest_progress(&pool, conn.char_id, &quest_id, progress).await
-                    }
-                    None => db::delete_active_quest(&pool, conn.char_id, &quest_id).await,
-                };
-                if let Err(e) = result {
-                    tracing::error!(char_id = conn.char_id, quest_id = %quest_id, error = %e,
-                        "quest state flush failed — re-queueing for next tick");
-                    conn.quests_dirty.insert(quest_id);
-                }
+            if !conn.quests_dirty.is_empty() {
+                persistence::flush_quests(&pool, conn, "tick").await;
             }
         }
 
@@ -12224,6 +12278,27 @@ pub async fn run(
             let mut dirty: Vec<&mut PerConnection> = connections.values_mut().collect();
             persistence::checkpoint_dirty(&pool, &mut dirty).await;
             last_checkpoint = now;
+        }
+
+        // 7-bis. Retry the logout saves that did not land. Once one does, that
+        //    account may log in again.
+        if !pending_saves.is_empty() && now.duration_since(last_pending_retry) >= PENDING_SAVE_RETRY {
+            last_pending_retry = now;
+            let mut still_pending = Vec::new();
+            for mut pending in pending_saves.drain(..) {
+                if persistence::flush_connection(&pool, &mut pending.conn, "logout retry").await {
+                    tracing::info!(char_id = pending.conn.char_id, "queued logout save landed; relogin open");
+                } else if now.duration_since(pending.since) >= PENDING_SAVE_GIVE_UP {
+                    tracing::error!(
+                        char_id = pending.conn.char_id,
+                        account_id = pending.conn.account_id,
+                        "logout save given up after retrying; the character keeps its last saved state and may log in"
+                    );
+                } else {
+                    still_pending.push(pending);
+                }
+            }
+            pending_saves = still_pending;
         }
 
         // 7-ter. The world clock. Everyone in the world is told the hour on a

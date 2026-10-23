@@ -2154,27 +2154,30 @@ async fn pet_command_attack_locks_onto_target() {
     }
 }
 
-/// Track 12 Piece A2 â€” pet pulls aggro via threat re-eval. Walk
-/// player into camp, get aggro'd, summon skeleton, command attack;
-/// pet's accumulated threat eventually clears the 1.3Ã— current-
-/// target multiplier and the enemy re-targets onto the pet,
-/// broadcasting an EntityTarget switch.
+/// Track 12 Piece A2: the pet pulls aggro through the threat re-evaluation.
+/// A mob targets the player, the pet is sent on it, and once the pet's
+/// threat clears 1.3x the player's the mob switches to the pet, fanning an
+/// EntityTarget. The mob is the test's own dev spawn (500 HP, 1 damage),
+/// not a camp mob: since the EQ parity pass a camp's Decrepit Skeleton has
+/// 16 HP and the pet killed it before the switch could happen, so the test
+/// read camp numbers instead of the threat rule.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pet_pulls_aggro_via_threat_reaggro() {
     let h = start_both().await;
 
-    let (a_session, a_char_id, a_token) =
+    let (a_session, a_char_id, _stale_token) =
         provision_client(&h.auth_url, "tnk", "Tanker", "Human", "Necromancer").await;
     // Summon Skeleton requires level 6; provisioned characters start at 1.
     set_char_level(&h.db_url, a_char_id, 6).await;
+    // GM for the dev spawn; the token is minted after the grant.
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "tnk", true).await.expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
-    // Summon FIRST, in peace, before walking into aggro range â€” the same
-    // reorder its two sibling pet tests got: casting the 3 s summon while
-    // an enemy swings at you rolls a ~70% interrupt per hit taken
-    // (channeling 0). The test's substance (threat re-aggro between owner
-    // and pet) starts after the pull and is unchanged.
+    // Summon first, in peace: casting the 3 s summon while a mob swings at
+    // you rolls an interrupt per hit taken (channeling 0).
     a.send_cast_start("Summon Skeleton", 3.0);
     for _ in 0..3 {
         tick_one(&mut a.client, &mut a.transport);
@@ -2197,16 +2200,10 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
         _ => unreachable!(),
     };
 
-    // Pet in hand; NOW walk into the camp. Phase 4 layout note: aim at
-    // the Bonepile's isolated [-16, 0, -14] spawn â€” the one ring 1 spawn
-    // whose aggro circle overlaps no other, so exactly ONE slow level 1
-    // Decrepit Skeleton pulls, the single-puller semantics this test was
-    // written against.
-    // Walk in on the server's own word, not the wall clock (a slow test
-    // thread used to come up short): to 2 m from the spawn point, well
-    // inside its aggro whatever the spawn jitter.
-    let mut seq: u32 = 1;
-    walk_until_within(&mut a, &mut seq, a_char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, BONEPILE_SPAWN, 2.0).await;
+    // A sturdy target 3 m away that notices the player at once and walks
+    // into melee: it outlives the whole exchange, and its 1 damage a swing
+    // cannot kill the player first.
+    a.send_dev_spawn("Threat Dummy", 1, 500.0, 1, 2.0, 10.0);
 
     // Wait for enemy to lock on us and start swinging. We capture
     // the enemy id and confirm the player is the target.
@@ -2222,33 +2219,26 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
         _ => unreachable!(),
     };
 
-    // Lock the pet onto the enemy via /pet attack.
-    a.send_pet_command(protocol::world::pet_command::ATTACK, Some(enemy_id));
-    for _ in 0..3 {
-        tick_one(&mut a.client, &mut a.transport);
-        tokio::time::sleep(TICK_DT).await;
-    }
-
-    // Skeleton dmg is 8/swing on 2.2 s interval; bare-handed human
-    // Necromancer is doing single-digit damage / 2-3 s. After ~3-4
-    // pet swings (each adding +8 threat against pet_id) plus the
-    // player's accumulated threat, the pet's threat passes 1.3Ã— the
-    // player's and the enemy switches. Generous timeout because
-    // the player keeps adding threat too via auto-attacks... wait,
-    // the test doesn't send player attacks. Player threat only
-    // accumulates if THEY swing; the test client doesn't. So pet
-    // threat starts at 0, climbs by 8 per 2.2 s; player threat is
-    // 0 (the test doesn't send Attack). Pet pulls on the first
-    // swing because 8 >= 0 * 1.3 (but the > 0 guard catches that).
-    //
-    // To make this deterministic, send one player Attack so the
-    // player has > 0 threat; pet's accumulated swings then have
-    // to surpass it by 1.3Ã—.
+    // One player swing first gives the player real threat, so the switch is
+    // the 1.3x rule at work and not a pull off an empty list; the pet is sent
+    // in only after it, so no switch can happen (and be skipped by a wait)
+    // before the test listens for it. The swing waits for the dummy to reach
+    // melee and hit the player, so it is in reach.
+    let in_melee = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
+                if *attacker == enemy_id && *target == a_char_id as u64)
+        })
+        .await;
+    assert!(in_melee.is_some(), "the dummy walks into melee and swings at the player");
     a.send_attack(enemy_id, "", false, DamageType::Physical);
     for _ in 0..3 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
+
+    // Now lock the pet onto the enemy via /pet attack.
+    a.send_pet_command(protocol::world::pet_command::ATTACK, Some(enemy_id));
 
     let switch_evt = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
@@ -5982,8 +5972,13 @@ async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
         provision_client(&h.auth_url, "petfar_o", "Petfaro", "Human", "Necromancer").await;
     set_char_level(&h.db_url, b_char_id, 6).await;
     // B in cell (0,0) a metre short of the x=120 line; the summon lands the
-    // pet 1.5 m east of B, in cell (1,0).
-    set_char_pos(&h.db_url, b_char_id, 119.0, 60.0).await;
+    // pet 1.5 m east of B, in cell (1,0). Row z = 80: the walk west passes no
+    // camp's aggro by 14 m. On row 60 it ended 7.4 m from a Cave Bat (aggro
+    // 12), and since the EQ parity pass a level 6 Necromancer can die to the
+    // bats before the pet arrives; a dead owner drops out of the AI's target
+    // list and the pet stands still, which failed this test about one full
+    // run in four.
+    set_char_pos(&h.db_url, b_char_id, 119.0, 80.0).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
@@ -9504,8 +9499,12 @@ async fn a_cast_can_fizzle_on_a_low_casting_skill() {
     for _ in 0..40 {
         a.send_cast_start("Fireball Rk. III", 1.5);
         let msgs = a.collect_for(Duration::from_millis(150)).await;
-        if msgs.iter().any(is_fizzle) {
-            mp_after_fizzle = msgs.iter().find_map(|m| match m {
+        if let Some(at) = msgs.iter().position(is_fizzle) {
+            // The fizzle's own ManaUpdate follows its CastFail on the same
+            // ordered channel; the regen fan's periodic update (full mana)
+            // can land in the same window just before it, so read the one
+            // after the fizzle line, never the first in the batch.
+            mp_after_fizzle = msgs[at..].iter().find_map(|m| match m {
                 ServerWorldMsg::ManaUpdate { id, mp, .. } if *id == me => Some(*mp),
                 _ => None,
             });

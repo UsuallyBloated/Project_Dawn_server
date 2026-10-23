@@ -1,0 +1,43 @@
+# cargo-deny policy (https://embarkstudios.github.io/cargo-deny/). Run by the
+# on-demand CI workflow (.github/workflows/ci.yml) as
+# `cargo deny check advisories bans sources`; locally the same with cargo-deny
+# installed. Licenses are not checked yet: the project is proprietary and which
+# licenses it accepts is the owner's call.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+# A crate with a RustSec advisory fails the check. To accept one knowingly,
+# list it here with the reason and when to revisit it. Reviewed 2026-10-23
+# against the advisory database (tokio, anyhow and event-listener were
+# updated past theirs the same day).
+ignore = [
+    # bincode 2.x is unmaintained (its team stopped development). It is the
+    # wire format between client and server, so replacing it is a protocol
+    # project of its own (postcard or wincode are the named alternatives).
+    # Revisit with the next protocol redesign; until then nothing in it is
+    # known to be unsound, and the decoder takes untrusted bytes behind a
+    # size limit with property tests on it.
+    { id = "RUSTSEC-2025-0141", reason = "bincode is the wire format; replacement is its own project" },
+    # rsa: the Marvin timing attack, no fixed version exists. It is in
+    # Cargo.lock only through sqlx's optional MySQL driver, which this
+    # SQLite-only server never compiles (`cargo tree -i rsa` prints nothing).
+    { id = "RUSTSEC-2023-0071", reason = "lockfile only via sqlx-mysql, never compiled" },
+]
+yanked = "warn"
+
+[bans]
+# Several versions of one crate is common in a tree this size; report it, do
+# not fail on it.
+multiple-versions = "warn"
+# The workspace's own crates depend on each other by path.
+wildcards = "allow"
+
+[sources]
+# Every crate comes from crates.io: anything from another registry or a git
+# repository fails the check, so a new one is a deliberate decision.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

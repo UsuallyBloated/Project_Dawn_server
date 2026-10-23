@@ -18,12 +18,24 @@ pub struct Config {
     pub min_client_version: semver::Version,
     /// 32-byte private key for renet `Secure` connection tokens. Shared by
     /// the auth (mints tokens) and world (validates) services.
-    pub netcode_private_key: [u8; 32],
+    pub netcode_private_key: NetcodeKey,
     /// Whether casts can fizzle (`cast_gate::roll_fizzle`). Always on for a
     /// running server, with no env var to turn it off: only the integration
     /// harness sets it false, so its hundred single-cast tests are not a coin
     /// flip each, and turns it back on for the one test that is about fizzles.
     pub fizzles: bool,
+}
+
+/// The 32-byte renet netcode private key. A newtype so its `Debug` can never
+/// print it, wherever it travels (a `{cfg:?}` in a log line included): anyone
+/// holding it can mint connect tokens for any account, GM flag included.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct NetcodeKey(pub [u8; 32]);
+
+impl std::fmt::Debug for NetcodeKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NetcodeKey(<redacted>)")
+    }
 }
 
 // We don't pull in the `semver` crate yet — implement the bare-minimum
@@ -88,7 +100,7 @@ impl Config {
             world_endpoint,
             database_url,
             min_client_version,
-            netcode_private_key,
+            netcode_private_key: NetcodeKey(netcode_private_key),
             fizzles: true,
         })
     }
@@ -116,4 +128,25 @@ fn load_netcode_key() -> Result<[u8; 32]> {
         )
     })?;
     Ok(arr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_output_never_shows_the_netcode_key() {
+        let cfg = Config {
+            auth_bind: "127.0.0.1:0".into(),
+            world_bind: "127.0.0.1:0".into(),
+            world_endpoint: "127.0.0.1:7777".into(),
+            database_url: "sqlite::memory:".into(),
+            min_client_version: semver::Version { major: 0, minor: 1, patch: 0 },
+            netcode_private_key: NetcodeKey([0xAB; 32]),
+            fizzles: true,
+        };
+        let shown = format!("{cfg:?}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+        assert!(!shown.contains("171"), "the key's bytes leaked: {shown}");
+    }
 }

@@ -28,7 +28,7 @@ async fn start_server() -> (String, TempDir) {
         },
         // Fixed bytes — auth tests never actually mint a token, so the
         // value doesn't matter; we just need *some* 32-byte array.
-        netcode_private_key: [0xA5; 32],
+        netcode_private_key: projectdawn_server::config::NetcodeKey([0xA5; 32]),
         fizzles: true,
     };
 

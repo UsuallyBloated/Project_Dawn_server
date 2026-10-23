@@ -3331,3 +3331,80 @@ mod tests {
         assert!(inv.restore_worn(CAP, 1, 2));
     }
 }
+
+/// Property test: no sequence of moves creates or destroys an item. Random
+/// contents (food, water, a sword, pouches holding food) and a random sequence
+/// of moves between base slots, bag slots and the cursor, valid or not; after every move the count
+/// of each item across the whole inventory is what it was. Moves are where a
+/// dupe would hide (merges, swaps, a bag carrying its contents).
+#[cfg(test)]
+mod move_properties {
+    use super::*;
+    use proptest::prelude::*;
+    use std::collections::BTreeMap;
+
+    const PATHS: [&str; 4] = [
+        "res://data/loot/items/bread_loaf.tres",
+        "res://data/loot/items/water_flask.tres",
+        "res://data/loot/items/iron_short_sword.tres",
+        "res://data/loot/items/small_pouch.tres",
+    ];
+
+    fn totals(inv: &PlayerInventory) -> BTreeMap<String, u64> {
+        let mut out = BTreeMap::new();
+        for (path, count) in inv.all_stacks() {
+            *out.entry(path).or_insert(0) += u64::from(count);
+        }
+        out
+    }
+
+    /// Base slots, bag slots and the cursor (the hand: lifting a full pouch
+    /// onto it re-keys its contents, the path where a dupe once hid).
+    fn location() -> impl Strategy<Value = (String, u32)> {
+        prop_oneof![
+            4 => (0u32..BASE_SLOT_COUNT as u32).prop_map(|s| ("base".to_string(), s)),
+            4 => (0usize..BASE_SLOT_COUNT, 0u32..6).prop_map(|(b, s)| (format!("bag_{b}"), s)),
+            1 => Just(("cursor".to_string(), 0)),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn moves_never_create_or_destroy_items(
+            contents in proptest::collection::vec((0usize..PATHS.len(), 1i32..6), BASE_SLOT_COUNT),
+            moves in proptest::collection::vec((location(), location()), 1..40),
+        ) {
+            let mut rows: Vec<InventoryRow> = contents
+                .iter()
+                .enumerate()
+                .map(|(slot, (p, count))| InventoryRow {
+                    location: "base".into(),
+                    slot: slot as i32,
+                    item_path: PATHS[*p].into(),
+                    // Swords and pouches do not stack.
+                    count: if *p >= 2 { 1 } else { *count },
+                })
+                .collect();
+            // Every pouch starts with food in its first slots, so moving or
+            // lifting a pouch carries contents from the first move on.
+            for (slot, (p, count)) in contents.iter().enumerate() {
+                if *p == 3 {
+                    for inner in 0..3 {
+                        rows.push(InventoryRow {
+                            location: format!("bag_{slot}"),
+                            slot: inner,
+                            item_path: PATHS[inner as usize % 2].into(),
+                            count: *count,
+                        });
+                    }
+                }
+            }
+            let mut inv = PlayerInventory::from_rows(&rows);
+            let before = totals(&inv);
+            for ((src_loc, src_slot), (dst_loc, dst_slot)) in moves {
+                let _ = inv.move_across(&src_loc, src_slot, &dst_loc, dst_slot);
+                prop_assert_eq!(totals(&inv), before.clone(), "after {} {} to {} {}", src_loc, src_slot, dst_loc, dst_slot);
+            }
+        }
+    }
+}

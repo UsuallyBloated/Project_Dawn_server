@@ -80,7 +80,7 @@ async fn start_both_opts(fizzles: bool) -> Harness {
             minor: 1,
             patch: 0,
         },
-        netcode_private_key: netcode_key,
+        netcode_private_key: projectdawn_server::config::NetcodeKey(netcode_key),
         fizzles,
     });
 

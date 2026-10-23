@@ -23,6 +23,9 @@ license = "Proprietary"
 publish = false
 
 [workspace.dependencies]
+# Property tests (dev-dependency only; never in a shipped binary).
+proptest = "1"
+
 # Async runtime
 tokio = { version = "1.41.1", features = ["full"] }
 tokio-tungstenite = "0.24.0"

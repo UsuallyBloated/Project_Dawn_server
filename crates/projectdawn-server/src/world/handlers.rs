@@ -3402,20 +3402,108 @@ fn encode(msg: &ServerWorldMsg) -> Option<Vec<u8>> {
     }
 }
 
-/// Decode a single client message; returns None on protocol error.
+/// The most a client message may decode into, in bytes. The largest honest
+/// message (a 512-byte chat line, a full trade offer, a seeded spell bar) is a
+/// small fraction of it. The cap is what stops a forged length prefix (a
+/// string or list claiming billions of entries) from making the decoder
+/// reserve memory the bytes never back.
+const CLIENT_MSG_DECODE_LIMIT: usize = 16 * 1024;
+
+/// Decode one client message from untrusted bytes, refusing anything over
+/// `CLIENT_MSG_DECODE_LIMIT`. Bytes after the message are ignored, not
+/// refused: the protocol's compatibility rule is that a field appended to the
+/// end of a variant is safe, so a newer client must still be understood by an
+/// older server. Never panics; property tests feed it random and mutated bytes.
 pub fn decode_client(bytes: &[u8]) -> Option<ClientWorldMsg> {
-    match bincode::serde::decode_from_slice::<ClientWorldMsg, _>(bytes, bincode_cfg()) {
+    let cfg = bincode_cfg().with_limit::<CLIENT_MSG_DECODE_LIMIT>();
+    match bincode::serde::decode_from_slice::<ClientWorldMsg, _>(bytes, cfg) {
         Ok((msg, _)) => Some(msg),
         Err(e) => {
-            tracing::warn!(error = %e, "failed to bincode-decode ClientWorldMsg");
+            warn_decode_failure(&e);
             None
+        }
+    }
+}
+
+/// A forged client can send garbage as fast as it likes, and decoding comes
+/// before any intent budget, so a warning per bad message would let one
+/// client flood the log. At most one line a second, carrying how many
+/// failures it stands for.
+fn warn_decode_failure(error: &bincode::error::DecodeError) {
+    use std::sync::Mutex;
+    static WINDOW: Mutex<Option<(std::time::Instant, u64)>> = Mutex::new(None);
+    let Ok(mut window) = WINDOW.lock() else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    match window.as_mut() {
+        Some((since, count)) if now.duration_since(*since) < std::time::Duration::from_secs(1) => {
+            *count += 1;
+        }
+        _ => {
+            let suppressed = window.map(|(_, count)| count).unwrap_or(0);
+            tracing::warn!(error = %error, suppressed_last_second = suppressed, "failed to bincode-decode ClientWorldMsg");
+            *window = Some((now, 0));
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_at_char_boundary;
+    use super::{decode_client, truncate_at_char_boundary, CLIENT_MSG_DECODE_LIMIT};
+    use protocol::world::{ChatChannel, ClientWorldMsg};
+
+    fn encode(msg: &ClientWorldMsg) -> Vec<u8> {
+        bincode::serde::encode_to_vec(msg, bincode::config::standard()).expect("encode")
+    }
+
+    fn say(text: String) -> ClientWorldMsg {
+        ClientWorldMsg::Chat { channel: ChatChannel::Say, text, target_name: None }
+    }
+
+    #[test]
+    fn a_valid_message_decodes() {
+        assert!(decode_client(&encode(&say("hello".into()))).is_some());
+    }
+
+    /// The append-only compatibility rule: a newer client's extra trailing
+    /// field must not make an older server drop the whole message.
+    #[test]
+    fn trailing_bytes_are_ignored() {
+        let mut bytes = encode(&say("hello".into()));
+        bytes.extend_from_slice(&[1, 2, 3]);
+        assert!(decode_client(&bytes).is_some());
+    }
+
+    #[test]
+    fn a_message_over_the_decode_limit_is_refused() {
+        let bytes = encode(&say("a".repeat(CLIENT_MSG_DECODE_LIMIT + 1)));
+        assert!(decode_client(&bytes).is_none());
+    }
+
+    proptest::proptest! {
+        /// The decoder takes untrusted bytes straight off the network: no
+        /// input may panic it (a panic in the world loop ends the server).
+        #[test]
+        fn random_bytes_never_panic_the_decoder(bytes in proptest::collection::vec(proptest::num::u8::ANY, 0..4096)) {
+            let _ = decode_client(&bytes);
+        }
+
+        /// The same, starting from real messages with a few bytes changed:
+        /// random bytes rarely get past the variant index, mutations do.
+        #[test]
+        fn mutated_messages_never_panic_the_decoder(
+            text in ".{0,64}",
+            flips in proptest::collection::vec((0usize..256, proptest::num::u8::ANY), 1..8),
+        ) {
+            let mut bytes = encode(&say(text));
+            for (at, value) in flips {
+                let i = at % bytes.len();
+                bytes[i] = value;
+            }
+            let _ = decode_client(&bytes);
+        }
+    }
 
     #[test]
     fn a_cut_inside_a_multibyte_char_backs_off_to_its_start() {

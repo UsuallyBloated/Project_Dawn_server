@@ -7572,6 +7572,84 @@ async fn a_dropped_item_leaves_the_droppers_saved_inventory_at_once() {
     assert_eq!(saved, 0, "the dropped stack is still in the dropper's saved inventory");
 }
 
+/// The other half of a drop: whoever picks the stack up is saved in the same
+/// tick. The dropper's row is already gone, so a picker left unsaved until the
+/// checkpoint would lose the item to a crash.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_picked_up_drop_is_saved_on_the_picker_at_once() {
+    let h = start_both().await;
+    let (a_session, a_char, a_token) =
+        provision_client(&h.auth_url, "giftdrop", "Giver", "Human", "Warrior").await;
+    let (b_session, b_char, b_token) =
+        provision_client(&h.auth_url, "giftpick", "Taker", "Human", "Warrior").await;
+    give_char_item(&h.db_url, a_char, "base", 0, BREAD, 2).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char).await;
+
+    a.send_drop_item("base", 0, 0);
+    a.pump_for(Duration::from_millis(100)).await;
+    let bag_id = match b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::LootBagSpawn { items, .. }
+                if items.iter().any(|(p, _)| p == BREAD))
+        })
+        .await
+        .expect("the bag reaches the peer")
+    {
+        ServerWorldMsg::LootBagSpawn { bag_id, .. } => bag_id,
+        _ => unreachable!(),
+    };
+    b.send_loot_all(bag_id);
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD)
+    })
+    .await
+    .expect("the loaves reach the picker");
+
+    let picker_saved = count_item_rows(
+        &h.db_url,
+        "SELECT COUNT(*) FROM character_items WHERE char_id = ?1 AND item_path = ?2",
+        b_char,
+        BREAD,
+    )
+    .await;
+    assert_eq!(picker_saved, 1, "the picked-up stack is not in the picker's saved inventory");
+}
+
+/// A burst of drops in one tick is capped (MAX_DROPS_PER_TICK, 4): each
+/// dropper is saved once per tick, and the cap bounds what a forged burst can
+/// make that save and the bag fan carry. Six drops in one datagram: four
+/// leave the saved inventory, two stay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_burst_of_drops_in_one_tick_is_capped() {
+    let h = start_both().await;
+    let (session, char_id, token) =
+        provision_client(&h.auth_url, "dropburst", "Flooder", "Human", "Warrior").await;
+    for slot in 0..6 {
+        give_char_item(&h.db_url, char_id, "base", slot, BREAD, 1).await;
+    }
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+    })
+    .await
+    .expect("snapshot");
+
+    for slot in 0..6 {
+        a.send_drop_item("base", slot, 0);
+    }
+    a.pump_for(Duration::from_millis(800)).await;
+
+    let left = count_item_rows(
+        &h.db_url,
+        "SELECT COUNT(*) FROM character_items WHERE char_id = ?1 AND item_path = ?2",
+        char_id,
+        BREAD,
+    )
+    .await;
+    assert_eq!(left, 2, "four drops apply per tick and are saved; the rest of the burst is ignored");
+}
+
 /// An immediate save writes every dirty store, never one alone. Withdraw a
 /// loaf from the bank (vault and inventory both dirty, nothing saved yet),
 /// then die before any checkpoint: the corpse transaction writes the

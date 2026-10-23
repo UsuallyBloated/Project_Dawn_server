@@ -95,6 +95,12 @@ const SWING_RATE_GRACE_SECS: f32 = 0.35;
 /// 0.4s (0.5 minus jitter) is a safe unconditional forgery line.
 const HARD_MIN_SWING_SECS: f32 = 0.4;
 
+/// How many DropItem intents one player may have applied per tick. Each
+/// dropper's drops are saved in one commit per tick; the cap bounds what a
+/// forged burst can make that commit (and the bag fan) carry. An honest
+/// client drops one stack per click, far below it.
+const MAX_DROPS_PER_TICK: u32 = 4;
+
 /// Minimum wall-clock seconds allowed between two SAME-HAND swings before the
 /// faster one is a forgery. Mirrors the client pacing (`combat.gd`):
 /// `weapon_delay` (fists 2.0) times the off-hand multiplier, scaled by the
@@ -6289,79 +6295,115 @@ pub async fn run(
         //      restart hand the item back to them after someone else had
         //      saved it: a dupe. Saved first, a crash can at worst lose a bag
         //      lying on the ground, never copy it.
+        //
+        //      Three passes so the save costs one commit per dropper per tick,
+        //      not one per intent (a forged burst of drops would otherwise run
+        //      a commit each inside the tick): remove in memory, at most
+        //      MAX_DROPS_PER_TICK per dropper; save each dropper once, undoing
+        //      all of their drops if it fails; then tell the client and spawn
+        //      the bags for the drops that were saved.
         if !drop_item_intents.is_empty() {
+            struct DoneDrop {
+                owner_cid: ClientId,
+                location: String,
+                slot: u32,
+                pos: Vec3f,
+                item_path: String,
+                count: u32,
+            }
+            let mut before: HashMap<ClientId, (inventory::PlayerInventory, bool)> = HashMap::new();
+            let mut drops_seen: HashMap<ClientId, u32> = HashMap::new();
+            let mut done: Vec<DoneDrop> = Vec::new();
             for intent in drop_item_intents.drain(..) {
                 let owner_cid = intent.owner as ClientId;
-                let drop_pos: Vec3f;
-                let dropped: Option<(String, u32)>;
-                if let Some(conn) = connections.get_mut(&owner_cid) {
-                    drop_pos = conn.pos;
-                    let inventory_before = conn.inventory.clone();
-                    let was_dirty = conn.inventory_dirty;
-                    // Bag-aware removal (base or bag_<i>); mirrors the
-                    // DestroyItem apply path. Rejects a non-empty
-                    // bag-typed slot (the bag must be emptied first).
-                    dropped = match conn
-                        .inventory
-                        .destroy_at(&intent.location, intent.slot, intent.count)
-                    {
-                        Ok(d) => {
-                            conn.inventory_dirty = true;
-                            match persistence::persist_dirty_stores(&pool, conn).await {
-                                Ok(()) => Some(d),
-                                Err(e) => {
-                                    // Nothing was written: put the stack back
-                                    // and refuse. The client never saw the drop.
-                                    conn.inventory = inventory_before;
-                                    conn.inventory_dirty = was_dirty;
-                                    tracing::error!(
-                                        owner = intent.owner,
-                                        error = %e,
-                                        "DropItem persist failed; drop undone"
-                                    );
-                                    handlers::send_refusal(
-                                        &mut server,
-                                        owner_cid,
-                                        "You can't drop that right now. Try again.",
-                                    );
-                                    None
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::debug!(
-                                owner = intent.owner,
-                                loc = %intent.location,
-                                slot = intent.slot,
-                                error = %e,
-                                "DropItem rejected"
-                            );
-                            None
-                        }
-                    };
-                } else {
+                let Some(conn) = connections.get_mut(&owner_cid) else {
                     handlers::send_refusal(&mut server, owner_cid, "You can't drop that.");
                     continue;
+                };
+                // An honest client drops one stack per click; anything past
+                // the cap in one tick is a flood and is ignored.
+                let seen = drops_seen.entry(owner_cid).or_insert(0);
+                *seen += 1;
+                if *seen > MAX_DROPS_PER_TICK {
+                    continue;
                 }
-                let Some((item_path, count)) = dropped else {
+                // Snapshot once per dropper, before their first removal this
+                // tick, so a failed save can restore exactly what was there.
+                before
+                    .entry(owner_cid)
+                    .or_insert_with(|| (conn.inventory.clone(), conn.inventory_dirty));
+                // Bag-aware removal (base or bag_<i>); mirrors the
+                // DestroyItem apply path. Rejects a non-empty
+                // bag-typed slot (the bag must be emptied first).
+                match conn
+                    .inventory
+                    .destroy_at(&intent.location, intent.slot, intent.count)
+                {
+                    Ok((item_path, count)) => {
+                        conn.inventory_dirty = true;
+                        done.push(DoneDrop {
+                            owner_cid,
+                            location: intent.location,
+                            slot: intent.slot,
+                            pos: conn.pos,
+                            item_path,
+                            count,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            owner = intent.owner,
+                            loc = %intent.location,
+                            slot = intent.slot,
+                            error = %e,
+                            "DropItem rejected"
+                        );
+                    }
+                }
+            }
+            let mut unsaved: Vec<ClientId> = Vec::new();
+            for (owner_cid, (inventory_before, was_dirty)) in before {
+                if !done.iter().any(|d| d.owner_cid == owner_cid) {
+                    continue;
+                }
+                let Some(conn) = connections.get_mut(&owner_cid) else {
                     continue;
                 };
+                if let Err(e) = persistence::persist_dirty_stores(&pool, conn).await {
+                    // Nothing was written: put every stack back and refuse.
+                    // The client was told nothing yet.
+                    conn.inventory = inventory_before;
+                    conn.inventory_dirty = was_dirty;
+                    tracing::error!(
+                        owner = owner_cid,
+                        error = %e,
+                        "DropItem persist failed; drops undone"
+                    );
+                    handlers::send_refusal(
+                        &mut server,
+                        owner_cid,
+                        "You can't drop that right now. Try again.",
+                    );
+                    unsaved.push(owner_cid);
+                }
+            }
+            for drop in done.into_iter().filter(|d| !unsaved.contains(&d.owner_cid)) {
                 // InventoryDelta for the source slot — reflect the new
                 // state (residual count or empty). peek_at speaks every
                 // droppable location: base, bag_<i>, and the cursor,
                 // whose residual a partial drop must not zero out.
                 let post = connections
-                    .get(&owner_cid)
-                    .and_then(|c| c.inventory.peek_at(&intent.location, intent.slot));
+                    .get(&drop.owner_cid)
+                    .and_then(|c| c.inventory.peek_at(&drop.location, drop.slot));
                 let (delta_path, delta_count) = match post {
                     Some((p, c)) => (Some(p), c),
                     None => (None, 0),
                 };
                 handlers::send_inventory_delta(
                     &mut server,
-                    owner_cid,
-                    intent.location.clone(),
-                    intent.slot,
+                    drop.owner_cid,
+                    drop.location.clone(),
+                    drop.slot,
                     delta_path,
                     delta_count,
                 );
@@ -6370,8 +6412,12 @@ pub async fn run(
                 // Dropped items are public (no kill-owner) — anyone in
                 // range may pick them up, as before.
                 let bag = loot::LootBag::new(
-                    drop_pos,
-                    vec![loot::LootItemStack { item_path: item_path.clone(), count, equip_slot: None }],
+                    drop.pos,
+                    vec![loot::LootItemStack {
+                        item_path: drop.item_path.clone(),
+                        count: drop.count,
+                        equip_slot: None,
+                    }],
                     protocol::world::Coins::ZERO,
                     String::new(), // player-dropped public bag — no creature, keep the sack visual
                     None,
@@ -6395,10 +6441,10 @@ pub async fn run(
                 }
                 loot_bags.insert(bag_id, bag);
                 tracing::info!(
-                    owner = intent.owner,
-                    slot = intent.slot,
-                    %item_path,
-                    count,
+                    owner = drop.owner_cid,
+                    slot = drop.slot,
+                    item_path = %drop.item_path,
+                    count = drop.count,
                     bag_id,
                     "DropItem spawned loot bag"
                 );
@@ -6897,31 +6943,30 @@ pub async fn run(
                 // a modified client could trade from anywhere; the honest
                 // client has always had a 6 m UI gate, so only remote abuse is
                 // refused here. `vendor_id` remains informational until the
-                // client sends real ids; the stock gate below covers which
-                // merchant sells what.
-                if super::npcs::any_within_range("vendor", conn.pos).is_none() {
-                    tracing::info!(
-                        owner = intent.owner,
-                        pos = ?conn.pos,
-                        "BuyItem rejected — no vendor within range"
-                    );
-                    handlers::send_refusal(&mut server, owner_cid, "There is no merchant near you.");
-                    continue;
-                }
+                // client sends real ids.
+                //
                 // Stock gate: only what a merchant in reach actually sells.
                 // Without it every item with a sell-back price was buyable,
                 // named-mob drops included, by a client that asked by name.
+                // The second lookup only picks the refusal line.
                 let Some(seller) =
                     super::npcs::vendor_stocking_within_range(&intent.item_name, conn.pos)
                 else {
+                    let near_a_merchant =
+                        super::npcs::any_within_range("vendor", conn.pos).is_some();
                     tracing::info!(
                         owner = intent.owner,
+                        pos = ?conn.pos,
                         item_name = %intent.item_name,
+                        near_a_merchant,
                         "BuyItem rejected — no merchant in reach stocks it"
                     );
-                    handlers::send_refusal(
-                        &mut server, owner_cid, "The merchant doesn't stock that.",
-                    );
+                    let line = if near_a_merchant {
+                        "The merchant doesn't stock that."
+                    } else {
+                        "There is no merchant near you."
+                    };
+                    handlers::send_refusal(&mut server, owner_cid, line);
                     continue;
                 };
                 let Some(item) = items::lookup_by_name(&intent.item_name) else {
@@ -8829,6 +8874,14 @@ pub async fn run(
         //      Out-of-range / unknown-bag / out-of-slot intents drop
         //      silently — the GDScript UI already gates the click on
         //      LOOT_RANGE so a legitimate user can't trip this.
+        //
+        //      Everyone who took an item out of a loot bag this tick (here or
+        //      by the ground pickup in 4jc) is saved once after both phases.
+        //      A dropped stack left its dropper's saved inventory the moment
+        //      it hit the ground; left unsaved in the picker's hands until the
+        //      checkpoint, a crash would lose it, the dropper's own regrab
+        //      included.
+        let mut bag_looters: Vec<ClientId> = Vec::new();
         if !loot_intents.is_empty() {
             for intent in loot_intents.drain(..) {
                 let Some(looter_conn) = connections.get(&(intent.looter as ClientId)) else {
@@ -9374,6 +9427,9 @@ pub async fn run(
                             path.clone(),
                             placed_count,
                         );
+                        if !bag_looters.contains(&looter_cid) {
+                            bag_looters.push(looter_cid);
+                        }
                     }
                     if leftover_count > 0 {
                         // Refund — push the unplaced portion back into
@@ -9552,6 +9608,18 @@ pub async fn run(
                     count = stack.count,
                     "ground item picked up to cursor"
                 );
+                if !bag_looters.contains(&looter_cid) {
+                    bag_looters.push(looter_cid);
+                }
+            }
+        }
+        // One save per looter for everything taken from bags this tick (see 4ka).
+        // A failure leaves the stores dirty for the checkpoint to retry.
+        for looter_cid in bag_looters {
+            if let Some(conn) = connections.get_mut(&looter_cid) {
+                if let Err(e) = persistence::persist_dirty_stores(&pool, conn).await {
+                    tracing::warn!(looter = looter_cid, error = %e, "post-loot store save failed; the checkpoint will retry");
+                }
             }
         }
 
@@ -10123,9 +10191,10 @@ pub async fn run(
         // DeathBroadcast (Test Panel Trigger Death, fall damage, a linkdead body
         // that dies) handled earlier this tick. ORDER MATTERS: persist the corpse
         // FIRST so a crash before the inventory clear leaves the gear recoverable
-        // on the corpse (never duped-then-lost). If save_corpse fails we skip the
-        // strip entirely (player keeps their gear, no corpse). Outside the
-        // values_mut loop so we can await the DB.
+        // on the corpse (never duped-then-lost). If a save fails we skip the
+        // strip this tick and set corpse_pending again, so the corpse is
+        // retried next tick rather than forgotten. Outside the values_mut loop
+        // so we can await the DB.
         let corpse_pending: Vec<i64> = connections
             .values()
             .filter(|c| c.corpse_pending)
@@ -10156,10 +10225,13 @@ pub async fn run(
             //    inventory and wallet but not the vaults, so an unsaved bank
             //    withdrawal would go onto the corpse while the vault row still
             //    held it. A failed flush is treated like a failed save_corpse:
-            //    no strip, no corpse, the gear stays on the player.
+            //    nothing is stripped this tick and the corpse is retried on
+            //    the next one (corpse_pending is set again), so a passing
+            //    database error cannot let a death skip its corpse.
             if let Some(c) = connections.get_mut(&client_id) {
                 if let Err(e) = persistence::persist_dirty_stores(&pool, c).await {
-                    tracing::error!(char_id = cid, error = %e, "pre-corpse store flush failed; leaving inventory intact (no strip)");
+                    tracing::error!(char_id = cid, error = %e, "pre-corpse store flush failed; corpse retried next tick");
+                    c.corpse_pending = true;
                     continue;
                 }
             }
@@ -10184,7 +10256,10 @@ pub async fn run(
             )
             .await
             {
-                tracing::error!(char_id = cid, error = %e, "save_corpse failed; leaving inventory intact (no strip)");
+                tracing::error!(char_id = cid, error = %e, "save_corpse failed; inventory intact, corpse retried next tick");
+                if let Some(c) = connections.get_mut(&client_id) {
+                    c.corpse_pending = true;
+                }
                 continue;
             }
             // 2. Mirror that committed state in memory and tell the client: the

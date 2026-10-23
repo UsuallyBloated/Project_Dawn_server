@@ -308,7 +308,8 @@ enum ServerMsg {
     CoinsUpdate { coins: i64 },                                 // owner only
     XpGained { amount: i32, current: i32, to_next: i32 },      // owner only; current/to_next now real (PD_W0018)
     LevelUp { new_level: u32, xp: i32, xp_to_next: i32 },       // owner only; up on xp, DOWN on death penalty (PD_W0018)
-    AlignmentChanged { score: i32, tier: String },
+    AlignmentUpdate { score: f32 },                             // owner only; on a 0.01 move or a tier crossing (PD_W0028, factions 2026-10-23)
+    FactionUpdate { faction_id, name, standing: f32, level: u8 }, // owner only; one standing, 0 Scowls to 8 Ally (PD_W0028)
 
     // Combat events
     Hit { attacker: EntityId, target: EntityId, amount: i32, crit: bool, dmg_type: DamageType },
@@ -433,7 +434,7 @@ CREATE TABLE characters (
     stamina             REAL    NOT NULL,
     coins               INTEGER NOT NULL DEFAULT 0,
     -- Persistent meta
-    alignment_score     INTEGER NOT NULL DEFAULT 0,
+    alignment_score     INTEGER NOT NULL DEFAULT 0,   -- written since migration 0016 (a REAL value; read with CAST), with alignment_seeded
     bind_zone           TEXT,
     bind_entry          TEXT,
     bind_zone_name      TEXT,

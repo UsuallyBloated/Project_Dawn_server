@@ -118,12 +118,17 @@ pub fn load_camps() -> Vec<CampSpawn> {
 
 /// The faction and alignment tier a camp template of `name` carries, for a
 /// dev spawn of the same mob (the Test Panel sends the display name), so a
-/// GM's test mob answers for its kills as the camp's does. None for a name
-/// no camp spawns.
-pub fn faction_of_camp_mob(name: &str) -> (Option<String>, Option<String>) {
+/// GM's test mob answers for its kills as the camp's does. A named mob is
+/// found by its `named_id` (its camp template carries the base name, "Dire
+/// Wolf" for Rotfang, never the display name the panel sends). None for a
+/// mob no camp spawns.
+pub fn faction_of_camp_mob(name: &str, named_id: Option<&str>) -> (Option<String>, Option<String>) {
     load_camps()
         .iter()
-        .find(|c| c.mob.name == name)
+        .find(|c| match named_id {
+            Some(id) => c.mob.named_id.as_deref() == Some(id),
+            None => c.mob.name == name,
+        })
         .map(|c| (c.mob.faction.clone(), c.mob.alignment.clone()))
         .unwrap_or((None, None))
 }
@@ -131,6 +136,15 @@ pub fn faction_of_camp_mob(name: &str) -> (Option<String>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dev_spawn_takes_its_camps_faction_named_or_not() {
+        let own = |a: &str, b: &str| (Some(a.to_string()), Some(b.to_string()));
+        assert_eq!(faction_of_camp_mob("Gnoll Raider", None), own("gnoll_raiders", "bad"));
+        assert_eq!(faction_of_camp_mob("Rotfang", Some("rotfang")), own("wildlife", "neutral"));
+        assert_eq!(faction_of_camp_mob("The Undying", Some("the_undying")), own("restless_dead", "undead"));
+        assert_eq!(faction_of_camp_mob("Practice Dummy", None), (None, None));
+    }
 
     #[test]
     fn embedded_toml_parses() {

@@ -1097,8 +1097,10 @@ pub fn handle_message(
             // A dev spawn of a mob a camp also spawns carries the camp's
             // faction and alignment, so a GM can test a kill's hits on a
             // spawned mob; anything else moves no standing.
-            let (camp_faction, camp_alignment) = super::zones::faction_of_camp_mob(&name);
-            let mob = match super::named::resolve_for_dev_spawn(&name) {
+            let named_dev = super::named::resolve_for_dev_spawn(&name);
+            let (camp_faction, camp_alignment) =
+                super::zones::faction_of_camp_mob(&name, named_dev.map(|n| n.id.as_str()));
+            let mob = match named_dev {
                 Some(n) => super::zones::MobTemplate {
                     // from_spawn applies the multipliers, so these are the
                     // client's enemy-scene BASE values, not the scaled ones the

@@ -160,6 +160,15 @@ impl NetClient {
     #[signal]
     fn skill_fail(skill_name: GString, reason: GString);
 
+    /// One of our faction standings (factions, 2026-10-23): on entering the
+    /// world, after a change, after a GM set. `level` is 0 Scowls to 8 Ally.
+    #[signal]
+    fn faction_update(faction_id: GString, name: GString, standing: f64, level: i64);
+
+    /// Our alignment score as the server holds it.
+    #[signal]
+    fn alignment_update(score: f64);
+
     /// Track 4 sub-task 4 combat events. `dmg_type` is the u8
     /// discriminant of `protocol::world::DamageType` (mirror of
     /// NetProtocol.DamageType on the GDScript side).
@@ -966,6 +975,29 @@ impl NetClient {
     #[func]
     fn send_stop_song(&mut self) -> bool {
         self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::StopSong)
+    }
+
+    /// Consider an NPC (by its npcs.toml id; "" for none) or a mob (by
+    /// entity id; 0 for none). The server answers with the con line.
+    #[func]
+    fn send_consider(&mut self, npc_id: GString, target_id: i64) -> bool {
+        let npc = npc_id.to_string();
+        let msg = ClientWorldMsg::Consider {
+            npc_id: if npc.is_empty() { None } else { Some(npc) },
+            target_id: if target_id == 0 { None } else { Some(target_id as u64) },
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// Dev-only, gated and audited like `send_dev_spawn_mob`: set our own
+    /// standing with one faction (the GM faction panel's slider).
+    #[func]
+    fn send_dev_set_faction(&mut self, faction_id: GString, standing: f64) -> bool {
+        let msg = ClientWorldMsg::DevSetFaction {
+            faction_id: faction_id.to_string(),
+            standing: standing as f32,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
     /// The server-held spell bar (client-authority audit fix 5): begin
@@ -1783,6 +1815,15 @@ enum Incoming {
         skill_name: String,
         reason: String,
     },
+    FactionUpdate {
+        faction_id: String,
+        name: String,
+        standing: f32,
+        level: u8,
+    },
+    AlignmentUpdate {
+        score: f32,
+    },
     LootGranted {
         item_path: String,
         count: u32,
@@ -2453,6 +2494,21 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::FactionUpdate { faction_id, name, standing, level } => {
+                    self.base_mut().emit_signal(
+                        "faction_update",
+                        &[
+                            GString::from(faction_id.as_str()).to_variant(),
+                            GString::from(name.as_str()).to_variant(),
+                            (standing as f64).to_variant(),
+                            (level as i64).to_variant(),
+                        ],
+                    );
+                }
+                Incoming::AlignmentUpdate { score } => {
+                    self.base_mut()
+                        .emit_signal("alignment_update", &[(score as f64).to_variant()]);
+                }
                 Incoming::HungerUpdate { hunger_secs, thirst_secs, cap_secs, drain_per_sec } => {
                     self.base_mut().emit_signal(
                         "hunger_update",
@@ -2990,6 +3046,10 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
         ServerWorldMsg::PlayerJumped { id } => Incoming::PlayerJumped { id: id as i64 },
         ServerWorldMsg::SpellGems { gems, seeded } => Incoming::SpellGems { gems, seeded },
         ServerWorldMsg::SkillFail { skill_name, reason } => Incoming::SkillFail { skill_name, reason },
+        ServerWorldMsg::FactionUpdate { faction_id, name, standing, level } => {
+            Incoming::FactionUpdate { faction_id, name, standing, level }
+        }
+        ServerWorldMsg::AlignmentUpdate { score } => Incoming::AlignmentUpdate { score },
         ServerWorldMsg::LootGranted { item_path, count } => Incoming::LootGranted {
             item_path,
             count,

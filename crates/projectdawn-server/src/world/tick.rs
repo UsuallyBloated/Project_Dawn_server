@@ -533,6 +533,44 @@ fn fan_out_pet_buff_snapshot(
 /// `!death_processed && hp > 0.0`: the death sweep runs at end of tick, so
 /// a member dropped by the mob's last swing in the SAME tick as the kill
 /// is a corpse by hp before the flag catches up. The kill-creditor is
+/// What a kill does to standings and alignment (factions, 2026-10-23), read
+/// off the dying entity before its borrow ends: its faction and alignment
+/// tier, the hit it is worth, and the players on its hate list.
+struct FactionKill {
+    faction: Option<String>,
+    alignment: Option<String>,
+    hit: f32,
+    named: bool,
+    haters: Vec<ClientId>,
+}
+
+impl FactionKill {
+    fn of(entity: &Entity) -> Self {
+        let named = entity.mob.named_id.is_some();
+        Self {
+            faction: entity.mob.faction.clone(),
+            alignment: entity.mob.alignment.clone(),
+            hit: super::factions::kill_hit(entity.mob.level, named, entity.mob.faction_hit),
+            named,
+            haters: {
+                // Everyone the mob hates: whoever damaged it (`aggro`) and
+                // whoever it holds threat on (a miss adds a point; a healer's
+                // hate rides the threat map), as EQ's hate list.
+                let mut ids: Vec<ClientId> = entity
+                    .aggro
+                    .keys()
+                    .chain(entity.threat.keys())
+                    .filter(|&&id| id < protocol::world::ENEMY_ID_BASE)
+                    .map(|&id| id as ClientId)
+                    .collect();
+                ids.sort_unstable();
+                ids.dedup();
+                ids
+            },
+        }
+    }
+}
+
 /// exempt from the RANGE half only (a pet owner may legitimately direct a
 /// kill from afar, and the coin analogue — the looter — always collects),
 /// never from the alive half. The pool divides among eligible members only.
@@ -550,6 +588,7 @@ fn award_kill(
     mob_name: &str,
     victim_owned: bool,
     victim_pos: Vec3f,
+    faction_kill: FactionKill,
 ) {
     if base_xp <= 0 || credit_id >= protocol::world::ENEMY_ID_BASE {
         return; // no reward, or the top damager wasn't a player
@@ -562,6 +601,23 @@ fn award_kill(
         return;
     }
     let credit_cid = credit_id as ClientId;
+    // Factions (2026-10-23, EQ's rule): the kill's hits go to every player
+    // on the mob's hate list, grouped or not, in range or not, so a healer
+    // who never swung still answers for the kill once the mob hated them.
+    if let Some(faction_id) = faction_kill.faction.as_deref() {
+        let hits = super::factions::kill_hits(faction_id, faction_kill.hit);
+        for hater in &faction_kill.haters {
+            if let Some(conn) = connections.get_mut(hater) {
+                super::handlers::apply_faction_hits(server, *hater, conn, &hits);
+            }
+        }
+    }
+    // Alignment: the kill is the creditor's act (events.md's table by the
+    // victim's tier; a named mob counts as its tier's named row).
+    if let Some(conn) = connections.get_mut(&credit_cid) {
+        let delta = super::alignment::kill_delta(faction_kill.alignment.as_deref(), faction_kill.named);
+        super::handlers::move_alignment(server, credit_cid, conn, delta);
+    }
     // Alive = neither flagged dead NOR at 0 hp — the flag alone misses a
     // member the mob dropped in this same tick (death sweep runs at end
     // of tick).
@@ -666,7 +722,7 @@ fn kill_enemy(
     source: &str,
     now: Instant,
 ) {
-    let (credit_id_opt, mob_xp, mob_level, death_pos, mob_name, warder_owner_opt, victim_owned) = {
+    let (credit_id_opt, mob_xp, mob_level, death_pos, mob_name, warder_owner_opt, victim_owned, faction_kill) = {
         let Some(entity) = enemies.get_mut(&entity_id) else {
             return;
         };
@@ -693,7 +749,8 @@ fn kill_enemy(
         // credit — the warder is literally named "Wolf", so a respawning
         // PvP warder would farm the wolf quest otherwise.
         let victim_owned = entity.owner.is_some();
-        (credit_id_opt, mob_xp, entity.mob.level, entity.pos, entity.mob.name.clone(), warder_owner_opt, victim_owned)
+        let faction_kill = FactionKill::of(entity);
+        (credit_id_opt, mob_xp, entity.mob.level, entity.pos, entity.mob.name.clone(), warder_owner_opt, victim_owned, faction_kill)
     };
 
     // Warder respawn — mirrors the melee path. If the dying entity is a
@@ -725,6 +782,7 @@ fn kill_enemy(
             &mob_name,
             victim_owned,
             death_pos,
+            faction_kill,
         );
     }
     // An owned victim (a pet, a charmed mob) drops nothing, as it pays no
@@ -1479,6 +1537,7 @@ async fn reap_connection(
                 conn.level,
                 conn.hunger_secs,
                 conn.thirst_secs,
+                conn.alignment,
             )
             .await
             {
@@ -1524,6 +1583,20 @@ async fn reap_connection(
                 );
             } else {
                 conn.skills_dirty = false;
+            }
+        }
+        // Faction standings: a kill's hit right before logout shouldn't roll
+        // back either.
+        if conn.factions_dirty {
+            let rows = conn.faction_rows();
+            if let Err(e) = db::save_factions(pool, conn.char_id, &rows).await {
+                tracing::warn!(
+                    char_id = conn.char_id,
+                    error = %e,
+                    "final faction save on disconnect failed"
+                );
+            } else {
+                conn.factions_dirty = false;
             }
         }
         // PD_W0024 — reconcile quest state touched this tick on the way out (a
@@ -2128,6 +2201,7 @@ pub async fn run(
             Abandon,
         }
         let mut quest_lifecycle_intents: Vec<(u64, QuestLifecycle, String)> = Vec::new();
+        let mut consider_intents: Vec<(ClientId, EntityId)> = Vec::new();
         // Track 12 Piece A — pet commands. Buffered to apply after
         // message dispatch so we can mutate `enemies` (where pets
         // live) without overlapping the handler's mutable
@@ -2630,6 +2704,9 @@ pub async fn run(
                         Outcome::DevDespawnEnemiesIntent { requester, pos } => {
                             dev_despawn_intents.push((requester, pos));
                         }
+                        Outcome::ConsiderIntent { requester, target_id } => {
+                            consider_intents.push((requester, target_id));
+                        }
                         Outcome::SpellGemsChanged { char_id, gems, seeded } => {
                             spell_gem_saves.push((char_id, gems, seeded));
                         }
@@ -2932,6 +3009,13 @@ pub async fn run(
                 // The server-held spell bar (audit fix 5): the client's bar
                 // adopts it, or seeds it once if the server holds none yet.
                 handlers::send_spell_gems(&mut server, *new_id, new_conn);
+            }
+            // Factions and alignment (2026-10-23): every standing the
+            // character has moved and the alignment score, so the client
+            // follows the server's numbers from the first frame.
+            if let Some(new_conn) = connections.get_mut(new_id) {
+                handlers::send_factions_snapshot(&mut server, *new_id, new_conn);
+                handlers::send_alignment_if_due(&mut server, *new_id, new_conn, true);
             }
             // PD_W0024 — seed the joiner's quest journal: every active quest
             // with its per-objective progress, plus the full completed set
@@ -4574,6 +4658,7 @@ pub async fn run(
                         // credit — the warder is literally named "Wolf".
                         let victim_owned = entity.owner.is_some();
                         let victim_pos = entity.pos;
+                        let faction_kill = FactionKill::of(entity);
                         award_kill(
                             &mut server,
                             &mut connections,
@@ -4583,6 +4668,7 @@ pub async fn run(
                             &mob_name,
                             victim_owned,
                             victim_pos,
+                            faction_kill,
                         );
                     }
                     // Roll loot from the mob's archetype table; spawn
@@ -4725,9 +4811,11 @@ pub async fn run(
                 // legit spell trips this on missing data. This is the one home of
                 // the rule: the CORPSE arm no longer keeps a copy.
                 {
+                    // The class the caster casts as (alignment.rs): a Paladin
+                    // at Evil has the Fallen kit and not the Paladin's.
                     let caster_cl = connections
                         .get(&caster_cid)
-                        .map(|c| (c.class.clone(), c.level));
+                        .map(|c| (c.effective_class(), c.level));
                     let class_ok = caster_cl
                         .as_ref()
                         .map(|(class, _)| spell.classes.iter().any(|cl| cl == class))
@@ -4956,8 +5044,19 @@ pub async fn run(
                 let dmg_type = spells::parse_damage_type(&spell.damage_type);
                 // A spell does exactly its listed number, as in classic EQ
                 // (the parity audit of 2026-10-20); the caster's INT feeds
-                // only the crit roll (spell_power.rs).
+                // only the crit roll (spell_power.rs). The one scaling left
+                // is the off-side penalty on a Paladin's or Shadow Knight's
+                // spells (alignment.rs), applied once here so every arm
+                // below reads the penalised numbers.
                 let caster_int = caster_conn.intelligence;
+                let side = super::alignment::off_side_multiplier(&caster_conn.class, caster_conn.alignment);
+                let penalised;
+                let spell = if side < 1.0 {
+                    penalised = super::alignment::penalise(spell, side);
+                    &penalised
+                } else {
+                    spell
+                };
 
                 // Cast pre-flight: presence, reach, the PvP gates and "the
                 // server has no effect for this spell", decided before the mana
@@ -4985,6 +5084,8 @@ pub async fn run(
                             spell = %spell.name,
                             target = ?intent.target_id,
                             reason = %line,
+                            caster_pos = ?caster_pos,
+                            target_pos = ?intent.target_id.and_then(|t| enemies.get(&t).map(|e| (e.pos, e.hp, e.is_alive()))),
                             "CastSpell refused — target pre-flight"
                         );
                         // Clear the cast cache so this refused cast's in-flight
@@ -5056,6 +5157,10 @@ pub async fn run(
                 let (new_mp, new_hp_after_cost, max_hp) = {
                     let cc = connections.get_mut(&caster_cid).expect("checked");
                     cc.mp = (cc.mp - mana_cost).max(0.0);
+                    // Alignment (2026-10-23): a cast leans its school's way by
+                    // a hundred-thousandth of its mana, through the momentum
+                    // rule (the user's equation).
+                    handlers::move_alignment(&mut server, caster_cid, cc, super::alignment::spell_delta(spell));
                     if hp_cost > 0.0 {
                         cc.hp = (cc.hp - hp_cost).max(0.0);
                     }
@@ -8229,14 +8334,23 @@ pub async fn run(
                 // client has always had a 6 m UI gate, so only remote abuse is
                 // refused here. `vendor_id` remains informational until the
                 // client sends real ids (per-vendor stocking is a later step).
-                if super::npcs::any_within_range("vendor", conn.pos).is_none() {
-                    tracing::info!(
-                        owner = intent.owner,
-                        pos = ?conn.pos,
-                        "BuyItem rejected — no vendor within range"
-                    );
-                    handlers::send_refusal(&mut server, owner_cid, "There is no merchant near you.");
-                    continue;
+                match conn.npc_service("vendor") {
+                    Err(None) => {
+                        tracing::info!(
+                            owner = intent.owner,
+                            pos = ?conn.pos,
+                            "BuyItem rejected — no vendor within range"
+                        );
+                        handlers::send_refusal(&mut server, owner_cid, "There is no merchant near you.");
+                        continue;
+                    }
+                    // Factions (2026-10-23): EQ's merchants refuse at Dubious.
+                    Err(Some(npc)) => {
+                        tracing::info!(owner = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "BuyItem rejected — faction");
+                        handlers::send_refusal(&mut server, owner_cid, &format!("{} will not deal with you.", npc.name));
+                        continue;
+                    }
+                    Ok(_) => {}
                 }
                 let Some(item) = items::lookup_by_name(&intent.item_name) else {
                     tracing::info!(
@@ -8382,14 +8496,22 @@ pub async fn run(
                     continue;
                 };
                 // Same proximity gate as BuyItem above.
-                if super::npcs::any_within_range("vendor", conn.pos).is_none() {
-                    tracing::info!(
-                        owner = intent.owner,
-                        pos = ?conn.pos,
-                        "SellItem rejected — no vendor within range"
-                    );
-                    handlers::send_refusal(&mut server, owner_cid, "There is no merchant near you.");
-                    continue;
+                match conn.npc_service("vendor") {
+                    Err(None) => {
+                        tracing::info!(
+                            owner = intent.owner,
+                            pos = ?conn.pos,
+                            "SellItem rejected — no vendor within range"
+                        );
+                        handlers::send_refusal(&mut server, owner_cid, "There is no merchant near you.");
+                        continue;
+                    }
+                    Err(Some(npc)) => {
+                        tracing::info!(owner = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "SellItem rejected — faction");
+                        handlers::send_refusal(&mut server, owner_cid, &format!("{} will not deal with you.", npc.name));
+                        continue;
+                    }
+                    Ok(_) => {}
                 }
                 // Resolve the slot reference + read the held item
                 // path/count without mutating yet so we can compute
@@ -8555,10 +8677,18 @@ pub async fn run(
             // the banker. This is the arm that voided the death penalty — a
             // modified client could BankStoreItem its whole inventory from a
             // dungeon one second before dying, leaving the corpse empty.
-            if super::npcs::any_within_range("banker", conn.pos).is_none() {
-                tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
-                handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
-                continue;
+            match conn.npc_service("banker") {
+                Err(None) => {
+                    tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
+                    handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
+                    continue;
+                }
+                Err(Some(npc)) => {
+                    tracing::info!(owner = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
+                    handlers::send_bank_rejected(&mut server, cid, format!("{} will not deal with you.", npc.name));
+                    continue;
+                }
+                Ok(_) => {}
             }
             if intent.coins.has_negative() || intent.coins == protocol::world::Coins::ZERO {
                 handlers::send_bank_rejected(&mut server, cid, "Nothing to deposit.".to_string());
@@ -8595,10 +8725,18 @@ pub async fn run(
             let cid = intent.owner as ClientId;
             let Some(conn) = connections.get_mut(&cid) else { continue };
             // Same banker proximity gate as the deposit loop above.
-            if super::npcs::any_within_range("banker", conn.pos).is_none() {
-                tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
-                handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
-                continue;
+            match conn.npc_service("banker") {
+                Err(None) => {
+                    tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
+                    handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
+                    continue;
+                }
+                Err(Some(npc)) => {
+                    tracing::info!(owner = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
+                    handlers::send_bank_rejected(&mut server, cid, format!("{} will not deal with you.", npc.name));
+                    continue;
+                }
+                Ok(_) => {}
             }
             if intent.coins.has_negative() || intent.coins == protocol::world::Coins::ZERO {
                 handlers::send_bank_rejected(&mut server, cid, "Nothing to withdraw.".to_string());
@@ -8631,10 +8769,18 @@ pub async fn run(
             let cid = intent.owner as ClientId;
             let Some(conn) = connections.get_mut(&cid) else { continue };
             // Same banker proximity gate as the deposit loop above.
-            if super::npcs::any_within_range("banker", conn.pos).is_none() {
-                tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
-                handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
-                continue;
+            match conn.npc_service("banker") {
+                Err(None) => {
+                    tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
+                    handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
+                    continue;
+                }
+                Err(Some(npc)) => {
+                    tracing::info!(owner = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
+                    handlers::send_bank_rejected(&mut server, cid, format!("{} will not deal with you.", npc.name));
+                    continue;
+                }
+                Ok(_) => {}
             }
             match conn.coins.exchange(intent.from_tier, intent.to_tier, intent.qty) {
                 Ok(()) => {
@@ -8672,10 +8818,18 @@ pub async fn run(
             }
             let Some(conn) = connections.get_mut(&cid) else { continue };
             // Same banker proximity gate as the deposit loop above.
-            if super::npcs::any_within_range("banker", conn.pos).is_none() {
-                tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
-                handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
-                continue;
+            match conn.npc_service("banker") {
+                Err(None) => {
+                    tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
+                    handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
+                    continue;
+                }
+                Err(Some(npc)) => {
+                    tracing::info!(owner = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
+                    handlers::send_bank_rejected(&mut server, cid, format!("{} will not deal with you.", npc.name));
+                    continue;
+                }
+                Ok(_) => {}
             }
             let Some((path, avail)) =
                 conn.inventory.peek_at(&intent.src_location, intent.src_slot)
@@ -8741,10 +8895,18 @@ pub async fn run(
             let cid = intent.owner as ClientId;
             let Some(conn) = connections.get_mut(&cid) else { continue };
             // Same banker proximity gate as the deposit loop above.
-            if super::npcs::any_within_range("banker", conn.pos).is_none() {
-                tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
-                handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
-                continue;
+            match conn.npc_service("banker") {
+                Err(None) => {
+                    tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
+                    handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
+                    continue;
+                }
+                Err(Some(npc)) => {
+                    tracing::info!(owner = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
+                    handlers::send_bank_rejected(&mut server, cid, format!("{} will not deal with you.", npc.name));
+                    continue;
+                }
+                Ok(_) => {}
             }
             let slot = intent.vault_slot as usize;
             let present = if intent.shared {
@@ -9383,6 +9545,7 @@ pub async fn run(
                             None
                         };
                         let death_pos = target_entity.pos;
+                        let faction_kill = FactionKill::of(target_entity);
                         let credit_id_opt = if died {
                             target_entity
                                 .aggro
@@ -9461,6 +9624,7 @@ pub async fn run(
                                         name,
                                         victim_owned,
                                         death_pos,
+                                        faction_kill,
                                     );
                                 }
                             }
@@ -9970,6 +10134,29 @@ pub async fn run(
         //      replayable after relog), then award through award_xp. Every
         //      rejection answers with a private QuestRejected so the player
         //      sees WHY instead of silently getting nothing.
+        // Considers of mobs (factions, 2026-10-23): the faction phrase from
+        // the considerer's standing with the mob's faction (Indifferent for a
+        // mob with none, a dev spawn or a pet), then the level phrase. A dead
+        // or unknown id gets the same line a player id gets in the handler.
+        for (requester, target_id) in consider_intents.drain(..) {
+            let Some(conn) = connections.get(&requester) else {
+                continue;
+            };
+            let line = match enemies.get(&target_id).filter(|e| e.is_alive()) {
+                Some(e) => {
+                    let level = e
+                        .mob
+                        .faction
+                        .as_deref()
+                        .and_then(super::factions::lookup)
+                        .map(|f| conn.faction_level(f))
+                        .unwrap_or(super::factions::Level::Indifferent);
+                    super::factions::mob_con_line(&e.mob.name, level, conn.level, e.mob.level as i32)
+                }
+                None => "You cannot consider that.".to_string(),
+            };
+            handlers::send_system_line(&mut server, requester, &line);
+        }
         for (responder, quest_id) in complete_quest_intents.drain(..) {
             let responder_cid = responder as ClientId;
             let Some(quest) = super::quests::lookup(&quest_id) else {
@@ -10001,6 +10188,21 @@ pub async fn run(
                         responder_cid,
                         &quest_id,
                         &format!("You must return to {npc_name}."),
+                        false,
+                    );
+                    continue;
+                }
+            }
+            // The turn-in NPC's faction (2026-10-23): at Apprehensive or
+            // below the NPC has nothing to say, as EQ's quest givers.
+            if let Some(npc) = quest.turn_in_npc.as_deref().and_then(super::npcs::lookup) {
+                if !conn_ro.npc_serves(npc, super::factions::Level::Indifferent) {
+                    tracing::info!(char_id = responder, quest_id = %quest_id, npc = %npc.id, level = conn_ro.npc_faction_level(npc).name(), "quest turn-in rejected — faction");
+                    handlers::send_quest_rejected(
+                        &mut server,
+                        responder_cid,
+                        &quest_id,
+                        &format!("{} has nothing to say to you.", npc.name),
                         false,
                     );
                     continue;
@@ -10067,6 +10269,14 @@ pub async fn run(
                 // quest-sourced (for the "quest experience" chat line).
                 handlers::send_quest_completed(&mut server, responder_cid, &quest_id);
                 super::progression::award_xp(&mut server, conn, reward);
+                // Factions and alignment (2026-10-23): the quest's explicit
+                // hits (sorted, so the lines come in one order) and its
+                // alignment delta, after the XP as EQ's turn-ins paid.
+                let mut hits: Vec<(String, f32)> =
+                    quest.faction_hits.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                hits.sort_by(|a, b| a.0.cmp(&b.0));
+                handlers::apply_faction_hits(&mut server, responder_cid, conn, &hits);
+                handlers::move_alignment(&mut server, responder_cid, conn, quest.alignment_delta);
                 // Grant item reward(s). Capacity was pre-checked, so
                 // add_item_locating fits; the completion is already durable, so
                 // a crash here can only lose the item, never dup it (the forced
@@ -10153,6 +10363,16 @@ pub async fn run(
                         tracing::info!(char_id = responder, quest_id = %quest_id, "quest accept rejected — journal full");
                         handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Your quest journal is full.", true);
                         continue;
+                    }
+                    // The giver's faction (2026-10-23): the quest's NPC (its
+                    // turn-in NPC gives it too) has nothing to say at
+                    // Apprehensive or below, so the quest is not offered.
+                    if let Some(npc) = quest.turn_in_npc.as_deref().and_then(super::npcs::lookup) {
+                        if !conn.npc_serves(npc, super::factions::Level::Indifferent) {
+                            tracing::info!(char_id = responder, quest_id = %quest_id, npc = %npc.id, "quest accept rejected — faction");
+                            handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, &format!("{} has nothing to say to you.", npc.name), true);
+                            continue;
+                        }
                     }
                     conn.active_quests.insert(quest_id.clone(), vec![0i32; quest.objectives.len()]);
                     conn.quests_dirty.insert(quest_id.clone());
@@ -12695,6 +12915,8 @@ mod tests {
             let spawn = crate::db::CharacterSpawn {
                 hunger: 14400.0,
                 thirst: 14400.0,
+                alignment: None,
+                factions: Vec::new(),
                 char_id,
                 account_id: char_id,
                 name: format!("Char{char_id}"),

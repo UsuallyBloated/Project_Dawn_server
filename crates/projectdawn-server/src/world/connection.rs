@@ -542,6 +542,23 @@ pub struct PerConnection {
     pub casting_skills: HashMap<String, i32>,
     pub skills_dirty: bool,
 
+    /// Faction standings by faction id (`world/factions.rs`), only the
+    /// factions this character has ever moved; a missing one sits at its
+    /// starting value. `factions_dirty` flips on any change; the persistence
+    /// sweep clears it.
+    pub factions: HashMap<String, f32>,
+    pub factions_dirty: bool,
+    /// The alignment score, the server's since migration 0016
+    /// (`world/alignment.rs`): moved by kills, quests and spells, read by
+    /// the prestige-class gates. Persisted with the resources; `None` for
+    /// the last persisted value means the server never wrote one (a
+    /// character seeded at this load), so the next checkpoint writes it.
+    pub alignment: f32,
+    pub last_persisted_alignment: Option<f32>,
+    /// The score the client was last told (`AlignmentUpdate`); None until
+    /// the enter-world send.
+    pub alignment_sent: Option<f32>,
+
     /// Track 14.2 — last accumulated stat bonuses from equipped items.
     /// `recompute_equipped_stats` reads this to know what to subtract
     /// before re-summing across the current equipment map. Stays
@@ -582,6 +599,25 @@ impl PerConnection {
                 Some((quest_id, progress))
             })
             .collect();
+        // Factions and alignment: a character the server has never held a
+        // score for is seeded from its class's start, exactly as the client
+        // seeded itself before the score moved server-side. A standing for a
+        // faction no longer in factions.toml is dropped.
+        let factions: HashMap<String, f32> = spawn
+            .factions
+            .iter()
+            .filter(|(id, _)| super::factions::lookup(id).is_some())
+            .map(|(id, standing)| {
+                (
+                    id.clone(),
+                    standing.clamp(-super::factions::STANDING_CAP, super::factions::STANDING_CAP),
+                )
+            })
+            .collect();
+        let alignment = spawn
+            .alignment
+            .unwrap_or_else(|| super::alignment::starting_score(&spawn.class))
+            .clamp(-super::alignment::SCORE_CAP, super::alignment::SCORE_CAP);
         Self {
             char_id: spawn.char_id,
             account_id: spawn.account_id,
@@ -712,7 +748,71 @@ impl PerConnection {
             armor_skills: HashMap::new(),
             casting_skills: HashMap::new(),
             skills_dirty: false,
+            factions,
+            factions_dirty: false,
+            alignment,
+            last_persisted_alignment: spawn.alignment,
+            alignment_sent: None,
         }
+    }
+
+    /// Every standing as rows for `db::save_factions`.
+    pub fn faction_rows(&self) -> Vec<(String, f32)> {
+        self.factions.iter().map(|(id, s)| (id.clone(), *s)).collect()
+    }
+
+    /// This character's PERSONAL standing with a faction: what kills, quests
+    /// and the GM tool have moved, zero when nothing has.
+    pub fn faction_standing(&self, faction: &super::factions::Faction) -> f32 {
+        self.factions.get(&faction.id).copied().unwrap_or(0.0)
+    }
+
+    /// The standing the faction's NPCs see: the personal number plus the
+    /// character's starting modifier with it for its race and class.
+    pub fn faction_shown(&self, faction: &super::factions::Faction) -> f32 {
+        super::factions::shown_standing(self.faction_standing(faction), faction, &self.race, &self.class)
+    }
+
+    pub fn faction_level(&self, faction: &super::factions::Faction) -> super::factions::Level {
+        super::factions::level_for(self.faction_shown(faction))
+    }
+
+    /// How an NPC's faction regards this character; Indifferent for an NPC
+    /// with no faction (the soul binder serves everyone).
+    pub fn npc_faction_level(&self, npc: &super::npcs::Npc) -> super::factions::Level {
+        npc.faction
+            .as_deref()
+            .and_then(super::factions::lookup)
+            .map(|f| self.faction_level(f))
+            .unwrap_or(super::factions::Level::Indifferent)
+    }
+
+    /// Will `npc` deal with this character? Its faction must regard them at
+    /// `min` or better: Apprehensive for a vendor or banker (EQ's merchants
+    /// refuse at Dubious), Indifferent for a quest giver.
+    pub fn npc_serves(&self, npc: &super::npcs::Npc, min: super::factions::Level) -> bool {
+        self.npc_faction_level(npc) >= min
+    }
+
+    /// The NPC-service gate with factions: Ok(the NPC) when an NPC of `kind`
+    /// is in service range and will deal with this character; Err(Some(npc))
+    /// when one is in range but refuses them (the first such); Err(None)
+    /// when none is in range at all.
+    pub fn npc_service(
+        &self,
+        kind: &str,
+    ) -> Result<&'static super::npcs::Npc, Option<&'static super::npcs::Npc>> {
+        let in_range = super::npcs::all_within_range(kind, self.pos);
+        if let Some(npc) = in_range.iter().find(|n| self.npc_serves(n, super::factions::Level::Apprehensive)) {
+            return Ok(npc);
+        }
+        Err(in_range.first().copied())
+    }
+
+    /// The class this character casts and uses skills as: its own, or the
+    /// prestige class its alignment has carried it to.
+    pub fn effective_class(&self) -> String {
+        super::alignment::effective_class(&self.class, self.alignment)
     }
 
     /// May this connection use dev / GM commands (`/give`, `HealSelf`,
@@ -833,6 +933,7 @@ impl PerConnection {
             // worth is the threshold, so an idle lobby connection stays clean.
             || (self.hunger_secs - self.last_persisted_hunger).abs() >= 1.0
             || (self.thirst_secs - self.last_persisted_thirst).abs() >= 1.0
+            || Some(self.alignment) != self.last_persisted_alignment
     }
 
     pub fn mark_resources_persisted(&mut self) {
@@ -843,6 +944,7 @@ impl PerConnection {
         self.last_persisted_level = self.level;
         self.last_persisted_hunger = self.hunger_secs;
         self.last_persisted_thirst = self.thirst_secs;
+        self.last_persisted_alignment = Some(self.alignment);
     }
 
     /// Camp + linkdead: true once a body that dropped uncleanly has lingered at
@@ -916,6 +1018,8 @@ mod tests {
         crate::db::CharacterSpawn {
             hunger: crate::world::hunger::FULLNESS_CAP_SECS,
             thirst: crate::world::hunger::FULLNESS_CAP_SECS,
+            alignment: None,
+            factions: Vec::new(),
             char_id: 1,
             account_id: 1,
             name: "Tester".into(),

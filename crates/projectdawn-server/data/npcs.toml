@@ -26,34 +26,40 @@
 id = "brom"
 name = "Brom"
 kinds = ["vendor", "quest"]
+faction = "greyveil_town"
 pos = [8.0, 0.0, 5.0]
 
 [[npc]]
 id = "aldric"
 name = "Aldric the Guard"
 kinds = ["quest"]
+faction = "greyveil_watch"
 pos = [2.0, 0.0, 5.0]
 
 [[npc]]
 id = "sister_maelis"
 name = "Sister Maelis"
 kinds = ["soul_binder"]
+faction = "greyveil_town"
 pos = [-2.0, 0.0, 5.0]
 
 [[npc]]
 id = "thalia"
 name = "Thalia Mourne"
 kinds = ["banker"]
+faction = "greyveil_town"
 pos = [11.0, 0.0, 5.0]
 
 [[npc]]
 id = "elara"
 name = "Elara"
 kinds = ["vendor"]
+faction = "greyveil_town"
 pos = [5.0, 0.0, 5.0]
 
 [[npc]]
 id = "hadrik"
 name = "Hadrik"
 kinds = ["vendor"]
+faction = "greyveil_town"
 pos = [-5.0, 0.0, 5.0]

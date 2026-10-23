@@ -595,6 +595,29 @@ impl WorldClient {
         );
     }
 
+    /// Factions (2026-10-23): consider an NPC by id or a mob by entity id.
+    fn send_consider(&mut self, npc_id: Option<&str>, target_id: Option<u64>) {
+        let msg = ClientWorldMsg::Consider { npc_id: npc_id.map(str::to_string), target_id };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
+    /// The GM faction panel's slider: set our own standing with one faction.
+    /// Gated like the other dev tools.
+    fn send_dev_set_faction(&mut self, faction_id: &str, standing: f32) {
+        let msg = ClientWorldMsg::DevSetFaction { faction_id: faction_id.into(), standing };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
+    fn send_accept_quest(&mut self, quest_id: &str) {
+        let msg = ClientWorldMsg::AcceptQuest { quest_id: quest_id.into(), giver_id: 0 };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
+    fn send_complete_quest(&mut self, quest_id: &str) {
+        let msg = ClientWorldMsg::CompleteQuest { quest_id: quest_id.into() };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
     /// Dev-gated "Despawn All Enemies" (the Test Panel button).
     fn send_dev_despawn_enemies(&mut self) {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::DevDespawnEnemies);
@@ -9528,4 +9551,597 @@ async fn a_cast_can_fizzle_on_a_low_casting_skill() {
         }
     }
     assert!(fizzled, "forty instant casts with no evocation at all and not one fizzle");
+}
+
+// ─── Factions and alignment (2026-10-23) ─────────────────────────────────
+
+// A dev spawn lands 3 m from its requester, and the enter-world seed carries
+// the camps' mobs of the same names (a Grey Wolf camp sits 38 m from the
+// spawn), so every spawn below is matched beside the caster, not by name alone.
+
+/// The faction standings a batch of messages carries, in order.
+fn faction_updates(msgs: &[ServerWorldMsg]) -> Vec<(String, f32, u8)> {
+    msgs.iter()
+        .filter_map(|m| match m {
+            ServerWorldMsg::FactionUpdate { faction_id, standing, level, .. } => {
+                Some((faction_id.clone(), *standing, *level))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The last standing a batch carries for one faction.
+fn last_standing(msgs: &[ServerWorldMsg], faction_id: &str) -> Option<(f32, u8)> {
+    faction_updates(msgs)
+        .into_iter()
+        .filter(|(id, _, _)| id == faction_id)
+        .map(|(_, s, l)| (s, l))
+        .last()
+}
+
+fn system_lines(msgs: &[ServerWorldMsg]) -> Vec<String> {
+    msgs.iter()
+        .filter_map(|m| match m {
+            ServerWorldMsg::ChatMessage { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn alignment_scores(msgs: &[ServerWorldMsg]) -> Vec<f32> {
+    msgs.iter()
+        .filter_map(|m| match m {
+            ServerWorldMsg::AlignmentUpdate { score } => Some(*score),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Smite's own cooldown (longer than the global one), with a margin.
+async fn a_breath(c: &mut WorldClient) {
+    c.pump_alive_for(Duration::from_millis(4200)).await;
+}
+
+/// The same wait with two clients in the world: each is pumped with
+/// heartbeats for half of it, so neither sits silent past the server's 10 s
+/// idle timeout across a run of casts.
+async fn a_breath_for_two(a: &mut WorldClient, b: &mut WorldClient) {
+    a.pump_alive_for(Duration::from_millis(2100)).await;
+    b.pump_alive_for(Duration::from_millis(2100)).await;
+}
+
+const APPREHENSIVE: u8 = 3;
+const INDIFFERENT: u8 = 4;
+const KINDLY: u8 = 6;
+const DUBIOUS: u8 = 2;
+
+/// Factions, EQ's rule: a kill's hits go to every player on the mob's hate
+/// list, not only the killer, and the killer's alignment moves by the victim's
+/// tier. A GM Cleric spawns a Gnoll Raider (the camp's faction and tier:
+/// gnoll_raiders, bad; level 3, so a 7-point hit), a plain Cleric Smites it
+/// once (on the hate list, never the top damager), the GM finishes it. Both
+/// lose 7 with the gnolls and gain 3.5 with the town and the Watch, with EQ's
+/// lines; the GM's alignment goes from the Cleric's 400 to 408 (a bad kill's
+/// +10 through the momentum rule) and the bystander's does not move. Both
+/// were told their 400 on entering. Fails on the previous server, which sent
+/// no FactionUpdate and no AlignmentUpdate at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kill_pays_faction_hits_to_the_hate_list_and_moves_alignment() {
+    let h = start_both().await;
+    let (gm_session, gm_char, _stale) =
+        provision_client(&h.auth_url, "factgm", "Factgm", "Human", "Cleric").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "factgm", true).await.expect("set is_gm");
+    // Level 20 for the mana of several Smites; the class seed is still 400.
+    set_char_level(&h.db_url, gm_char, 20).await;
+    let gm_token = request_world_token(&h.auth_url, &gm_session, gm_char).await;
+    let mut gm = WorldClient::start(gm_token, &gm_session, gm_char).await;
+    let (b_session, b_char, b_token) =
+        provision_client(&h.auth_url, "factby", "Factby", "Human", "Cleric").await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char).await;
+
+    for (who, c) in [("the GM", &mut gm), ("the bystander", &mut b)] {
+        let seed = c
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::AlignmentUpdate { .. })
+            })
+            .await;
+        assert!(
+            matches!(seed, Some(ServerWorldMsg::AlignmentUpdate { score }) if (score - 400.0).abs() < 1e-3),
+            "{who}: a Cleric is seeded at 400 and told so on entering, got {seed:?}"
+        );
+    }
+
+    // 40 HP. The GM Smites three times first (21 at least), the bystander
+    // once (7, or 14 on a crit), the GM finishes it: the GM is the top
+    // damager whatever the crits, so the kill and its alignment are theirs.
+    gm.send_dev_spawn("Gnoll Raider", 3, 40.0, 0, 0.0, 0.0);
+    let mob = match gm
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, pos, .. } if mob_name == "Gnoll Raider" && pos.x.abs() < 6.0 && pos.z.abs() < 6.0)
+        })
+        .await
+    {
+        Some(ServerWorldMsg::EnemySpawn { id, .. }) => id,
+        other => panic!("the gnoll spawns: {other:?}"),
+    };
+    let seen = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { id, .. } if *id == mob)
+        })
+        .await;
+    assert!(seen.is_some(), "the bystander sees the gnoll");
+    for i in 0..3 {
+        gm.send_cast_spell("Smite", Some(mob));
+        let hit = gm
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
+                    if *target == mob && *attacker == gm_char as u64)
+            })
+            .await;
+        assert!(hit.is_some(), "the GM's Smite {i} lands");
+        a_breath_for_two(&mut gm, &mut b).await;
+    }
+    b.send_cast_spell("Smite", Some(mob));
+    let hit = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
+                if *target == mob && *attacker == b_char as u64)
+        })
+        .await;
+    assert!(hit.is_some(), "the bystander's Smite lands, which puts them on the hate list");
+    let mut died = None;
+    for _ in 0..4 {
+        gm.send_cast_spell("Smite", Some(mob));
+        died = gm
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::EntityDied { id } if *id == mob)
+            })
+            .await;
+        if died.is_some() {
+            break;
+        }
+        a_breath_for_two(&mut gm, &mut b).await;
+    }
+    assert!(died.is_some(), "the GM's Smites kill it");
+
+    let gm_msgs = gm.collect_for(Duration::from_secs(2)).await;
+    let b_msgs = b.collect_for(Duration::from_secs(2)).await;
+    for (who, msgs) in [("the GM", &gm_msgs), ("the bystander", &b_msgs)] {
+        assert_eq!(
+            last_standing(msgs, "gnoll_raiders"),
+            Some((-7.0, APPREHENSIVE)),
+            "{who}: 4 + level 3 off the gnolls; got {:?}",
+            faction_updates(msgs)
+        );
+        assert_eq!(last_standing(msgs, "greyveil_town"), Some((3.5, INDIFFERENT)), "{who}: half to the town");
+        assert_eq!(last_standing(msgs, "greyveil_watch"), Some((3.5, INDIFFERENT)), "{who}: half to the Watch");
+        let lines = system_lines(msgs);
+        for want in [
+            "Your faction standing with The Gnoll Raiders has gotten worse.",
+            "Your faction standing with The Folk of Greyveil has gotten better.",
+            "Your faction standing with The Greyveil Watch has gotten better.",
+        ] {
+            assert!(lines.iter().any(|l| l == want), "{who}: missing {want:?} in {lines:?}");
+        }
+    }
+    let gm_scores = alignment_scores(&gm_msgs);
+    assert!(
+        gm_scores.iter().any(|s| (s - 408.0).abs() < 1e-3),
+        "the killer's alignment: 400 + 10 x (1 - 400/2000) = 408, got {gm_scores:?}"
+    );
+    assert!(
+        alignment_scores(&b_msgs).is_empty(),
+        "the bystander did not kill, so no alignment moves: {:?}",
+        alignment_scores(&b_msgs)
+    );
+}
+
+/// A quest turn-in pays its explicit hits and its alignment delta, and an
+/// NPC whose faction has been pushed down refuses as EQ's did. A GM Cleric
+/// takes wolf_threat, kills five Grey Wolves (wildlife: a 5-point hit to
+/// wildlife alone, nothing to anyone else, alignment unmoved by a neutral
+/// kill), turns in at Aldric: the Watch +25, the town +10, alignment 400 to
+/// 416. Then the GM slider on the town's standing: at -50 (Apprehensive)
+/// Brom has nothing to say (rat_infestation refused at accept) but still
+/// sells; at -200 (Dubious) he will not deal; the -200 survives a relog; at
+/// 0 he sells again. Fails on the previous server at the first FactionUpdate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quest_turn_in_pays_its_hits_and_a_shunned_npc_refuses() {
+    const POTION_NAME: &str = "Minor Healing Potion";
+    let h = start_both().await;
+    let (session, char_id, _stale) =
+        provision_client(&h.auth_url, "questfac", "Questfac", "Human", "Cleric").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "questfac", true).await.expect("set is_gm");
+    // Level 20 for the mana of five Smites; a purse for the merchant.
+    set_char_level(&h.db_url, char_id, 20).await;
+    sqlx::query("UPDATE characters SET copper = 100000 WHERE id = ?1")
+        .bind(char_id)
+        .execute(&pool)
+        .await
+        .expect("seed coin");
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    let _ = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+        })
+        .await
+        .expect("in the world");
+
+    a.send_accept_quest("wolf_threat");
+    for i in 0..5 {
+        a.send_dev_spawn("Grey Wolf", 1, 1.0, 0, 0.0, 0.0);
+        let mob = match a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::EnemySpawn { mob_name, pos, .. } if mob_name == "Grey Wolf" && pos.x.abs() < 6.0 && pos.z.abs() < 6.0)
+            })
+            .await
+        {
+            Some(ServerWorldMsg::EnemySpawn { id, .. }) => id,
+            other => panic!("wolf {i} spawns: {other:?}"),
+        };
+        a.send_cast_spell("Smite", Some(mob));
+        let died = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::EntityDied { id } if *id == mob)
+            })
+            .await;
+        assert!(died.is_some(), "wolf {i} dies to one Smite");
+        a_breath(&mut a).await;
+    }
+    // The five kills' own hits: wildlife alone, 5 a kill, and no alignment.
+    let after_kills = a.collect_for(Duration::from_millis(500)).await;
+    assert_eq!(
+        last_standing(&after_kills, "wildlife"),
+        Some((-25.0, APPREHENSIVE)),
+        "five wolves at 4 + 1 each, and under zero is Apprehensive: {:?}",
+        faction_updates(&after_kills)
+    );
+    assert!(
+        faction_updates(&after_kills).iter().all(|(id, _, _)| id == "wildlife"),
+        "wildlife has no enemies, so nobody else moves: {:?}",
+        faction_updates(&after_kills)
+    );
+
+    a.send_complete_quest("wolf_threat");
+    let msgs = a.collect_for(Duration::from_secs(2)).await;
+    assert!(
+        msgs.iter().any(|m| matches!(m, ServerWorldMsg::QuestCompleted { quest_id } if quest_id == "wolf_threat")),
+        "the turn-in lands: {msgs:?}"
+    );
+    assert_eq!(last_standing(&msgs, "greyveil_watch"), Some((25.0, INDIFFERENT)), "{:?}", faction_updates(&msgs));
+    assert_eq!(last_standing(&msgs, "greyveil_town"), Some((10.0, INDIFFERENT)));
+    let scores = alignment_scores(&msgs);
+    assert!(
+        scores.iter().any(|s| (s - 416.0).abs() < 1e-3),
+        "400 + 20 x 0.8 from the quest, nothing from five neutral kills: {scores:?}"
+    );
+
+    // Apprehensive: the quest giver has nothing to say, the merchant still sells.
+    a.send_dev_set_faction("greyveil_town", -50.0);
+    let set = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::FactionUpdate { faction_id, .. } if faction_id == "greyveil_town")
+        })
+        .await;
+    assert!(
+        matches!(set, Some(ServerWorldMsg::FactionUpdate { standing, level, .. }) if standing == -50.0 && level == APPREHENSIVE),
+        "{set:?}"
+    );
+    a.send_accept_quest("rat_infestation");
+    let rejected = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::QuestRejected { quest_id, .. } if quest_id == "rat_infestation")
+        })
+        .await;
+    match rejected {
+        Some(ServerWorldMsg::QuestRejected { reason, rollback, .. }) => {
+            assert_eq!(reason, "Brom has nothing to say to you.");
+            assert!(rollback, "an accept-phase refusal rolls the journal back");
+        }
+        other => panic!("Brom at Apprehensive refuses the quest: {other:?}"),
+    }
+    a.send_buy_item(0, POTION_NAME, 1);
+    let bought = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { .. })
+        })
+        .await;
+    assert!(bought.is_some(), "at Apprehensive the merchant still sells");
+
+    // Dubious: he will not deal.
+    a.send_dev_set_faction("greyveil_town", -200.0);
+    let set = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::FactionUpdate { faction_id, standing, .. }
+                if faction_id == "greyveil_town" && *standing == -200.0)
+        })
+        .await;
+    assert!(matches!(set, Some(ServerWorldMsg::FactionUpdate { level, .. }) if level == DUBIOUS), "{set:?}");
+    a.send_buy_item(0, POTION_NAME, 1);
+    let msgs = a.collect_for(Duration::from_millis(1500)).await;
+    assert!(
+        !msgs.iter().any(|m| matches!(m, ServerWorldMsg::InventoryDelta { .. })),
+        "at Dubious no sale: {msgs:?}"
+    );
+    let lines = system_lines(&msgs);
+    assert!(
+        lines.iter().any(|l| l == "Brom will not deal with you."),
+        "the refusal names the merchant: {lines:?}"
+    );
+
+    // The standing persists: leave, come back, and the snapshot carries it.
+    a.send_disconnect();
+    a.pump_for(Duration::from_millis(500)).await;
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    let snap = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::FactionUpdate { faction_id, .. } if faction_id == "greyveil_town")
+        })
+        .await;
+    assert!(
+        matches!(snap, Some(ServerWorldMsg::FactionUpdate { standing, .. }) if standing == -200.0),
+        "the town's -200 survives a relog: {snap:?}"
+    );
+    a.send_dev_set_faction("greyveil_town", 0.0);
+    let _ = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::FactionUpdate { faction_id, standing, .. }
+                if faction_id == "greyveil_town" && *standing == 0.0)
+        })
+        .await
+        .expect("back to Indifferent");
+    a.send_buy_item(0, POTION_NAME, 1);
+    let bought = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { .. })
+        })
+        .await;
+    assert!(bought.is_some(), "Indifferent again, the merchant sells");
+}
+
+/// The exploit lens on the GM slider, and the consider line. A plain account's
+/// DevSetFaction is a silent no-op (nothing moves, nothing is said: a reply
+/// would be an oracle for dev commands). Consider answers for an NPC by id
+/// with EQ's faction phrase, for a mob with the faction phrase and the level
+/// phrase (a level 10 Gnoll Brute to a level 1 is red), and with one line for
+/// anything else: an unknown id and a player id get the same words. The GM
+/// at Kindly with the town is kindly considered by Brom.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plain_account_cannot_set_faction_and_a_consider_names_no_standing() {
+    if std::env::var("PD_DEV_CMDS").as_deref() == Ok("1") {
+        eprintln!("skipping: PD_DEV_CMDS=1 makes every connection dev");
+        return;
+    }
+    let h = start_both().await;
+    let (gm_session, gm_char, _stale) =
+        provision_client(&h.auth_url, "congm", "Congm", "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "congm", true).await.expect("set is_gm");
+    let gm_token = request_world_token(&h.auth_url, &gm_session, gm_char).await;
+    let mut gm = WorldClient::start(gm_token, &gm_session, gm_char).await;
+    let (p_session, p_char, p_token) =
+        provision_client(&h.auth_url, "conplain", "Conplain", "Human", "Warrior").await;
+    let mut plain = WorldClient::start(p_token, &p_session, p_char).await;
+    let _ = plain
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+        })
+        .await
+        .expect("in the world");
+
+    plain.send_dev_set_faction("greyveil_town", 2000.0);
+    let msgs = plain.collect_for(Duration::from_secs(1)).await;
+    assert!(faction_updates(&msgs).is_empty(), "a plain account's slider moves nothing: {msgs:?}");
+    assert!(
+        !system_lines(&msgs).iter().any(|l| l.contains("standing")),
+        "and is told nothing: {:?}",
+        system_lines(&msgs)
+    );
+
+    let con = |c: &mut WorldClient, npc: Option<&str>, target: Option<u64>| {
+        c.send_consider(npc, target);
+    };
+    con(&mut plain, Some("brom"), None);
+    let line = plain
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("Brom"))
+        })
+        .await;
+    assert!(
+        matches!(&line, Some(ServerWorldMsg::ChatMessage { text, .. }) if text == "Brom regards you indifferently."),
+        "{line:?}"
+    );
+    for (what, npc, target) in [("an unknown id", Some("nobody"), None), ("a player id", None, Some(gm_char as u64))] {
+        con(&mut plain, npc, target);
+        let line = plain
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+                matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("consider"))
+            })
+            .await;
+        assert!(
+            matches!(&line, Some(ServerWorldMsg::ChatMessage { text, .. }) if text == "You cannot consider that."),
+            "{what}: {line:?}"
+        );
+    }
+
+    gm.send_dev_spawn("Gnoll Brute", 10, 100.0, 0, 0.0, 0.0);
+    let mob = match gm
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, pos, .. } if mob_name == "Gnoll Brute" && pos.x.abs() < 6.0 && pos.z.abs() < 6.0)
+        })
+        .await
+    {
+        Some(ServerWorldMsg::EnemySpawn { id, .. }) => id,
+        other => panic!("the brute spawns: {other:?}"),
+    };
+    let _ = plain
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { id, .. } if *id == mob)
+        })
+        .await
+        .expect("the plain account sees the brute");
+    con(&mut plain, None, Some(mob));
+    let line = plain
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("Gnoll Brute"))
+        })
+        .await;
+    assert!(
+        matches!(&line, Some(ServerWorldMsg::ChatMessage { text, .. })
+            if text == "Gnoll Brute regards you indifferently. What would you like your tombstone to say?"),
+        "{line:?}"
+    );
+
+    gm.send_dev_set_faction("greyveil_town", 600.0);
+    let set = gm
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::FactionUpdate { faction_id, .. } if faction_id == "greyveil_town")
+        })
+        .await;
+    assert!(
+        matches!(set, Some(ServerWorldMsg::FactionUpdate { standing, level, .. }) if standing == 600.0 && level == KINDLY),
+        "{set:?}"
+    );
+    con(&mut gm, Some("brom"), None);
+    let line = gm
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("Brom"))
+        })
+        .await;
+    assert!(
+        matches!(&line, Some(ServerWorldMsg::ChatMessage { text, .. }) if text == "Brom kindly considers you."),
+        "{line:?}"
+    );
+}
+
+/// The prestige gate is the server's: a Paladin driven to Evil casts as a
+/// Paladin_Fallen. Seeded at -1600 (the server has nowhere else to set it but
+/// the row), told so on entering, Death's Embrace (the Fallen kit) lands for
+/// its 80 and Righteous Fire (the Paladin's) is refused as not the class's.
+/// Both kits sit on the bar; the server decides. Fails on the previous
+/// server, which gated on the plain class and knew no Fallen spells.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_paladin_at_evil_casts_the_fallen_kit_and_not_the_paladins() {
+    let h = start_both().await;
+    let (session, char_id, _stale) =
+        provision_client(&h.auth_url, "fallen", "Fallen", "Human", "Paladin").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "fallen", true).await.expect("set is_gm");
+    set_char_level(&h.db_url, char_id, 20).await;
+    sqlx::query("UPDATE characters SET alignment_score = -1600.0, alignment_seeded = 1 WHERE id = ?1")
+        .bind(char_id)
+        .execute(&pool)
+        .await
+        .expect("seed the fall");
+    let gems: Vec<(i32, String)> = world::class_spell_names("Paladin")
+        .into_iter()
+        .chain(world::class_spell_names("Paladin_Fallen"))
+        .enumerate()
+        .map(|(i, n)| (i as i32, n))
+        .collect();
+    db::save_spell_gems(&pool, char_id, &gems, true).await.expect("both kits on the bar");
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    let seed = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::AlignmentUpdate { .. })
+        })
+        .await;
+    assert!(
+        matches!(seed, Some(ServerWorldMsg::AlignmentUpdate { score }) if (score + 1600.0).abs() < 1e-3),
+        "told the stored score on entering: {seed:?}"
+    );
+
+    a.send_dev_spawn("Practice Dummy", 1, 500.0, 0, 0.0, 0.0);
+    let mob = match a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, pos, .. } if mob_name == "Practice Dummy" && pos.x.abs() < 6.0 && pos.z.abs() < 6.0)
+        })
+        .await
+    {
+        Some(ServerWorldMsg::EnemySpawn { id, .. }) => id,
+        other => panic!("the dummy spawns: {other:?}"),
+    };
+    a.send_cast_spell("Death's Embrace", Some(mob));
+    let hit = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == mob)
+        })
+        .await;
+    match hit {
+        Some(ServerWorldMsg::Hit { amount, .. }) => assert!(amount >= 80, "the Fallen nuke's 80: {amount}"),
+        other => panic!("a Fallen Paladin casts Death's Embrace: {other:?}"),
+    }
+    a.pump_alive_for(Duration::from_millis(2200)).await; // the global cooldown
+    a.send_cast_spell("Righteous Fire", Some(mob));
+    let fail = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == char_id as u64)
+        })
+        .await;
+    match fail {
+        Some(ServerWorldMsg::CastFail { reason, .. }) => {
+            assert_eq!(reason, "Your class cannot cast that.", "the Paladin's own kit is lost to the Fallen")
+        }
+        other => panic!("Righteous Fire is refused: {other:?}"),
+    }
+}
+
+/// The off-side penalty is the server's: a Paladin at Neutral casts at 0.7
+/// (the client's old rule, kept by the user). Righteous Fire lists 7; a
+/// non-crit hit lands for 4 (7 x 0.7 truncated). A crit is retried after the
+/// cooldown. Fails on the previous server at 7.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_neutral_paladin_casts_at_seventy_percent() {
+    let h = start_both().await;
+    let (session, char_id, _stale) =
+        provision_client(&h.auth_url, "lukewarm", "Lukewarm", "Human", "Paladin").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "lukewarm", true).await.expect("set is_gm");
+    set_char_level(&h.db_url, char_id, 20).await;
+    sqlx::query("UPDATE characters SET alignment_score = 0.0, alignment_seeded = 1 WHERE id = ?1")
+        .bind(char_id)
+        .execute(&pool)
+        .await
+        .expect("seed neutral");
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.send_dev_spawn("Practice Dummy", 1, 500.0, 0, 0.0, 0.0);
+    let mob = match a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, pos, .. } if mob_name == "Practice Dummy" && pos.x.abs() < 6.0 && pos.z.abs() < 6.0)
+        })
+        .await
+    {
+        Some(ServerWorldMsg::EnemySpawn { id, .. }) => id,
+        other => panic!("the dummy spawns: {other:?}"),
+    };
+    let mut landed: Option<i32> = None;
+    for _ in 0..6 {
+        a.send_cast_spell("Righteous Fire", Some(mob));
+        let hit = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::Hit { target, .. } if *target == mob)
+            })
+            .await;
+        match hit {
+            Some(ServerWorldMsg::Hit { amount, crit: false, .. }) => {
+                landed = Some(amount);
+                break;
+            }
+            Some(ServerWorldMsg::Hit { crit: true, .. }) => {
+                // Righteous Fire has a 4 s cooldown of its own.
+                a.pump_alive_for(Duration::from_millis(4200)).await;
+            }
+            other => panic!("a Neutral Paladin still casts the Paladin's kit: {other:?}"),
+        }
+    }
+    assert_eq!(landed, Some(4), "7 listed, x 0.7 at Neutral, truncated");
 }

@@ -69,6 +69,19 @@ pub struct MobTemplate {
     /// missing id simply behaves like an ordinary mob.
     #[serde(default)]
     pub named_id: Option<String>,
+    /// The faction this mob belongs to (`factions.toml`); a kill costs the
+    /// killer standing with it and pays half to its enemies. None means the
+    /// kill moves no standing at all (`world/factions.rs`).
+    #[serde(default)]
+    pub faction: Option<String>,
+    /// The mob's alignment tier for the killer's alignment delta
+    /// (`world/alignment.rs::kill_delta`): "undead", "bad", "evil", "good",
+    /// "exalted", "innocent" or "neutral" (the default, which moves nothing).
+    #[serde(default)]
+    pub alignment: Option<String>,
+    /// Optional override of the derived faction hit (4 + level, x3 named).
+    #[serde(default)]
+    pub faction_hit: Option<f32>,
 }
 
 /// One spawn-point definition. The `SpawnPoint` runtime type in
@@ -101,6 +114,18 @@ pub fn load_camps() -> Vec<CampSpawn> {
         }
     }
     out
+}
+
+/// The faction and alignment tier a camp template of `name` carries, for a
+/// dev spawn of the same mob (the Test Panel sends the display name), so a
+/// GM's test mob answers for its kills as the camp's does. None for a name
+/// no camp spawns.
+pub fn faction_of_camp_mob(name: &str) -> (Option<String>, Option<String>) {
+    load_camps()
+        .iter()
+        .find(|c| c.mob.name == name)
+        .map(|c| (c.mob.faction.clone(), c.mob.alignment.clone()))
+        .unwrap_or((None, None))
 }
 
 #[cfg(test)]

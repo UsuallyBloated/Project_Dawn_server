@@ -1968,3 +1968,96 @@ classes = ["Magician", "Cleric", "Shaman", "Druid"]
 class_min_levels = { Magician = 1, Shaman = 2, Cleric = 3, Druid = 10 }
 summon_item = "res://data/loot/items/conjured_water.tres"
 summon_max = 10
+
+# ── The prestige classes' spells (factions and alignment, 2026-10-23) ──
+# A Paladin driven to Evil casts as a Paladin_Fallen and a Shadow Knight
+# raised to Exalted as a Shadow Knight_Redeemed (`alignment::effective_class`,
+# the cast gate's class); these seven were client-only until the server
+# owned alignment. Numbers as the client had them; a Fallen or Redeemed
+# character is well past level 10, so the parity pass left them.
+
+[[spell]]
+name = "Death's Embrace"
+target_type = "ENEMY"
+damage_type = "SHADOW"
+base_damage = 80.0
+heal_amount = 0.0
+mana_cost = 40.0
+cast_time = 0.0
+cooldown = 8.0
+min_level = 1
+classes = ["Paladin_Fallen"]
+
+[[spell]]
+name = "Blood Price"
+target_type = "SELF"
+damage_type = "SHADOW"
+base_damage = 0.0
+heal_amount = 35.0
+hp_cost = 15.0
+mana_cost = 20.0
+cast_time = 0.5
+cooldown = 5.0
+min_level = 1
+classes = ["Paladin_Fallen"]
+
+[[spell]]
+name = "Shadow Flame"
+target_type = "ENEMY"
+damage_type = "SHADOW"
+base_damage = 55.0
+heal_amount = 0.0
+mana_cost = 25.0
+cast_time = 0.0
+cooldown = 4.0
+min_level = 1
+classes = ["Paladin_Fallen"]
+
+[[spell]]
+name = "Condemnation"
+target_type = "ENEMY"
+damage_type = "SHADOW"
+base_damage = 85.0
+heal_amount = 0.0
+mana_cost = 40.0
+cast_time = 2.0
+cooldown = 10.0
+min_level = 1
+classes = ["Paladin_Fallen"]
+
+[[spell]]
+name = "Sacrificial Mend"
+target_type = "SELF"
+damage_type = "HOLY"
+base_damage = 0.0
+heal_amount = 35.0
+hp_cost = 15.0
+mana_cost = 20.0
+cast_time = 0.5
+cooldown = 5.0
+min_level = 1
+classes = ["Shadow Knight_Redeemed"]
+
+[[spell]]
+name = "Radiant Bolt"
+target_type = "ENEMY"
+damage_type = "HOLY"
+base_damage = 38.0
+heal_amount = 0.0
+mana_cost = 15.0
+cast_time = 0.0
+cooldown = 3.0
+min_level = 1
+classes = ["Shadow Knight_Redeemed"]
+
+[[spell]]
+name = "Holy Mantle"
+target_type = "ENEMY"
+damage_type = "HOLY"
+base_damage = 55.0
+heal_amount = 0.0
+mana_cost = 35.0
+cast_time = 1.5
+cooldown = 9.0
+min_level = 1
+classes = ["Shadow Knight_Redeemed"]

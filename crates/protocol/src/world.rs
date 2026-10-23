@@ -146,6 +146,9 @@ use serde::{Deserialize, Serialize};
 /// sent before, carries a `skill_name` now (the server resolves active
 /// skills by name, as spells), and `SkillFail` is appended after `SpellGems`.
 /// `StopSong` is appended after `SeedSpellGems` (the Bard song rework).
+/// Factions and alignment (2026-10-23) append `Consider` and `DevSetFaction`
+/// after `StopSong`, and `FactionUpdate` and `AlignmentUpdate` after
+/// `SkillFail`.
 pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3238; // "PD_W0028"
 
 pub type EntityId = u64;
@@ -1032,6 +1035,22 @@ pub enum ClientWorldMsg {
     /// it to end (re-clicking the song, `/stopsong`) says so instantly instead
     /// of singing it again. No-op when nothing is sung.
     StopSong,
+    /// Consider a target (factions, 2026-10-23): an NPC by its `npcs.toml`
+    /// id or display name, or a mob by entity id. The server answers with EQ's con line
+    /// (the faction phrase from this character's standing with the target's
+    /// faction, then the level phrase) on the System channel. Only the
+    /// phrase travels, never a standing.
+    Consider {
+        npc_id: Option<String>,
+        target_id: Option<EntityId>,
+    },
+    /// Dev-gated (GM only, audited like `DevSpawnMob`): set this character's
+    /// OWN standing with one faction to an absolute value, clamped. The GM
+    /// faction panel's slider. A plain account's request is ignored silently.
+    DevSetFaction {
+        faction_id: String,
+        standing: f32,
+    },
 }
 
 // ─── Server → Client ─────────────────────────────────────────────────────
@@ -1641,6 +1660,23 @@ pub enum ServerWorldMsg {
     SkillFail {
         skill_name: String,
         reason: String,
+    },
+    /// One faction standing, to its owner only (factions, 2026-10-23): on
+    /// entering the world (one per faction the character has moved), after
+    /// every change, and after a `DevSetFaction`. `standing` is the number
+    /// the faction's NPCs see; `level` its con level, 0 Scowls to 8 Ally.
+    FactionUpdate {
+        faction_id: String,
+        name: String,
+        standing: f32,
+        level: u8,
+    },
+    /// The character's alignment score as the server holds it, to its owner
+    /// only: on entering the world and whenever it has moved a hundredth of
+    /// a point or crossed a tier since the last send (a spell's delta is far
+    /// under that, so a cast alone fans nothing).
+    AlignmentUpdate {
+        score: f32,
     },
 }
 

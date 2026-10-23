@@ -2362,6 +2362,8 @@ mod tests {
         let spawn = CharacterSpawn {
             hunger: 14400.0,
             thirst: 14400.0,
+            alignment: None,
+            factions: Vec::new(),
             char_id: 1, account_id: 1,
             name: "Test".into(), race: "Human".into(), class: "Warrior".into(),
             level: 1, xp: 0, xp_to_next: 100,

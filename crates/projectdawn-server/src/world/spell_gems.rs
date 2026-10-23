@@ -43,7 +43,10 @@ pub fn check_gem(conn: &PerConnection, gem: i32, spell_name: &str) -> Result<&'s
     let Some(spell) = spells::lookup(spell_name) else {
         return Err("That spell isn't known here yet.");
     };
-    if !spell.classes.iter().any(|c| c == &conn.class) || conn.level < spell.required_level(&conn.class) {
+    // The class the character casts as: a Fallen Paladin memorizes the
+    // Fallen kit and not the Paladin's (alignment.rs).
+    let class = conn.effective_class();
+    if !spell.classes.iter().any(|c| c == &class) || conn.level < spell.required_level(&class) {
         return Err("You cannot memorize that spell.");
     }
     Ok(spell)
@@ -83,6 +86,8 @@ mod tests {
         let spawn = crate::db::CharacterSpawn {
             hunger: 14400.0,
             thirst: 14400.0,
+            alignment: None,
+            factions: Vec::new(),
             char_id: 1, account_id: 1,
             name: "Gemmer".into(), race: "Human".into(), class: class.into(),
             level, xp: 0, xp_to_next: 100,

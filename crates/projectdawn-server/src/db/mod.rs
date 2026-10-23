@@ -353,13 +353,15 @@ pub async fn create_character(
             base_constitution,
             base_max_hp, base_max_mp, base_max_stamina,
             hp, mp, stamina,
-            bind_x, bind_y, bind_z
+            bind_x, bind_y, bind_z,
+            alignment_score, alignment_seeded
          ) VALUES (
             ?1, ?2, ?3, ?4, 1, ?5,
             ?6, ?7, ?8, ?9, ?10, ?11, ?12,
             ?13, ?14, ?15,
             ?16, ?17, ?18,
-            ?19, ?20, ?21
+            ?19, ?20, ?21,
+            ?22, 1
          )",
     )
     .bind(account_id)
@@ -383,6 +385,9 @@ pub async fn create_character(
     .bind(birth_bind.x)
     .bind(birth_bind.y)
     .bind(birth_bind.z)
+    // Alignment is the server's from birth (migration 0016): the class's
+    // starting score, as the client's creation screen used to seed it.
+    .bind(crate::world::alignment::starting_score(class))
     .execute(pool)
     .await;
 
@@ -668,6 +673,13 @@ pub struct CharacterSpawn {
     /// Food and water: seconds of fullness left (`world/hunger.rs`).
     pub hunger: f32,
     pub thirst: f32,
+    /// The alignment score the server holds; None until the server has
+    /// seeded it (migration 0016's `alignment_seeded`), after which the
+    /// first checkpoint writes the class's starting score.
+    pub alignment: Option<f32>,
+    /// Faction standings by faction id (`character_factions`); a faction with
+    /// no row sits at its starting value (`world/factions.rs`).
+    pub factions: Vec<(String, f32)>,
     /// Quest ids this character has already turned in (quests pay once, ever).
     /// Loaded into `PerConnection.completed_quests`; the tick loop consults it
     /// before granting a `CompleteQuest` reward.
@@ -683,6 +695,8 @@ pub struct CharacterSpawn {
 struct SpawnRow {
     hunger: f32,
     thirst: f32,
+    alignment_score: f32,
+    alignment_seeded: i32,
     id: i64,
     account_id: i64,
     name: String,
@@ -737,7 +751,8 @@ pub async fn load_character(
                 bank_platinum, bank_gold, bank_silver, bank_copper,
                 zone, pos_x, pos_y, pos_z, yaw,
                 bind_zone, bind_x, bind_y, bind_z,
-                hunger, thirst
+                hunger, thirst,
+                CAST(alignment_score AS REAL) AS alignment_score, alignment_seeded
          FROM characters
          WHERE id = ?1 AND deleted_at IS NULL",
     )
@@ -799,6 +814,8 @@ pub async fn load_character(
         })
         .collect();
 
+    let factions = load_factions(pool, char_id).await?;
+
     Ok(CharacterSpawn {
         char_id: row.id,
         account_id: row.account_id,
@@ -820,6 +837,8 @@ pub async fn load_character(
         max_stamina: computed.max_stamina,
         hunger: row.hunger,
         thirst: row.thirst,
+        alignment: if row.alignment_seeded != 0 { Some(row.alignment_score) } else { None },
+        factions,
         hp: row.hp.min(computed.max_hp),
         mp: row.mp.min(computed.max_mp),
         stamina: row.stamina.min(computed.max_stamina),
@@ -1000,11 +1019,12 @@ pub async fn checkpoint_resources(
     level: i32,
     hunger: f32,
     thirst: f32,
+    alignment: f32,
 ) -> AuthResult<()> {
     sqlx::query(
         "UPDATE characters
          SET hp = ?1, mp = ?2, stamina = ?3, xp = ?4, xp_to_next = ?5,
-             hunger = ?8, thirst = ?9,
+             hunger = ?8, thirst = ?9, alignment_score = ?10, alignment_seeded = 1,
              level = ?6
          WHERE id = ?7 AND deleted_at IS NULL",
     )
@@ -1017,6 +1037,7 @@ pub async fn checkpoint_resources(
     .bind(char_id)
     .bind(hunger)
     .bind(thirst)
+    .bind(alignment)
     .execute(pool)
     .await?;
     Ok(())
@@ -1739,6 +1760,53 @@ pub async fn save_skills(
         .bind(&row.kind)
         .bind(&row.key)
         .bind(row.score)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Faction standings (migration 0016): one row per faction the character has
+/// moved standing with. Read with the character; a faction with no row sits
+/// at its starting value for the character's race and class.
+pub async fn load_factions(
+    pool: &SqlitePool,
+    char_id: i64,
+) -> AuthResult<Vec<(String, f32)>> {
+    let rows: Vec<(String, f32)> = sqlx::query_as(
+        "SELECT faction_id, standing
+         FROM character_factions
+         WHERE char_id = ?1
+         ORDER BY faction_id",
+    )
+    .bind(char_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Persist every standing for `char_id`: atomic delete + insert, the
+/// `save_skills` shape (a handful of rows per character). Called on the same
+/// checkpoint + disconnect cadence.
+pub async fn save_factions(
+    pool: &SqlitePool,
+    char_id: i64,
+    rows: &[(String, f32)],
+) -> AuthResult<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM character_factions WHERE char_id = ?1")
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await?;
+    for (faction_id, standing) in rows {
+        sqlx::query(
+            "INSERT INTO character_factions (char_id, faction_id, standing)
+             VALUES (?1, ?2, ?3)",
+        )
+        .bind(char_id)
+        .bind(faction_id)
+        .bind(standing)
         .execute(&mut *tx)
         .await?;
     }

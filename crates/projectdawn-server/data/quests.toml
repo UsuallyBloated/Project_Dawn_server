@@ -30,12 +30,16 @@ reward_tier = "standard"
 objectives = [ { kind = "kill", target = "Wolf", count = 5 } ]
 item_rewards = [ "res://data/loot/items/tarnished_silver_ring.tres" ]
 turn_in_npc = "aldric"
+faction_hits = { greyveil_watch = 25.0, greyveil_town = 10.0 }
+alignment_delta = 20.0
 [[quest]]
 id = "rat_infestation"
 level_req = 1
 reward_tier = "trivial"
 objectives = [ { kind = "kill", target = "Rat", count = 8 } ]
 turn_in_npc = "brom"
+faction_hits = { greyveil_town = 25.0, greyveil_watch = 10.0 }
+alignment_delta = 20.0
 [[quest]]
 id = "gnoll_raiders"
 level_req = 3
@@ -43,6 +47,8 @@ reward_tier = "standard"
 objectives = [ { kind = "kill", target = "Gnoll", count = 8 } ]
 item_rewards = [ "res://data/loot/items/scouts_leather_boots.tres" ]
 turn_in_npc = "brom"
+faction_hits = { greyveil_town = 25.0, greyveil_watch = 15.0 }
+alignment_delta = 25.0
 [[quest]]
 id = "rotfang_hunt"
 level_req = 5
@@ -55,6 +61,8 @@ item_rewards = [ "res://data/loot/items/hunters_medal.tres" ]
 # also shows a "Report back to Captain Aldren" flavor line; server-side the
 # five wolf kills are the whole requirement.
 turn_in_npc = "aldric"
+faction_hits = { greyveil_watch = 30.0, greyveil_town = 15.0 }
+alignment_delta = 25.0
 [[quest]]
 id = "test_q1"
 level_req = 1
@@ -75,6 +83,8 @@ reward_tier = "standard"
 objectives = [ { kind = "kill", target = "Skeleton", count = 8 } ]
 item_rewards = [ "res://data/loot/items/leather_cap.tres" ]
 turn_in_npc = "aldric"
+faction_hits = { greyveil_watch = 30.0, greyveil_town = 15.0 }
+alignment_delta = 30.0
 
 [[quest]]
 id = "road_toll"
@@ -83,6 +93,8 @@ reward_tier = "standard"
 objectives = [ { kind = "kill", target = "Bandit", count = 6 } ]
 item_rewards = [ "res://data/loot/items/copper_chain_coif.tres" ]
 turn_in_npc = "brom"
+faction_hits = { greyveil_town = 30.0, greyveil_watch = 15.0 }
+alignment_delta = 25.0
 
 [[quest]]
 id = "silk_harvest"
@@ -91,6 +103,8 @@ reward_tier = "hard"
 objectives = [ { kind = "kill", target = "Spider", count = 10 } ]
 item_rewards = [ "res://data/loot/items/leather_vest.tres" ]
 turn_in_npc = "brom"
+faction_hits = { greyveil_town = 25.0 }
+alignment_delta = 20.0
 
 [[quest]]
 id = "champions_crypt"
@@ -99,6 +113,8 @@ reward_tier = "hard"
 objectives = [ { kind = "kill", target = "Skeleton Champion", count = 6 } ]
 item_rewards = [ "res://data/loot/items/iron_chain_leggings.tres" ]
 turn_in_npc = "aldric"
+faction_hits = { greyveil_watch = 35.0, greyveil_town = 15.0 }
+alignment_delta = 35.0
 
 [[quest]]
 id = "the_undying"
@@ -107,3 +123,5 @@ reward_tier = "named"
 objectives = [ { kind = "kill", target = "The Undying", count = 1 } ]
 item_rewards = [ "res://data/loot/items/flamebrand.tres" ]
 turn_in_npc = "aldric"
+faction_hits = { greyveil_watch = 50.0, greyveil_town = 25.0 }
+alignment_delta = 40.0

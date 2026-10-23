@@ -50,6 +50,7 @@ pub async fn checkpoint_dirty(pool: &SqlitePool, conns: &mut [&mut PerConnection
                 conn.level,
                 conn.hunger_secs,
                 conn.thirst_secs,
+                conn.alignment,
             )
             .await
             {
@@ -146,6 +147,20 @@ pub async fn checkpoint_dirty(pool: &SqlitePool, conns: &mut [&mut PerConnection
                         char_id = conn.char_id,
                         error = %e,
                         "skill checkpoint failed; will retry next interval"
+                    );
+                }
+            }
+        }
+        // Faction standings moved by a kill or a quest since the last pass.
+        if conn.factions_dirty {
+            let rows = conn.faction_rows();
+            match db::save_factions(pool, conn.char_id, &rows).await {
+                Ok(()) => conn.factions_dirty = false,
+                Err(e) => {
+                    tracing::warn!(
+                        char_id = conn.char_id,
+                        error = %e,
+                        "faction checkpoint failed; will retry next interval"
                     );
                 }
             }

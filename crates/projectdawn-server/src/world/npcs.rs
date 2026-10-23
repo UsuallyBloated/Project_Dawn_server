@@ -32,6 +32,12 @@ pub struct Npc {
     pub name: String,
     pub kinds: Vec<String>,
     pub pos: [f32; 3],
+    /// The faction whose standing decides whether this NPC serves a player
+    /// (`factions.toml`): a vendor or banker refuses at Dubious or below, a
+    /// quest giver at Apprehensive or below. None means the NPC serves
+    /// everyone (the soul binder, by design).
+    #[serde(default)]
+    pub faction: Option<String>,
 }
 
 impl Npc {
@@ -62,6 +68,13 @@ fn table() -> &'static Vec<Npc> {
                     n.id
                 );
             }
+            if let Some(f) = n.faction.as_deref() {
+                assert!(
+                    super::factions::lookup(f).is_some(),
+                    "npcs.toml: unknown faction '{f}' on '{}'",
+                    n.id
+                );
+            }
         }
         parsed.npc
     })
@@ -71,6 +84,13 @@ pub fn lookup(id: &str) -> Option<&'static Npc> {
     table().iter().find(|n| n.id == id)
 }
 
+/// An NPC by its id or, failing that, its display name (case-insensitive):
+/// the client's NPC nodes carry the name and not the id, so a `Consider`
+/// names what the player sees.
+pub fn lookup_by_id_or_name(key: &str) -> Option<&'static Npc> {
+    lookup(key).or_else(|| table().iter().find(|n| n.name.eq_ignore_ascii_case(key)))
+}
+
 /// Is any NPC of `kind` within service range of `pos`? Returns the NPC so the
 /// caller can name it in logs.
 pub fn any_within_range(kind: &str, pos: Vec3f) -> Option<&'static Npc> {
@@ -78,6 +98,16 @@ pub fn any_within_range(kind: &str, pos: Vec3f) -> Option<&'static Npc> {
         .iter()
         .filter(|n| n.has_kind(kind))
         .find(|n| n.position().distance_to(pos) <= NPC_SERVICE_RANGE)
+}
+
+/// Every NPC of `kind` within service range of `pos`, for the faction gate
+/// (one vendor may refuse a character another serves).
+pub fn all_within_range(kind: &str, pos: Vec3f) -> Vec<&'static Npc> {
+    table()
+        .iter()
+        .filter(|n| n.has_kind(kind))
+        .filter(|n| n.position().distance_to(pos) <= NPC_SERVICE_RANGE)
+        .collect()
 }
 
 /// Is the specific NPC `id` within service range of `pos`? Used for quest

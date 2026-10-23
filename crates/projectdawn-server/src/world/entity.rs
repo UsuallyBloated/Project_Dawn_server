@@ -1251,6 +1251,9 @@ mod tests {
             melee_range: None,
             attack_interval: None,
             named_id: None,
+            faction: None,
+            alignment: None,
+            faction_hit: None,
         }
     }
 

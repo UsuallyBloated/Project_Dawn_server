@@ -412,6 +412,12 @@ pub enum Outcome {
         requester: ClientId,
         pos: super::connection::Vec3f,
     },
+    /// A `Consider` of a mob (factions, 2026-10-23): answered in the tick
+    /// loop, which holds the enemies map.
+    ConsiderIntent {
+        requester: ClientId,
+        target_id: protocol::world::EntityId,
+    },
     /// The spell bar changed (a memorize, a forget or the one-time seed): the
     /// tick loop writes it to `character_spell_gems`, where the pool is.
     SpellGemsChanged {
@@ -1088,6 +1094,10 @@ pub fn handle_message(
             // be recovered here. And it is strictly less trusting — the client
             // currently hands over six numbers the server takes at face value,
             // whereas a named mob is now defined entirely server-side.
+            // A dev spawn of a mob a camp also spawns carries the camp's
+            // faction and alignment, so a GM can test a kill's hits on a
+            // spawned mob; anything else moves no standing.
+            let (camp_faction, camp_alignment) = super::zones::faction_of_camp_mob(&name);
             let mob = match super::named::resolve_for_dev_spawn(&name) {
                 Some(n) => super::zones::MobTemplate {
                     // from_spawn applies the multipliers, so these are the
@@ -1105,6 +1115,9 @@ pub fn handle_message(
                     melee_range: None,
                     attack_interval: None,
                     named_id: Some(n.id.clone()),
+                    faction: camp_faction.clone(),
+                    alignment: camp_alignment.clone(),
+                    faction_hit: None,
                 },
                 None => super::zones::MobTemplate {
                     name,
@@ -1118,6 +1131,9 @@ pub fn handle_message(
                     melee_range: None,
                     attack_interval: None,
                     named_id: None,
+                    faction: camp_faction,
+                    alignment: camp_alignment,
+                    faction_hit: None,
                 },
             };
             let pos = super::connection::Vec3f {
@@ -1549,10 +1565,11 @@ pub fn handle_message(
                 send_skill_fail(server, client_id, &skill_name, "That skill isn't known here yet.");
                 return Outcome::Continue;
             };
-            // Alignment variants (Paladin_Fallen, Shadow Knight_Redeemed) fall
-            // here for everyone until alignment lives on the server.
-            if !skill.usable_by(&conn.class) {
-                tracing::info!(user = conn.char_id, skill = %skill.name, class = %conn.class,
+            // The class the character acts as: a Paladin at Evil uses the
+            // Fallen kit and loses the Paladin's (alignment.rs).
+            let acting_class = conn.effective_class();
+            if !skill.usable_by(&acting_class) {
+                tracing::info!(user = conn.char_id, skill = %skill.name, class = %acting_class,
                     "UseSkill rejected — class");
                 send_skill_fail(server, client_id, &skill.name, "You cannot use that skill.");
                 return Outcome::Continue;
@@ -1592,6 +1609,72 @@ pub fn handle_message(
                 send_system_line(server, client_id, &format!("You stop singing {song}."));
                 tracing::info!(singer = conn.char_id, %song, "song stopped");
             }
+            Outcome::Continue
+        }
+
+        // ── Factions and alignment (2026-10-23) ──
+        ClientWorldMsg::Consider { npc_id, target_id } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            // An NPC is static, so its con is answered here; a mob needs the
+            // enemies map and goes to the tick. Anything else (a player, a
+            // bag, an id that is nothing) gets one line, so a Consider is no
+            // oracle for what an id is.
+            if let Some(npc) = npc_id.as_deref().and_then(super::npcs::lookup_by_id_or_name) {
+                let level = conn.npc_faction_level(npc);
+                send_system_line(server, client_id, &super::factions::con_line(&npc.name, level));
+                return Outcome::Continue;
+            }
+            match target_id {
+                Some(id) if id >= protocol::world::ENEMY_ID_BASE => {
+                    Outcome::ConsiderIntent { requester: client_id, target_id: id }
+                }
+                _ => {
+                    send_system_line(server, client_id, "You cannot consider that.");
+                    Outcome::Continue
+                }
+            }
+        }
+
+        ClientWorldMsg::DevSetFaction { faction_id, standing } => {
+            // The GM faction panel's slider. Same gate and audit as
+            // DevSpawnMob: a plain account's request is ignored silently and
+            // writes nothing. Only the sender's OWN standing moves.
+            if !conn.in_world || !conn.can_use_dev_cmds() || !standing.is_finite() {
+                return Outcome::Continue;
+            }
+            let shown_id: String = faction_id.chars().take(40).collect();
+            let audit_args = format!("faction={shown_id:?} standing={standing:.0}");
+            if !dev_cmd_allowed(server, conn, client_id, now, "dev_set_faction", audit_args) {
+                return Outcome::Continue;
+            }
+            let Some(faction) = super::factions::lookup(&faction_id) else {
+                send_refusal(server, client_id, "No such faction.");
+                return Outcome::Continue;
+            };
+            // The slider names the standing the NPCs see; the personal part
+            // is what gets stored (the start modifier stays the table's).
+            let start = super::factions::start_modifier(faction, &conn.race, &conn.class) as f32;
+            let personal = (standing - start)
+                .clamp(-super::factions::STANDING_CAP, super::factions::STANDING_CAP);
+            conn.factions.insert(faction.id.clone(), personal);
+            conn.factions_dirty = true;
+            let shown = conn.faction_shown(faction);
+            let level = super::factions::level_for(shown);
+            send_faction_update(server, client_id, faction, shown);
+            send_system_line(
+                server,
+                client_id,
+                &format!("Your standing with {} is now {} ({}).", faction.name, shown as i32, level.name()),
+            );
+            tracing::info!(
+                char_id = conn.char_id,
+                faction = %faction.id,
+                standing = shown,
+                level = level.name(),
+                "GM set own faction standing"
+            );
             Outcome::Continue
         }
 
@@ -2499,6 +2582,118 @@ pub fn send_skill_fail(server: &mut RenetServer, recipient: ClientId, skill_name
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient, CHANNEL_SYSTEM, bytes);
     }
+}
+
+/// One faction standing to its owner (factions, 2026-10-23): the number the
+/// faction's NPCs see and its con level.
+pub fn send_faction_update(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    faction: &super::factions::Faction,
+    shown: f32,
+) {
+    let msg = ServerWorldMsg::FactionUpdate {
+        faction_id: faction.id.clone(),
+        name: faction.name.clone(),
+        standing: shown,
+        level: super::factions::level_for(shown).as_wire(),
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// Apply faction hits to a character (a kill's derived hits or a quest's
+/// explicit ones): each clamps, flips the dirty flag, is told with EQ's line
+/// and fanned as a `FactionUpdate`. A zero hit is skipped.
+pub fn apply_faction_hits(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    conn: &mut PerConnection,
+    hits: &[(String, f32)],
+) {
+    for (faction_id, delta) in hits {
+        if *delta == 0.0 || !delta.is_finite() {
+            continue;
+        }
+        let Some(faction) = super::factions::lookup(faction_id) else {
+            continue;
+        };
+        let entry = conn.factions.entry(faction.id.clone()).or_insert(0.0);
+        let applied = super::factions::apply_hit(entry, *delta);
+        let personal = *entry;
+        conn.factions_dirty = true;
+        let shown = conn.faction_shown(faction);
+        send_system_line(server, recipient, &super::factions::change_line(faction, applied, personal));
+        send_faction_update(server, recipient, faction, shown);
+        tracing::info!(
+            char_id = conn.char_id,
+            faction = %faction.id,
+            delta,
+            applied,
+            standing = shown,
+            level = super::factions::level_for(shown).name(),
+            "faction standing changed"
+        );
+    }
+}
+
+/// Every standing the character has moved, on entering the world, so the
+/// client follows the server's numbers from the first frame.
+pub fn send_factions_snapshot(server: &mut RenetServer, recipient: ClientId, conn: &PerConnection) {
+    let mut ids: Vec<&String> = conn.factions.keys().collect();
+    ids.sort();
+    for id in ids {
+        if let Some(faction) = super::factions::lookup(id) {
+            let shown = conn.faction_shown(faction);
+            send_faction_update(server, recipient, faction, shown);
+        }
+    }
+}
+
+/// Tell the owner their alignment when it is due: always when `force` (the
+/// enter-world send), otherwise once it has moved a hundredth of a point or
+/// crossed a tier since the last send (a spell's delta alone never fans one).
+pub fn send_alignment_if_due(server: &mut RenetServer, recipient: ClientId, conn: &mut PerConnection, force: bool) {
+    let due = match conn.alignment_sent {
+        None => true,
+        Some(sent) => {
+            force
+                || (conn.alignment - sent).abs() >= 0.01
+                || super::alignment::tier_for(sent) != super::alignment::tier_for(conn.alignment)
+        }
+    };
+    if !due {
+        return;
+    }
+    conn.alignment_sent = Some(conn.alignment);
+    let msg = ServerWorldMsg::AlignmentUpdate { score: conn.alignment };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// Move a character's alignment by `delta` through the momentum rule and
+/// tell them if it is due. A tier change is logged (it is what swaps a
+/// Paladin's or Shadow Knight's kit).
+pub fn move_alignment(server: &mut RenetServer, recipient: ClientId, conn: &mut PerConnection, delta: f32) {
+    if delta == 0.0 || !delta.is_finite() {
+        return;
+    }
+    let before = conn.alignment;
+    conn.alignment = super::alignment::apply(before, delta);
+    let tier_before = super::alignment::tier_for(before);
+    let tier_now = super::alignment::tier_for(conn.alignment);
+    if tier_before != tier_now {
+        tracing::info!(
+            char_id = conn.char_id,
+            from = tier_before.name(),
+            to = tier_now.name(),
+            score = conn.alignment,
+            "alignment tier changed"
+        );
+    }
+    send_alignment_if_due(server, recipient, conn, false);
 }
 
 pub fn fan_out_chat_message(

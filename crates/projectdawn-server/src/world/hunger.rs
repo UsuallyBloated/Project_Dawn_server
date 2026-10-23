@@ -293,6 +293,8 @@ mod tests {
             active_quests: Default::default(),
             hunger: FULLNESS_CAP_SECS,
             thirst: FULLNESS_CAP_SECS,
+            alignment: None,
+            factions: Vec::new(),
         }
     }
 

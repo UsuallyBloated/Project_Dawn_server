@@ -14,6 +14,7 @@
 //! the game .exe (track D will define the temp-file handoff).
 
 mod active_skills;
+pub mod alignment;
 mod aoi;
 mod buffs;
 mod songs;
@@ -24,6 +25,7 @@ mod connection;
 mod corpses;
 pub mod encumbrance;
 mod entity;
+pub mod factions;
 mod groups;
 mod handlers;
 pub mod hunger;

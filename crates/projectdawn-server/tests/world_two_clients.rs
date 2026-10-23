@@ -37,6 +37,10 @@ struct Harness {
     db_url: String,
     _world_addr: SocketAddr,
     _tmp: TempDir,
+    /// Send `true` to give the world a stop signal (as systemd's SIGTERM does).
+    shutdown: tokio::sync::watch::Sender<bool>,
+    /// The world task; it ends after a stop signal.
+    world: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
 }
 
 async fn start_both() -> Harness {
@@ -75,9 +79,11 @@ async fn start_both() -> Harness {
     let pool = db::open(&url).await.expect("open pool");
     db::migrate(&pool).await.expect("migrate");
 
-    let _world_handle = world::serve_with_socket(cfg.clone(), pool.clone(), world_socket)
-        .await
-        .expect("world serve_with_socket");
+    let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+    let world_handle =
+        world::serve_with_socket_until(cfg.clone(), pool.clone(), world_socket, shutdown_rx)
+            .await
+            .expect("world serve_with_socket_until");
     let (auth_addr, _auth_handle) = auth::serve_bound(cfg, pool).await.expect("auth bind");
 
     Harness {
@@ -85,6 +91,8 @@ async fn start_both() -> Harness {
         db_url: url,
         _world_addr: world_addr,
         _tmp: tmp,
+        shutdown,
+        world: Some(world_handle),
     }
 }
 
@@ -275,11 +283,22 @@ impl WorldClient {
         char_id: i64,
     ) -> ServerWorldMsg {
         let mut this = Self::handshake_and_connect(token_bytes, session_token_hex, char_id).await;
-        this.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::ConnectOk { .. } | ServerWorldMsg::Kick { .. })
-        })
-        .await
-        .expect("an answer to Connect (ConnectOk or Kick)")
+        let answer = this
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::ConnectOk { .. } | ServerWorldMsg::Kick { .. })
+            })
+            .await
+            .expect("an answer to Connect (ConnectOk or Kick)");
+        // Close the transport as the real client's kick handler does: a refused
+        // connection is never disconnected by the server, so a client that just
+        // vanished would hold its netcode slot (and client id) until the
+        // timeout, and the next login attempt's handshake would be ignored.
+        this.transport.disconnect();
+        for _ in 0..4 {
+            tick_one(&mut this.client, &mut this.transport);
+            tokio::time::sleep(TICK_DT).await;
+        }
+        answer
     }
 
     async fn start(
@@ -7785,4 +7804,225 @@ async fn a_priced_item_no_merchant_stocks_cannot_be_bought() {
         })
         .await;
     assert!(bought.is_some(), "a stocked loaf should still sell");
+}
+
+// ---- Housekeeping Phase 1: durability -----------------------------------
+
+async fn fund_char(db_url: &str, char_id: i64) {
+    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    sqlx::query("UPDATE characters SET platinum = 10 WHERE id = ?1")
+        .bind(char_id)
+        .execute(&pool)
+        .await
+        .expect("fund");
+}
+
+async fn char_xp_level(db_url: &str, char_id: i64) -> (i64, i64) {
+    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    sqlx::query_as("SELECT xp, level FROM characters WHERE id = ?1")
+        .bind(char_id)
+        .fetch_one(&pool)
+        .await
+        .expect("xp row")
+}
+
+/// Pump both clients until each has received a Kick, returning their codes.
+/// Reads the channel directly rather than through `wait_for`, which gives up
+/// on a disconnect: the server closes every connection right after the kick.
+async fn kicks_for_both(
+    a: &mut WorldClient,
+    b: &mut WorldClient,
+) -> (Option<protocol::world::KickCode>, Option<protocol::world::KickCode>) {
+    let (mut ka, mut kb) = (None, None);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while (ka.is_none() || kb.is_none()) && Instant::now() < deadline {
+        for (c, slot) in [(&mut *a, &mut ka), (&mut *b, &mut kb)] {
+            tick_one(&mut c.client, &mut c.transport);
+            while let Some(bytes) = c.client.receive_message(CHANNEL_SYSTEM) {
+                if let Ok((ServerWorldMsg::Kick { code, .. }, _)) =
+                    bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+                {
+                    *slot = Some(code);
+                }
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    (ka, kb)
+}
+
+/// A stop signal (systemd's SIGTERM on `restart`) saves everyone and tells
+/// them, instead of throwing away up to 60 s of progress. A walks and buys a
+/// loaf (both only marked dirty, never saved before the 60 s checkpoint), the
+/// world is stopped, and the walk and the loaf are both in the database; both
+/// players were told the world is restarting; the world task ends cleanly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_signal_saves_everyone_and_tells_them() {
+    let mut h = start_both().await;
+    let (a_session, a_char, a_token) =
+        provision_client(&h.auth_url, "stopa", "Walker", "Human", "Warrior").await;
+    let (b_session, b_char, b_token) =
+        provision_client(&h.auth_url, "stopb", "Stander", "Human", "Warrior").await;
+    fund_char(&h.db_url, a_char).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char).await;
+
+    a.send_buy_item(0, "Bread Loaf", 1);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD)
+    })
+    .await
+    .expect("the loaf is bought");
+    let mut seq = 0;
+    walk_east(&mut a, &mut seq, 6.0).await;
+
+    h.shutdown.send(true).expect("send the stop signal");
+    let (ka, kb) = kicks_for_both(&mut a, &mut b).await;
+    assert_eq!(ka, Some(protocol::world::KickCode::Restart), "the walker was told the world is restarting");
+    assert_eq!(kb, Some(protocol::world::KickCode::Restart), "the bystander was told too");
+    let world = h.world.take().expect("world handle");
+    let ended = tokio::time::timeout(Duration::from_secs(5), world)
+        .await
+        .expect("the world task ends after the stop signal")
+        .expect("the world task did not panic");
+    assert!(ended.is_ok(), "a stop signal is a clean end: {ended:?}");
+
+    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    let (pos_x,): (Option<f32>,) = sqlx::query_as("SELECT pos_x FROM characters WHERE id = ?1")
+        .bind(a_char)
+        .fetch_one(&pool)
+        .await
+        .expect("position row");
+    assert!(pos_x.unwrap_or(0.0) > 3.0, "the walk was not saved: pos_x = {pos_x:?}");
+    let loaves = count_item_rows(
+        &h.db_url,
+        "SELECT COUNT(*) FROM character_items WHERE char_id = ?1 AND item_path = ?2",
+        a_char,
+        BREAD,
+    )
+    .await;
+    assert_eq!(loaves, 1, "the bought loaf was not saved");
+}
+
+/// A logout whose save fails is not thrown away: it is retried, and the
+/// account's relogin is refused until it lands (letting it in would load the
+/// older saved state). A test-only trigger makes every inventory write fail;
+/// the player buys a loaf and logs out; the relogin is refused; the trigger
+/// is dropped; the retry lands and the relogin succeeds with the loaf saved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_logout_save_holds_the_relogin_until_it_lands() {
+    let h = start_both().await;
+    let (session, char_id, token) =
+        provision_client(&h.auth_url, "savefail", "Unsaved", "Human", "Warrior").await;
+    fund_char(&h.db_url, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.send_buy_item(0, "Bread Loaf", 1);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD)
+    })
+    .await
+    .expect("the loaf is bought");
+
+    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    sqlx::query(
+        "CREATE TRIGGER fail_inventory_writes BEFORE INSERT ON character_items
+         BEGIN SELECT RAISE(ABORT, 'test: inventory writes fail'); END",
+    )
+    .execute(&pool)
+    .await
+    .expect("install the failing trigger");
+
+    a.send_disconnect();
+    a.pump_for(Duration::from_millis(500)).await;
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let answer = WorldClient::start_refused(token, &session, char_id).await;
+    assert!(
+        matches!(&answer, ServerWorldMsg::Kick { reason, .. } if reason.contains("still being saved")),
+        "the relogin must wait for the pending save: {answer:?}"
+    );
+
+    sqlx::query("DROP TRIGGER fail_inventory_writes")
+        .execute(&pool)
+        .await
+        .expect("drop the trigger");
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let answer = WorldClient::start_refused(token, &session, char_id).await;
+    assert!(
+        matches!(answer, ServerWorldMsg::ConnectOk { .. }),
+        "once the retry lands the relogin succeeds: {answer:?}"
+    );
+    let loaves = count_item_rows(
+        &h.db_url,
+        "SELECT COUNT(*) FROM character_items WHERE char_id = ?1 AND item_path = ?2",
+        char_id,
+        BREAD,
+    )
+    .await;
+    assert_eq!(loaves, 1, "the retried save holds the loaf");
+}
+
+/// A death's XP loss is saved with the corpse that records it. Before, the
+/// corpse (and its refundable `lost_xp`) was written at once while the loss
+/// waited for the checkpoint, so a crash gave the XP back and a resurrection
+/// then refunded part of it again. A level 10 with no progress dies and
+/// drops to level 9; the database says 9 the moment the corpse exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_death_saves_its_xp_loss_with_the_corpse() {
+    let h = start_both().await;
+    let (session, char_id, token) =
+        provision_client(&h.auth_url, "xpdeath", "Fallen", "Human", "Warrior").await;
+    set_char_level(&h.db_url, char_id, 10).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+    })
+    .await
+    .expect("snapshot");
+
+    a.send_death();
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::CorpseContents { .. })
+    })
+    .await
+    .expect("the corpse is made");
+
+    let (_xp, level) = char_xp_level(&h.db_url, char_id).await;
+    assert_eq!(level, 9, "the de-level must be saved with the corpse");
+}
+
+/// A quest's reward XP is saved with its completion. Before, the completion
+/// was written at once and the XP waited for the checkpoint, so a crash kept
+/// the quest done and lost the reward for good.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quest_turn_in_saves_its_reward_xp_with_the_completion() {
+    let h = start_both().await;
+    let (session, char_id, token) =
+        provision_client(&h.auth_url, "questxp", "Rewarded", "Human", "Warrior").await;
+    {
+        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        projectdawn_server::db::save_quest_progress(&pool, char_id, "rat_infestation", &[8])
+            .await
+            .expect("seed a finished quest");
+    }
+    let before = char_xp_level(&h.db_url, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+
+    send_msg(
+        &mut a.client,
+        CHANNEL_SYSTEM,
+        &ClientWorldMsg::CompleteQuest { quest_id: "rat_infestation".into() },
+    );
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::QuestCompleted { quest_id } if quest_id == "rat_infestation")
+    })
+    .await
+    .expect("the quest is completed");
+
+    let after = char_xp_level(&h.db_url, char_id).await;
+    assert_ne!(after, before, "the reward XP must be saved with the completion");
 }

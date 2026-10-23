@@ -55,107 +55,109 @@ pub async fn persist_dirty_stores(pool: &SqlitePool, conn: &mut PerConnection) -
     Ok(())
 }
 
-/// Walk the connection map, writing dirty rows to SQLite. Called from the
-/// tick loop on each `CHECKPOINT_INTERVAL` and on disconnect.
+/// Write everything about `conn` that has changed since it was last saved:
+/// position, resources (HP, mana, stamina, XP, level, hunger), the item and
+/// coin stores (in one transaction), passive skill scores and quest progress.
+/// Each part clears its own dirty flag only when its write lands, so a failed
+/// part is simply still dirty and a later call retries it.
 ///
-/// Each row is its own UPDATE — keeps lock contention with the auth
-/// handlers' touch_session writes minimal under SQLite WAL. Track 6 added
-/// the resource path (hp/mp/stamina/xp/level) alongside position, since
-/// the server now mutates resources every regen tick. Track 13.1 added
-/// the inventory path (delete + insert per-character) for the server-
-/// side inventory snapshot.
+/// Returns true when nothing is left unsaved. Every way a connection is saved
+/// goes through here: the 60 s checkpoint, logout, the retry queue for a
+/// logout whose save failed, and the graceful shutdown. `when` names the
+/// caller in the log lines.
+pub async fn flush_connection(pool: &SqlitePool, conn: &mut PerConnection, when: &str) -> bool {
+    if conn.is_dirty_for_persist() {
+        let zone = conn.zone.as_deref();
+        match db::checkpoint_position(pool, conn.char_id, zone, conn.pos.into_tuple(), conn.yaw)
+            .await
+        {
+            Ok(()) => conn.mark_persisted(),
+            Err(e) => {
+                tracing::warn!(char_id = conn.char_id, when, error = %e, "position save failed");
+            }
+        }
+    }
+    if conn.is_dirty_for_resource_persist() {
+        match db::checkpoint_resources(
+            pool,
+            conn.char_id,
+            conn.hp,
+            conn.mp,
+            conn.stamina,
+            conn.xp,
+            conn.xp_to_next,
+            conn.level,
+            conn.hunger_secs,
+            conn.thirst_secs,
+        )
+        .await
+        {
+            Ok(()) => conn.mark_resources_persisted(),
+            Err(e) => {
+                tracing::warn!(char_id = conn.char_id, when, error = %e, "resource save failed");
+            }
+        }
+    }
+    if let Err(e) = persist_dirty_stores(pool, conn).await {
+        tracing::warn!(char_id = conn.char_id, when, error = %e, "store save failed");
+    }
+    // Passive skill scores: the full set is rewritten when any advance landed
+    // since the last save (one delete plus at most ~21 inserts).
+    if conn.skills_dirty {
+        let mut rows: Vec<db::SkillRow> = Vec::new();
+        for (kind, map) in [
+            ("weapon", &conn.weapon_skills),
+            ("armor", &conn.armor_skills),
+            ("casting", &conn.casting_skills),
+        ] {
+            for (key, score) in map {
+                rows.push(db::SkillRow { kind: kind.to_string(), key: key.clone(), score: *score });
+            }
+        }
+        match db::save_skills(pool, conn.char_id, &rows).await {
+            Ok(()) => conn.skills_dirty = false,
+            Err(e) => {
+                tracing::warn!(char_id = conn.char_id, when, error = %e, "skill save failed");
+            }
+        }
+    }
+    // Quest progress touched since the last save: upsert a quest that is still
+    // active, delete the row of one that is not (abandoned or completed).
+    let dirty_quests: Vec<String> = conn.quests_dirty.iter().cloned().collect();
+    for quest_id in dirty_quests {
+        let result = match conn.active_quests.get(&quest_id) {
+            Some(progress) => db::save_quest_progress(pool, conn.char_id, &quest_id, progress).await,
+            None => db::delete_active_quest(pool, conn.char_id, &quest_id).await,
+        };
+        match result {
+            Ok(()) => {
+                conn.quests_dirty.remove(&quest_id);
+            }
+            Err(e) => {
+                tracing::warn!(char_id = conn.char_id, when, quest_id = %quest_id, error = %e, "quest save failed");
+            }
+        }
+    }
+    !has_unsaved_state(conn)
+}
+
+/// Is anything about `conn` still waiting to be written?
+pub fn has_unsaved_state(conn: &PerConnection) -> bool {
+    conn.is_dirty_for_persist()
+        || conn.is_dirty_for_resource_persist()
+        || conn.inventory_dirty
+        || conn.coins_dirty
+        || conn.bank_dirty
+        || conn.bank_items_dirty
+        || conn.account_bank_items_dirty
+        || conn.skills_dirty
+        || !conn.quests_dirty.is_empty()
+}
+
+/// The 60 s checkpoint: flush every connection. A part that fails stays dirty
+/// and is retried at the next checkpoint.
 pub async fn checkpoint_dirty(pool: &SqlitePool, conns: &mut [&mut PerConnection]) {
     for conn in conns.iter_mut() {
-        if conn.is_dirty_for_persist() {
-            let zone = conn.zone.as_deref();
-            match db::checkpoint_position(
-                pool,
-                conn.char_id,
-                zone,
-                conn.pos.into_tuple(),
-                conn.yaw,
-            )
-            .await
-            {
-                Ok(()) => conn.mark_persisted(),
-                Err(e) => {
-                    tracing::warn!(
-                        char_id = conn.char_id,
-                        error = %e,
-                        "position checkpoint failed; will retry next interval"
-                    );
-                }
-            }
-        }
-        if conn.is_dirty_for_resource_persist() {
-            match db::checkpoint_resources(
-                pool,
-                conn.char_id,
-                conn.hp,
-                conn.mp,
-                conn.stamina,
-                conn.xp,
-                conn.xp_to_next,
-                conn.level,
-                conn.hunger_secs,
-                conn.thirst_secs,
-            )
-            .await
-            {
-                Ok(()) => conn.mark_resources_persisted(),
-                Err(e) => {
-                    tracing::warn!(
-                        char_id = conn.char_id,
-                        error = %e,
-                        "resource checkpoint failed; will retry next interval"
-                    );
-                }
-            }
-        }
-        if let Err(e) = persist_dirty_stores(pool, conn).await {
-            tracing::warn!(
-                char_id = conn.char_id,
-                error = %e,
-                "store checkpoint failed; will retry next interval"
-            );
-        }
-        // Track 18.1 — passive skill scores. Rewrite the full set
-        // when any advance landed since last persist; one delete +
-        // ≤ 21 inserts per character is well within the SQLite WAL
-        // budget at the 60 s checkpoint cadence.
-        if conn.skills_dirty {
-            let mut rows: Vec<db::SkillRow> = Vec::new();
-            for (key, score) in &conn.weapon_skills {
-                rows.push(db::SkillRow {
-                    kind: "weapon".to_string(),
-                    key: key.clone(),
-                    score: *score,
-                });
-            }
-            for (key, score) in &conn.armor_skills {
-                rows.push(db::SkillRow {
-                    kind: "armor".to_string(),
-                    key: key.clone(),
-                    score: *score,
-                });
-            }
-            for (key, score) in &conn.casting_skills {
-                rows.push(db::SkillRow {
-                    kind: "casting".to_string(),
-                    key: key.clone(),
-                    score: *score,
-                });
-            }
-            match db::save_skills(pool, conn.char_id, &rows).await {
-                Ok(()) => conn.skills_dirty = false,
-                Err(e) => {
-                    tracing::warn!(
-                        char_id = conn.char_id,
-                        error = %e,
-                        "skill checkpoint failed; will retry next interval"
-                    );
-                }
-            }
-        }
+        flush_connection(pool, conn, "checkpoint").await;
     }
 }

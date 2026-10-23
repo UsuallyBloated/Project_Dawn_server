@@ -892,21 +892,55 @@ pub async fn delete_active_quest(
     Ok(())
 }
 
-/// Record a quest turn-in (server-authoritative quest rewards). Idempotent —
-/// the (char_id, quest_id) primary key makes a repeat insert a no-op, and the
-/// world loop checks the in-memory set before awarding anyway. Persisted
-/// BEFORE the XP grant so a crash can't leave a paid-but-unrecorded quest that
-/// a relog could turn in again.
+/// A character's experience as it stands after an XP change: written inside
+/// the transaction that records WHY it changed (a death's corpse, a quest
+/// turn-in, a resurrection), so the record and the XP can never come apart.
+/// Left to the 60 s checkpoint, a crash kept the record and lost the XP move:
+/// a death's loss came back while its corpse still held the refundable amount
+/// (dying gained XP), and a turned-in quest lost its reward for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct XpProgress {
+    pub xp: i32,
+    pub xp_to_next: i32,
+    pub level: i32,
+}
+
+async fn write_xp_progress(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    char_id: i64,
+    progress: XpProgress,
+) -> AuthResult<()> {
+    sqlx::query("UPDATE characters SET xp = ?1, xp_to_next = ?2, level = ?3 WHERE id = ?4")
+        .bind(progress.xp)
+        .bind(progress.xp_to_next)
+        .bind(progress.level)
+        .bind(char_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Record a quest turn-in (server-authoritative quest rewards) together with
+/// the reward's XP, in one transaction. Idempotent — the (char_id, quest_id)
+/// primary key makes a repeat insert a no-op, and the world loop checks the
+/// in-memory set before awarding anyway. Persisted BEFORE the XP is granted in
+/// memory so a crash can't leave a paid-but-unrecorded quest that a relog
+/// could turn in again, and WITH the XP so a crash can't leave a recorded
+/// quest whose reward was never saved.
 pub async fn record_quest_completion(
     pool: &SqlitePool,
     char_id: i64,
     quest_id: &str,
+    progress: XpProgress,
 ) -> AuthResult<()> {
+    let mut tx = pool.begin().await?;
     sqlx::query("INSERT OR IGNORE INTO completed_quests (char_id, quest_id) VALUES (?1, ?2)")
         .bind(char_id)
         .bind(quest_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    write_xp_progress(&mut tx, char_id, progress).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1127,7 +1161,10 @@ struct CorpseHeaderRow {
 /// leaves the gear on the corpse (recoverable) rather than vaporizing it.
 /// `corpse_id` is the minted EntityId (loot-bag id partition); `items` are
 /// flat (item_path, count, worn slot) stacks, the slot `None` for anything
-/// that was carried (`PlayerInventory::corpse_stacks`).
+/// that was carried (`PlayerInventory::corpse_stacks`). `owner_progress` is the
+/// owner's XP after the death penalty, written with the corpse that records
+/// the loss (`lost_xp`), so the two cannot disagree after a crash.
+#[allow(clippy::too_many_arguments)] // one corpse row's fields, written together
 pub async fn save_corpse(
     pool: &SqlitePool,
     corpse_id: i64,
@@ -1139,6 +1176,7 @@ pub async fn save_corpse(
     items: &[(String, u32, Option<u8>)],
     lost_xp: i32,
     strip_owner: bool,
+    owner_progress: Option<XpProgress>,
 ) -> AuthResult<()> {
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1200,6 +1238,9 @@ pub async fn save_corpse(
         .bind(char_id)
         .execute(&mut *tx)
         .await?;
+    }
+    if let Some(progress) = owner_progress {
+        write_xp_progress(&mut tx, char_id, progress).await?;
     }
     tx.commit().await?;
     Ok(())
@@ -1265,12 +1306,22 @@ pub async fn delete_corpse(pool: &SqlitePool, corpse_id: i64) -> AuthResult<()> 
 }
 
 /// Mark a corpse resurrected (corpse / resurrection Slice 3) so it can't be
-/// rezzed twice for free XP. Persisted so a restart can't reset the flag.
-pub async fn set_corpse_resurrected(pool: &SqlitePool, corpse_id: i64) -> AuthResult<()> {
+/// rezzed twice for free XP, and write the owner's XP after the refund in the
+/// same transaction: a flag saved without its refund would spend the
+/// resurrection and lose the XP to a crash.
+pub async fn set_corpse_resurrected(
+    pool: &SqlitePool,
+    corpse_id: i64,
+    owner_char_id: i64,
+    owner_progress: XpProgress,
+) -> AuthResult<()> {
+    let mut tx = pool.begin().await?;
     sqlx::query("UPDATE corpses SET resurrected = 1 WHERE corpse_id = ?1")
         .bind(corpse_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    write_xp_progress(&mut tx, owner_char_id, owner_progress).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -2074,6 +2125,7 @@ mod corpse_loot_tests {
             ],
             0,     // lost_xp
             false, // strip_owner: tests exercise corpse creation only
+            None,  // owner_progress
         )
         .await
         .expect("save corpse");
@@ -2224,6 +2276,7 @@ mod corpse_loot_tests {
             ],
             0,
             true, // strip_owner
+            None,
         )
         .await
         .expect("save corpse + strip");
@@ -2275,6 +2328,7 @@ mod corpse_loot_tests {
             &[("res://items/staff.tres".to_string(), 1, Some(0))],
             500,   // lost_xp
             false, // strip_owner: tests exercise corpse creation only
+            None,  // owner_progress
         )
         .await
         .expect("save");
@@ -2283,6 +2337,50 @@ mod corpse_loot_tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].lost_xp, 500, "lost_xp must survive a save/load round-trip");
         assert!(!loaded[0].resurrected, "a fresh corpse is not resurrected");
+    }
+
+    /// The resurrected flag and the refunded XP land in one transaction: the
+    /// flag alone would spend the resurrection and lose the refund to a crash.
+    #[tokio::test]
+    async fn a_resurrection_saves_its_refund_with_the_flag() {
+        let (pool, _tmp) = fresh_pool().await;
+        let account = create_account(&pool, "rezref", "hunter2!", None)
+            .await
+            .expect("account");
+        let char_id = create_character(&pool, account, "Rezref", "Human", "Warrior")
+            .await
+            .expect("char");
+        let corpse_id = 2_000_000_078_i64;
+        save_corpse(
+            &pool,
+            corpse_id,
+            char_id,
+            "Rezref",
+            "test_zone",
+            (0.0, 0.0, 0.0),
+            protocol::world::Coins::ZERO,
+            &[],
+            400,
+            false,
+            None,
+        )
+        .await
+        .expect("save");
+
+        let refunded = XpProgress { xp: 123, xp_to_next: 9_000, level: 7 };
+        set_corpse_resurrected(&pool, corpse_id, char_id, refunded)
+            .await
+            .expect("resurrect");
+
+        let loaded = load_corpses(&pool).await.expect("load");
+        assert!(loaded[0].resurrected, "the flag is set");
+        let (xp, xp_to_next, level): (i64, i64, i64) =
+            sqlx::query_as("SELECT xp, xp_to_next, level FROM characters WHERE id = ?1")
+                .bind(char_id)
+                .fetch_one(&pool)
+                .await
+                .expect("xp row");
+        assert_eq!((xp, xp_to_next, level), (123, 9_000, 7), "the refund is saved with the flag");
     }
 
     // Server-authoritative quest rewards — a completion persists across a
@@ -2301,9 +2399,9 @@ mod corpse_loot_tests {
         let spawn = load_character(&pool, char_id).await.expect("load");
         assert!(spawn.completed_quests.is_empty(), "fresh char has no completions");
 
-        record_quest_completion(&pool, char_id, "wolf_threat").await.expect("record");
-        record_quest_completion(&pool, char_id, "wolf_threat").await.expect("repeat is a no-op");
-        record_quest_completion(&pool, char_id, "rotfang_hunt").await.expect("record 2nd");
+        record_quest_completion(&pool, char_id, "wolf_threat", XpProgress { xp: 0, xp_to_next: 1000, level: 1 }).await.expect("record");
+        record_quest_completion(&pool, char_id, "wolf_threat", XpProgress { xp: 0, xp_to_next: 1000, level: 1 }).await.expect("repeat is a no-op");
+        record_quest_completion(&pool, char_id, "rotfang_hunt", XpProgress { xp: 0, xp_to_next: 1000, level: 1 }).await.expect("record 2nd");
 
         let spawn = load_character(&pool, char_id).await.expect("reload");
         let mut done = spawn.completed_quests.clone();

@@ -90,6 +90,20 @@ pub fn award_xp(server: &mut RenetServer, conn: &mut PerConnection, amount: i32)
     leveled
 }
 
+/// The XP state `award_xp(conn, amount)` will leave, without changing
+/// anything. A quest turn-in or a resurrection writes this inside the
+/// transaction that records it, then calls `award_xp` with the same amount,
+/// which lands on the same numbers (both go through `resolve`).
+pub fn progress_after(conn: &PerConnection, amount: i32) -> crate::db::XpProgress {
+    let (xp, level, xp_to_next) = resolve(conn.xp.saturating_add(amount), conn.level);
+    crate::db::XpProgress { xp, xp_to_next, level }
+}
+
+/// The connection's XP state as it stands now.
+pub fn current_progress(conn: &PerConnection) -> crate::db::XpProgress {
+    crate::db::XpProgress { xp: conn.xp, xp_to_next: conn.xp_to_next, level: conn.level }
+}
+
 /// Apply the death XP penalty: 5% of the current level's band, cascading down
 /// with no per-death cap, but exempt below level 5 and floored at level 5.
 /// Routes through [`award_xp`] so the de-level fans the same messages.

@@ -307,8 +307,16 @@ pub fn mint_connect_token(
 }
 
 /// Production entry — binds from `cfg.world_bind` and runs the tick loop
-/// until the task ends or the process exits.
-pub async fn serve(cfg: Arc<Config>, pool: SqlitePool) -> anyhow::Result<()> {
+/// until `shutdown` turns true (a clean stop: everyone saved, see
+/// `tick::shut_down_world`) or the loop fails. Either way it returns, so the
+/// caller can end the process; an error comes back as an error, so a dead
+/// world takes the process (and auth) down with it and systemd restarts it,
+/// rather than auth handing out tokens for a world that is gone.
+pub async fn serve(
+    cfg: Arc<Config>,
+    pool: SqlitePool,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<()> {
     let socket = bind_world_socket(&cfg.world_bind)
         .with_context(|| format!("binding world UDP {}", cfg.world_bind))?;
     let local = socket.local_addr()?;
@@ -317,19 +325,32 @@ pub async fn serve(cfg: Arc<Config>, pool: SqlitePool) -> anyhow::Result<()> {
         advertised = %cfg.world_endpoint,
         "world UDP listening (renet 2.0, Secure)"
     );
-    let handle = serve_with_socket(cfg, pool, socket).await?;
-    handle.await?;
+    let handle = serve_with_socket_until(cfg, pool, socket, shutdown).await?;
+    handle.await??;
     Ok(())
 }
 
 /// Test / advanced entry — caller pre-binds the socket (e.g. on ephemeral
 /// port) and hands it in. Returns immediately with the JoinHandle for the
 /// tick task; caller can either `.await` it or drop it for fire-and-forget.
+/// The loop runs until the process ends (no stop signal).
 pub async fn serve_with_socket(
     cfg: Arc<Config>,
     pool: SqlitePool,
     socket: UdpSocket,
-) -> anyhow::Result<JoinHandle<()>> {
+) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
+    // A receiver whose sender is gone reads its last value forever: never stop.
+    let (_never, shutdown) = tokio::sync::watch::channel(false);
+    serve_with_socket_until(cfg, pool, socket, shutdown).await
+}
+
+/// As `serve_with_socket`, ending cleanly when `shutdown` turns true.
+pub async fn serve_with_socket_until(
+    cfg: Arc<Config>,
+    pool: SqlitePool,
+    socket: UdpSocket,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
     let public_addr = cfg
         .world_endpoint
         .parse()
@@ -356,9 +377,11 @@ pub async fn serve_with_socket(
     let server = RenetServer::new(connection_config());
 
     let handle = tokio::spawn(async move {
-        if let Err(e) = tick::run(cfg, pool, server, transport).await {
+        let result = tick::run(cfg, pool, server, transport, shutdown).await;
+        if let Err(e) = &result {
             tracing::error!(error = %e, "world tick loop exited with error");
         }
+        result
     });
     Ok(handle)
 }

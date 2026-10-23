@@ -54,14 +54,52 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg_arc = std::sync::Arc::new(cfg);
 
-    // Run auth (WS) and world (UDP) concurrently. The first to error wins.
-    // For graceful shutdown we'd intercept Ctrl-C and tell both to drain;
-    // alpha-stage is fine with abrupt termination since DB writes are
-    // per-mutation atomic and the 60 s checkpoint bounds position loss.
+    // A stop signal (SIGTERM from systemd on `systemctl stop` or `restart`,
+    // or Ctrl-C) asks the world to shut down cleanly: it tells every player,
+    // saves everyone and returns. Without this, a restart threw away up to
+    // 60 s of everyone's progress.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        wait_for_stop_signal().await;
+        tracing::info!("stop signal received");
+        let _ = shutdown_tx.send(true);
+    });
+
+    // Run auth (WS) and world (UDP) together. The process ends when the world
+    // ends, cleanly after a stop signal or with its error, or if auth fails.
+    // Auth is simply dropped at exit: nothing it holds needs saving.
     let auth_fut = auth::serve(cfg_arc.clone(), pool.clone());
-    let world_fut = world::serve(cfg_arc, pool);
-    tokio::try_join!(auth_fut, world_fut)?;
+    let world_fut = world::serve(cfg_arc, pool, shutdown_rx);
+    tokio::select! {
+        result = auth_fut => result?,
+        result = world_fut => result?,
+    }
     Ok(())
+}
+
+/// Resolves on the first stop signal: SIGTERM or Ctrl-C (SIGINT) on Linux,
+/// Ctrl-C on Windows.
+async fn wait_for_stop_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = tokio::signal::ctrl_c() => {}
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not listen for SIGTERM; Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// Minimal `.env` loader: KEY=VALUE per line, `#` comments, no quoting magic.

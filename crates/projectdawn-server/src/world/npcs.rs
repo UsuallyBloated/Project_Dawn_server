@@ -38,6 +38,12 @@ pub struct Npc {
     /// everyone (the soul binder, by design).
     #[serde(default)]
     pub faction: Option<String>,
+    /// For a vendor: the client's `VendorDefinitions` entry it mirrors.
+    #[serde(default)]
+    pub vendor_type: Option<String>,
+    /// For a vendor: the item names it sells. Nothing else is for sale there.
+    #[serde(default)]
+    pub stock: Vec<String>,
 }
 
 impl Npc {
@@ -110,6 +116,23 @@ pub fn all_within_range(kind: &str, pos: Vec3f) -> Vec<&'static Npc> {
         .collect()
 }
 
+/// A vendor within service range of `pos` that `serves` the buyer and stocks
+/// `item_name`, if any. The client names no vendor yet (its `vendor_id` is
+/// always 0), so any vendor in reach that deals with the buyer and sells the
+/// item will do; what matters is that an item nobody stocks, a rare drop with
+/// a sell-back price, cannot be bought anywhere, and that a vendor who refuses
+/// the buyer on faction cannot be the one who sells.
+pub fn vendor_stocking_within_range(
+    item_name: &str,
+    pos: Vec3f,
+    serves: impl Fn(&Npc) -> bool,
+) -> Option<&'static Npc> {
+    all_within_range("vendor", pos)
+        .into_iter()
+        .filter(|n| serves(n))
+        .find(|n| n.stock.iter().any(|s| s == item_name))
+}
+
 /// Is the specific NPC `id` within service range of `pos`? Used for quest
 /// turn-ins, which name their NPC rather than accepting any of a kind.
 pub fn id_within_range(id: &str, pos: Vec3f) -> bool {
@@ -159,6 +182,37 @@ mod tests {
         assert!(any_within_range("banker", dungeon).is_none(), "the exploit case");
         assert!(any_within_range("vendor", dungeon).is_none());
         assert!(!id_within_range("aldric", dungeon));
+    }
+
+    /// Every stocked name must be a real item with a price, or the vendor
+    /// lists an item the BuyItem path can never sell.
+    #[test]
+    fn every_vendor_stocks_only_real_priced_items() {
+        for n in table().iter().filter(|n| n.has_kind("vendor")) {
+            assert!(!n.stock.is_empty(), "vendor {} has no stock", n.id);
+            assert!(n.vendor_type.is_some(), "vendor {} names no vendor_type", n.id);
+            for name in &n.stock {
+                let item = crate::world::items::lookup_by_name(name)
+                    .unwrap_or_else(|| panic!("{}: stocked item '{name}' is not in items.toml", n.id));
+                assert!(item.vendor_price > 0, "{}: '{name}' has no vendor_price", n.id);
+            }
+        }
+    }
+
+    #[test]
+    fn a_priced_item_nobody_stocks_is_sold_nowhere() {
+        let at_brom = Vec3f { x: 8.0, y: 0.0, z: 5.0 };
+        assert_eq!(vendor_stocking_within_range("Bread Loaf", at_brom, |_| true).map(|n| n.id.as_str()), Some("brom"));
+        // Hadrik (x = -5) is within service range of the spawn, Brom is not
+        // the one who sells swords.
+        assert!(vendor_stocking_within_range("Iron Short Sword", Vec3f::ZERO, |_| true).is_some());
+        // The only vendor who stocks it refuses the buyer (faction): not for sale.
+        assert!(vendor_stocking_within_range("Iron Short Sword", Vec3f::ZERO, |n| n.id != "hadrik").is_none());
+        // A named drop with a sell-back price.
+        assert!(crate::world::items::lookup_by_name("Predator's Collar").is_some_and(|i| i.vendor_price > 0));
+        assert!(vendor_stocking_within_range("Predator's Collar", at_brom, |_| true).is_none());
+        let dungeon = Vec3f { x: 200.0, y: 0.0, z: 200.0 };
+        assert!(vendor_stocking_within_range("Bread Loaf", dungeon, |_| true).is_none());
     }
 
     #[test]

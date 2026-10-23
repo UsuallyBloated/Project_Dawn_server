@@ -312,7 +312,9 @@ struct WorldClient {
 
 impl WorldClient {
     /// Drive renet handshake + send app-layer Connect; spin until ConnectOk.
-    async fn start(
+    /// Spin the renet handshake and send the app-layer Connect; the caller
+    /// waits for the answer (ConnectOk, or a Kick for a refused login).
+    async fn handshake_and_connect(
         token_bytes: Vec<u8>,
         session_token_hex: &str,
         char_id: i64,
@@ -345,8 +347,29 @@ impl WorldClient {
             client_version: "0.1.0".into(),
         };
         send_msg(&mut client, CHANNEL_SYSTEM, &msg);
+        Self { client, transport, _char_id: char_id }
+    }
 
-        let mut this = Self { client, transport, _char_id: char_id };
+    /// Connect a login the server is expected to REFUSE; returns the Kick.
+    async fn start_refused(
+        token_bytes: Vec<u8>,
+        session_token_hex: &str,
+        char_id: i64,
+    ) -> ServerWorldMsg {
+        let mut this = Self::handshake_and_connect(token_bytes, session_token_hex, char_id).await;
+        this.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ConnectOk { .. } | ServerWorldMsg::Kick { .. })
+        })
+        .await
+        .expect("an answer to Connect (ConnectOk or Kick)")
+    }
+
+    async fn start(
+        token_bytes: Vec<u8>,
+        session_token_hex: &str,
+        char_id: i64,
+    ) -> Self {
+        let mut this = Self::handshake_and_connect(token_bytes, session_token_hex, char_id).await;
         this.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(m, ServerWorldMsg::ConnectOk { .. })
         })
@@ -762,6 +785,20 @@ impl WorldClient {
             item_name: item_name.into(),
             qty,
         };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
+    fn send_say(&mut self, text: &str) {
+        let msg = ClientWorldMsg::Chat {
+            channel: protocol::world::ChatChannel::Say,
+            text: text.into(),
+            target_name: None,
+        };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
+    fn send_bank_withdraw_item(&mut self, vault_slot: u32) {
+        let msg = ClientWorldMsg::BankWithdrawItem { shared: false, vault_slot };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
@@ -10143,4 +10180,379 @@ async fn a_neutral_paladin_casts_at_seventy_percent() {
         }
     }
     assert_eq!(landed, Some(4), "7 listed, x 0.7 at Neutral, truncated");
+}
+
+// ---- Hotfix 2026-10-23: the crash and the dupes -------------------------
+//
+// Each of these fails on the code before the fix.
+
+async fn count_item_rows(db_url: &str, sql: &str, id: i64, path: &str) -> i64 {
+    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    let (n,): (i64,) = sqlx::query_as(sql)
+        .bind(id)
+        .bind(path)
+        .fetch_one(&pool)
+        .await
+        .expect("count rows");
+    n
+}
+
+/// A chat line longer than the 512-byte cap with a two-byte character
+/// straddling byte 512 used to panic the slice `text[..512]` inside the tick
+/// task, which took the whole server down. The server must cut it on a char
+/// boundary and keep serving: the speaker's next line still reaches a peer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chat_line_cut_inside_a_multibyte_char_does_not_crash_the_server() {
+    let h = start_both().await;
+    let (a_session, a_char, a_token) =
+        provision_client(&h.auth_url, "chatcrasha", "Speaker", "Human", "Warrior").await;
+    let (b_session, b_char, b_token) =
+        provision_client(&h.auth_url, "chatcrashb", "Listener", "Human", "Warrior").await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char).await;
+
+    let poison = format!("{}é and more", "a".repeat(511));
+    assert!(!poison.is_char_boundary(512), "the test line must straddle byte 512");
+    a.send_say(&poison);
+    a.pump_for(Duration::from_millis(300)).await;
+    a.send_say("still here");
+    a.pump_for(Duration::from_millis(100)).await;
+
+    let probe = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "still here")
+        })
+        .await;
+    assert!(probe.is_some(), "the server stopped serving after the long chat line");
+}
+
+/// A drop is durable at once. The bag lives only in memory and its picker is
+/// saved at their own logout, so a dropper whose removal waited for the 60 s
+/// checkpoint could get the item back from a restart after someone else had
+/// saved it. The dropper's row must be gone from the DB the moment the bag
+/// exists, with no checkpoint and no logout in between.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_item_leaves_the_droppers_saved_inventory_at_once() {
+    let h = start_both().await;
+    let (session, char_id, token) =
+        provision_client(&h.auth_url, "dropdurable", "Dropper", "Human", "Warrior").await;
+    give_char_item(&h.db_url, char_id, "base", 0, BREAD, 3).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+    })
+    .await
+    .expect("snapshot");
+
+    a.send_drop_item("base", 0, 0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::LootBagSpawn { items, .. }
+            if items.iter().any(|(p, c)| p == BREAD && *c == 3))
+    })
+    .await
+    .expect("the bag spawns with the dropped stack");
+
+    let saved = count_item_rows(
+        &h.db_url,
+        "SELECT COUNT(*) FROM character_items WHERE char_id = ?1 AND item_path = ?2",
+        char_id,
+        BREAD,
+    )
+    .await;
+    assert_eq!(saved, 0, "the dropped stack is still in the dropper's saved inventory");
+}
+
+/// The other half of a drop: whoever picks the stack up is saved in the same
+/// tick. The dropper's row is already gone, so a picker left unsaved until the
+/// checkpoint would lose the item to a crash.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_picked_up_drop_is_saved_on_the_picker_at_once() {
+    let h = start_both().await;
+    let (a_session, a_char, a_token) =
+        provision_client(&h.auth_url, "giftdrop", "Giver", "Human", "Warrior").await;
+    let (b_session, b_char, b_token) =
+        provision_client(&h.auth_url, "giftpick", "Taker", "Human", "Warrior").await;
+    give_char_item(&h.db_url, a_char, "base", 0, BREAD, 2).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char).await;
+
+    a.send_drop_item("base", 0, 0);
+    a.pump_for(Duration::from_millis(100)).await;
+    let bag_id = match b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::LootBagSpawn { items, .. }
+                if items.iter().any(|(p, _)| p == BREAD))
+        })
+        .await
+        .expect("the bag reaches the peer")
+    {
+        ServerWorldMsg::LootBagSpawn { bag_id, .. } => bag_id,
+        _ => unreachable!(),
+    };
+    b.send_loot_all(bag_id);
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD)
+    })
+    .await
+    .expect("the loaves reach the picker");
+
+    let picker_saved = count_item_rows(
+        &h.db_url,
+        "SELECT COUNT(*) FROM character_items WHERE char_id = ?1 AND item_path = ?2",
+        b_char,
+        BREAD,
+    )
+    .await;
+    assert_eq!(picker_saved, 1, "the picked-up stack is not in the picker's saved inventory");
+}
+
+/// A burst of drops in one tick is capped (MAX_DROPS_PER_TICK, 4): each
+/// dropper is saved once per tick, and the cap bounds what a forged burst can
+/// make that save and the bag fan carry. Six drops in one datagram: four
+/// leave the saved inventory, two stay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_burst_of_drops_in_one_tick_is_capped() {
+    let h = start_both().await;
+    let (session, char_id, token) =
+        provision_client(&h.auth_url, "dropburst", "Flooder", "Human", "Warrior").await;
+    for slot in 0..6 {
+        give_char_item(&h.db_url, char_id, "base", slot, BREAD, 1).await;
+    }
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+    })
+    .await
+    .expect("snapshot");
+
+    for slot in 0..6 {
+        a.send_drop_item("base", slot, 0);
+    }
+    a.pump_for(Duration::from_millis(800)).await;
+
+    let left = count_item_rows(
+        &h.db_url,
+        "SELECT COUNT(*) FROM character_items WHERE char_id = ?1 AND item_path = ?2",
+        char_id,
+        BREAD,
+    )
+    .await;
+    assert_eq!(left, 2, "four drops apply per tick and are saved; the rest of the burst is ignored");
+}
+
+/// An immediate save writes every dirty store, never one alone. Withdraw a
+/// loaf from the bank (vault and inventory both dirty, nothing saved yet),
+/// then die before any checkpoint: the corpse transaction writes the
+/// inventory onto the corpse, and the vault must be written with it, or the
+/// loaf sits on the corpse AND in the vault row after a crash.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_death_after_an_unsaved_bank_withdrawal_leaves_the_item_in_one_place() {
+    let h = start_both().await;
+    let (session, char_id, token) =
+        provision_client(&h.auth_url, "bankdeath", "Withdrawer", "Human", "Warrior").await;
+    {
+        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        sqlx::query("INSERT INTO bank_items (char_id, slot, item_path, count) VALUES (?1, 0, ?2, 1)")
+            .bind(char_id)
+            .bind(BREAD)
+            .execute(&pool)
+            .await
+            .expect("seed the vault");
+    }
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+    })
+    .await
+    .expect("snapshot");
+
+    // The starter spawn is within reach of the banker (npcs.rs pins it).
+    a.send_bank_withdraw_item(0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD)
+    })
+    .await
+    .expect("the loaf arrives in the bags");
+
+    a.send_death();
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventorySnapshot { entries } if entries.is_empty())
+    })
+    .await
+    .expect("the death strip empties the bags");
+
+    let in_vault = count_item_rows(
+        &h.db_url,
+        "SELECT COUNT(*) FROM bank_items WHERE char_id = ?1 AND item_path = ?2",
+        char_id,
+        BREAD,
+    )
+    .await;
+    let on_corpse = count_item_rows(
+        &h.db_url,
+        "SELECT COUNT(*) FROM corpse_items ci JOIN corpses c ON c.corpse_id = ci.corpse_id
+         WHERE c.char_id = ?1 AND ci.item_path = ?2",
+        char_id,
+        BREAD,
+    )
+    .await;
+    assert_eq!(on_corpse, 1, "the loaf went onto the corpse");
+    assert_eq!(in_vault, 0, "the loaf is ALSO still in the saved vault: a dupe");
+}
+
+/// A store that fails to load refuses the login. Playing on with an empty
+/// inventory let the next save replace the real rows with nothing. A row the
+/// decoder rejects (a count stored as text) stands in for a transient read
+/// error; the login must be refused and the row left exactly as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_store_that_fails_to_load_refuses_the_login() {
+    let h = start_both().await;
+    let (session, char_id, token) =
+        provision_client(&h.auth_url, "badload", "Unlucky", "Human", "Warrior").await;
+    {
+        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        sqlx::query(
+            "INSERT INTO character_items (char_id, location, slot, item_path, count)
+             VALUES (?1, 'base', 0, ?2, 'not a number')",
+        )
+        .bind(char_id)
+        .bind(BREAD)
+        .execute(&pool)
+        .await
+        .expect("seed an undecodable row");
+    }
+
+    let answer = WorldClient::start_refused(token, &session, char_id).await;
+    assert!(
+        matches!(answer, ServerWorldMsg::Kick { .. }),
+        "the login was accepted with an empty inventory: {answer:?}"
+    );
+    let rows = count_item_rows(
+        &h.db_url,
+        "SELECT COUNT(*) FROM character_items WHERE char_id = ?1 AND item_path = ?2",
+        char_id,
+        BREAD,
+    )
+    .await;
+    assert_eq!(rows, 1, "the stored row must be untouched");
+}
+
+/// Only what a merchant in reach stocks is for sale. A priced item no vendor
+/// stocks (a named-mob drop with a sell-back price) used to be buyable from
+/// any vendor by name; the town's own stock still sells.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_priced_item_no_merchant_stocks_cannot_be_bought() {
+    let h = start_both().await;
+    let (session, char_id, token) =
+        provision_client(&h.auth_url, "stockgate", "Shopper", "Human", "Warrior").await;
+    {
+        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        sqlx::query("UPDATE characters SET platinum = 10 WHERE id = ?1")
+            .bind(char_id)
+            .execute(&pool)
+            .await
+            .expect("fund the shopper");
+    }
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+    })
+    .await
+    .expect("snapshot");
+
+    a.send_buy_item(0, "Predator's Collar", 1);
+    let refusal = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("doesn't stock"))
+        })
+        .await;
+    assert!(refusal.is_some(), "an unstocked named drop was sold");
+
+    a.send_buy_item(0, "Bread Loaf", 1);
+    let bought = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD)
+        })
+        .await;
+    assert!(bought.is_some(), "a stocked loaf should still sell");
+}
+
+/// The trade commit writes both inventories and wallets but not the vaults,
+/// so each trader's other dirty stores are flushed first. A withdraws a loaf
+/// from the bank (unsaved) and trades it to B: once the trade commits, the
+/// loaf is in B's saved inventory and nowhere in A's saved vault.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_traded_bank_withdrawal_leaves_the_givers_saved_vault() {
+    let h = start_both().await;
+    let (a_session, a_char, a_token) =
+        provision_client(&h.auth_url, "vaulttradea", "Vaulter", "Human", "Warrior").await;
+    let (b_session, b_char, b_token) =
+        provision_client(&h.auth_url, "vaulttradeb", "Receiver", "Elf", "Cleric").await;
+    {
+        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        sqlx::query("INSERT INTO bank_items (char_id, slot, item_path, count) VALUES (?1, 0, ?2, 1)")
+            .bind(a_char)
+            .bind(BREAD)
+            .execute(&pool)
+            .await
+            .expect("seed the vault");
+    }
+    let mut a = WorldClient::start(a_token, &a_session, a_char).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char).await;
+
+    a.send_bank_withdraw_item(0);
+    let (loc, slot) = match a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD)
+        })
+        .await
+        .expect("the loaf arrives in the bags")
+    {
+        ServerWorldMsg::InventoryDelta { location, slot, .. } => (location, slot),
+        _ => unreachable!(),
+    };
+
+    a.send_trade_request(b_char as u64);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { .. })
+    })
+    .await
+    .expect("the trade opens");
+    a.send_trade_offer_item(0, &loc, slot);
+    a.pump_for(Duration::from_millis(200)).await;
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOfferUpdate { mine: false, slots, .. } if !slots.is_empty())
+    })
+    .await
+    .expect("B sees the offer");
+    a.send_trade_accept();
+    a.pump_for(Duration::from_millis(200)).await;
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeAcceptState { them: true, .. })
+    })
+    .await
+    .expect("B sees A accept");
+    b.send_trade_accept();
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::TradeClosed { committed: true, .. })
+    })
+    .await
+    .expect("the trade commits");
+
+    let b_has = count_item_rows(
+        &h.db_url,
+        "SELECT COUNT(*) FROM character_items WHERE char_id = ?1 AND item_path = ?2",
+        b_char,
+        BREAD,
+    )
+    .await;
+    let a_vault = count_item_rows(
+        &h.db_url,
+        "SELECT COUNT(*) FROM bank_items WHERE char_id = ?1 AND item_path = ?2",
+        a_char,
+        BREAD,
+    )
+    .await;
+    assert_eq!(b_has, 1, "the loaf is in the receiver's saved inventory");
+    assert_eq!(a_vault, 0, "the loaf is ALSO still in the giver's saved vault: a dupe");
 }

@@ -1,10 +1,59 @@
-//! Periodic position checkpoints. Inventory / quest mutations write
-//! per-mutation elsewhere; this is the "where was I when the power went
-//! out" safety net.
+//! Writing a connection's state to SQLite: the 60 s checkpoint, and the
+//! store flush every immediate save goes through. Most mutations only mark a
+//! store dirty and wait for the checkpoint; the ones that move an item or coin
+//! to another character or onto a durable record (a drop, a corpse, a corpse
+//! loot, a quest reward) flush first, so a crash cannot leave it in two places.
 
 use super::connection::PerConnection;
 use crate::db;
+use crate::error::AuthResult;
 use sqlx::SqlitePool;
+
+/// Write every dirty item and coin store of `conn` in ONE transaction and
+/// clear their flags only once it commits. A no-op when nothing is dirty.
+///
+/// Items and coins move BETWEEN these stores (a bank deposit touches the
+/// inventory and the vault, a vendor sale the inventory and the wallet), so
+/// they are never written separately: a crash between two writes either loses
+/// the item or duplicates it, and a dupe is the worse half, because losses get
+/// reported and dupes get exploited quietly. For the same reason an immediate
+/// save must never write one store alone while another is dirty (a quest
+/// reward saving the inventory while a bank withdrawal sits unsaved left the
+/// item in both). See db::save_stores_atomic.
+pub async fn persist_dirty_stores(pool: &SqlitePool, conn: &mut PerConnection) -> AuthResult<()> {
+    let any_store_dirty = conn.inventory_dirty
+        || conn.coins_dirty
+        || conn.bank_dirty
+        || conn.bank_items_dirty
+        || conn.account_bank_items_dirty;
+    if !any_store_dirty {
+        return Ok(());
+    }
+    let inv_rows = conn.inventory_dirty.then(|| conn.inventory.to_rows());
+    let bank_rows = conn.bank_items_dirty.then(|| conn.bank_items.to_rows());
+    let acct_rows = conn
+        .account_bank_items_dirty
+        .then(|| conn.account_bank_items.to_rows());
+    db::save_stores_atomic(
+        pool,
+        conn.char_id,
+        conn.account_id,
+        inv_rows.as_deref(),
+        conn.coins_dirty.then_some(conn.coins),
+        conn.bank_dirty.then_some(conn.bank_coins),
+        bank_rows.as_deref(),
+        acct_rows.as_deref(),
+    )
+    .await?;
+    // All-or-nothing: the transaction committed, so every flag it covered is
+    // clean. Clearing them individually would reopen the very window this closes.
+    conn.inventory_dirty = false;
+    conn.coins_dirty = false;
+    conn.bank_dirty = false;
+    conn.bank_items_dirty = false;
+    conn.account_bank_items_dirty = false;
+    Ok(())
+}
 
 /// Walk the connection map, writing dirty rows to SQLite. Called from the
 /// tick loop on each `CHECKPOINT_INTERVAL` and on disconnect.
@@ -63,54 +112,12 @@ pub async fn checkpoint_dirty(pool: &SqlitePool, conns: &mut [&mut PerConnection
                 }
             }
         }
-        // Items and coins move BETWEEN these stores, so they are written in one
-        // transaction rather than five. A bank deposit touches inventory and the
-        // vault; a vendor sale touches inventory and the wallet. Writing them
-        // separately left a crash window that either loses the item (gone from
-        // inventory, never arrived) or duplicates it (arrived and still in
-        // inventory) — and a dupe is the worse half, because losses get reported
-        // and dupes get exploited quietly. See db::save_stores_atomic.
-        let any_store_dirty = conn.inventory_dirty
-            || conn.coins_dirty
-            || conn.bank_dirty
-            || conn.bank_items_dirty
-            || conn.account_bank_items_dirty;
-        if any_store_dirty {
-            let inv_rows = conn.inventory_dirty.then(|| conn.inventory.to_rows());
-            let bank_rows = conn.bank_items_dirty.then(|| conn.bank_items.to_rows());
-            let acct_rows = conn
-                .account_bank_items_dirty
-                .then(|| conn.account_bank_items.to_rows());
-            match db::save_stores_atomic(
-                pool,
-                conn.char_id,
-                conn.account_id,
-                inv_rows.as_deref(),
-                conn.coins_dirty.then_some(conn.coins),
-                conn.bank_dirty.then_some(conn.bank_coins),
-                bank_rows.as_deref(),
-                acct_rows.as_deref(),
-            )
-            .await
-            {
-                Ok(()) => {
-                    // All-or-nothing: the transaction committed, so every flag it
-                    // covered is clean. Clearing them individually would reopen
-                    // the very window this closes.
-                    conn.inventory_dirty = false;
-                    conn.coins_dirty = false;
-                    conn.bank_dirty = false;
-                    conn.bank_items_dirty = false;
-                    conn.account_bank_items_dirty = false;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        char_id = conn.char_id,
-                        error = %e,
-                        "store checkpoint failed; will retry next interval"
-                    );
-                }
-            }
+        if let Err(e) = persist_dirty_stores(pool, conn).await {
+            tracing::warn!(
+                char_id = conn.char_id,
+                error = %e,
+                "store checkpoint failed; will retry next interval"
+            );
         }
         // Track 18.1 — passive skill scores. Rewrite the full set
         // when any advance landed since last persist; one delete +

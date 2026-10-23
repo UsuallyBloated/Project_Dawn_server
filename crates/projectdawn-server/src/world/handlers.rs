@@ -419,6 +419,21 @@ fn quest_id_well_formed(quest_id: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
+/// Cut `text` to at most `max_bytes`, backing off to the last char boundary
+/// at or below the cap. Slicing a `String` by byte (`&text[..n]`) panics when
+/// `n` falls inside a multibyte character, and a panic in the tick task takes
+/// the whole server down, so every cut of client text goes through here.
+fn truncate_at_char_boundary(mut text: String, max_bytes: usize) -> String {
+    if text.len() > max_bytes {
+        let mut cut = max_bytes;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+    }
+    text
+}
+
 /// The gate every dev/GM command goes through: authorize it, charge its
 /// budget and queue its audit row in one step (`authorize_dev_cmd`). True
 /// only when the command should run. An unauthorized client gets silence (a
@@ -1676,11 +1691,7 @@ pub fn handle_message(
             // Hard cap to keep payloads sane. Clients should validate but
             // a hostile or buggy client could still try to flood.
             const MAX_CHAT_LEN: usize = 512;
-            let trimmed = if text.len() > MAX_CHAT_LEN {
-                text[..MAX_CHAT_LEN].to_string()
-            } else {
-                text
-            };
+            let trimmed = truncate_at_char_boundary(text, MAX_CHAT_LEN);
             Outcome::ChatFanOut {
                 channel,
                 text: trimmed,
@@ -2737,5 +2748,31 @@ pub fn decode_client(bytes: &[u8]) -> Option<ClientWorldMsg> {
             tracing::warn!(error = %e, "failed to bincode-decode ClientWorldMsg");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_at_char_boundary;
+
+    #[test]
+    fn a_cut_inside_a_multibyte_char_backs_off_to_its_start() {
+        // 511 ASCII bytes then "é" (2 bytes): byte 512 is the middle of the é,
+        // the exact shape that panicked the old `text[..512]`.
+        let text = format!("{}é tail", "a".repeat(511));
+        let cut = truncate_at_char_boundary(text, 512);
+        assert_eq!(cut.len(), 511);
+        assert!(cut.chars().all(|c| c == 'a'));
+    }
+
+    #[test]
+    fn a_cut_on_a_boundary_keeps_exactly_the_cap() {
+        let cut = truncate_at_char_boundary("é".repeat(300), 512);
+        assert_eq!(cut, "é".repeat(256));
+    }
+
+    #[test]
+    fn short_text_is_untouched() {
+        assert_eq!(truncate_at_char_boundary("hello".to_string(), 512), "hello");
     }
 }

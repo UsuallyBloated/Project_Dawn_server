@@ -1348,51 +1348,15 @@ async fn reap_connection(
                 conn.mark_persisted();
             }
         }
-        // Every item/coin store flushes on the way out, in ONE transaction.
-        // A logout right after a vendor run or a bank deposit shouldn't roll
-        // back to the last 60 s checkpoint — and, more importantly, these
-        // stores must not be written separately: an item moving between two of
-        // them (inventory to vault, wallet to bank) would otherwise have a
-        // crash window that loses or duplicates it. Same reasoning and same
-        // helper as the periodic sweep. See db::save_stores_atomic.
-        let any_store_dirty = conn.inventory_dirty
-            || conn.coins_dirty
-            || conn.bank_dirty
-            || conn.bank_items_dirty
-            || conn.account_bank_items_dirty;
-        if any_store_dirty {
-            let inv_rows = conn.inventory_dirty.then(|| conn.inventory.to_rows());
-            let bank_rows = conn.bank_items_dirty.then(|| conn.bank_items.to_rows());
-            let acct_rows = conn
-                .account_bank_items_dirty
-                .then(|| conn.account_bank_items.to_rows());
-            match db::save_stores_atomic(
-                pool,
-                conn.char_id,
-                conn.account_id,
-                inv_rows.as_deref(),
-                conn.coins_dirty.then_some(conn.coins),
-                conn.bank_dirty.then_some(conn.bank_coins),
-                bank_rows.as_deref(),
-                acct_rows.as_deref(),
-            )
-            .await
-            {
-                Ok(()) => {
-                    conn.inventory_dirty = false;
-                    conn.coins_dirty = false;
-                    conn.bank_dirty = false;
-                    conn.bank_items_dirty = false;
-                    conn.account_bank_items_dirty = false;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        char_id = conn.char_id,
-                        error = %e,
-                        "final store save on disconnect failed"
-                    );
-                }
-            }
+        // Every item/coin store flushes on the way out, in ONE transaction, so
+        // a logout right after a vendor run or a bank deposit doesn't roll back
+        // to the last 60 s checkpoint. Same helper as the periodic sweep.
+        if let Err(e) = persistence::persist_dirty_stores(pool, &mut conn).await {
+            tracing::warn!(
+                char_id = conn.char_id,
+                error = %e,
+                "final store save on disconnect failed"
+            );
         }
         // Resources (hp / mp / stamina / xp / level) — a kill's XP or a de-level
         // right before logout shouldn't roll back either.
@@ -1700,53 +1664,36 @@ pub async fn run(
                                 );
                                 continue;
                             }
-                            // Track 13.1 — load any persisted inventory
-                            // rows. Failure here is non-fatal (logged
-                            // and the character keeps an empty
-                            // inventory snapshot); we don't want a
-                            // transient DB error to kick the client
-                            // out of the world.
-                            let inv_rows = match db::load_inventory(&pool, char_id).await {
-                                Ok(rows) => rows,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        char_id,
-                                        error = %e,
-                                        "load_inventory failed; defaulting to empty"
-                                    );
-                                    Vec::new()
-                                }
-                            };
-                            // Track 18.1 — load persisted skill scores
-                            // alongside inventory. Same non-fatal stance.
-                            let skill_rows = match db::load_skills(&pool, char_id).await {
-                                Ok(rows) => rows,
-                                Err(e) => {
-                                    tracing::warn!(
-                                        char_id,
-                                        error = %e,
-                                        "load_skills failed; defaulting to starting values"
-                                    );
-                                    Vec::new()
-                                }
-                            };
-                            // Banker slice 2 — load the two item vaults:
-                            // personal (char-keyed) + account-shared (keyed on
-                            // account_id, freshly flushed above if a sibling
-                            // session was just kicked).
-                            let bank_item_rows = match db::load_bank_items(&pool, char_id).await {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    tracing::warn!(char_id, error = %e, "load_bank_items failed; empty");
-                                    Vec::new()
-                                }
-                            };
-                            let account_bank_item_rows =
-                                match db::load_account_bank_items(&pool, account_id).await {
-                                    Ok(r) => r,
+                            // Load the persisted stores: inventory, skill
+                            // scores, and the two item vaults (personal and
+                            // account-shared). Any failure REFUSES the login.
+                            // Playing on with an empty store is not harmless:
+                            // the next save rewrites the table from memory,
+                            // so a transient read error (a busy database)
+                            // would wipe the real inventory, the skills, or
+                            // the whole account bank. Same no-disconnect kick
+                            // as the ban refusal, so the reason arrives.
+                            let loaded = async {
+                                let inv = db::load_inventory(&pool, char_id).await?;
+                                let skills = db::load_skills(&pool, char_id).await?;
+                                let bank = db::load_bank_items(&pool, char_id).await?;
+                                let acct = db::load_account_bank_items(&pool, account_id).await?;
+                                Ok::<_, crate::error::AuthError>((inv, skills, bank, acct))
+                            }
+                            .await;
+                            let (inv_rows, skill_rows, bank_item_rows, account_bank_item_rows) =
+                                match loaded {
+                                    Ok(rows) => rows,
                                     Err(e) => {
-                                        tracing::warn!(account_id, error = %e, "load_account_bank_items failed; empty");
-                                        Vec::new()
+                                        tracing::error!(account_id, char_id, error = %e,
+                                            "could not load the character's stores at connect — refusing");
+                                        handlers::send_kick(
+                                            &mut server,
+                                            client_id,
+                                            KickCode::Unknown,
+                                            "The server could not load your character. Please try again in a moment.",
+                                        );
+                                        continue;
                                     }
                                 };
                             connections.insert(
@@ -6335,6 +6282,13 @@ pub async fn run(
         //      via the existing pipeline. The bag is FFA — any
         //      player nearby can pick it up — matching the GDScript
         //      behaviour of "drop on ground".
+        //
+        //      The removal is made DURABLE before the bag exists. A bag lives
+        //      only in memory and its picker is saved at their own logout, so
+        //      a dropper left waiting for the 60 s checkpoint could see a
+        //      restart hand the item back to them after someone else had
+        //      saved it: a dupe. Saved first, a crash can at worst lose a bag
+        //      lying on the ground, never copy it.
         if !drop_item_intents.is_empty() {
             for intent in drop_item_intents.drain(..) {
                 let owner_cid = intent.owner as ClientId;
@@ -6342,6 +6296,8 @@ pub async fn run(
                 let dropped: Option<(String, u32)>;
                 if let Some(conn) = connections.get_mut(&owner_cid) {
                     drop_pos = conn.pos;
+                    let inventory_before = conn.inventory.clone();
+                    let was_dirty = conn.inventory_dirty;
                     // Bag-aware removal (base or bag_<i>); mirrors the
                     // DestroyItem apply path. Rejects a non-empty
                     // bag-typed slot (the bag must be emptied first).
@@ -6351,7 +6307,26 @@ pub async fn run(
                     {
                         Ok(d) => {
                             conn.inventory_dirty = true;
-                            Some(d)
+                            match persistence::persist_dirty_stores(&pool, conn).await {
+                                Ok(()) => Some(d),
+                                Err(e) => {
+                                    // Nothing was written: put the stack back
+                                    // and refuse. The client never saw the drop.
+                                    conn.inventory = inventory_before;
+                                    conn.inventory_dirty = was_dirty;
+                                    tracing::error!(
+                                        owner = intent.owner,
+                                        error = %e,
+                                        "DropItem persist failed; drop undone"
+                                    );
+                                    handlers::send_refusal(
+                                        &mut server,
+                                        owner_cid,
+                                        "You can't drop that right now. Try again.",
+                                    );
+                                    None
+                                }
+                            }
                         }
                         Err(e) => {
                             tracing::debug!(
@@ -6907,9 +6882,10 @@ pub async fn run(
         //      Server validates: item exists, player has enough coins,
         //      inventory has room. On success: deducts coins, grants
         //      via add_item_locating, fans CoinsUpdate + one
-        //      InventoryDelta per touched slot. Stock-by-vendor
-        //      validation is deferred until server NPCs land (the
-        //      `vendor_id` field is informational for now).
+        //      InventoryDelta per touched slot. Only an item a merchant
+        //      in reach stocks is for sale (npcs.toml `stock`); the
+        //      `vendor_id` field stays informational until the client
+        //      sends real ids.
         if !buy_item_intents.is_empty() {
             for intent in buy_item_intents.drain(..) {
                 let owner_cid = intent.owner as ClientId;
@@ -6921,7 +6897,8 @@ pub async fn run(
                 // a modified client could trade from anywhere; the honest
                 // client has always had a 6 m UI gate, so only remote abuse is
                 // refused here. `vendor_id` remains informational until the
-                // client sends real ids (per-vendor stocking is a later step).
+                // client sends real ids; the stock gate below covers which
+                // merchant sells what.
                 if super::npcs::any_within_range("vendor", conn.pos).is_none() {
                     tracing::info!(
                         owner = intent.owner,
@@ -6931,6 +6908,22 @@ pub async fn run(
                     handlers::send_refusal(&mut server, owner_cid, "There is no merchant near you.");
                     continue;
                 }
+                // Stock gate: only what a merchant in reach actually sells.
+                // Without it every item with a sell-back price was buyable,
+                // named-mob drops included, by a client that asked by name.
+                let Some(seller) =
+                    super::npcs::vendor_stocking_within_range(&intent.item_name, conn.pos)
+                else {
+                    tracing::info!(
+                        owner = intent.owner,
+                        item_name = %intent.item_name,
+                        "BuyItem rejected — no merchant in reach stocks it"
+                    );
+                    handlers::send_refusal(
+                        &mut server, owner_cid, "The merchant doesn't stock that.",
+                    );
+                    continue;
+                };
                 let Some(item) = items::lookup_by_name(&intent.item_name) else {
                     tracing::info!(
                         owner = intent.owner,
@@ -7044,6 +7037,8 @@ pub async fn run(
                     qty = placed,
                     cost = actual_cost,
                     coins_after = coins_after.total_copper(),
+                    seller = %seller.id,
+                    vendor_type = seller.vendor_type.as_deref().unwrap_or(""),
                     "BuyItem applied"
                 );
             }
@@ -8746,15 +8741,15 @@ pub async fn run(
                 tracing::info!(char_id = responder, quest_id = %quest_id, reward, "quest completed");
             }
             // Force-persist the granted inventory so a crash after the (already
-            // durable) completion record can't lose the reward. Rare path; a
-            // failed save just falls back to the periodic checkpoint.
+            // durable) completion record can't lose the reward. It goes through
+            // the all-stores flush, never the inventory alone: writing only the
+            // inventory while a bank withdrawal or a purchase sat unsaved left
+            // the item in the bag AND the vault (or the coins unspent) after a
+            // crash. Rare path; a failed save falls back to the checkpoint.
             if !rewards.is_empty() {
-                let inv = connections
-                    .get(&responder_cid)
-                    .map(|c| (c.char_id, c.inventory.to_rows()));
-                if let Some((cid, rows)) = inv {
-                    if let Err(e) = db::save_inventory(&pool, cid, &rows).await {
-                        tracing::warn!(char_id = responder, quest_id = %quest_id, error = %e, "quest reward inventory save failed (will retry on checkpoint)");
+                if let Some(conn) = connections.get_mut(&responder_cid) {
+                    if let Err(e) = persistence::persist_dirty_stores(&pool, conn).await {
+                        tracing::warn!(char_id = responder, quest_id = %quest_id, error = %e, "quest reward store save failed (will retry on checkpoint)");
                     }
                 }
             }
@@ -8864,6 +8859,23 @@ pub async fn run(
                                 &mut server,
                                 looter_cid,
                                 "That is not your corpse.".to_string(),
+                            );
+                            continue;
+                        }
+                    }
+                    // Flush the looter's other dirty stores FIRST. The corpse
+                    // transaction below rewrites the inventory and wallet but
+                    // not the vaults, so an unsaved bank withdrawal would ride
+                    // into the DB inventory while the vault row still held the
+                    // item: a crash then leaves it in both. Flushed beforehand,
+                    // each commit records a state that was whole in memory.
+                    if let Some(c) = connections.get_mut(&looter_cid) {
+                        if let Err(e) = persistence::persist_dirty_stores(&pool, c).await {
+                            tracing::error!(corpse_id, error = %e, "pre-loot store flush failed; corpse loot refused");
+                            handlers::send_loot_rejected(
+                                &mut server,
+                                looter_cid,
+                                "You can't loot that right now. Try again.".to_string(),
                             );
                             continue;
                         }
@@ -10140,6 +10152,17 @@ pub async fn run(
             // someone who dies mid-corpse-run with nothing on them STILL needs a
             // body to be rezzed back to. An empty corpse is just a corpses row
             // with no items; it renders and decays like any other.
+            // 0. Flush the owner's dirty stores first. save_corpse writes the
+            //    inventory and wallet but not the vaults, so an unsaved bank
+            //    withdrawal would go onto the corpse while the vault row still
+            //    held it. A failed flush is treated like a failed save_corpse:
+            //    no strip, no corpse, the gear stays on the player.
+            if let Some(c) = connections.get_mut(&client_id) {
+                if let Err(e) = persistence::persist_dirty_stores(&pool, c).await {
+                    tracing::error!(char_id = cid, error = %e, "pre-corpse store flush failed; leaving inventory intact (no strip)");
+                    continue;
+                }
+            }
             let corpse_id = super::loot::mint_bag_id();
             // 1. Create the corpse AND strip the owner in ONE transaction. These
             //    are two halves of a single movement — the gear and coin leave

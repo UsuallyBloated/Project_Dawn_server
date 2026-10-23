@@ -17,6 +17,12 @@
 # vendor and a quest giver). Recognised kinds: "vendor", "banker", "quest",
 # "soul_binder".
 #
+# A vendor's `stock` is what it sells, by item name, and the server sells only
+# that: a priced item is not for sale anywhere it isn't stocked (the price is
+# also what the item fetches when sold back). It mirrors the client's
+# `data/vendor_definitions.gd` entry named by `vendor_type`; change both in the
+# same commit. `tools/check_vendor_lockstep.gd` (client repo) compares them.
+#
 # Zone note: the server currently simulates a single zone and `conn.zone` is
 # not populated by the client, so entries carry no zone field yet. When real
 # multi-zone lands, add one and gate on it — a position-only check can collide
@@ -27,6 +33,26 @@ id = "brom"
 name = "Brom"
 kinds = ["vendor", "quest"]
 pos = [8.0, 0.0, 5.0]
+vendor_type = "Provisioner"
+stock = [
+    "Flour",
+    "Salt",
+    "Raw Egg",
+    "Honey",
+    "Wild Berries",
+    "Wild Fruit",
+    "Wild Mushroom",
+    "Yeast",
+    "Hops",
+    "Barley",
+    "Bread Loaf",
+    "Meat Pie",
+    "Mushroom Bread",
+    "Berry Tart",
+    "Crude Ale",
+    "Honey Mead",
+    "Water Flask",
+]
 
 [[npc]]
 id = "aldric"
@@ -51,9 +77,55 @@ id = "elara"
 name = "Elara"
 kinds = ["vendor"]
 pos = [5.0, 0.0, 5.0]
+vendor_type = "General Merchant"
+stock = [
+    "Cloth Scraps",
+    "Flax",
+    "Coal",
+    "Salt",
+    "Flour",
+    "Raw Egg",
+    "Honey",
+    "Bread Loaf",
+    "Stale Bread",
+    "Crude Ale",
+    "Water Flask",
+    "Empty Bottle",
+    "Empty Vial",
+    "Minor Healing Potion",
+    "Wild Berries",
+    "Wild Fruit",
+    "Wild Mushroom",
+    "Skinning Knife",
+    "Sewing Needle",
+    "Pickaxe",
+]
 
 [[npc]]
 id = "hadrik"
 name = "Hadrik"
 kinds = ["vendor"]
 pos = [-5.0, 0.0, 5.0]
+vendor_type = "Blacksmith"
+stock = [
+    "Copper Ore",
+    "Iron Ore",
+    "Coal",
+    "Copper Ingot",
+    "Iron Ingot",
+    "Metal Bits",
+    "Small Metal Plate",
+    "Small Metal Sheet",
+    "Smithing Hammer",
+    "Ruined Metal Scraps",
+    "Copper Dagger",
+    "Iron Dagger",
+    "Copper Short Sword",
+    "Iron Short Sword",
+    "Copper Chain Vest",
+    "Iron Chain Vest",
+    "Iron Chain Coif",
+    "Iron Chain Boots",
+    "Iron Chain Gloves",
+    "Iron Chain Leggings",
+]

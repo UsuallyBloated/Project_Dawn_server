@@ -7,10 +7,17 @@
 # not yet rustfmt-clean and clippy still warns; they become blocking after the
 # one-time reformat that follows the tick.rs split (housekeeping audit, Phase 2
 # and 3).
+#
+# Every third-party action is pinned to a commit SHA (the tag it was taken
+# from is in the comment), so a moved tag or branch cannot change what runs.
 name: CI
 
 on:
   workflow_dispatch:
+
+# Read-only: CI checks code, it never writes to the repository.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,16 +29,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # The toolchain pinned in rust-toolchain.toml, stated here as well so a
       # bump of one without the other is visible in review.
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-23
         with:
           toolchain: "1.95.0"
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: rustfmt (report only)
         continue-on-error: true
@@ -39,19 +46,23 @@ jobs:
 
       - name: clippy (report only)
         continue-on-error: true
-        run: cargo clippy --all-targets
+        run: cargo clippy --locked --all-targets
 
       # The default members only: the gdext-net crate builds against Godot
-      # and is built by hand on the dev box.
+      # and is built by hand on the dev box. --locked: test exactly the
+      # dependency set in Cargo.lock, the one the R720 builds.
       - name: tests
-        run: cargo test
+        run: cargo test --locked
 
   deny:
     name: cargo-deny (advisories, bans, sources)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
+          # The action defaults to --all-features; empty keeps the graph the
+          # one deny.toml declares, so a local `cargo deny check` agrees.
+          arguments: ""
           command: check advisories bans sources

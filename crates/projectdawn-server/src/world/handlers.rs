@@ -2747,22 +2747,41 @@ fn encode(msg: &ServerWorldMsg) -> Option<Vec<u8>> {
 /// reserve memory the bytes never back.
 const CLIENT_MSG_DECODE_LIMIT: usize = 16 * 1024;
 
-/// Decode one client message from untrusted bytes: refuses anything over
-/// `CLIENT_MSG_DECODE_LIMIT`, and a message followed by extra bytes (an honest
-/// client encodes exactly one message per send, so trailing bytes mean a
-/// forged or corrupt payload). Never panics; a property test feeds it random
-/// bytes.
+/// Decode one client message from untrusted bytes, refusing anything over
+/// `CLIENT_MSG_DECODE_LIMIT`. Bytes after the message are ignored, not
+/// refused: the protocol's compatibility rule is that a field appended to the
+/// end of a variant is safe, so a newer client must still be understood by an
+/// older server. Never panics; property tests feed it random and mutated bytes.
 pub fn decode_client(bytes: &[u8]) -> Option<ClientWorldMsg> {
     let cfg = bincode_cfg().with_limit::<CLIENT_MSG_DECODE_LIMIT>();
     match bincode::serde::decode_from_slice::<ClientWorldMsg, _>(bytes, cfg) {
-        Ok((msg, read)) if read == bytes.len() => Some(msg),
-        Ok((_, read)) => {
-            tracing::warn!(read, len = bytes.len(), "ClientWorldMsg followed by trailing bytes; dropped");
+        Ok((msg, _)) => Some(msg),
+        Err(e) => {
+            warn_decode_failure(&e);
             None
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to bincode-decode ClientWorldMsg");
-            None
+    }
+}
+
+/// A forged client can send garbage as fast as it likes, and decoding comes
+/// before any intent budget, so a warning per bad message would let one
+/// client flood the log. At most one line a second, carrying how many
+/// failures it stands for.
+fn warn_decode_failure(error: &bincode::error::DecodeError) {
+    use std::sync::Mutex;
+    static WINDOW: Mutex<Option<(std::time::Instant, u64)>> = Mutex::new(None);
+    let Ok(mut window) = WINDOW.lock() else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    match window.as_mut() {
+        Some((since, count)) if now.duration_since(*since) < std::time::Duration::from_secs(1) => {
+            *count += 1;
+        }
+        _ => {
+            let suppressed = window.map(|(_, count)| count).unwrap_or(0);
+            tracing::warn!(error = %error, suppressed_last_second = suppressed, "failed to bincode-decode ClientWorldMsg");
+            *window = Some((now, 0));
         }
     }
 }
@@ -2785,11 +2804,13 @@ mod tests {
         assert!(decode_client(&encode(&say("hello".into()))).is_some());
     }
 
+    /// The append-only compatibility rule: a newer client's extra trailing
+    /// field must not make an older server drop the whole message.
     #[test]
-    fn a_message_with_trailing_bytes_is_refused() {
+    fn trailing_bytes_are_ignored() {
         let mut bytes = encode(&say("hello".into()));
-        bytes.push(0);
-        assert!(decode_client(&bytes).is_none());
+        bytes.extend_from_slice(&[1, 2, 3]);
+        assert!(decode_client(&bytes).is_some());
     }
 
     #[test]

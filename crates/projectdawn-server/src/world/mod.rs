@@ -295,7 +295,7 @@ pub fn mint_connect_token(
         NETCODE_TIMEOUT_SECS,
         vec![server_addr],
         Some(&user_data),
-        &cfg.netcode_private_key,
+        &cfg.netcode_private_key.0,
     )
     .context("ConnectToken::generate failed")?;
 
@@ -368,7 +368,7 @@ pub async fn serve_with_socket_until(
         protocol_id: WORLD_PROTOCOL_ID,
         public_addresses: vec![public_addr],
         authentication: ServerAuthentication::Secure {
-            private_key: cfg.netcode_private_key,
+            private_key: cfg.netcode_private_key.0,
         },
     };
 

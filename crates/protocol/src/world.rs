@@ -1700,10 +1700,14 @@ mod coin_properties {
     use super::Coins;
     use proptest::prelude::*;
 
+    /// Ordinary purses most of the time, and enormous ones too: up to a
+    /// trillion platinum (10^18 copper, below i64's 9.2 x 10^18), where the
+    /// arithmetic's products are largest. Saturation itself (past 9.2 x 10^12
+    /// platinum) is out of reach of any economy and not generated.
     fn purse() -> impl Strategy<Value = Coins> {
-        (0i64..1_000_000, 0i64..1_000_000, 0i64..1_000_000, 0i64..100_000).prop_map(
-            |(copper, silver, gold, platinum)| Coins { copper, silver, gold, platinum },
-        )
+        let tier = |max: i64| prop_oneof![3 => 0i64..1_000_000, 1 => 0i64..max];
+        (tier(1_000_000_000_000_000), tier(1_000_000_000_000_000), tier(1_000_000_000_000), tier(1_000_000_000_000))
+            .prop_map(|(copper, silver, gold, platinum)| Coins { copper, silver, gold, platinum })
     }
 
     fn no_negative_tier(c: Coins) -> bool {

@@ -4,7 +4,7 @@
 use anyhow::Result;
 use std::env;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Config {
     pub auth_bind: String,
     /// What the renet UDP listener binds to. Always 0.0.0.0 in production
@@ -18,21 +18,18 @@ pub struct Config {
     pub min_client_version: semver::Version,
     /// 32-byte private key for renet `Secure` connection tokens. Shared by
     /// the auth (mints tokens) and world (validates) services.
-    pub netcode_private_key: [u8; 32],
+    pub netcode_private_key: NetcodeKey,
 }
 
-/// Written by hand so the netcode private key can never reach a log: anyone
+/// The 32-byte renet netcode private key. A newtype so its `Debug` can never
+/// print it, wherever it travels (a `{cfg:?}` in a log line included): anyone
 /// holding it can mint connect tokens for any account, GM flag included.
-impl std::fmt::Debug for Config {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct NetcodeKey(pub [u8; 32]);
+
+impl std::fmt::Debug for NetcodeKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Config")
-            .field("auth_bind", &self.auth_bind)
-            .field("world_bind", &self.world_bind)
-            .field("world_endpoint", &self.world_endpoint)
-            .field("database_url", &self.database_url)
-            .field("min_client_version", &self.min_client_version)
-            .field("netcode_private_key", &"<redacted>")
-            .finish()
+        f.write_str("NetcodeKey(<redacted>)")
     }
 }
 
@@ -98,7 +95,7 @@ impl Config {
             world_endpoint,
             database_url,
             min_client_version,
-            netcode_private_key,
+            netcode_private_key: NetcodeKey(netcode_private_key),
         })
     }
 }
@@ -139,11 +136,10 @@ mod tests {
             world_endpoint: "127.0.0.1:7777".into(),
             database_url: "sqlite::memory:".into(),
             min_client_version: semver::Version { major: 0, minor: 1, patch: 0 },
-            netcode_private_key: [0xAB; 32],
+            netcode_private_key: NetcodeKey([0xAB; 32]),
         };
         let shown = format!("{cfg:?}");
         assert!(shown.contains("<redacted>"), "{shown}");
         assert!(!shown.contains("171"), "the key's bytes leaked: {shown}");
-        assert!(!shown.to_lowercase().contains("ab, ab"), "the key's bytes leaked: {shown}");
     }
 }

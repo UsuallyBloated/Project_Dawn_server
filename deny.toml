@@ -10,8 +10,22 @@ all-features = false
 [advisories]
 version = 2
 # A crate with a RustSec advisory fails the check. To accept one knowingly,
-# list its id here with a comment saying why and until when.
-ignore = []
+# list it here with the reason and when to revisit it. Reviewed 2026-10-23
+# against the advisory database (tokio, anyhow and event-listener were
+# updated past theirs the same day).
+ignore = [
+    # bincode 2.x is unmaintained (its team stopped development). It is the
+    # wire format between client and server, so replacing it is a protocol
+    # project of its own (postcard or wincode are the named alternatives).
+    # Revisit with the next protocol redesign; until then nothing in it is
+    # known to be unsound, and the decoder takes untrusted bytes behind a
+    # size limit with property tests on it.
+    { id = "RUSTSEC-2025-0141", reason = "bincode is the wire format; replacement is its own project" },
+    # rsa: the Marvin timing attack, no fixed version exists. It is in
+    # Cargo.lock only through sqlx's optional MySQL driver, which this
+    # SQLite-only server never compiles (`cargo tree -i rsa` prints nothing).
+    { id = "RUSTSEC-2023-0071", reason = "lockfile only via sqlx-mysql, never compiled" },
+]
 yanked = "warn"
 
 [bans]

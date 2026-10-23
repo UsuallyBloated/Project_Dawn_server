@@ -73,7 +73,7 @@ async fn start_both() -> Harness {
             minor: 1,
             patch: 0,
         },
-        netcode_private_key: netcode_key,
+        netcode_private_key: projectdawn_server::config::NetcodeKey(netcode_key),
     });
 
     let pool = db::open(&url).await.expect("open pool");

@@ -3246,8 +3246,8 @@ mod tests {
 }
 
 /// Property test: no sequence of moves creates or destroys an item. Random
-/// contents (food, water, a sword, pouches) and a random sequence of moves
-/// between base slots and bag slots, valid or not; after every move the count
+/// contents (food, water, a sword, pouches holding food) and a random sequence
+/// of moves between base slots, bag slots and the cursor, valid or not; after every move the count
 /// of each item across the whole inventory is what it was. Moves are where a
 /// dupe would hide (merges, swaps, a bag carrying its contents).
 #[cfg(test)]
@@ -3271,10 +3271,13 @@ mod move_properties {
         out
     }
 
+    /// Base slots, bag slots and the cursor (the hand: lifting a full pouch
+    /// onto it re-keys its contents, the path where a dupe once hid).
     fn location() -> impl Strategy<Value = (String, u32)> {
         prop_oneof![
-            (0u32..BASE_SLOT_COUNT as u32).prop_map(|s| ("base".to_string(), s)),
-            (0usize..BASE_SLOT_COUNT, 0u32..10).prop_map(|(b, s)| (format!("bag_{b}"), s)),
+            4 => (0u32..BASE_SLOT_COUNT as u32).prop_map(|s| ("base".to_string(), s)),
+            4 => (0usize..BASE_SLOT_COUNT, 0u32..6).prop_map(|(b, s)| (format!("bag_{b}"), s)),
+            1 => Just(("cursor".to_string(), 0)),
         ]
     }
 
@@ -3284,7 +3287,7 @@ mod move_properties {
             contents in proptest::collection::vec((0usize..PATHS.len(), 1i32..6), BASE_SLOT_COUNT),
             moves in proptest::collection::vec((location(), location()), 1..40),
         ) {
-            let rows: Vec<InventoryRow> = contents
+            let mut rows: Vec<InventoryRow> = contents
                 .iter()
                 .enumerate()
                 .map(|(slot, (p, count))| InventoryRow {
@@ -3295,6 +3298,20 @@ mod move_properties {
                     count: if *p >= 2 { 1 } else { *count },
                 })
                 .collect();
+            // Every pouch starts with food in its first slots, so moving or
+            // lifting a pouch carries contents from the first move on.
+            for (slot, (p, count)) in contents.iter().enumerate() {
+                if *p == 3 {
+                    for inner in 0..3 {
+                        rows.push(InventoryRow {
+                            location: format!("bag_{slot}"),
+                            slot: inner,
+                            item_path: PATHS[inner as usize % 2].into(),
+                            count: *count,
+                        });
+                    }
+                }
+            }
             let mut inv = PlayerInventory::from_rows(&rows);
             let before = totals(&inv);
             for ((src_loc, src_slot), (dst_loc, dst_slot)) in moves {

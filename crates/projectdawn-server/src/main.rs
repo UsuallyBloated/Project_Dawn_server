@@ -58,11 +58,17 @@ async fn main() -> anyhow::Result<()> {
     // or Ctrl-C) asks the world to shut down cleanly: it tells every player,
     // saves everyone and returns. Without this, a restart threw away up to
     // 60 s of everyone's progress.
+    // A SECOND stop signal ends the process at once: listening for the signal
+    // replaces the default "terminate" action, so without this a shutdown stuck
+    // on a locked database could not be interrupted from the keyboard.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
         wait_for_stop_signal().await;
-        tracing::info!("stop signal received");
+        tracing::info!("stop signal received; saving everyone (signal again to quit at once)");
         let _ = shutdown_tx.send(true);
+        wait_for_stop_signal().await;
+        tracing::warn!("second stop signal; exiting without finishing the save");
+        std::process::exit(130);
     });
 
     // Run auth (WS) and world (UDP) together. The process ends when the world
@@ -77,8 +83,9 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolves on the first stop signal: SIGTERM or Ctrl-C (SIGINT) on Linux,
-/// Ctrl-C on Windows.
+/// Resolves on the next stop signal: SIGTERM or Ctrl-C (SIGINT) on Linux;
+/// Ctrl-C, Ctrl-Break, closing the console window, or the machine shutting
+/// down on Windows (the last two allow about 5 s, enough for the save).
 async fn wait_for_stop_signal() {
     #[cfg(unix)]
     {
@@ -96,7 +103,25 @@ async fn wait_for_stop_signal() {
             }
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows;
+        match (windows::ctrl_break(), windows::ctrl_close(), windows::ctrl_shutdown()) {
+            (Ok(mut brk), Ok(mut close), Ok(mut shut)) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = brk.recv() => {}
+                    _ = close.recv() => {}
+                    _ = shut.recv() => {}
+                }
+            }
+            _ => {
+                tracing::warn!("could not listen for console close; Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = tokio::signal::ctrl_c().await;
     }

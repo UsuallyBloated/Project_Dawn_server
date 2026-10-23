@@ -734,6 +734,18 @@ impl PerConnection {
         p.x != lp.x || p.y != lp.y || p.z != lp.z || self.yaw != self.last_persisted_yaw
     }
 
+    /// Is any item or coin store (inventory, wallet, either vault) waiting to
+    /// be written? The one list of those stores: `persist_dirty_stores` writes
+    /// exactly these, and the logout retry queue holds a character while any
+    /// is set, so a store added here is covered by both.
+    pub fn any_store_dirty(&self) -> bool {
+        self.inventory_dirty
+            || self.coins_dirty
+            || self.bank_dirty
+            || self.bank_items_dirty
+            || self.account_bank_items_dirty
+    }
+
     pub fn mark_persisted(&mut self) {
         self.last_persisted_pos = self.pos;
         self.last_persisted_yaw = self.yaw;

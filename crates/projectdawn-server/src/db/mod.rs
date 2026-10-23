@@ -950,7 +950,7 @@ pub async fn record_quest_completion(
 /// path cheap (single-row UPDATE).
 /// Persist a character's bind point (where `Respawn` sends them). Written
 /// immediately when the player binds rather than riding the 60 s checkpoint:
-/// binding is a deliberate, rare act, and losing it to an ungraceful shutdown
+/// binding is a deliberate, rare act, and losing it to a crash
 /// would send the player somewhere they explicitly chose not to be.
 pub async fn set_bind_point(
     pool: &SqlitePool,

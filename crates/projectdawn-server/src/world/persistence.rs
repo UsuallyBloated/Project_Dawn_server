@@ -21,12 +21,7 @@ use sqlx::SqlitePool;
 /// reward saving the inventory while a bank withdrawal sits unsaved left the
 /// item in both). See db::save_stores_atomic.
 pub async fn persist_dirty_stores(pool: &SqlitePool, conn: &mut PerConnection) -> AuthResult<()> {
-    let any_store_dirty = conn.inventory_dirty
-        || conn.coins_dirty
-        || conn.bank_dirty
-        || conn.bank_items_dirty
-        || conn.account_bank_items_dirty;
-    if !any_store_dirty {
+    if !conn.any_store_dirty() {
         return Ok(());
     }
     let inv_rows = conn.inventory_dirty.then(|| conn.inventory.to_rows());
@@ -121,8 +116,16 @@ pub async fn flush_connection(pool: &SqlitePool, conn: &mut PerConnection, when:
             }
         }
     }
-    // Quest progress touched since the last save: upsert a quest that is still
-    // active, delete the row of one that is not (abandoned or completed).
+    flush_quests(pool, conn, when).await;
+    !has_unsaved_state(conn)
+}
+
+/// Write the quest progress touched since the last save, reconciled to the
+/// database: upsert a quest that is still active, delete the row of one that
+/// is not (abandoned or completed). A failed write stays dirty for the next
+/// call. The tick loop runs this every tick for every connection (counted
+/// kills are worth more than the writes), and `flush_connection` runs it too.
+pub async fn flush_quests(pool: &SqlitePool, conn: &mut PerConnection, when: &str) {
     let dirty_quests: Vec<String> = conn.quests_dirty.iter().cloned().collect();
     for quest_id in dirty_quests {
         let result = match conn.active_quests.get(&quest_id) {
@@ -138,18 +141,13 @@ pub async fn flush_connection(pool: &SqlitePool, conn: &mut PerConnection, when:
             }
         }
     }
-    !has_unsaved_state(conn)
 }
 
 /// Is anything about `conn` still waiting to be written?
 pub fn has_unsaved_state(conn: &PerConnection) -> bool {
     conn.is_dirty_for_persist()
         || conn.is_dirty_for_resource_persist()
-        || conn.inventory_dirty
-        || conn.coins_dirty
-        || conn.bank_dirty
-        || conn.bank_items_dirty
-        || conn.account_bank_items_dirty
+        || conn.any_store_dirty()
         || conn.skills_dirty
         || !conn.quests_dirty.is_empty()
 }

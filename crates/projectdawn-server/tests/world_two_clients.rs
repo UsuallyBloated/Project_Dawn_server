@@ -1166,11 +1166,12 @@ async fn two_clients_hit_fanout() {
 async fn two_clients_death_fanout() {
     let h = start_both().await;
 
-    let (a_session, a_char_id, a_token) =
+    let (a_session, a_char_id, _a_stale) =
         provision_client(&h.auth_url, "lambda", "Lam", "Human", "Cleric").await;
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "mumu", "Mumu", "Elf", "Druid").await;
 
+    let a_token = gm_world_token(&h.auth_url, &h.db_url, "lambda", &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
 
@@ -4612,6 +4613,23 @@ fn decode_token_bytes(hex_str: &str) -> [u8; 32] {
     v.try_into().expect("32 bytes")
 }
 
+/// Makes `username` a GM and mints a fresh connect token carrying the flag (it
+/// is packed at mint time). A test that kills a player with `send_death` needs
+/// it: `DeathBroadcast` is a dev command since 2026-10-23 (housekeeping audit B1,
+/// `docs/design/server_fall_damage.md`), as it is for the Test Panel's Trigger
+/// Death in play.
+async fn gm_world_token(
+    auth_url: &str,
+    db_url: &str,
+    username: &str,
+    session_token_hex: &str,
+    char_id: i64,
+) -> Vec<u8> {
+    let pool = db::open(db_url).await.expect("open pool");
+    db::set_account_gm(&pool, username, true).await.expect("set is_gm");
+    request_world_token(auth_url, session_token_hex, char_id).await
+}
+
 /// Request a FRESH world ConnectToken for an existing session + char. Used when
 /// account state changed after the initial `provision_client` (e.g. `is_gm` was
 /// flipped), so the new token reflects it â€” the flag is packed at mint time.
@@ -4635,6 +4653,61 @@ async fn request_world_token(auth_url: &str, session_token_hex: &str, char_id: i
         .iter()
         .map(|v| v.as_u64().expect("byte") as u8)
         .collect()
+}
+
+/// `DeathBroadcast` is a dev command (housekeeping audit B1, 2026-10-23,
+/// `docs/design/server_fall_damage.md` slice 0). Ungated it killed the sender on
+/// demand: a free trip to the bind point and a wipe of every mob's hate. A plain
+/// account's send is ignored and writes nothing; a GM's kills them (the Test
+/// Panel's Trigger Death) and writes one audit row; a second send while dead,
+/// which is what an honest client does after every death, writes no more. On
+/// the previous handler the plain account died.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn death_broadcast_is_a_dev_command() {
+    if std::env::var("PD_DEV_CMDS").as_deref() == Ok("1") {
+        eprintln!("skipping death_broadcast_is_a_dev_command: PD_DEV_CMDS=1 makes every connection dev");
+        return;
+    }
+    let h = start_both().await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    let death_rows = |pool: sqlx::SqlitePool| async move {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM gm_actions WHERE command = 'death_broadcast'")
+            .fetch_one(&pool)
+            .await
+            .expect("count death_broadcast rows")
+    };
+
+    // A plain account: the forged death does nothing.
+    let (pl_session, pl_char, pl_token) =
+        provision_client(&h.auth_url, "deathplain", "Liveson", "Human", "Warrior").await;
+    let mut plain = WorldClient::start(pl_token, &pl_session, pl_char).await;
+    let pl_id = pl_char as u64;
+    plain.send_death();
+    let died = plain
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+            matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == pl_id && *hp <= 0.01)
+        })
+        .await;
+    assert!(died.is_none(), "a plain account's DeathBroadcast must not kill it");
+    assert_eq!(death_rows(pool.clone()).await, 0, "a refused dev command writes no audit row");
+
+    // A GM: the Test Panel's Trigger Death still works, and is audited once.
+    let (gm_session, gm_char, _stale) =
+        provision_client(&h.auth_url, "deathgm", "Fallsdown", "Human", "Warrior").await;
+    let gm_token = gm_world_token(&h.auth_url, &h.db_url, "deathgm", &gm_session, gm_char).await;
+    let mut gm = WorldClient::start(gm_token, &gm_session, gm_char).await;
+    let gm_id = gm_char as u64;
+    gm.send_death();
+    let died = gm
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == gm_id && *hp <= 0.01)
+        })
+        .await;
+    assert!(died.is_some(), "a GM's DeathBroadcast kills them");
+    // The honest client's follow-up send, already dead: no second row.
+    gm.send_death();
+    gm.pump_for(Duration::from_millis(600)).await;
+    assert_eq!(death_rows(pool.clone()).await, 1, "one death, one audit row");
 }
 
 /// Phase 1 keystone: the per-account GM gate. A dev/GM command must APPLY for an
@@ -4712,8 +4785,9 @@ async fn is_gm_gates_dev_commands() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn respawn_requires_being_dead() {
     let h = start_both().await;
-    let (session, char_id, token) =
+    let (session, char_id, _stale) =
         provision_client(&h.auth_url, "respawner", "Respawna", "Human", "Warrior").await;
+    let token = gm_world_token(&h.auth_url, &h.db_url, "respawner", &session, char_id).await;
     let mut c = WorldClient::start(token, &session, char_id).await;
     let cid = char_id as u64;
 
@@ -4763,8 +4837,9 @@ async fn respawn_requires_being_dead() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dead_players_cannot_loot_or_touch_inventory() {
     let h = start_both().await;
-    let (a_session, a_char_id, a_token) =
+    let (a_session, a_char_id, _a_stale) =
         provision_client(&h.auth_url, "dedguy", "Deddy", "Human", "Warrior").await;
+    let a_token = gm_world_token(&h.auth_url, &h.db_url, "dedguy", &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     a.send_death();
@@ -4894,11 +4969,12 @@ async fn dead_group_member_gets_no_xp_share() {
     let pool = db::open(&h.db_url).await.expect("open pool");
     db::set_account_gm(&pool, "xpsolo", true).await.expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
-    let (b_session, b_char_id, b_token) =
+    let (b_session, b_char_id, _b_stale) =
         provision_client(&h.auth_url, "xpdead", "Xpdead", "Elf", "Cleric").await;
 
     master_weapon_skill(&h.db_url, a_char_id, "hand_to_hand").await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let b_token = gm_world_token(&h.auth_url, &h.db_url, "xpdead", &b_session, b_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
     let _ = b_char_id;
 
@@ -7545,7 +7621,7 @@ async fn a_dead_character_stays_dead_on_relogin_and_pays_once() {
         provision_client(&h.auth_url, "corpse", "Corpsey", "Human", "Warrior").await;
     // Below the level floor there is no XP penalty to double; level 10 has one.
     set_char_level(&h.db_url, char_id, 10).await;
-    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let token = gm_world_token(&h.auth_url, &h.db_url, "corpse", &session, char_id).await;
     let mut a = WorldClient::start(token, &session, char_id).await;
     let cid = char_id as u64;
     a.send_death();
@@ -7672,7 +7748,7 @@ async fn out_of_food_means_no_hp_regen_and_the_dead_do_not_starve() {
     let (session, char_id, _) =
         provision_client(&h.auth_url, "starving", "Starvo", "Human", "Warrior").await;
     set_char_appetite(&h.db_url, char_id, 0.0, 1000.0, Some(1.0)).await;
-    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let token = gm_world_token(&h.auth_url, &h.db_url, "starving", &session, char_id).await;
     let mut a = WorldClient::start(token, &session, char_id).await;
     let cid = char_id as u64;
     // Heartbeats keep the app-layer timeout (10 s) off while we watch.
@@ -10367,7 +10443,7 @@ async fn a_burst_of_drops_in_one_tick_is_capped() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_death_after_an_unsaved_bank_withdrawal_leaves_the_item_in_one_place() {
     let h = start_both().await;
-    let (session, char_id, token) =
+    let (session, char_id, _stale) =
         provision_client(&h.auth_url, "bankdeath", "Withdrawer", "Human", "Warrior").await;
     {
         let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
@@ -10378,6 +10454,7 @@ async fn a_death_after_an_unsaved_bank_withdrawal_leaves_the_item_in_one_place()
             .await
             .expect("seed the vault");
     }
+    let token = gm_world_token(&h.auth_url, &h.db_url, "bankdeath", &session, char_id).await;
     let mut a = WorldClient::start(token, &session, char_id).await;
     a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
         matches!(m, ServerWorldMsg::InventorySnapshot { .. })
@@ -10744,9 +10821,10 @@ async fn a_failed_logout_save_holds_the_relogin_until_it_lands() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_death_saves_its_xp_loss_with_the_corpse() {
     let h = start_both().await;
-    let (session, char_id, token) =
+    let (session, char_id, _stale) =
         provision_client(&h.auth_url, "xpdeath", "Fallen", "Human", "Warrior").await;
     set_char_level(&h.db_url, char_id, 10).await;
+    let token = gm_world_token(&h.auth_url, &h.db_url, "xpdeath", &session, char_id).await;
     let mut a = WorldClient::start(token, &session, char_id).await;
     a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
         matches!(m, ServerWorldMsg::InventorySnapshot { .. })

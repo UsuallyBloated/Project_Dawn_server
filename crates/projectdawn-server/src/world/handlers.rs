@@ -762,15 +762,26 @@ pub fn handle_message(
             if !conn.ready {
                 return Outcome::Continue;
             }
-            // Server-authoritative death (Slice 0): the per-tick death sweep
-            // already kills players whose hp hit zero in server-simulated
-            // combat. This handler now covers death causes the server doesn't
-            // simulate (e.g. client-side fall damage): if this death hasn't been
-            // processed yet, run the same authoritative kill path (xp penalty +
-            // de-level, on-death resets). The `death_processed` guard keeps the
-            // penalty + EntityDied to exactly once whether the sweep or this
-            // handler reaches it first.
+            // A dev command since 2026-10-23 (docs/design/server_fall_damage.md,
+            // slice 0). Online every honest death is already the server's: HP
+            // only falls on the server, and the per-tick death sweep kills at
+            // zero, so an honest client's send arrives after `death_processed`
+            // is set and stops at the check below without writing an audit
+            // row. The one honest sender of a fresh death is the Test Panel's
+            // Trigger Death, a GM tool. Ungated, this was an instant death on
+            // demand: a free trip to the bind point and a wipe of every mob's
+            // hate (housekeeping audit B1).
             if conn.death_processed {
+                return Outcome::Continue;
+            }
+            if !dev_cmd_allowed(
+                server,
+                conn,
+                client_id,
+                now,
+                "death_broadcast",
+                format!("hp={}", conn.hp),
+            ) {
                 return Outcome::Continue;
             }
             super::progression::kill_player(server, conn);

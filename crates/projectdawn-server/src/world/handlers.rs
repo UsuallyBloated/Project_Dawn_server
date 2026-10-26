@@ -532,6 +532,17 @@ fn dev_cmd_allowed(
     }
 }
 
+/// A client message's variant name ("UseSkill", "Sit") for logs, without its
+/// fields (a chat line or a trade offer stays out of the journal).
+fn message_name(msg: &ClientWorldMsg) -> String {
+    let debug = format!("{msg:?}");
+    debug
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
 pub fn handle_message(
     server: &mut RenetServer,
     conn: &mut PerConnection,
@@ -558,6 +569,11 @@ pub fn handle_message(
     // sessions) and refuse the rest with one honest line. Move stays
     // whitelisted because its own silent gate already drops it — it arrives
     // at 20 Hz, and a chat refusal per packet would flood an old client.
+    // SetTarget is allowed (2026-10-26): clicking things while dead is natural
+    // and a target only matters to attacks and casts, which stay refused. The
+    // line is said once per death (a client sends several messages while dead,
+    // and each used to add a line); every refusal is logged by its message
+    // name, the first at info and the rest at debug.
     if conn.death_processed {
         let allowed_while_dead = matches!(
             msg,
@@ -579,9 +595,17 @@ pub fn handle_message(
                 | ClientWorldMsg::GroupKick { .. }
                 | ClientWorldMsg::SetGroupLootMode { .. }
                 | ClientWorldMsg::PassLeadership { .. }
+                | ClientWorldMsg::SetTarget { .. }
         );
         if !allowed_while_dead {
-            send_refusal(server, client_id, "You cannot do that while dead.");
+            let refused = message_name(&msg);
+            if conn.dead_refusal_told {
+                tracing::debug!(char_id = conn.char_id, refused, "refused while dead");
+            } else {
+                tracing::info!(char_id = conn.char_id, refused, "refused while dead");
+                send_refusal(server, client_id, "You cannot do that while dead.");
+                conn.dead_refusal_told = true;
+            }
             return Outcome::Continue;
         }
     }
@@ -1466,6 +1490,7 @@ pub fn handle_message(
             // Slice 0: the player is alive again, so the death sweep should
             // process the next death afresh.
             conn.death_processed = false;
+            conn.dead_refusal_told = false;
             super::regen::mark_dirty(conn);
             // Move them to their bind point. Until now Respawn only restored
             // resources and left position untouched — and since the SERVER owns
@@ -3461,7 +3486,7 @@ fn warn_decode_failure(error: &bincode::error::DecodeError) {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_client, truncate_at_char_boundary, CLIENT_MSG_DECODE_LIMIT};
+    use super::{decode_client, message_name, truncate_at_char_boundary, CLIENT_MSG_DECODE_LIMIT};
     use protocol::world::{ChatChannel, ClientWorldMsg};
 
     fn encode(msg: &ClientWorldMsg) -> Vec<u8> {
@@ -3470,6 +3495,13 @@ mod tests {
 
     fn say(text: String) -> ClientWorldMsg {
         ClientWorldMsg::Chat { channel: ChatChannel::Say, text, target_name: None }
+    }
+
+    #[test]
+    fn message_name_is_the_variant_alone() {
+        assert_eq!(message_name(&say("a secret".into())), "Chat");
+        assert_eq!(message_name(&ClientWorldMsg::Sit), "Sit");
+        assert_eq!(message_name(&ClientWorldMsg::SetTarget { target_id: Some(7) }), "SetTarget");
     }
 
     #[test]

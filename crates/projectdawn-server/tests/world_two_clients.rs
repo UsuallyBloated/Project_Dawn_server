@@ -4710,6 +4710,69 @@ async fn death_broadcast_is_a_dev_command() {
     assert_eq!(death_rows(pool.clone()).await, 1, "one death, one audit row");
 }
 
+const DEAD_LINE: &str = "You cannot do that while dead.";
+
+fn dead_lines(msgs: &[ServerWorldMsg]) -> usize {
+    system_lines(msgs).iter().filter(|l| l.as_str() == DEAD_LINE).count()
+}
+
+/// The dead-state gate says its line once per death, not once per refused
+/// message (2026-10-26: Trigger Death filled the chat with it eight times),
+/// and lets a target change through: clicking things while dead is natural and
+/// harmless. A new death says it again. On the previous gate the target change
+/// drew a line and three refused messages drew three.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_dead_are_told_once_per_death() {
+    let h = start_both().await;
+    let (session, char_id, _stale) =
+        provision_client(&h.auth_url, "deadonce", "Onceler", "Human", "Warrior").await;
+    let token = gm_world_token(&h.auth_url, &h.db_url, "deadonce", &session, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    let me = char_id as u64;
+
+    let die = |a: &mut WorldClient| a.send_damage_self(1_000_000);
+    die(&mut a);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == me && *hp <= 0.01)
+    })
+    .await
+    .expect("the dev damage kills");
+    a.collect_for(Duration::from_millis(500)).await;
+
+    send_msg(&mut a.client, CHANNEL_SYSTEM, &ClientWorldMsg::SetTarget { target_id: None });
+    let msgs = a.collect_for(Duration::from_millis(800)).await;
+    assert_eq!(dead_lines(&msgs), 0, "a target change is allowed while dead");
+
+    for _ in 0..3 {
+        a.send_sit();
+    }
+    let msgs = a.collect_for(Duration::from_millis(1200)).await;
+    assert_eq!(dead_lines(&msgs), 1, "three refused messages, one line; got {:?}", system_lines(&msgs));
+
+    a.send_sit();
+    let msgs = a.collect_for(Duration::from_millis(800)).await;
+    assert_eq!(dead_lines(&msgs), 0, "still the same death: no more lines");
+
+    // Alive again, then a new death: told once more.
+    a.send_respawn();
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == me && *hp > 0.01)
+    })
+    .await
+    .expect("the respawn restores some HP");
+    die(&mut a);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == me && *hp <= 0.01)
+    })
+    .await
+    .expect("the second death");
+    a.collect_for(Duration::from_millis(500)).await;
+    a.send_sit();
+    a.send_sit();
+    let msgs = a.collect_for(Duration::from_millis(1200)).await;
+    assert_eq!(dead_lines(&msgs), 1, "a new death is told once again");
+}
+
 /// Phase 1 keystone: the per-account GM gate. A dev/GM command must APPLY for an
 /// `is_gm` account and be a silent no-op for a plain account, when the server is
 /// NOT in process-wide dev mode. This exercises the whole real path: the account
@@ -4833,7 +4896,9 @@ async fn respawn_requires_being_dead() {
 /// their own corpse before respawning and keep all the gear, voiding the
 /// corpse-run penalty. Now any economy/combat intent from a dead player is
 /// refused with a chat line, Respawn still works, and normal handling
-/// resumes after it.
+/// resumes after it. The line is said once per death (2026-10-26), so each
+/// intent is proven refused by its line in a death of its own, and a second
+/// refused intent in the same death draws no second line.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dead_players_cannot_loot_or_touch_inventory() {
     let h = start_both().await;
@@ -4858,7 +4923,33 @@ async fn dead_players_cannot_loot_or_touch_inventory() {
         .await;
     assert!(refusal.is_some(), "dead MoveItem must be refused with a chat line");
 
-    // Loot intent while dead: refused BEFORE any bag lookup (id need not exist).
+    // A second refused intent in the same death draws no second line.
+    a.send_loot_all(999_999);
+    let again = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(1500), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+                if text.contains("while dead"))
+        })
+        .await;
+    assert!(again.is_none(), "the line is said once per death");
+
+    // Respawn is still allowed and clears the gate: the bind/spawn Teleport
+    // arrives.
+    a.send_respawn();
+    let tp = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::Teleport { .. })
+        })
+        .await;
+    assert!(tp.is_some(), "Respawn must still work for the dead");
+
+    // A second death: the loot intent, first this time, is refused with the
+    // line, BEFORE any bag lookup (the id need not exist).
+    a.send_death();
+    for _ in 0..4 {
+        tick_one(&mut a.client, &mut a.transport);
+        tokio::time::sleep(TICK_DT).await;
+    }
     a.send_loot_all(999_999);
     let refusal2 = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
@@ -4868,15 +4959,14 @@ async fn dead_players_cannot_loot_or_touch_inventory() {
         .await;
     assert!(refusal2.is_some(), "dead LootAll must be refused with a chat line");
 
-    // Respawn is still allowed and clears the gate: the bind/spawn Teleport
-    // arrives, and a subsequent inventory intent is no longer dead-refused.
+    // Respawn again; a subsequent inventory intent is no longer dead-refused.
     a.send_respawn();
     let tp = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
             matches!(m, ServerWorldMsg::Teleport { .. })
         })
         .await;
-    assert!(tp.is_some(), "Respawn must still work for the dead");
+    assert!(tp.is_some(), "Respawn must still work after the second death");
 
     a.send_move_item("base", 0, "base", 1);
     let post = a

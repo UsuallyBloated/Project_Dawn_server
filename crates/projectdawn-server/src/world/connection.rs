@@ -229,6 +229,11 @@ pub struct PerConnection {
     /// EntityDied). Guards the sweep from re-running every tick while hp stays 0,
     /// and is cleared on `Respawn` so the next death is processed afresh.
     pub death_processed: bool,
+    /// The dead-state gate has told this player "You cannot do that while
+    /// dead." since they died. The line is said once per death, not once per
+    /// refused message (a client sends several while dead; the chat used to
+    /// fill with it). Cleared with `death_processed` on `Respawn`.
+    pub dead_refusal_told: bool,
     /// Corpse/resurrection Slice 1: set true by `kill_player`, so EVERY death
     /// path flags a corpse (the server-detected death sweep AND a client-first
     /// `DeathBroadcast` — Trigger Death, fall damage, a linkdead body that dies).
@@ -661,6 +666,7 @@ impl PerConnection {
             // works, since it gates on exactly this flag. The client learns it
             // is dead from the HP seed, as it always did.
             death_processed: spawn.hp <= 0.0,
+            dead_refusal_told: false,
             corpse_pending: false,
             death_lost_xp: 0,
             pending_res_offer: None,

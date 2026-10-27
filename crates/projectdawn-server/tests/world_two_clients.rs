@@ -10430,10 +10430,11 @@ async fn count_item_rows(db_url: &str, sql: &str, id: i64, path: &str) -> i64 {
     n
 }
 
-/// A chat line longer than the 512-byte cap with a two-byte character
-/// straddling byte 512 used to panic the slice `text[..512]` inside the tick
-/// task, which took the whole server down. The server must cut it on a char
-/// boundary and keep serving: the speaker's next line still reaches a peer.
+/// A chat line with a two-byte character straddling byte 512 used to panic
+/// the slice `text[..512]` inside the tick task, which took the whole server
+/// down. The server cuts chat to `MAX_CHAT_CHARS` (250) characters now
+/// (2026-10-26, the client stops at the same cap): the listener gets exactly
+/// 250, and the server keeps serving, so the speaker's next line still lands.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_chat_line_cut_inside_a_multibyte_char_does_not_crash_the_server() {
     let h = start_both().await;
@@ -10450,6 +10451,14 @@ async fn a_chat_line_cut_inside_a_multibyte_char_does_not_crash_the_server() {
     a.pump_for(Duration::from_millis(300)).await;
     a.send_say("still here");
     a.pump_for(Duration::from_millis(100)).await;
+
+    let cut = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("aaa"))
+        })
+        .await;
+    let Some(ServerWorldMsg::ChatMessage { text, .. }) = cut else { panic!("the long line reaches the listener") };
+    assert_eq!(text, "a".repeat(250), "cut to 250 characters, as the client stops typing");
 
     let probe = b
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {

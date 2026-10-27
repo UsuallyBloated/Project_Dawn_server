@@ -484,16 +484,19 @@ fn quest_id_well_formed(quest_id: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
-/// Cut `text` to at most `max_bytes`, backing off to the last char boundary
-/// at or below the cap. Slicing a `String` by byte (`&text[..n]`) panics when
-/// `n` falls inside a multibyte character, and a panic in the tick task takes
-/// the whole server down, so every cut of client text goes through here.
-fn truncate_at_char_boundary(mut text: String, max_bytes: usize) -> String {
-    if text.len() > max_bytes {
-        let mut cut = max_bytes;
-        while !text.is_char_boundary(cut) {
-            cut -= 1;
-        }
+/// The most characters one chat line carries (EQ II's chat box took about 250;
+/// user, 2026-10-26). The client's chat line refuses typing past it, so the
+/// line every player sees is the line its sender sent; this cut only bites on a
+/// forged client. Kept in lockstep with `ChatChannel.MAX_CHARS` (counted the
+/// same way: Unicode scalar values, which is what a Godot String's length is).
+pub const MAX_CHAT_CHARS: usize = 250;
+
+/// Cut `text` to at most `max_chars` characters. Counting characters, never
+/// slicing by byte: `&text[..n]` panics when `n` falls inside a multibyte
+/// character, and a panic in the tick task takes the whole server down, so
+/// every cut of client text goes through here.
+fn truncate_to_chars(mut text: String, max_chars: usize) -> String {
+    if let Some((cut, _)) = text.char_indices().nth(max_chars) {
         text.truncate(cut);
     }
     text
@@ -2150,10 +2153,9 @@ pub fn handle_message(
             if !conn.in_world {
                 return Outcome::Continue;
             }
-            // Hard cap to keep payloads sane. Clients should validate but
-            // a hostile or buggy client could still try to flood.
-            const MAX_CHAT_LEN: usize = 512;
-            let trimmed = truncate_at_char_boundary(text, MAX_CHAT_LEN);
+            // The client stops at the same cap, so this only bites on a forged
+            // client (a hostile or buggy one could still try to flood).
+            let trimmed = truncate_to_chars(text, MAX_CHAT_CHARS);
             Outcome::ChatFanOut {
                 channel,
                 text: trimmed,
@@ -3478,7 +3480,7 @@ fn warn_decode_failure(error: &bincode::error::DecodeError) {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_client, message_name, truncate_at_char_boundary, CLIENT_MSG_DECODE_LIMIT};
+    use super::{decode_client, message_name, truncate_to_chars, CLIENT_MSG_DECODE_LIMIT, MAX_CHAT_CHARS};
     use protocol::world::{ChatChannel, ClientWorldMsg};
 
     fn encode(msg: &ClientWorldMsg) -> Vec<u8> {
@@ -3541,23 +3543,28 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_inside_a_multibyte_char_backs_off_to_its_start() {
-        // 511 ASCII bytes then "é" (2 bytes): byte 512 is the middle of the é,
-        // the exact shape that panicked the old `text[..512]`.
-        let text = format!("{}é tail", "a".repeat(511));
-        let cut = truncate_at_char_boundary(text, 512);
-        assert_eq!(cut.len(), 511);
-        assert!(cut.chars().all(|c| c == 'a'));
+    fn a_long_line_is_cut_to_the_character_cap() {
+        let cut = truncate_to_chars("a".repeat(300), MAX_CHAT_CHARS);
+        assert_eq!(cut.chars().count(), 250);
     }
 
     #[test]
-    fn a_cut_on_a_boundary_keeps_exactly_the_cap() {
-        let cut = truncate_at_char_boundary("é".repeat(300), 512);
-        assert_eq!(cut, "é".repeat(256));
+    fn multibyte_characters_count_as_one_each() {
+        // 2-byte é and 4-byte emoji: the cut keeps 250 whole characters, and
+        // the shape that panicked the old byte slice (`text[..512]`) never
+        // arises.
+        let cut = truncate_to_chars("é".repeat(300), MAX_CHAT_CHARS);
+        assert_eq!(cut, "é".repeat(250));
+        let cut = truncate_to_chars("\u{1F600}".repeat(300), MAX_CHAT_CHARS);
+        assert_eq!(cut, "\u{1F600}".repeat(250));
+        let mixed = format!("{}é{}", "a".repeat(249), "b".repeat(10));
+        assert_eq!(truncate_to_chars(mixed, MAX_CHAT_CHARS), format!("{}é", "a".repeat(249)));
     }
 
     #[test]
     fn short_text_is_untouched() {
-        assert_eq!(truncate_at_char_boundary("hello".to_string(), 512), "hello");
+        assert_eq!(truncate_to_chars("hello".to_string(), MAX_CHAT_CHARS), "hello");
+        let exactly = "x".repeat(250);
+        assert_eq!(truncate_to_chars(exactly.clone(), MAX_CHAT_CHARS), exactly);
     }
 }

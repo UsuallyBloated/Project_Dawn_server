@@ -733,8 +733,9 @@ impl NetClient {
 
     /// Send a Move intent on the unreliable position channel. Server clamps
     /// `direction` to unit length and applies the speed cap; we just relay it.
+    /// `yaw` is the body's facing (PD_W0029), relayed to peers as sent.
     #[func]
-    fn send_move(&mut self, sequence: i64, direction: Vector3, jumping: bool) -> bool {
+    fn send_move(&mut self, sequence: i64, direction: Vector3, jumping: bool, yaw: f32) -> bool {
         let msg = ClientWorldMsg::Move {
             sequence: sequence.max(0) as u32,
             direction: WireVec3 {
@@ -743,6 +744,7 @@ impl NetClient {
                 z: direction.z,
             },
             jumping,
+            yaw,
         };
         self.send_app(CHANNEL_POSITION, &msg)
     }

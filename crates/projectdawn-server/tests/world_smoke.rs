@@ -253,6 +253,7 @@ async fn world_connect_move_position_disconnect() {
         sequence: 1,
         direction: Vec3 { x: 1.0, y: 0.0, z: 0.0 },
         jumping: false,
+        yaw: 0.0,
     };
     send_client_msg(&mut client, CHANNEL_POSITION, &move_msg);
 

@@ -149,7 +149,14 @@ use serde::{Deserialize, Serialize};
 /// Factions and alignment (2026-10-23) append `Consider` and `DevSetFaction`
 /// after `StopSong`, and `FactionUpdate` and `AlignmentUpdate` after
 /// `SkillFail`.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3238; // "PD_W0028"
+///
+/// PD_W0029: the facing (user, 2026-10-27). `Move` gains a trailing `yaw`,
+/// the client's own body yaw, which the server stores and the `Position` fan
+/// relays (it always carried a `yaw`; it was the login value forever), so
+/// players turn on each other's screens. EQ and WoW both send the heading
+/// with every movement packet. A shape change on a client intent, so both
+/// sides deploy together.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3239; // "PD_W0029"
 
 pub type EntityId = u64;
 
@@ -477,6 +484,9 @@ pub enum ClientWorldMsg {
         sequence: Sequence,
         direction: Vec3,
         jumping: bool,
+        /// The body's facing (Godot `rotation.y`, radians). Cosmetic: the
+        /// server stores it for the `Position` fan and reads it into nothing.
+        yaw: f32,
     },
 
     // Combat (intent only — server resolves outcomes)

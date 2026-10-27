@@ -410,14 +410,20 @@ impl WorldClient {
     }
 
     fn send_move(&mut self, sequence: u32, direction: Vec3) {
-        let msg = ClientWorldMsg::Move { sequence, direction, jumping: false };
+        let msg = ClientWorldMsg::Move { sequence, direction, jumping: false, yaw: 0.0 };
         send_msg(&mut self.client, CHANNEL_POSITION, &msg);
     }
 
     /// A Move carrying the real `jumping` flag (the client sets it on the Move
     /// after a jump begins).
     fn send_move_jump(&mut self, sequence: u32, direction: Vec3, jumping: bool) {
-        let msg = ClientWorldMsg::Move { sequence, direction, jumping };
+        let msg = ClientWorldMsg::Move { sequence, direction, jumping, yaw: 0.0 };
+        send_msg(&mut self.client, CHANNEL_POSITION, &msg);
+    }
+
+    /// A Move carrying a facing (PD_W0029): the client's body yaw.
+    fn send_move_facing(&mut self, sequence: u32, direction: Vec3, yaw: f32) {
+        let msg = ClientWorldMsg::Move { sequence, direction, jumping: false, yaw };
         send_msg(&mut self.client, CHANNEL_POSITION, &msg);
     }
 
@@ -9237,6 +9243,71 @@ async fn a_say_carries_fifty_metres_and_no_further() {
     })
     .await;
     assert!(heard.is_some(), "a shout still reaches the 60 m listener: the silence was the range");
+}
+
+/// Pump both clients for `window` and return every yaw `watcher` receives in
+/// a Position for `id`, in order.
+async fn yaws_seen(watcher: &mut WorldClient, other: &mut WorldClient, id: u64, window: Duration) -> Vec<f32> {
+    let mut seen = Vec::new();
+    watcher.send_heartbeat();
+    other.send_heartbeat();
+    let end = Instant::now() + window;
+    while Instant::now() < end {
+        tick_one(&mut watcher.client, &mut watcher.transport);
+        tick_one(&mut other.client, &mut other.transport);
+        while let Some(bytes) = watcher.client.receive_message(CHANNEL_POSITION) {
+            if let Ok((ServerWorldMsg::Position { id: pid, yaw, .. }, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
+                if pid == id {
+                    seen.push(yaw);
+                }
+            }
+        }
+        tokio::time::sleep(TICK_DT).await;
+    }
+    seen
+}
+
+/// The facing (PD_W0029; user, 2026-10-27, option a): a Move carries the
+/// client's own body yaw and the Position fan relays it, so B sees A turn.
+/// A stands 5 m from B and sends a Move with yaw 1.25: B's Positions for A
+/// carry 1.25. A Move with a non-finite yaw is dropped whole (B keeps seeing
+/// 1.25), and a yaw past PI comes back wrapped into (-PI, PI]. On the previous
+/// server A's yaw stayed at its login value whatever the client sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_players_facing_reaches_the_watcher() {
+    use std::f32::consts::TAU;
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "facing_a", "Turner", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "facing_b", "Watcher", "Human", "Warrior").await;
+    set_char_pos(&h.db_url, a_char_id, 0.0, 80.0).await;
+    set_char_pos(&h.db_url, b_char_id, 5.0, 80.0).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+    let a_id = a_char_id as u64;
+    let still = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+
+    a.send_move_facing(1, still, 1.25);
+    let seen = yaws_seen(&mut b, &mut a, a_id, Duration::from_millis(600)).await;
+    let last = *seen.last().expect("B receives A's Positions");
+    assert!((last - 1.25).abs() < 1e-4, "B sees A facing 1.25, sees {last}");
+
+    a.send_move_facing(2, still, f32::NAN);
+    let seen = yaws_seen(&mut b, &mut a, a_id, Duration::from_millis(400)).await;
+    assert!(!seen.is_empty(), "B keeps receiving A's Positions");
+    assert!(
+        seen.iter().all(|y| (y - 1.25).abs() < 1e-4),
+        "a non-finite yaw is dropped whole: B still sees 1.25, saw {seen:?}"
+    );
+
+    a.send_move_facing(3, still, 4.0);
+    let seen = yaws_seen(&mut b, &mut a, a_id, Duration::from_millis(600)).await;
+    let last = *seen.last().expect("B receives A's Positions");
+    assert!((last - (4.0 - TAU)).abs() < 1e-4, "a yaw past PI is wrapped into (-PI, PI]: {last}");
 }
 
 /// Wait for the next SpellGems and return (gems, seeded).

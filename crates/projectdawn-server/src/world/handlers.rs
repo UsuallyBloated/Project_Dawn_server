@@ -677,6 +677,7 @@ pub fn handle_message(
             sequence,
             direction,
             jumping,
+            yaw,
         } => {
             // Death lock: a dead player stays put. Without this you could walk
             // your corpse around during the respawn countdown, and worse, keep
@@ -702,6 +703,7 @@ pub fn handle_message(
             if !direction.x.is_finite()
                 || !direction.y.is_finite()
                 || !direction.z.is_finite()
+                || !yaw.is_finite()
             {
                 return Outcome::Continue;
             }
@@ -735,6 +737,13 @@ pub fn handle_message(
             // speed itself (RUN_SPEED's note) and multiplies by TICK_DT.
             conn.latest_direction = dir_v;
             conn.last_move_received = Some(now);
+            // The facing (PD_W0029): the client's own body yaw, carried by the
+            // Position fan so peers see each other turn (before it, everyone
+            // faced their login yaw forever). Cosmetic: nothing reads it into
+            // movement or combat, and a rooted player may still turn. Wrapped
+            // into (-PI, PI], Godot's own range, so a forged huge value stays
+            // a facing and not a 1e30 in the database.
+            conn.yaw = (yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
             // The jump is cosmetic and separate from the direction: it is
             // relayed as a one-shot for peers to animate, and nothing here
             // reads it into `pos` (Y stays the server's zero).

@@ -9027,8 +9027,9 @@ async fn dual_wield_is_earned_by_class_and_level() {
 /// Per-spell ranges (user, 2026-10-19, on Monsters and Memories' 30 m
 /// baseline): a hostile spell reaches 30 m, as friendly ones already did. A
 /// GM Cleric backs off from a dummy to about 28 m and Smites it: it lands,
-/// where the old server's 25 m hostile reach refused it. At about 33 m the
-/// same Smite is refused, before any mana comes off.
+/// where the old server's 25 m hostile reach refused it. Just past 30 m the
+/// same Smite is refused, before any mana comes off: the reach is exact
+/// (user, 2026-10-27), with no slack for the client's own full-reach check.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_nuke_reaches_thirty_metres() {
     let h = start_both().await;
@@ -9067,11 +9068,13 @@ async fn a_nuke_reaches_thirty_metres() {
         .await;
     assert!(landed.is_some(), "a Smite at about 28 m lands (the old 25 m reach refused it)");
 
-    // Past 30 m: refused. Smite's own 3 s cooldown runs out on the walk.
+    // Just past 30 m: refused, the reach being exact (user, 2026-10-27: a
+    // 30 m spell is out of range at 30.1). Smite's own 3 s cooldown runs out
+    // on the walk.
     a.pump_for(Duration::from_millis(3_100)).await;
-    let stood = walk_until_within(&mut a, &mut seq, a_char_id, stood, at(33.0), 0.3).await;
+    let stood = walk_until_within(&mut a, &mut seq, a_char_id, stood, at(30.6), 0.2).await;
     let dist = ((stood.x - dummy_pos.x).powi(2) + (stood.z - dummy_pos.z).powi(2)).sqrt();
-    assert!(dist > 31.0, "test setup: the caster stands past 30 m, is at {dist:.1}");
+    assert!((30.05..31.0).contains(&dist), "test setup: the caster stands just past 30 m, is at {dist:.2}");
     // A level 1 pool (about 16) does not hold two Smites (12 each), and the
     // mana gate runs before the reach gate: top it off first.
     a.send_heal_self();
@@ -9083,7 +9086,97 @@ async fn a_nuke_reaches_thirty_metres() {
                 if *caster == a_char_id as u64 && reason.contains("too far away"))
         })
         .await;
-    assert!(refused.is_some(), "past 30 m the Smite is refused");
+    assert!(refused.is_some(), "at {dist:.2} m, just past 30, the Smite is refused");
+}
+
+/// Wait for the next InventoryDelta naming this paperdoll slot, if one comes
+/// within the window.
+async fn next_equip_delta(c: &mut WorldClient, equip_slot: u32, window: Duration) -> Option<Option<String>> {
+    match c
+        .wait_for(CHANNEL_SYSTEM, window, |m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { location, slot, .. }
+                if location == "equip" && *slot == equip_slot)
+        })
+        .await
+    {
+        Some(ServerWorldMsg::InventoryDelta { item_path, .. }) => Some(item_path),
+        _ => None,
+    }
+}
+
+/// EQ's equip rule (2026-10-27, after a Cleric wore two clubs on the R720):
+/// the item refuses the class at the equip. A Cleric's club into the off hand
+/// is refused with "Your class cannot dual wield." and the paperdoll never
+/// changes; the same club into the main hand is worn; the Cleric's sword
+/// (1h_slashing, a skill Clerics never train) is refused as unwieldable; a
+/// Monk's club goes into the off hand (born with dual wield) while a leather
+/// vest is refused as unwearable (Monks train cloth alone). On the previous
+/// server every one of these went on; the swing gate alone kept the off hand
+/// idle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn equipping_is_refused_by_class_and_dual_wield() {
+    const CLUB: &str = "res://data/loot/items/cracked_wooden_club.tres";
+    const SWORD: &str = "res://data/loot/items/iron_short_sword.tres";
+    const VEST: &str = "res://data/loot/items/cracked_leather_vest.tres";
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "eqcleric", "Equipa", "Human", "Cleric").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "eqmonk", "Equipb", "Human", "Monk").await;
+    give_char_item(&h.db_url, a_char_id, "base", 0, CLUB, 1).await;
+    give_char_item(&h.db_url, a_char_id, "base", 1, SWORD, 1).await;
+    give_char_item(&h.db_url, b_char_id, "base", 0, CLUB, 1).await;
+    give_char_item(&h.db_url, b_char_id, "base", 1, VEST, 1).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    // The Cleric's club into the off hand: the line, and no paperdoll change.
+    a.send_equip_item("base", 0, 1);
+    let line = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("cannot dual wield"))
+        })
+        .await;
+    assert!(line.is_some(), "a Cleric's off-hand weapon is refused with the dual wield line");
+    assert!(
+        next_equip_delta(&mut a, 1, Duration::from_millis(500)).await.is_none(),
+        "the refused club never reaches the off hand"
+    );
+
+    // The same club into the main hand: worn (Clerics train 1h_blunt).
+    a.send_equip_item("base", 0, 0);
+    let worn = next_equip_delta(&mut a, 0, Duration::from_secs(3)).await;
+    assert_eq!(worn, Some(Some(CLUB.to_string())), "the Cleric's club goes into the main hand");
+
+    // The sword: a skill the class never trains, refused at the equip.
+    a.send_equip_item("base", 1, 0);
+    let line = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("cannot wield"))
+        })
+        .await;
+    assert!(line.is_some(), "a Cleric's sword is refused as unwieldable");
+    assert!(
+        next_equip_delta(&mut a, 0, Duration::from_millis(500)).await.is_none(),
+        "the sword never replaces the club"
+    );
+
+    // The Monk: the club into the off hand goes on; the leather vest does not.
+    b.send_equip_item("base", 0, 1);
+    let worn = next_equip_delta(&mut b, 1, Duration::from_secs(3)).await;
+    assert_eq!(worn, Some(Some(CLUB.to_string())), "a Monk 1's club goes into the off hand");
+    b.send_equip_item("base", 1, 3);
+    let line = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("cannot wear"))
+        })
+        .await;
+    assert!(line.is_some(), "a Monk's leather vest is refused as unwearable");
+    assert!(
+        next_equip_delta(&mut b, 3, Duration::from_millis(500)).await.is_none(),
+        "the vest never reaches the chest slot"
+    );
 }
 
 /// Wait for the next SpellGems and return (gems, seeded).

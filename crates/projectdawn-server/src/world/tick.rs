@@ -7932,6 +7932,25 @@ pub async fn run(
                 let Some(conn) = connections.get_mut(&owner_cid) else {
                     continue;
                 };
+                // The class gate (skills::equip_refusal): a weapon or armor
+                // the class never trains, or a weapon in the off hand before
+                // it can dual wield, is refused with the line the client
+                // already printed; only a modified client reaches this.
+                if let Some((path, _)) = conn.inventory.peek_at(&intent.src_location, intent.src_slot) {
+                    if let Some(line) = skills::equip_refusal(&conn.class, conn.level, &path, intent.equip_slot) {
+                        tracing::info!(
+                            owner = intent.owner,
+                            src_loc = %intent.src_location,
+                            src_slot = intent.src_slot,
+                            equip_slot = intent.equip_slot,
+                            item_path = %path,
+                            line,
+                            "EquipItem refused — the class cannot use it"
+                        );
+                        handlers::send_refusal(&mut server, owner_cid, &line);
+                        continue;
+                    }
+                }
                 let touched = match conn
                     .inventory
                     .equip_from_location(&intent.src_location, intent.src_slot, intent.equip_slot)
@@ -12465,8 +12484,11 @@ fn cast_target_refusal(
     let Some(caster) = connections.get(&caster_cid) else {
         return Err(TARGET_UNREACHABLE.to_string());
     };
-    // Each spell's own reach (per-spell ranges, 2026-10-19); binding a
-    // group member reaches as far as the bind spell does.
+    // Each spell's own reach (per-spell ranges, 2026-10-19), exact: a 30 m
+    // spell is out of range at 30.1 (user, 2026-10-27), and the client checks
+    // the same full reach, so a target that walks out during a cast bar costs
+    // a free refusal and nothing else. Binding a group member reaches as far
+    // as the bind spell does.
     let reach = spell.reach();
     let in_reach = |pos: Vec3f| pos.distance_to(caster_pos) <= reach;
     let unreachable = || Err(TARGET_UNREACHABLE.to_string());

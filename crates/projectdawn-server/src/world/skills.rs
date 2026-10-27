@@ -165,6 +165,41 @@ pub fn can_dual_wield(player_class: &str, level: i32) -> bool {
     dual_wield_level(player_class).is_some_and(|l| level >= l)
 }
 
+/// Whether a class trains a skill at all (its cap at 60 is above zero).
+pub fn class_trains(skill: Skill, player_class: &str, key: &str) -> bool {
+    max_cap(skill, player_class, key) > 0
+}
+
+/// Why this class may not put `item_path` on paperdoll slot `equip_slot`
+/// (0 main hand, 1 off hand), or `None` when it may. EQ's rule (2026-10-27,
+/// after a Cleric wore two clubs): the item refuses the class at the equip,
+/// not at the swing. A weapon of a type the class never trains, armor of a
+/// kind it never trains, and a weapon in the off hand before the class can
+/// dual wield are all refused with a line. Gear worn before this rule still
+/// goes through the swing's 80% miss and half damage. The client asks the
+/// same question first (`Equipment.equip_refusal`), so an honest player gets
+/// the line without a round trip; this is the backstop.
+pub fn equip_refusal(player_class: &str, level: i32, item_path: &str, equip_slot: u8) -> Option<String> {
+    let item = super::items::lookup(item_path)?;
+    if item.item_type == super::items::ItemType::Weapon {
+        let key = super::combat::weapon_skill_key(item_path);
+        if !class_trains(Skill::Weapon, player_class, &key) {
+            return Some("Your class cannot wield that.".to_string());
+        }
+        if equip_slot == 1 && !can_dual_wield(player_class, level) {
+            return Some(match dual_wield_level(player_class) {
+                Some(at) => format!("You will be able to dual wield at level {at}."),
+                None => "Your class cannot dual wield.".to_string(),
+            });
+        }
+        return None;
+    }
+    if !item.armor_type.is_empty() && !class_trains(Skill::Armor, player_class, &item.armor_type) {
+        return Some("Your class cannot wear that.".to_string());
+    }
+    None
+}
+
 /// Cap for a (class, level, skill_key). Mirrors the GDScript
 /// `get_cap` math: `max(1, max_cap * level / MAX_LEVEL)` when the
 /// class trains the skill (max_cap > 0); else 0.
@@ -505,6 +540,48 @@ mod tests {
         for class in ["Paladin", "Wizard", "Cleric", "Druid"] {
             assert_eq!(cap_for(Skill::Weapon, class, 60, "dual_wield"), 0, "{class} does not");
         }
+    }
+
+    /// The equip gate: the off hand needs dual wield, a weapon needs a skill
+    /// the class trains, armor a kind it trains; anything else goes on.
+    #[test]
+    fn the_equip_gate_refuses_by_class_and_dual_wield() {
+        const CLUB: &str = "res://data/loot/items/cracked_wooden_club.tres";
+        const SWORD: &str = "res://data/loot/items/iron_short_sword.tres";
+        const VEST: &str = "res://data/loot/items/cracked_leather_vest.tres";
+        const BOOTS: &str = "res://data/loot/items/copper_chain_boots.tres";
+        assert_eq!(equip_refusal("Cleric", 1, CLUB, 0), None, "a Cleric wields a club");
+        assert_eq!(
+            equip_refusal("Cleric", 60, CLUB, 1).as_deref(),
+            Some("Your class cannot dual wield."),
+            "never in the off hand"
+        );
+        assert_eq!(
+            equip_refusal("Warrior", 14, CLUB, 1).as_deref(),
+            Some("You will be able to dual wield at level 15."),
+            "a Warrior's off hand waits for 15"
+        );
+        assert_eq!(equip_refusal("Warrior", 15, CLUB, 1), None);
+        assert_eq!(equip_refusal("Monk", 1, CLUB, 1), None, "a Monk is born with it");
+        assert_eq!(
+            equip_refusal("Cleric", 60, SWORD, 0).as_deref(),
+            Some("Your class cannot wield that."),
+            "Clerics never train 1h_slashing"
+        );
+        assert_eq!(equip_refusal("Warrior", 1, SWORD, 0), None);
+        assert_eq!(
+            equip_refusal("Monk", 60, VEST, 3).as_deref(),
+            Some("Your class cannot wear that."),
+            "Monks train cloth alone"
+        );
+        assert_eq!(equip_refusal("Rogue", 1, VEST, 3), None);
+        assert_eq!(equip_refusal("Cleric", 1, BOOTS, 5), None, "Clerics train chain");
+        assert_eq!(
+            equip_refusal("Wizard", 60, BOOTS, 5).as_deref(),
+            Some("Your class cannot wear that."),
+            "Wizards never train chain"
+        );
+        assert_eq!(equip_refusal("Cleric", 1, "res://no/such/item.tres", 0), None, "an unknown item is the next gate's problem");
     }
 }
 

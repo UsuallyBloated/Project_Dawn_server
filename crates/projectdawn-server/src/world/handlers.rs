@@ -1265,27 +1265,19 @@ pub fn handle_message(
             } else {
                 None
             };
-            let spell = match (refusal, super::spell_gems::check_gem(conn, gem, &spell_name)) {
-                (Some(line), _) | (None, Err(line)) => {
-                    tracing::info!(char_id = conn.char_id, gem, spell = %spell_name, ran, line, "memorize refused");
-                    send_refusal(server, client_id, line);
-                    send_spell_gems(server, client_id, conn);
-                    return Outcome::Continue;
-                }
-                (None, Ok(spell)) => spell,
-            };
-            let cost = spell.mana_cost * super::spell_gems::MEMORIZE_COST_FACTOR;
-            if conn.mp < cost {
-                send_refusal(server, client_id, "You do not have enough mana to memorize that.");
+            if let (Some(line), _) | (None, Err(line)) =
+                (refusal, super::spell_gems::check_gem(conn, gem, &spell_name))
+            {
+                tracing::info!(char_id = conn.char_id, gem, spell = %spell_name, ran, line, "memorize refused");
+                send_refusal(server, client_id, line);
                 send_spell_gems(server, client_id, conn);
                 return Outcome::Continue;
             }
-            conn.mp -= cost;
-            super::regen::mark_dirty(conn);
-            fan_out_mana_update(server, &[client_id], conn.char_id as u64, conn.mp, conn.max_mp);
+            // Memorizing is free, as in EQ: the mana is paid when the spell is
+            // cast (user, 2026-10-26; it used to cost half the spell's mana).
             conn.spell_gems.insert(gem, spell_name.clone());
             conn.spell_gems_seeded = true;
-            tracing::info!(char_id = conn.char_id, gem, spell = %spell_name, cost, "spell memorized");
+            tracing::info!(char_id = conn.char_id, gem, spell = %spell_name, "spell memorized");
             send_spell_gems(server, client_id, conn);
             spell_gems_changed(conn)
         }

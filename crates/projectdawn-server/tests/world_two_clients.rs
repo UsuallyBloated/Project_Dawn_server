@@ -9131,12 +9131,14 @@ async fn a_spell_not_memorized_is_refused() {
     );
 }
 
-/// Memorizing is the server's: seated two seconds, half the spell's mana, an
-/// open gem. Finishing early is refused, so is standing up in between, so is a
-/// gem not yet open; a memorize that runs its time fills the gem, charges
-/// half of Smite's 12 mana, and the cast then gets past the memorize gate.
+/// Memorizing is the server's: seated two seconds, an open gem, and no mana
+/// (as in EQ: the mana is paid at the cast; user, 2026-10-26, where it used to
+/// cost half the spell's mana). Finishing early is refused, so is standing up
+/// in between, so is a gem not yet open; a memorize that runs its time fills
+/// the gem with the mana untouched, and the cast then gets past the memorize
+/// gate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn memorizing_takes_two_seated_seconds_and_half_the_mana() {
+async fn memorizing_takes_two_seated_seconds_and_no_mana() {
     let h = start_both().await;
     let (session, char_id, token) =
         provision_client(&h.auth_url, "memer", "Memera", "Human", "Cleric").await;
@@ -9173,16 +9175,23 @@ async fn memorizing_takes_two_seated_seconds_and_half_the_mana() {
     a.send_memorize_start(0, "Smite");
     a.pump_for(Duration::from_millis(2_150)).await;
     a.send_memorize_finish();
-    let mana = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == char_id as u64)
-        })
-        .await;
-    let Some(ServerWorldMsg::ManaUpdate { mp, max_mp, .. }) = mana else { panic!("the memorize charges mana") };
-    assert!((max_mp - mp - 6.0).abs() < 0.01, "half of Smite's 12 mana: {mp} of {max_mp}");
-    let (gems, seeded) = next_spell_gems(&mut a).await.expect("the new bar");
+    // Everything the server says for a second: the new bar, and no mana
+    // taken (a born-full Cleric stays full; the old server sent mp = max - 6).
+    let said = collect_system(&mut a, Duration::from_secs(1)).await;
+    let bar = said.iter().find_map(|m| match m {
+        ServerWorldMsg::SpellGems { gems, seeded } => Some((gems.clone(), *seeded)),
+        _ => None,
+    });
+    let (gems, seeded) = bar.expect("the new bar");
     assert_eq!(gems[0], "Smite");
     assert!(seeded, "the server holds the bar now");
+    for m in &said {
+        if let ServerWorldMsg::ManaUpdate { id, mp, max_mp } = m {
+            if *id == char_id as u64 {
+                assert!((max_mp - mp).abs() < 0.01, "memorizing takes no mana: {mp} of {max_mp}");
+            }
+        }
+    }
 
     a.send_cast_spell("Smite", None);
     let fail = a

@@ -5,8 +5,8 @@
 //! `memorize.gd`), kept in lockstep by hand:
 //!
 //! * ten gems, of which `3 + level / 5` are unlocked (never fewer than three);
-//! * memorizing needs the caster seated for two seconds and costs half the
-//!   spell's mana; standing in between voids it;
+//! * memorizing needs the caster seated for two seconds and costs nothing (the
+//!   mana is paid at the cast, as in EQ); standing in between voids it;
 //! * emptying a gem is free;
 //! * a cast of a spell in no gem is refused.
 //!
@@ -26,7 +26,6 @@ pub const MEMORIZE_SECS: f32 = 2.0;
 /// A memorize that finishes this much early still counts: the client times its
 /// own bar, and a packet can arrive a little ahead of the server's clock.
 pub const MEMORIZE_GRACE_SECS: f32 = 0.25;
-pub const MEMORIZE_COST_FACTOR: f32 = 0.5;
 
 /// How many gems a character of `level` may fill.
 pub fn unlocked_gems(level: i32) -> i32 {

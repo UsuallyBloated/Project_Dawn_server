@@ -2964,6 +2964,17 @@ pub async fn run(
             if let Some(new_conn) = connections.get(new_id) {
                 handlers::send_coins_update(&mut server, *new_id, new_conn.coins);
             }
+            // Seed the new joiner with their own HP, mana and stamina. The regen
+            // fan only sends a value that changed since its last send, and
+            // `from_spawn` starts that baseline at the persisted values, so a
+            // character who left dead with full mana and stamina was never sent
+            // anything: the client kept the full bars `apply_character` gives it,
+            // never learned it was dead, and never respawned, while the server
+            // refused every move (2026-10-26). The same gap left a hurt character
+            // with no HP regen (out of food) showing a full bar.
+            if let Some(new_conn) = connections.get(new_id) {
+                handlers::fan_out_resources(&mut server, std::slice::from_ref(new_id), new_conn);
+            }
             // The shared sky: a joiner is told the hour at once instead of
             // waiting up to a minute for the next broadcast (step 7-ter).
             handlers::fan_out_time_of_day(

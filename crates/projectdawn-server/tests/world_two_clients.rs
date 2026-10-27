@@ -7769,6 +7769,45 @@ async fn a_dead_character_stays_dead_on_relogin_and_pays_once() {
     assert_eq!(corpses_after_relog, 1, "no second corpse either");
 }
 
+/// A character that left dead with full mana and stamina (a Warrior, whose
+/// token mana is always full) is told its HP on entering the world. The regen
+/// fan sends only what changed since its last send, and nothing changes on the
+/// dead with full pools, so this character used to hear nothing: the client
+/// kept the full bars of its login reset, never learned it was dead and never
+/// respawned, while the server refused every move (playtest 2026-10-26, "Bun
+/// is stuck"). The test above passed only because its stamina was regenerating.
+#[tokio::test]
+async fn a_dead_character_with_full_pools_is_told_it_is_dead() {
+    let h = start_both().await;
+    let (session, char_id, _) =
+        provision_client(&h.auth_url, "stuckbun", "Stuckbun", "Gnome", "Warrior").await;
+    // Dead, with mana and stamina at their maximum (the load clamps 99999).
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    sqlx::query("UPDATE characters SET hp = 0.0, mp = 99999.0, stamina = 99999.0 WHERE id = ?1")
+        .bind(char_id)
+        .execute(&pool)
+        .await
+        .expect("leave dead with full pools");
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    let cid = char_id as u64;
+    let told_dead = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp <= 0.01)
+        })
+        .await;
+    assert!(told_dead.is_some(), "a dead joiner is told its HP even when nothing regenerates");
+
+    // Told it is dead, the client respawns, and the server stands it back up.
+    a.send_respawn();
+    let alive = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp > 0.0)
+        })
+        .await;
+    assert!(alive.is_some(), "the respawn lands");
+}
+
 // ── Food and water, the EQ way (docs/design/food_and_water.md) ─────────────
 
 /// A famished character does not regenerate; the tick it runs out with food

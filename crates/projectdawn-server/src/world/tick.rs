@@ -1142,6 +1142,20 @@ fn pet_owner_cid(entity: &Entity) -> Option<ClientId> {
 
 /// Who is told an entity is gone for real: the in-world players who could
 /// see its cell, plus a pet's owner wherever they are (`pet_owner_cid`).
+/// The room: every in-world player within `SAY_RANGE` of `speaker`, never the
+/// speaker. What a `/say`, the eating emote and the jump relay reach. Written
+/// keep-only-when-in-range, so a non-finite position hears nothing.
+fn say_recipients(speaker: ClientId, connections: &HashMap<ClientId, PerConnection>) -> Vec<ClientId> {
+    let Some(from) = connections.get(&speaker) else {
+        return Vec::new();
+    };
+    connections
+        .iter()
+        .filter(|(id, c)| **id != speaker && c.in_world && c.pos.distance_to(from.pos) <= super::SAY_RANGE)
+        .map(|(id, _)| *id)
+        .collect()
+}
+
 /// Wall-clock unix seconds (the logout stamp for NO RENT items).
 fn unix_now_secs() -> i64 {
     std::time::SystemTime::now()
@@ -3122,10 +3136,10 @@ pub async fn run(
         }
 
         // 4b-jump. The jump relay: one PlayerJumped per jump begun this tick,
-        //     to the in-world players whose AOI cell can see the jumper (the
-        //     Say channel's reach), never to the jumper, whose own client
-        //     already played the hop. Position is untouched: the relay is
-        //     the peers' animation cue and nothing else.
+        //     to the in-world players within the Say channel's reach of the
+        //     jumper, never to the jumper, whose own client already played
+        //     the hop. Position is untouched: the relay is the peers'
+        //     animation cue and nothing else.
         for jumper_id in jump_fanouts.drain(..) {
             if to_disconnect.contains(&jumper_id) {
                 continue;
@@ -3133,14 +3147,7 @@ pub async fn run(
             let Some(jumper) = connections.get(&jumper_id) else {
                 continue;
             };
-            let visible = aoi.entities_visible_from(jumper.aoi_cell);
-            let recipients: Vec<ClientId> = connections
-                .iter()
-                .filter(|(id, c)| {
-                    **id != jumper_id && c.in_world && visible.contains(&(c.char_id as u64))
-                })
-                .map(|(id, _)| *id)
-                .collect();
+            let recipients = say_recipients(jumper_id, &connections);
             handlers::fan_out_player_jumped(&mut server, &recipients, jumper.char_id as u64);
         }
 
@@ -3278,7 +3285,7 @@ pub async fn run(
         }
 
         // Chat fan-out. Recipient set depends on channel:
-        // - Say: AOI 3×3 neighbourhood of the sender, sender excluded.
+        // - Say: everyone within SAY_RANGE of the sender, sender excluded.
         // - Shout / Ooc: every in-world client, sender excluded.
         // - Tell: the one connection whose `name` matches `target_name`
         //   case-insensitively. If not found, fan a system message back
@@ -3291,18 +3298,7 @@ pub async fn run(
             use protocol::world::ChatChannel;
             match channel {
                 ChatChannel::Say => {
-                    let Some(sender) = connections.get(&sender_id) else {
-                        continue;
-                    };
-                    let sender_cell = sender.aoi_cell;
-                    let visible = aoi.entities_visible_from(sender_cell);
-                    let recipients: Vec<ClientId> = connections
-                        .iter()
-                        .filter(|(id, c)| {
-                            **id != sender_id && c.in_world && visible.contains(&(c.char_id as u64))
-                        })
-                        .map(|(id, _)| *id)
-                        .collect();
+                    let recipients = say_recipients(sender_id, &connections);
                     handlers::fan_out_chat_message(&mut server, &recipients, &speaker, channel, &text);
                 }
                 ChatChannel::Shout | ChatChannel::Ooc => {
@@ -12150,17 +12146,7 @@ pub async fn run(
         // EQ's eating emote, to the people who could hear the eater say
         // something (the say channel's reach), never to the eater.
         for (eater_cid, text) in eat_emotes.drain(..) {
-            let Some(eater) = connections.get(&eater_cid) else {
-                continue;
-            };
-            let visible = aoi.entities_visible_from(eater.aoi_cell);
-            let recipients: Vec<ClientId> = connections
-                .iter()
-                .filter(|(id, c)| {
-                    **id != eater_cid && c.in_world && visible.contains(&(c.char_id as u64))
-                })
-                .map(|(id, _)| *id)
-                .collect();
+            let recipients = say_recipients(eater_cid, &connections);
             handlers::fan_out_chat_message(
                 &mut server,
                 &recipients,

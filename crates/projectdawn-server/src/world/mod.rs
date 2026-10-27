@@ -173,6 +173,14 @@ pub const ATTACK_RANGE_TOLERANCE: f32 = 1.5;
 /// out of a mob's reach back. 30 m until spells reached 30 m themselves.
 /// Mobs with an aggro radius of 0 (dev-spawned dummies) are left passive.
 pub const MIN_LEASH_RANGE: f32 = 35.0;
+
+/// How far a `/say` carries, in metres from the speaker (user, 2026-10-27:
+/// "the volume of a conversation", 50 m). The eating emote and the jump relay
+/// reach the same people: the room. It used to be the speaker's 3x3 AOI
+/// neighbourhood of 120 m cells, so anyone 120 to 240 m away heard a say and
+/// the reach moved with where the speaker stood in the cell. EQEmu's figure
+/// is 200 units for a player's say (`EntityList::ChannelMessage`).
+pub const SAY_RANGE: f32 = 50.0;
 /// Maximum distance a ranged attack (`weapon.is_ranged == true`) can
 /// connect at. Mirrors the GDScript `Combat.RANGED_RANGE = 25.0` so
 /// bows / crossbows feel the same on server-authoritative combat. The

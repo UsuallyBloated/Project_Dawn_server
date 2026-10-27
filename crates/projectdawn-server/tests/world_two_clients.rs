@@ -9179,6 +9179,66 @@ async fn equipping_is_refused_by_class_and_dual_wield() {
     );
 }
 
+/// A `/say` carries SAY_RANGE (50 m; user, 2026-10-27: "the volume of a
+/// conversation") and no further. A listener 40 m from the speaker hears a
+/// say; walked out to 60 m it hears nothing, while a shout still reaches it
+/// (so the silence is the range, not the link). On the previous server a say
+/// reached the speaker's whole 3x3 AOI neighbourhood of 120 m cells, so the
+/// 60 m listener heard it too. Row z = 80 is clear of every camp.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_say_carries_fifty_metres_and_no_further() {
+    let h = start_both().await;
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "sayrange_a", "Sayer", "Human", "Warrior").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "sayrange_b", "Hearer", "Human", "Warrior").await;
+    set_char_pos(&h.db_url, a_char_id, 0.0, 80.0).await;
+    set_char_pos(&h.db_url, b_char_id, 40.0, 80.0).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    a.send_say("near");
+    let heard = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "near")
+    })
+    .await;
+    assert!(heard.is_some(), "a say reaches a listener 40 m away");
+
+    let mut seq = 1u32;
+    let stood = walk_until_within(
+        &mut b,
+        &mut seq,
+        b_char_id,
+        Vec3 { x: 40.0, y: 0.0, z: 80.0 },
+        Vec3 { x: 60.0, y: 0.0, z: 80.0 },
+        0.3,
+    )
+    .await;
+    assert!(stood.x > 55.0, "test setup: the listener stands past 55 m, is at x={:.1}", stood.x);
+    a.send_say("far");
+    let heard = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_millis(1_500), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "far")
+    })
+    .await;
+    assert!(heard.is_none(), "a say does not reach a listener 60 m away");
+
+    send_msg(
+        &mut a.client,
+        CHANNEL_SYSTEM,
+        &ClientWorldMsg::Chat {
+            channel: protocol::world::ChatChannel::Shout,
+            text: "still here".into(),
+            target_name: None,
+        },
+    );
+    let heard = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "still here")
+    })
+    .await;
+    assert!(heard.is_some(), "a shout still reaches the 60 m listener: the silence was the range");
+}
+
 /// Wait for the next SpellGems and return (gems, seeded).
 async fn next_spell_gems(c: &mut WorldClient) -> Option<(Vec<String>, bool)> {
     match c

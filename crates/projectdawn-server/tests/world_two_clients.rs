@@ -8668,7 +8668,10 @@ async fn the_server_decides_run_speed() {
 }
 
 /// The jump relay (the "Remote players never show a jump" To-Do, cosmetic
-/// version). A watcher stands beside a jumper at the spawn. One Move with
+/// version). A watcher stands beside a jumper at the spawn; since 2026-10-29
+/// (the user's jump check) a second watches from 128 m, in view but past the
+/// say range, and sees the cue too, while a third two cells away, out of
+/// view, sees nothing. One Move with
 /// `jumping: true` reaches the watcher as exactly one PlayerJumped naming the
 /// jumper, and never reaches the jumper; a burst of ten alternating flags
 /// inside the half-second interval relays nothing more; an edge after the
@@ -8686,9 +8689,25 @@ async fn a_jump_reaches_the_players_nearby_once_and_moves_nobody() {
     let w_token = request_world_token(&h.auth_url, &w_session, w_char_id).await;
     let mut w = WorldClient::start(w_token, &w_session, w_char_id).await;
     pump_both_for(&mut j, &mut w, Duration::from_millis(400)).await;
+    // The jump check: a watcher in view past the say range (128 m away, the
+    // same AOI cell; row z = 80 is clear of every camp) and one two cells
+    // away, out of view.
+    let (f_session, f_char_id, _) =
+        provision_client(&h.auth_url, "jumpfar", "Farsee", "Human", "Warrior").await;
+    let (o_session, o_char_id, _) =
+        provision_client(&h.auth_url, "jumpout", "Outsee", "Human", "Warrior").await;
+    set_char_pos(&h.db_url, f_char_id, 100.0, 80.0).await;
+    set_char_pos(&h.db_url, o_char_id, 248.0, 60.0).await;
+    let f_token = request_world_token(&h.auth_url, &f_session, f_char_id).await;
+    let mut f = WorldClient::start(f_token, &f_session, f_char_id).await;
+    let o_token = request_world_token(&h.auth_url, &o_session, o_char_id).await;
+    let mut o = WorldClient::start(o_token, &o_session, o_char_id).await;
+    pump_both_for(&mut f, &mut o, Duration::from_millis(400)).await;
     // Drain what entering fanned, so the counts below are the jumps only.
     let _ = collect_system(&mut w, Duration::from_millis(200)).await;
     let _ = collect_system(&mut j, Duration::from_millis(200)).await;
+    let _ = collect_system(&mut f, Duration::from_millis(200)).await;
+    let _ = collect_system(&mut o, Duration::from_millis(200)).await;
     let still = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
     let jumps_in = |msgs: &[ServerWorldMsg]| {
         msgs.iter()
@@ -8704,12 +8723,16 @@ async fn a_jump_reaches_the_players_nearby_once_and_moves_nobody() {
         tick_one(&mut j.client, &mut j.transport);
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let (w_msgs, j_msgs) = tokio::join!(
+    let (w_msgs, j_msgs, f_msgs, o_msgs) = tokio::join!(
         collect_system(&mut w, Duration::from_millis(600)),
         collect_system(&mut j, Duration::from_millis(600)),
+        collect_system(&mut f, Duration::from_millis(600)),
+        collect_system(&mut o, Duration::from_millis(600)),
     );
     assert_eq!(jumps_in(&w_msgs), 1, "the watcher sees one jump; the burst inside the interval adds none");
     assert_eq!(jumps_in(&j_msgs), 0, "the jumper is not told about their own jump");
+    assert_eq!(jumps_in(&f_msgs), 1, "a watcher in view past the say range sees the jump: the jump check");
+    assert_eq!(jumps_in(&o_msgs), 0, "a watcher two cells away, out of view, sees nothing");
 
     // Past the interval, the next edge relays again.
     pump_both_for(&mut j, &mut w, Duration::from_millis(400)).await;
@@ -8730,8 +8753,12 @@ async fn a_jump_reaches_the_players_nearby_once_and_moves_nobody() {
 
     j.send_disconnect();
     w.send_disconnect();
+    f.send_disconnect();
+    o.send_disconnect();
     j.pump_for(Duration::from_millis(200)).await;
     w.pump_for(Duration::from_millis(200)).await;
+    f.pump_for(Duration::from_millis(200)).await;
+    o.pump_for(Duration::from_millis(200)).await;
 }
 
 /// The Test Panel's "Despawn All Enemies" removes the mobs on the SERVER. It
@@ -9177,6 +9204,99 @@ async fn equipping_is_refused_by_class_and_dual_wield() {
         next_equip_delta(&mut b, 3, Duration::from_millis(500)).await.is_none(),
         "the vest never reaches the chest slot"
     );
+}
+
+/// EQ's two-hander rule (user, 2026-10-29: a two-hander beside an off-hand
+/// weapon is an end-game Warrior ability; nobody until then). A Warrior 15
+/// (dual wield earned) wearing a club in the off hand is refused a Carved
+/// Staff for the main hand ("Empty your off hand first."); with the club off
+/// and the staff on, the club is refused for the off hand ("You cannot hold
+/// that with a two-handed weapon."). The swing backstop, for gear worn before
+/// the rule: a second Warrior 15 seeded wearing the staff AND a club swings
+/// the staff and gets no answer for the off hand. On the previous server the
+/// staff went on beside the club (both staves lacked the two-handed flag)
+/// and the off hand swung beside it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_two_hander_needs_an_empty_off_hand() {
+    const STAFF: &str = "res://data/loot/items/carved_staff.tres";
+    const CLUB: &str = "res://data/loot/items/cracked_wooden_club.tres";
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale_a) =
+        provision_client(&h.auth_url, "twohand_a", "Staffa", "Human", "Warrior").await;
+    let (b_session, b_char_id, _stale_b) =
+        provision_client(&h.auth_url, "twohand_b", "Staffb", "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "twohand_a", true).await.expect("set is_gm");
+    set_char_level(&h.db_url, a_char_id, 15).await;
+    set_char_level(&h.db_url, b_char_id, 15).await;
+    give_char_item(&h.db_url, a_char_id, "base", 0, STAFF, 1).await;
+    give_char_item(&h.db_url, a_char_id, "base", 1, CLUB, 1).await;
+    // Gear from before the rule: the pairing the equip now refuses.
+    give_char_item(&h.db_url, b_char_id, "equip", 0, STAFF, 1).await;
+    give_char_item(&h.db_url, b_char_id, "equip", 1, CLUB, 1).await;
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    // The club into the off hand: worn (a Warrior 15 dual wields).
+    a.send_equip_item("base", 1, 1);
+    assert_eq!(
+        next_equip_delta(&mut a, 1, Duration::from_secs(3)).await,
+        Some(Some(CLUB.to_string())),
+        "the club goes into the off hand"
+    );
+    // The staff into the main hand beside it: refused, no paperdoll change.
+    a.send_equip_item("base", 0, 0);
+    let line = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "Empty your off hand first.")
+        })
+        .await;
+    assert!(line.is_some(), "a two-hander is refused beside an off-hand weapon");
+    assert!(
+        next_equip_delta(&mut a, 0, Duration::from_millis(500)).await.is_none(),
+        "the staff never reaches the main hand"
+    );
+    // Off hand emptied, the staff goes on; then the club is refused beside it.
+    a.send_unequip_item(1, "base", 1);
+    assert_eq!(next_equip_delta(&mut a, 1, Duration::from_secs(3)).await, Some(None), "the off hand empties");
+    a.send_equip_item("base", 0, 0);
+    assert_eq!(
+        next_equip_delta(&mut a, 0, Duration::from_secs(3)).await,
+        Some(Some(STAFF.to_string())),
+        "the staff goes into the empty-off-hand main hand"
+    );
+    a.send_equip_item("base", 1, 1);
+    let line = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "You cannot hold that with a two-handed weapon.")
+        })
+        .await;
+    assert!(line.is_some(), "nothing joins a two-hander");
+    assert!(
+        next_equip_delta(&mut a, 1, Duration::from_millis(500)).await.is_none(),
+        "the club never reaches the off hand"
+    );
+
+    // The swing backstop for gear worn before the rule.
+    a.send_dev_spawn("Staff Dummy", 1, 100_000.0, 0, 0.0, 0.0);
+    let spawn = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Staff Dummy")
+    })
+    .await
+    .expect("the dummy spawns");
+    let (dummy, dummy_pos) = match spawn {
+        ServerWorldMsg::EnemySpawn { id, pos, .. } => (id, pos),
+        _ => unreachable!(),
+    };
+    let origin = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    let mut sb = 1u32;
+    walk_until_within(&mut b, &mut sb, b_char_id, origin, dummy_pos, 1.0).await;
+    a.send_heartbeat();
+    assert!(swing_answered(&mut b, b_char_id, dummy, false).await, "the staff swings");
+    assert!(!swing_answered(&mut b, b_char_id, dummy, true).await, "the off hand beside it is unanswered");
 }
 
 /// A `/say` carries SAY_RANGE (50 m; user, 2026-10-27: "the volume of a

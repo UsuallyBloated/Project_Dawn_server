@@ -1143,8 +1143,10 @@ fn pet_owner_cid(entity: &Entity) -> Option<ClientId> {
 /// Who is told an entity is gone for real: the in-world players who could
 /// see its cell, plus a pet's owner wherever they are (`pet_owner_cid`).
 /// The room: every in-world player within `SAY_RANGE` of `speaker`, never the
-/// speaker. What a `/say`, the eating emote and the jump relay reach. Written
-/// keep-only-when-in-range, so a non-finite position hears nothing.
+/// speaker. What a `/say` and the eating emote reach (the jump relay reaches
+/// the jumper's AOI view instead, since 2026-10-29: a jump is seen, not
+/// heard). Written keep-only-when-in-range, so a non-finite position hears
+/// nothing.
 fn say_recipients(speaker: ClientId, connections: &HashMap<ClientId, PerConnection>) -> Vec<ClientId> {
     let Some(from) = connections.get(&speaker) else {
         return Vec::new();
@@ -3136,10 +3138,12 @@ pub async fn run(
         }
 
         // 4b-jump. The jump relay: one PlayerJumped per jump begun this tick,
-        //     to the in-world players within the Say channel's reach of the
-        //     jumper, never to the jumper, whose own client already played
-        //     the hop. Position is untouched: the relay is the peers'
-        //     animation cue and nothing else.
+        //     to the in-world players who can see the jumper (the AOI view,
+        //     the same audience as the jumper's Position fan in step 6; a
+        //     jump is seen, not heard: the user's "jump check" on someone
+        //     far off, 2026-10-29), never to the jumper, whose own client
+        //     already played the hop. Position is untouched: the relay is
+        //     the peers' animation cue and nothing else.
         for jumper_id in jump_fanouts.drain(..) {
             if to_disconnect.contains(&jumper_id) {
                 continue;
@@ -3147,7 +3151,12 @@ pub async fn run(
             let Some(jumper) = connections.get(&jumper_id) else {
                 continue;
             };
-            let recipients = say_recipients(jumper_id, &connections);
+            let visible = aoi.entities_visible_from(jumper.aoi_cell);
+            let recipients: Vec<ClientId> = connections
+                .iter()
+                .filter(|(id, c)| **id != jumper_id && c.in_world && visible.contains(id))
+                .map(|(id, _)| *id)
+                .collect();
             handlers::fan_out_player_jumped(&mut server, &recipients, jumper.char_id as u64);
         }
 
@@ -3940,23 +3949,22 @@ pub async fn run(
                 // before the class's level (skills::dual_wield_level), and
                 // never for a class without it. A Monk fights with both
                 // fists, so with BOTH hands empty a Monk's off hand punches;
-                // everyone else still needs a real off-hand weapon.
+                // everyone else still needs a real off-hand weapon. And no
+                // off hand swings beside a two-handed main hand (2026-10-29;
+                // the equip refuses the pairing, this is the backstop). One
+                // home for the rule: skills::offhand_swing_refusal.
                 if intent.is_offhand {
-                    if !skills::can_dual_wield(&attacker_conn.class, attacker_conn.level) {
+                    if let Some(why) = skills::offhand_swing_refusal(
+                        &attacker_conn.class,
+                        attacker_conn.level,
+                        &attacker_conn.equipped_weapon_path(false),
+                        &server_weapon_path,
+                    ) {
                         tracing::info!(
                             attacker = intent.attacker,
                             class = %attacker_conn.class,
                             level = attacker_conn.level,
-                            "Attack rejected — off-hand swing before the class can dual wield"
-                        );
-                        continue;
-                    }
-                    let monk_fists = attacker_conn.class == "Monk"
-                        && attacker_conn.equipped_weapon_path(false).is_empty();
-                    if server_weapon_path.is_empty() && !monk_fists {
-                        tracing::info!(
-                            attacker = intent.attacker,
-                            "Attack rejected — off-hand swing with no off-hand weapon equipped"
+                            "Attack rejected — off-hand swing {why}"
                         );
                         continue;
                     }
@@ -7933,7 +7941,15 @@ pub async fn run(
                 // it can dual wield, is refused with the line the client
                 // already printed; only a modified client reaches this.
                 if let Some((path, _)) = conn.inventory.peek_at(&intent.src_location, intent.src_slot) {
-                    if let Some(line) = skills::equip_refusal(&conn.class, conn.level, &path, intent.equip_slot) {
+                    // The other weapon hand, for the two-hander rule.
+                    let other_hand = match intent.equip_slot {
+                        0 => conn.equipped_weapon_path(true),
+                        1 => conn.equipped_weapon_path(false),
+                        _ => String::new(),
+                    };
+                    if let Some(line) =
+                        skills::equip_refusal(&conn.class, conn.level, &path, intent.equip_slot, &other_hand)
+                    {
                         tracing::info!(
                             owner = intent.owner,
                             src_loc = %intent.src_location,

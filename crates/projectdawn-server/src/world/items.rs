@@ -258,6 +258,21 @@ pub fn bag_num_slots(path: &str) -> Option<u32> {
 mod tests {
     use super::*;
 
+    // The two-handed flag follows the skill (2026-10-29): every 2h_ or archery
+    // weapon carries it, and nothing else does. Both staves lacked it, so a
+    // staff went on beside an off-hand weapon and the off hand swung beside it.
+    #[test]
+    fn the_two_handed_flag_follows_the_skill() {
+        for item in items().values() {
+            let two_handed_skill = item.skill.starts_with("2h_") || item.skill == "archery";
+            assert_eq!(
+                item.is_two_handed, two_handed_skill,
+                "{}: skill {:?}, is_two_handed {}",
+                item.name, item.skill, item.is_two_handed
+            );
+        }
+    }
+
     #[test]
     fn embedded_toml_parses() {
         // Force-init the OnceLock; panic-on-parse means a failure here

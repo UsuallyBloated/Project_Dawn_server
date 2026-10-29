@@ -179,23 +179,86 @@ pub fn class_trains(skill: Skill, player_class: &str, key: &str) -> bool {
 /// goes through the swing's 80% miss and half damage. The client asks the
 /// same question first (`Equipment.equip_refusal`), so an honest player gets
 /// the line without a round trip; this is the backstop.
-pub fn equip_refusal(player_class: &str, level: i32, item_path: &str, equip_slot: u8) -> Option<String> {
+///
+/// The two-hander rule (2026-10-29, after a Carved Staff went on beside a
+/// club): `other_hand` is what the OTHER weapon slot holds (empty when bare).
+/// A two-hander goes in the main hand only, and only while the off hand is
+/// empty; nothing goes in the off hand while the main hand holds one. The
+/// user's call: wielding a two-hander with anything in the off hand is an
+/// end-game Warrior ability, and nobody has it until that ability exists.
+pub fn equip_refusal(
+    player_class: &str,
+    level: i32,
+    item_path: &str,
+    equip_slot: u8,
+    other_hand: &str,
+) -> Option<String> {
     let item = super::items::lookup(item_path)?;
     if item.item_type == super::items::ItemType::Weapon {
         let key = super::combat::weapon_skill_key(item_path);
         if !class_trains(Skill::Weapon, player_class, &key) {
             return Some("Your class cannot wield that.".to_string());
         }
-        if equip_slot == 1 && !can_dual_wield(player_class, level) {
-            return Some(match dual_wield_level(player_class) {
-                Some(at) => format!("You will be able to dual wield at level {at}."),
-                None => "Your class cannot dual wield.".to_string(),
-            });
+        match equip_slot {
+            1 => {
+                if item.is_two_handed {
+                    return Some("A two-handed weapon goes in the main hand.".to_string());
+                }
+                if !can_dual_wield(player_class, level) {
+                    return Some(match dual_wield_level(player_class) {
+                        Some(at) => format!("You will be able to dual wield at level {at}."),
+                        None => "Your class cannot dual wield.".to_string(),
+                    });
+                }
+                if is_two_handed(other_hand) {
+                    return Some("You cannot hold that with a two-handed weapon.".to_string());
+                }
+            }
+            0 => {
+                if item.is_two_handed && !other_hand.is_empty() {
+                    return Some("Empty your off hand first.".to_string());
+                }
+            }
+            _ => {}
         }
         return None;
     }
     if !item.armor_type.is_empty() && !class_trains(Skill::Armor, player_class, &item.armor_type) {
         return Some("Your class cannot wear that.".to_string());
+    }
+    None
+}
+
+/// Whether the item at `path` is a two-handed weapon; an empty or unknown
+/// path is not.
+fn is_two_handed(path: &str) -> bool {
+    super::items::lookup(path).is_some_and(|w| w.is_two_handed)
+}
+
+/// Why a character may not swing its off hand now, or `None` when it may:
+/// the class has no dual wield yet (before its level, or never); the off
+/// hand holds no weapon (a Monk with BOTH hands empty punches with it, as
+/// EQ's monks did; everyone else needs a real off-hand weapon, or a forged
+/// off-hand Attack would be a free second damage stream); or the main hand
+/// holds a two-handed weapon (the equip refuses that pairing since
+/// 2026-10-29, so this is the backstop for gear worn before the rule and for
+/// a modified client). One home for the rule: the Attack path logs the
+/// reason and drops the swing, answering nothing.
+pub fn offhand_swing_refusal(
+    player_class: &str,
+    level: i32,
+    main_path: &str,
+    off_path: &str,
+) -> Option<&'static str> {
+    if !can_dual_wield(player_class, level) {
+        return Some("before the class can dual wield");
+    }
+    let monk_fists = player_class == "Monk" && main_path.is_empty();
+    if off_path.is_empty() && !monk_fists {
+        return Some("with no off-hand weapon equipped");
+    }
+    if is_two_handed(main_path) {
+        return Some("beside a two-handed weapon");
     }
     None
 }
@@ -550,38 +613,88 @@ mod tests {
         const SWORD: &str = "res://data/loot/items/iron_short_sword.tres";
         const VEST: &str = "res://data/loot/items/cracked_leather_vest.tres";
         const BOOTS: &str = "res://data/loot/items/copper_chain_boots.tres";
-        assert_eq!(equip_refusal("Cleric", 1, CLUB, 0), None, "a Cleric wields a club");
+        assert_eq!(equip_refusal("Cleric", 1, CLUB, 0, ""), None, "a Cleric wields a club");
         assert_eq!(
-            equip_refusal("Cleric", 60, CLUB, 1).as_deref(),
+            equip_refusal("Cleric", 60, CLUB, 1, "").as_deref(),
             Some("Your class cannot dual wield."),
             "never in the off hand"
         );
         assert_eq!(
-            equip_refusal("Warrior", 14, CLUB, 1).as_deref(),
+            equip_refusal("Warrior", 14, CLUB, 1, "").as_deref(),
             Some("You will be able to dual wield at level 15."),
             "a Warrior's off hand waits for 15"
         );
-        assert_eq!(equip_refusal("Warrior", 15, CLUB, 1), None);
-        assert_eq!(equip_refusal("Monk", 1, CLUB, 1), None, "a Monk is born with it");
+        assert_eq!(equip_refusal("Warrior", 15, CLUB, 1, ""), None);
+        assert_eq!(equip_refusal("Monk", 1, CLUB, 1, ""), None, "a Monk is born with it");
         assert_eq!(
-            equip_refusal("Cleric", 60, SWORD, 0).as_deref(),
+            equip_refusal("Cleric", 60, SWORD, 0, "").as_deref(),
             Some("Your class cannot wield that."),
             "Clerics never train 1h_slashing"
         );
-        assert_eq!(equip_refusal("Warrior", 1, SWORD, 0), None);
+        assert_eq!(equip_refusal("Warrior", 1, SWORD, 0, ""), None);
         assert_eq!(
-            equip_refusal("Monk", 60, VEST, 3).as_deref(),
+            equip_refusal("Monk", 60, VEST, 3, "").as_deref(),
             Some("Your class cannot wear that."),
             "Monks train cloth alone"
         );
-        assert_eq!(equip_refusal("Rogue", 1, VEST, 3), None);
-        assert_eq!(equip_refusal("Cleric", 1, BOOTS, 5), None, "Clerics train chain");
+        assert_eq!(equip_refusal("Rogue", 1, VEST, 3, ""), None);
+        assert_eq!(equip_refusal("Cleric", 1, BOOTS, 5, ""), None, "Clerics train chain");
         assert_eq!(
-            equip_refusal("Wizard", 60, BOOTS, 5).as_deref(),
+            equip_refusal("Wizard", 60, BOOTS, 5, "").as_deref(),
             Some("Your class cannot wear that."),
             "Wizards never train chain"
         );
-        assert_eq!(equip_refusal("Cleric", 1, "res://no/such/item.tres", 0), None, "an unknown item is the next gate's problem");
+        assert_eq!(equip_refusal("Cleric", 1, "res://no/such/item.tres", 0, ""), None, "an unknown item is the next gate's problem");
+        // The two-hander rule (2026-10-29): the main hand only, and only
+        // while the off hand is empty; nothing joins one; a one-hander swaps
+        // in beside an off-hand weapon as before.
+        const STAFF: &str = "res://data/loot/items/carved_staff.tres";
+        assert_eq!(equip_refusal("Warrior", 15, STAFF, 0, ""), None, "a staff goes in an empty-off-hand main hand");
+        assert_eq!(
+            equip_refusal("Warrior", 15, STAFF, 0, CLUB).as_deref(),
+            Some("Empty your off hand first."),
+            "not beside an off-hand weapon"
+        );
+        assert_eq!(
+            equip_refusal("Warrior", 15, CLUB, 1, STAFF).as_deref(),
+            Some("You cannot hold that with a two-handed weapon."),
+            "and nothing joins a two-hander"
+        );
+        assert_eq!(
+            equip_refusal("Warrior", 15, STAFF, 1, "").as_deref(),
+            Some("A two-handed weapon goes in the main hand."),
+            "a two-hander never sits in the off hand"
+        );
+        assert_eq!(
+            equip_refusal("Cleric", 60, CLUB, 1, STAFF).as_deref(),
+            Some("Your class cannot dual wield."),
+            "the class rule answers first"
+        );
+        assert_eq!(equip_refusal("Warrior", 15, SWORD, 0, CLUB), None, "a one-hander swaps in beside an off-hand weapon");
+    }
+
+    // The off-hand swing rule has one home (2026-10-29), the Attack path's
+    // gate: the class's dual wield level, a real off-hand weapon (a Monk with
+    // both hands empty punches), and never beside a two-handed main hand.
+    #[test]
+    fn the_off_hand_swing_rule_has_one_home() {
+        const CLUB: &str = "res://data/loot/items/cracked_wooden_club.tres";
+        const STAFF: &str = "res://data/loot/items/carved_staff.tres";
+        assert_eq!(offhand_swing_refusal("Warrior", 14, CLUB, CLUB), Some("before the class can dual wield"));
+        assert_eq!(offhand_swing_refusal("Cleric", 60, CLUB, CLUB), Some("before the class can dual wield"));
+        assert_eq!(offhand_swing_refusal("Warrior", 15, CLUB, ""), Some("with no off-hand weapon equipped"));
+        assert_eq!(offhand_swing_refusal("Monk", 1, "", ""), None, "a bare-handed Monk punches with both");
+        assert_eq!(
+            offhand_swing_refusal("Monk", 1, CLUB, ""),
+            Some("with no off-hand weapon equipped"),
+            "a Monk with one club has one weapon"
+        );
+        assert_eq!(
+            offhand_swing_refusal("Warrior", 15, STAFF, CLUB),
+            Some("beside a two-handed weapon"),
+            "the backstop for gear worn before the rule"
+        );
+        assert_eq!(offhand_swing_refusal("Warrior", 15, CLUB, CLUB), None);
     }
 }
 

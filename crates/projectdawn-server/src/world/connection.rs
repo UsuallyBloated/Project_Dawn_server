@@ -369,6 +369,13 @@ pub struct PerConnection {
     /// `authorize_dev_cmd`, which is also the gate: a command is queued here
     /// or it does not run.
     pub gm_audit: Vec<GmAuditEntry>,
+    /// The item ledger's queue (`world/ledger.rs`): one row per movement of
+    /// items or coin into or out of this character's holdings since the last
+    /// store write, pushed by `ledger` beside the dirty flag the move set and
+    /// written inside the next transaction that persists the stores (the
+    /// flush, the trade commit, the corpse loot, the death strip), which
+    /// clears it. Rolled back with the in-memory move on a failed persist.
+    pub item_events: Vec<crate::db::ItemEventRow>,
     /// The command budget (see `GM_CMD_BURST`): tokens left, and when they
     /// were last refilled.
     pub gm_cmd_tokens: f32,
@@ -709,6 +716,7 @@ impl PerConnection {
             // only sees the character spawn, not the account's GM flag).
             is_gm: false,
             gm_audit: Vec::new(),
+            item_events: Vec::new(),
             gm_cmd_tokens: GM_CMD_BURST,
             gm_cmd_refill_at: now,
             gm_cmd_refused: 0,
@@ -929,6 +937,28 @@ impl PerConnection {
             || self.bank_dirty
             || self.bank_items_dirty
             || self.account_bank_items_dirty
+    }
+
+    /// Queue an item ledger row for this character, stamped now
+    /// (`world/ledger.rs`). Called at the site that makes the move in memory,
+    /// beside the dirty flag it sets; the row is written with the next store
+    /// transaction and leaves the queue only when that commits.
+    pub fn ledger(&mut self, mut row: crate::db::ItemEventRow) {
+        row.at = super::ledger::unix_now_secs();
+        row.char_id = self.char_id;
+        self.item_events.push(row);
+    }
+
+    /// Where the ledger queue stands, for a site that may have to undo its
+    /// in-memory move on a failed persist: `ledger_rollback(mark)` drops
+    /// everything queued since, as the inventory snapshot it restores drops
+    /// the move.
+    pub fn ledger_mark(&self) -> usize {
+        self.item_events.len()
+    }
+
+    pub fn ledger_rollback(&mut self, mark: usize) {
+        self.item_events.truncate(mark);
     }
 
     pub fn mark_persisted(&mut self) {

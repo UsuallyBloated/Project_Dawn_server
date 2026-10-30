@@ -1387,11 +1387,22 @@ pub fn handle_message(
             // Exact per-tier credit, no reduction — a raw-copper grant must
             // stay raw copper (that's what makes it useful for encumbrance
             // testing). Negative grants allowed (dev drain), floored at 0.
+            let before = conn.coins.total_copper();
             conn.coins.platinum = conn.coins.platinum.saturating_add(platinum).max(0);
             conn.coins.gold = conn.coins.gold.saturating_add(gold).max(0);
             conn.coins.silver = conn.coins.silver.saturating_add(silver).max(0);
             conn.coins.copper = conn.coins.copper.saturating_add(copper).max(0);
             conn.coins_dirty = true;
+            // The ledger gets what the wallet really gained (the floor at 0
+            // can make a drain smaller than asked).
+            let gained = conn.coins.total_copper() - before;
+            if gained != 0 {
+                conn.ledger(super::ledger::coin_event(
+                    super::ledger::ItemAction::GmCoins,
+                    gained,
+                    Some("gm".to_string()),
+                ));
+            }
             send_coins_update(server, client_id, conn.coins);
             tracing::info!(
                 char_id = conn.char_id,

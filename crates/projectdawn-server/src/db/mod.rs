@@ -624,6 +624,179 @@ pub async fn record_gm_actions(pool: &SqlitePool, rows: &[GmActionRow]) -> AuthR
     Ok(())
 }
 
+/// One row of the item ledger (`item_events`, migration 0017; the rules in
+/// `world/ledger.rs`). Built by `world::ledger::item_event` / `coin_event`,
+/// stamped with `at` and `char_id` when queued on the connection, and written
+/// by `write_item_events` inside the transaction that persists the move.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemEventRow {
+    pub at: i64,
+    pub char_id: i64,
+    pub action: &'static str,
+    pub item_path: Option<String>,
+    pub count: i64,
+    pub delta: i64,
+    pub copper: i64,
+    pub detail: Option<String>,
+}
+
+/// Write queued ledger rows inside a caller's transaction. Every transaction
+/// that writes a character's stores calls this with that character's queue
+/// (the store flush, the trade commit, the corpse loot, the death strip), so
+/// a row is committed exactly when the move it describes is.
+pub async fn write_item_events(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    rows: &[ItemEventRow],
+) -> AuthResult<()> {
+    for row in rows {
+        sqlx::query(
+            "INSERT INTO item_events (at, char_id, action, item_path, count, delta, copper, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind(row.at)
+        .bind(row.char_id)
+        .bind(row.action)
+        .bind(&row.item_path)
+        .bind(row.count)
+        .bind(row.delta)
+        .bind(row.copper)
+        .bind(&row.detail)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+/// The ledger's prune, written so the books still balance afterwards: every
+/// row older than `cutoff` is folded into one `carry` row per character and
+/// item holding the folded sums (stamped `cutoff`), then deleted, in one
+/// transaction. Returns (carry rows written, rows deleted). A character and
+/// item whose old rows sum to nothing gets no carry row.
+pub async fn fold_item_events_before(pool: &SqlitePool, cutoff: i64) -> AuthResult<(u64, u64)> {
+    let mut tx = pool.begin().await?;
+    let carried = sqlx::query(
+        "INSERT INTO item_events (at, char_id, action, item_path, count, delta, copper, detail)
+         SELECT ?1, char_id, 'carry', item_path, 0, SUM(delta), SUM(copper), 'folded'
+         FROM item_events
+         WHERE at < ?1
+         GROUP BY char_id, item_path
+         HAVING SUM(delta) != 0 OR SUM(copper) != 0",
+    )
+    .bind(cutoff)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    let deleted = sqlx::query("DELETE FROM item_events WHERE at < ?1")
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    Ok((carried, deleted))
+}
+
+/// One place the books do not balance: an account whose ledger says it should
+/// hold `ledger` of `item_path` (or that much copper, when `item_path` is
+/// None) while its stores hold `held`.
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct LedgerMismatch {
+    pub account_id: i64,
+    pub item_path: Option<String>,
+    pub ledger: i64,
+    pub held: i64,
+}
+
+/// The conservation query: for every account and item, the sum of `delta`
+/// over its characters' ledger rows against the count in their inventories
+/// and vaults, and the sum of `copper` against their wallets. Empty when the
+/// books balance. Read-only; the daily sweep logs what it returns and
+/// `admin_report` shows it.
+pub async fn ledger_mismatches(pool: &SqlitePool) -> AuthResult<Vec<LedgerMismatch>> {
+    let mut out: Vec<LedgerMismatch> = sqlx::query_as(
+        "WITH ledger AS (
+            SELECT c.account_id AS account_id, e.item_path AS item_path, SUM(e.delta) AS delta
+            FROM item_events e JOIN characters c ON c.id = e.char_id
+            WHERE e.item_path IS NOT NULL
+            GROUP BY c.account_id, e.item_path
+         ),
+         held_rows AS (
+            SELECT c.account_id AS account_id, i.item_path AS item_path, i.count AS n
+            FROM character_items i JOIN characters c ON c.id = i.char_id
+            UNION ALL
+            SELECT c.account_id, b.item_path, b.count
+            FROM bank_items b JOIN characters c ON c.id = b.char_id
+            UNION ALL
+            SELECT a.account_id, a.item_path, a.count FROM account_bank_items a
+         ),
+         held AS (
+            SELECT account_id, item_path, SUM(n) AS n FROM held_rows GROUP BY account_id, item_path
+         ),
+         keys AS (
+            SELECT account_id, item_path FROM ledger
+            UNION
+            SELECT account_id, item_path FROM held
+         )
+         SELECT k.account_id AS account_id, k.item_path AS item_path,
+                COALESCE(l.delta, 0) AS ledger, COALESCE(h.n, 0) AS held
+         FROM keys k
+         LEFT JOIN ledger l ON l.account_id = k.account_id AND l.item_path = k.item_path
+         LEFT JOIN held h ON h.account_id = k.account_id AND h.item_path = k.item_path
+         WHERE COALESCE(l.delta, 0) != COALESCE(h.n, 0)
+         ORDER BY k.account_id, k.item_path",
+    )
+    .fetch_all(pool)
+    .await?;
+    let coins: Vec<LedgerMismatch> = sqlx::query_as(
+        "WITH ledger AS (
+            SELECT c.account_id AS account_id, SUM(e.copper) AS copper
+            FROM item_events e JOIN characters c ON c.id = e.char_id
+            GROUP BY c.account_id
+         ),
+         held AS (
+            SELECT account_id,
+                   SUM(platinum * 1000000 + gold * 10000 + silver * 100 + copper
+                       + bank_platinum * 1000000 + bank_gold * 10000 + bank_silver * 100 + bank_copper) AS n
+            FROM characters GROUP BY account_id
+         )
+         SELECT h.account_id AS account_id, NULL AS item_path,
+                COALESCE(l.copper, 0) AS ledger, h.n AS held
+         FROM held h LEFT JOIN ledger l ON l.account_id = h.account_id
+         WHERE COALESCE(l.copper, 0) != h.n
+         ORDER BY h.account_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    out.extend(coins);
+    Ok(out)
+}
+
+/// A ledger row as the operator reads it (`admin_report`), newest first.
+#[derive(Debug, Clone, FromRow)]
+pub struct ItemEventView {
+    pub at: i64,
+    pub char_name: Option<String>,
+    pub action: String,
+    pub item_path: Option<String>,
+    pub count: i64,
+    pub delta: i64,
+    pub copper: i64,
+    pub detail: Option<String>,
+}
+
+/// The newest `limit` ledger rows with the character's name (a LEFT JOIN, so
+/// a row outlives its character). Read-only.
+pub async fn recent_item_events(pool: &SqlitePool, limit: i64) -> AuthResult<Vec<ItemEventView>> {
+    let rows: Vec<ItemEventView> = sqlx::query_as(
+        "SELECT e.at, c.name AS char_name, e.action, e.item_path, e.count, e.delta, e.copper, e.detail
+         FROM item_events e LEFT JOIN characters c ON c.id = e.char_id
+         ORDER BY e.id DESC LIMIT ?1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// A character's bind point: where `Respawn` puts them. Coordinates are
 /// authoritative; the zone is persisted alongside (see `set_bind_point`) so a
 /// future multi-zone world can refuse or route a cross-zone respawn. A character
@@ -1198,6 +1371,7 @@ pub async fn save_corpse(
     lost_xp: i32,
     strip_owner: bool,
     owner_progress: Option<XpProgress>,
+    events: &[ItemEventRow],
 ) -> AuthResult<()> {
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1263,6 +1437,9 @@ pub async fn save_corpse(
     if let Some(progress) = owner_progress {
         write_xp_progress(&mut tx, char_id, progress).await?;
     }
+    // The owner's queued ledger rows and the death rows the caller added to
+    // them, committed with the strip they describe.
+    write_item_events(&mut tx, events).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -1365,6 +1542,7 @@ pub async fn apply_corpse_loot(
     corpse_items: &[(String, u32, Option<u8>)],
     corpse_coins: protocol::world::Coins,
     delete_corpse: bool,
+    events: &[ItemEventRow],
 ) -> AuthResult<()> {
     let mut tx = pool.begin().await?;
     // Looter inventory — full DELETE + reINSERT (same shape as save_inventory).
@@ -1429,6 +1607,9 @@ pub async fn apply_corpse_loot(
             .execute(&mut *tx)
             .await?;
     }
+    // The looter's queued ledger rows (the corpse loot rows among them),
+    // committed with the inventory they describe.
+    write_item_events(&mut tx, events).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -1559,6 +1740,7 @@ pub async fn save_stores_atomic(
     bank_coins: Option<Coins>,
     bank_items: Option<&[BankItemRow]>,
     account_bank_items: Option<&[BankItemRow]>,
+    events: &[ItemEventRow],
 ) -> AuthResult<()> {
     let mut tx = pool.begin().await?;
 
@@ -1647,6 +1829,10 @@ pub async fn save_stores_atomic(
             .await?;
         }
     }
+
+    // The ledger rows queued since the last flush, committed with the stores
+    // they describe (world/ledger.rs).
+    write_item_events(&mut tx, events).await?;
 
     tx.commit().await?;
     Ok(())
@@ -1872,19 +2058,22 @@ pub async fn save_factions(
 /// post-trade state persisted, the other's rolled back, and the traded items
 /// exist twice. Same single-tx doctrine as `apply_corpse_loot` and
 /// `save_stores_atomic`, spanning two characters instead of two stores.
+#[allow(clippy::too_many_arguments)]
 pub async fn commit_trade(
     pool: &SqlitePool,
     a_char_id: i64,
     a_inventory: &[InventoryRow],
     a_coins: Coins,
+    a_events: &[ItemEventRow],
     b_char_id: i64,
     b_inventory: &[InventoryRow],
     b_coins: Coins,
+    b_events: &[ItemEventRow],
 ) -> AuthResult<()> {
     let mut tx = pool.begin().await?;
-    for (char_id, rows, coins) in [
-        (a_char_id, a_inventory, a_coins),
-        (b_char_id, b_inventory, b_coins),
+    for (char_id, rows, coins, events) in [
+        (a_char_id, a_inventory, a_coins, a_events),
+        (b_char_id, b_inventory, b_coins, b_events),
     ] {
         sqlx::query("DELETE FROM character_items WHERE char_id = ?1")
             .bind(char_id)
@@ -1914,6 +2103,9 @@ pub async fn commit_trade(
         .bind(char_id)
         .execute(&mut *tx)
         .await?;
+        // Each side's queued ledger rows (the trade rows among them),
+        // committed with the inventories and wallets they describe.
+        write_item_events(&mut tx, events).await?;
     }
     tx.commit().await?;
     Ok(())
@@ -2320,6 +2512,7 @@ mod corpse_loot_tests {
             0,     // lost_xp
             false, // strip_owner: tests exercise corpse creation only
             None,  // owner_progress
+            &[],   // ledger rows
         )
         .await
         .expect("save corpse");
@@ -2347,6 +2540,7 @@ mod corpse_loot_tests {
             &[("res://items/shield.tres".to_string(), 1, Some(1))],
             protocol::world::Coins::ZERO,
             false, // partial -> keep the corpse
+            &[],
         )
         .await
         .expect("apply");
@@ -2395,6 +2589,7 @@ mod corpse_loot_tests {
             &[],
             protocol::world::Coins::ZERO,
             true, // looted clean -> delete the corpse
+            &[],
         )
         .await
         .expect("apply");
@@ -2471,6 +2666,7 @@ mod corpse_loot_tests {
             0,
             true, // strip_owner
             None,
+            &[],
         )
         .await
         .expect("save corpse + strip");
@@ -2523,6 +2719,7 @@ mod corpse_loot_tests {
             500,   // lost_xp
             false, // strip_owner: tests exercise corpse creation only
             None,  // owner_progress
+            &[],   // ledger rows
         )
         .await
         .expect("save");
@@ -2557,6 +2754,7 @@ mod corpse_loot_tests {
             400,
             false,
             None,
+            &[],
         )
         .await
         .expect("save");

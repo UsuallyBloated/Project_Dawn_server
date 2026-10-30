@@ -11294,3 +11294,334 @@ async fn a_quest_turn_in_saves_its_reward_xp_with_the_completion() {
     let after = char_xp_level(&h.db_url, char_id).await;
     assert_ne!(after, before, "the reward XP must be saved with the completion");
 }
+
+// ─── The item ledger (2026-10-30) ────────────────────────────────────────────
+
+/// Opening rows for everything the database holds right now, as migration
+/// 0017 writes them when the table is created: the tests seed stores straight
+/// into the tables, which the ledger never saw.
+async fn seed_ledger_openings(db_url: &str) {
+    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    for sql in [
+        "INSERT INTO item_events (at, char_id, action, item_path, count, delta, copper, detail)
+         SELECT 1, char_id, 'opening', item_path, SUM(count), SUM(count), 0, 'inventory'
+         FROM character_items GROUP BY char_id, item_path",
+        "INSERT INTO item_events (at, char_id, action, item_path, count, delta, copper, detail)
+         SELECT 1, char_id, 'opening', item_path, SUM(count), SUM(count), 0, 'vault'
+         FROM bank_items GROUP BY char_id, item_path",
+        "INSERT INTO item_events (at, char_id, action, item_path, count, delta, copper, detail)
+         SELECT 1, id, 'opening', NULL, 0, 0,
+                platinum * 1000000 + gold * 10000 + silver * 100 + copper
+                  + bank_platinum * 1000000 + bank_gold * 10000 + bank_silver * 100 + bank_copper,
+                'wallet and bank'
+         FROM characters",
+    ] {
+        sqlx::query(sql).execute(&pool).await.expect("opening rows");
+    }
+}
+
+/// A character's ledger rows after the opening ones, oldest first:
+/// (action, item path, count, delta, copper).
+async fn ledger_rows(db_url: &str, char_id: i64) -> Vec<(String, Option<String>, i64, i64, i64)> {
+    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    sqlx::query_as(
+        "SELECT action, item_path, count, delta, copper FROM item_events
+         WHERE char_id = ?1 AND action != 'opening' ORDER BY id",
+    )
+    .bind(char_id)
+    .fetch_all(&pool)
+    .await
+    .expect("ledger rows")
+}
+
+async fn ledger_mismatches(db_url: &str) -> Vec<projectdawn_server::db::LedgerMismatch> {
+    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    projectdawn_server::db::ledger_mismatches(&pool).await.expect("ledger check")
+}
+
+/// The item ledger: a sale, a purchase and a drop leave the seller's rows, the
+/// pickup leaves the picker's, each written with the transaction that
+/// persisted the move (the sale and the purchase ride the logout flush, the
+/// drop and the pickup their immediate saves), and the conservation query
+/// finds the books balanced. A stack then planted straight into the table,
+/// the shape of every dupe, is the one mismatch, named by account and item.
+/// Fails on the previous server at the first row assertion: no table.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_ledger_records_a_sale_a_purchase_a_drop_and_a_pickup_and_balances() {
+    const POTION: &str = "res://data/loot/items/minor_healing_potion.tres";
+    let h = start_both().await;
+    let (a_session, a_char, a_token) =
+        provision_client(&h.auth_url, "ledgera", "Ledgera", "Human", "Warrior").await;
+    let (b_session, b_char, b_token) =
+        provision_client(&h.auth_url, "ledgerb", "Ledgerb", "Human", "Warrior").await;
+    give_char_item(&h.db_url, a_char, "base", 0, BREAD, 3).await;
+    {
+        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        // At the spawn, in reach of the merchant, with coin for the potion.
+        sqlx::query("UPDATE characters SET copper = 1000, pos_x = 0.0, pos_z = 0.0 WHERE id = ?1")
+            .bind(a_char)
+            .execute(&pool)
+            .await
+            .expect("seed");
+    }
+    seed_ledger_openings(&h.db_url).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char).await;
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+    })
+    .await
+    .expect("snapshot");
+    b.pump_for(Duration::from_millis(200)).await;
+
+    a.send_sell_item(SlotRef::BaseSlot { idx: 0 }, 1);
+    // The sale's own delta (the stack 3 to 2), not the enter-world wallet
+    // send: the buy below must reach a later tick (within one tick the
+    // server applies buys before sells, which would reorder the rows).
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, slot: 0, item_path: Some(p), count: 2 }
+            if location == "base" && p == BREAD)
+    })
+    .await
+    .expect("the sale takes one loaf");
+    a.send_buy_item(0, "Minor Healing Potion", 1);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == POTION)
+    })
+    .await
+    .expect("the potion arrives");
+    a.send_drop_item("base", 0, 1);
+    a.pump_for(Duration::from_millis(100)).await;
+    let bag_id = match b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::LootBagSpawn { items, .. }
+                if items.iter().any(|(p, _)| p == BREAD))
+        })
+        .await
+        .expect("the bag reaches B")
+    {
+        ServerWorldMsg::LootBagSpawn { bag_id, .. } => bag_id,
+        _ => unreachable!(),
+    };
+    b.send_loot_all(bag_id);
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD)
+    })
+    .await
+    .expect("the loaf reaches B");
+
+    a.send_disconnect();
+    b.send_disconnect();
+    a.pump_for(Duration::from_millis(300)).await;
+    b.pump_for(Duration::from_millis(300)).await;
+
+    let a_rows = ledger_rows(&h.db_url, a_char).await;
+    let actions: Vec<&str> = a_rows.iter().map(|r| r.0.as_str()).collect();
+    assert_eq!(actions, vec!["sell", "buy", "drop"], "A's rows in order: {a_rows:?}");
+    let sale = &a_rows[0];
+    assert_eq!((sale.1.as_deref(), sale.2, sale.3), (Some(BREAD), 1, -1), "{sale:?}");
+    assert!(sale.4 > 0, "the sale credits coin: {sale:?}");
+    let purchase = &a_rows[1];
+    assert_eq!((purchase.1.as_deref(), purchase.2, purchase.3), (Some(POTION), 1, 1), "{purchase:?}");
+    assert!(purchase.4 < 0, "the purchase costs coin: {purchase:?}");
+    let drop = &a_rows[2];
+    assert_eq!((drop.1.as_deref(), drop.2, drop.3, drop.4), (Some(BREAD), 1, -1, 0), "{drop:?}");
+    let b_rows = ledger_rows(&h.db_url, b_char).await;
+    assert_eq!(
+        b_rows,
+        vec![("pickup".to_string(), Some(BREAD.to_string()), 1, 1, 0)],
+        "B's one row is the pickup"
+    );
+    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "the books balance after every move");
+
+    {
+        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        sqlx::query(
+            "INSERT INTO character_items (char_id, location, slot, item_path, count) VALUES (?1, 'base', 7, ?2, 5)",
+        )
+        .bind(b_char)
+        .bind(BREAD)
+        .execute(&pool)
+        .await
+        .expect("plant a dupe");
+    }
+    let found = ledger_mismatches(&h.db_url).await;
+    assert_eq!(found.len(), 1, "the planted stack is the one mismatch: {found:?}");
+    assert_eq!((found[0].item_path.as_deref(), found[0].ledger, found[0].held), (Some(BREAD), 1, 6));
+}
+
+/// The death strip and the corpse loot in the ledger: the strip's rows (one
+/// per stack, one for the coin) ride the corpse transaction, the loot's rows
+/// the corpse-loot transaction, and the books balance at both ends, with what
+/// lies on the corpse counted as out of the holdings in between. Fails on the
+/// previous server at the first row assertion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_death_and_the_corpse_loot_keep_the_books_balanced() {
+    const CAP: &str = "res://data/loot/items/cloth_cap.tres";
+    let h = start_both().await;
+    let (session, char_id, _) =
+        provision_client(&h.auth_url, "ledgerdie", "Ledgerdie", "Human", "Warrior").await;
+    give_char_item(&h.db_url, char_id, "equip", 2, CAP, 1).await;
+    give_char_item(&h.db_url, char_id, "base", 0, BREAD, 2).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    sqlx::query("UPDATE characters SET copper = 40 WHERE id = ?1")
+        .bind(char_id)
+        .execute(&pool)
+        .await
+        .expect("coin");
+    db::set_account_gm(&pool, "ledgerdie", true).await.expect("set is_gm");
+    seed_ledger_openings(&h.db_url).await;
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    a.send_damage_self(1_000_000);
+    let contents = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::CorpseContents { .. })
+        })
+        .await
+        .expect("dying leaves a corpse");
+    let ServerWorldMsg::CorpseContents { corpse_id, .. } = contents else {
+        unreachable!()
+    };
+    let rows = ledger_rows(&h.db_url, char_id).await;
+    assert_eq!(
+        rows,
+        vec![
+            ("death".to_string(), Some(CAP.to_string()), 1, -1, 0),
+            ("death".to_string(), Some(BREAD.to_string()), 2, -2, 0),
+            ("death_coins".to_string(), None, 0, 0, -40),
+        ],
+        "the strip's rows, written with the corpse"
+    );
+    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "balanced with the gear on the corpse");
+
+    a.send_respawn();
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| matches!(m, ServerWorldMsg::Teleport { .. }))
+        .await
+        .expect("respawned beside the corpse");
+    a.send_loot_all(corpse_id);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), .. }
+            if location == "equip" && p == CAP)
+    })
+    .await
+    .expect("the cap goes back on");
+    a.pump_for(Duration::from_millis(200)).await;
+    let rows = ledger_rows(&h.db_url, char_id).await;
+    assert_eq!(
+        rows[3..].to_vec(),
+        vec![
+            ("corpse_coins".to_string(), None, 0, 0, 40),
+            ("corpse_loot".to_string(), Some(CAP.to_string()), 1, 1, 0),
+            ("corpse_loot".to_string(), Some(BREAD.to_string()), 2, 2, 0),
+        ],
+        "the loot's rows, written with the loot: {rows:?}"
+    );
+    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "balanced with everything back");
+    a.send_disconnect();
+    a.pump_for(Duration::from_millis(200)).await;
+}
+
+/// A trade in the ledger: the giver's queued GM rows and the trade rows (one
+/// per stack out, one for the coin) and the receiver's (one per stack in, one
+/// for the coin) are all written by the trade's own commit, both sides name
+/// the partner, and the books balance with nothing but recorded moves behind
+/// every holding. Fails on the previous server at the first row assertion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_trade_writes_both_sides_of_the_ledger_and_balances() {
+    let h = start_both().await;
+    let (mut a, a_char_id, mut b, b_char_id, bread_loc, bread_slot) =
+        trade_pair(&h, "ledgertra", "Ledgertra", "ledgertrb", "Ledgertrb").await;
+    macro_rules! pump_a {
+        () => {{
+            for _ in 0..4 {
+                tick_one(&mut a.client, &mut a.transport);
+                tokio::time::sleep(TICK_DT).await;
+            }
+        }};
+    }
+
+    a.send_trade_request(b_char_id as u64);
+    pump_a!();
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { partner_id, .. }
+            if *partner_id == b_char_id as u64)
+    })
+    .await
+    .expect("A's window opens");
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { .. })
+    })
+    .await
+    .expect("B's window opens");
+    a.send_trade_offer_item(0, &bread_loc, bread_slot);
+    pump_a!();
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOfferUpdate { mine: false, .. })
+    })
+    .await
+    .expect("B sees the offer");
+    a.send_trade_offer_coins(protocol::world::Coins { platinum: 0, gold: 0, silver: 0, copper: 25 });
+    pump_a!();
+    a.send_trade_accept();
+    pump_a!();
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeAcceptState { you: false, them: true })
+    })
+    .await
+    .expect("B sees A accepted");
+    b.send_trade_accept();
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::TradeClosed { committed: true, .. })
+    })
+    .await
+    .expect("the trade commits");
+    a.pump_for(Duration::from_millis(200)).await;
+
+    let mut a_rows = ledger_rows(&h.db_url, a_char_id).await;
+    // The two GM grants land in one tick, the coin grant at intake and the
+    // give at the apply phase, so their order between themselves is not a
+    // rule; the trade's rows follow both.
+    assert_eq!(a_rows.len(), 4, "{a_rows:?}");
+    a_rows[..2].sort();
+    assert_eq!(
+        a_rows,
+        vec![
+            ("gm_coins".to_string(), None, 0, 0, 25),
+            ("gm_give".to_string(), Some(BREAD.to_string()), 3, 3, 0),
+            ("trade_out".to_string(), Some(BREAD.to_string()), 3, -3, 0),
+            ("trade_coins".to_string(), None, 0, 0, -25),
+        ],
+        "the giver's rows, the queued GM grants and the trade, all with the commit"
+    );
+    let b_rows = ledger_rows(&h.db_url, b_char_id).await;
+    assert_eq!(
+        b_rows,
+        vec![
+            ("trade_in".to_string(), Some(BREAD.to_string()), 3, 3, 0),
+            ("trade_coins".to_string(), None, 0, 0, 25),
+        ],
+        "the receiver's rows"
+    );
+    {
+        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        let details: Vec<(Option<String>,)> = sqlx::query_as(
+            "SELECT detail FROM item_events WHERE action LIKE 'trade%' ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("details");
+        assert!(
+            details.iter().take(2).all(|(d,)| d.as_deref() == Some(&format!("char:{b_char_id}")))
+                && details.iter().skip(2).all(|(d,)| d.as_deref() == Some(&format!("char:{a_char_id}"))),
+            "each side's rows name the partner: {details:?}"
+        );
+    }
+    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "the books balance after the trade");
+    a.send_disconnect();
+    b.send_disconnect();
+    a.pump_for(Duration::from_millis(200)).await;
+    b.pump_for(Duration::from_millis(200)).await;
+}

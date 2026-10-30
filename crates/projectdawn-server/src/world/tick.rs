@@ -14,6 +14,7 @@ use super::{
     handlers::{self, Outcome},
     inventory,
     items,
+    ledger::{self, ItemAction},
     loot::{self, LootBag},
     persistence,
     pet_templates,
@@ -1158,12 +1159,10 @@ fn say_recipients(speaker: ClientId, connections: &HashMap<ClientId, PerConnecti
         .collect()
 }
 
-/// Wall-clock unix seconds (the logout stamp for NO RENT items).
+/// Wall-clock unix seconds (the logout stamp for NO RENT items; the ledger's
+/// rows are stamped by the same clock).
 fn unix_now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    ledger::unix_now_secs()
 }
 
 /// Track 18.1 — a swing at a mob trains the hand's weapon skill and defense,
@@ -1598,14 +1597,15 @@ async fn shut_down_world(
     }
 
     // A few ticks of transport service so the reliable kicks are delivered
-    // (and resent if one was lost), then close every connection.
+    // (and resent if one was lost), then close every connection. The clock
+    // before the transport, as in the live loop.
     for _ in 0..5 {
         transport.send_packets(server);
         tokio::time::sleep(TICK_DT).await;
+        server.update(TICK_DT);
         if let Err(e) = transport.update(TICK_DT, server) {
             tracing::warn!(error = %e, "transport update error during shutdown");
         }
-        server.update(TICK_DT);
     }
     transport.send_packets(server);
     transport.disconnect_all(server);
@@ -1649,6 +1649,9 @@ pub async fn run(
     let mut enemy_pos_sent: u64 = 0;
     let mut last_fan_report = Instant::now();
     let mut last_ban_sweep = Instant::now();
+    // The item ledger's daily sweep (world/ledger.rs): None until it has run
+    // once, so the first tick runs it at boot.
+    let mut last_ledger_sweep: Option<Instant> = None;
     let mut last_time_broadcast = Instant::now();
     // The ban sweep's query runs on its own task and reports back here, so
     // the world loop never waits on the database for it.
@@ -1734,18 +1737,24 @@ pub async fn run(
             return Ok(());
         }
 
-        // 1. Advance the transport (reads UDP packets, processes netcode handshakes).
+        // 1. Advance renet's per-connection clocks, then the transport (UDP
+        //    packets in, netcode handshakes, the clients' acks handed to renet).
+        //    That is renet's documented order, and the one its RTT needs: an
+        //    ack is timed against the connection's clock as the transport hands
+        //    it over, and that clock moves nowhere but in `server.update`. With
+        //    the transport first (until 2026-10-30), an ack read in the tick
+        //    after its packet went out measured zero, so the `player link`
+        //    line read rtt_ms=0.0 for everyone. An RTT now reads in whole
+        //    ticks, rounded up: 50 ms is the floor. The same clock drives the
+        //    reliable resends: a lost packet is resent only when the clock
+        //    passes its resend time, and this call was missing until
+        //    2026-10-12, so a lost reliable packet (an inventory delta, a chat
+        //    line, a kick) was never resent; invisible on a lossless tailnet,
+        //    not on the internet.
+        server.update(TICK_DT);
         if let Err(e) = transport.update(TICK_DT, &mut server) {
             tracing::warn!(error = %e, "transport update error");
         }
-        //    And renet itself: its reliable channels resend a lost packet only
-        //    when the connection's clock has moved past the resend time, and
-        //    that clock advances nowhere but here (the transport's update does
-        //    not call it). This call was missing until 2026-10-12, so a lost
-        //    reliable packet (an inventory delta, a chat line, a kick) was
-        //    never resent; invisible on a lossless tailnet, not on the
-        //    internet.
-        server.update(TICK_DT);
 
         // 2. Drain transport-level events (Connected/Disconnected).
         while let Some(event) = server.get_event() {
@@ -1978,14 +1987,25 @@ pub async fn run(
                                 // so the next checkpoint writes the loss.
                                 let away = logged_out_at.map(|t| unix_now_secs() - t);
                                 if away.is_some_and(|a| a >= items::NO_RENT_AFTER_SECS) {
-                                    let gone = conn.inventory.purge_no_rent()
-                                        + conn.bank_items.purge_no_rent()
-                                        + conn.account_bank_items.purge_no_rent();
-                                    if gone > 0 {
+                                    let mut gone = conn.inventory.purge_no_rent();
+                                    gone.extend(conn.bank_items.purge_no_rent());
+                                    gone.extend(conn.account_bank_items.purge_no_rent());
+                                    if !gone.is_empty() {
                                         conn.inventory_dirty = true;
                                         conn.bank_items_dirty = true;
                                         conn.account_bank_items_dirty = true;
-                                        tracing::info!(char_id, gone, away_secs = away, "NO RENT items purged at login");
+                                        let stacks = gone.len();
+                                        let detail = Some(format!("away {} s", away.unwrap_or(0)));
+                                        for (path, count) in gone {
+                                            conn.ledger(ledger::item_event(
+                                                ItemAction::NoRent,
+                                                &path,
+                                                count,
+                                                -i64::from(count),
+                                                detail.clone(),
+                                            ));
+                                        }
+                                        tracing::info!(char_id, gone = stacks, away_secs = away, "NO RENT items purged at login");
                                     }
                                 }
                             }
@@ -5322,6 +5342,13 @@ pub async fn run(
                                     let placed = n - leftover;
                                     if placed > 0 {
                                         conn.inventory_dirty = true;
+                                        conn.ledger(ledger::item_event(
+                                            ItemAction::Summon,
+                                            &spell.summon_item,
+                                            placed,
+                                            i64::from(placed),
+                                            Some(spell.name.clone()),
+                                        ));
                                     }
                                     let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
                                         .iter()
@@ -7496,9 +7523,14 @@ pub async fn run(
                             close_trade(&mut server, &mut trade_manager, acid, "Trade failed.");
                             continue;
                         };
+                        // The ledger queues roll back with the snapshots if
+                        // the commit fails.
+                        let a_mark = connections.get(&acid).map(|c| c.ledger_mark()).unwrap_or(0);
+                        let b_mark = connections.get(&bcid).map(|c| c.ledger_mark()).unwrap_or(0);
                         let mut touched_by: HashMap<ClientId, Vec<(String, u32)>> =
                             HashMap::new();
                         let mut apply_side = |cid: ClientId,
+                                              partner: ClientId,
                                               gives: &[(String, u32, String, u32)],
                                               receives: &[(String, u32, String, u32)],
                                               pay: protocol::world::Coins,
@@ -7530,10 +7562,36 @@ pub async fn run(
                             conn.coins.silver += gain.silver;
                             conn.coins.copper += gain.copper;
                             conn.inventory_dirty = true;
+                            // The ledger: one row per stack each way and one
+                            // for the coin, written with the commit below.
+                            let detail = Some(format!("char:{partner}"));
+                            for (_, _, path, count) in gives {
+                                conn.ledger(ledger::item_event(
+                                    ItemAction::TradeOut,
+                                    path,
+                                    *count,
+                                    -i64::from(*count),
+                                    detail.clone(),
+                                ));
+                            }
+                            for (_, _, path, count) in receives {
+                                conn.ledger(ledger::item_event(
+                                    ItemAction::TradeIn,
+                                    path,
+                                    *count,
+                                    i64::from(*count),
+                                    detail.clone(),
+                                ));
+                            }
+                            let net = gain.total_copper() - pay.total_copper();
+                            if net != 0 {
+                                conn.ledger(ledger::coin_event(ItemAction::TradeCoins, net, detail));
+                            }
                             true
                         };
                         let applied = apply_side(
                             acid,
+                            bcid,
                             &a_gives,
                             &b_gives,
                             session.a.coins,
@@ -7541,6 +7599,7 @@ pub async fn run(
                             &mut connections,
                         ) && apply_side(
                             bcid,
+                            acid,
                             &b_gives,
                             &a_gives,
                             session.b.coins,
@@ -7550,20 +7609,22 @@ pub async fn run(
                         let persist_ok = if applied {
                             let rows_a = connections
                                 .get(&acid)
-                                .map(|c| (c.inventory.to_rows(), c.coins));
+                                .map(|c| (c.inventory.to_rows(), c.coins, c.item_events.clone()));
                             let rows_b = connections
                                 .get(&bcid)
-                                .map(|c| (c.inventory.to_rows(), c.coins));
+                                .map(|c| (c.inventory.to_rows(), c.coins, c.item_events.clone()));
                             match (rows_a, rows_b) {
-                                (Some((ra, ca)), Some((rb, cb))) => {
+                                (Some((ra, ca, ea)), Some((rb, cb, eb))) => {
                                     match db::commit_trade(
                                         &pool,
                                         acid as i64,
                                         &ra,
                                         ca,
+                                        &ea,
                                         bcid as i64,
                                         &rb,
                                         cb,
+                                        &eb,
                                     )
                                     .await
                                     {
@@ -7591,10 +7652,12 @@ pub async fn run(
                             if let Some(c) = connections.get_mut(&acid) {
                                 c.inventory = a_before.0.clone();
                                 c.coins = a_before.1;
+                                c.ledger_rollback(a_mark);
                             }
                             if let Some(c) = connections.get_mut(&bcid) {
                                 c.inventory = b_before.0.clone();
                                 c.coins = b_before.1;
+                                c.ledger_rollback(b_mark);
                             }
                             close_trade(&mut server, &mut trade_manager, acid, "Trade failed.");
                             continue;
@@ -7603,6 +7666,13 @@ pub async fn run(
                         // deltas for every touched slot, wallets, and the
                         // committed close. The window itself granted nothing.
                         trade_manager.close(acid);
+                        // commit_trade wrote both queues whole; they leave with
+                        // the commit, as the store flush clears its own.
+                        for c in [acid, bcid] {
+                            if let Some(conn) = connections.get_mut(&c) {
+                                conn.item_events.clear();
+                            }
+                        }
                         for c in [acid, bcid] {
                             if let Some(conn) = connections.get(&c) {
                                 if let Some(touched) = touched_by.get(&c) {
@@ -7773,7 +7843,8 @@ pub async fn run(
                 item_path: String,
                 count: u32,
             }
-            let mut before: HashMap<ClientId, (inventory::PlayerInventory, bool)> = HashMap::new();
+            let mut before: HashMap<ClientId, (inventory::PlayerInventory, bool, usize)> =
+                HashMap::new();
             let mut drops_seen: HashMap<ClientId, u32> = HashMap::new();
             let mut done: Vec<DoneDrop> = Vec::new();
             for intent in drop_item_intents.drain(..) {
@@ -7797,7 +7868,7 @@ pub async fn run(
                 // tick, so a failed save can restore exactly what was there.
                 before
                     .entry(owner_cid)
-                    .or_insert_with(|| (conn.inventory.clone(), conn.inventory_dirty));
+                    .or_insert_with(|| (conn.inventory.clone(), conn.inventory_dirty, conn.ledger_mark()));
                 // Bag-aware removal (base or bag_<i>); mirrors the
                 // DestroyItem apply path. Rejects a non-empty
                 // bag-typed slot (the bag must be emptied first).
@@ -7807,6 +7878,13 @@ pub async fn run(
                 {
                     Ok((item_path, count)) => {
                         conn.inventory_dirty = true;
+                        conn.ledger(ledger::item_event(
+                            ItemAction::Drop,
+                            &item_path,
+                            count,
+                            -i64::from(count),
+                            Some("ground".to_string()),
+                        ));
                         done.push(DoneDrop {
                             owner_cid,
                             location: intent.location,
@@ -7828,7 +7906,7 @@ pub async fn run(
                 }
             }
             let mut unsaved: Vec<ClientId> = Vec::new();
-            for (owner_cid, (inventory_before, was_dirty)) in before {
+            for (owner_cid, (inventory_before, was_dirty, ledger_mark)) in before {
                 if !done.iter().any(|d| d.owner_cid == owner_cid) {
                     continue;
                 }
@@ -7840,6 +7918,7 @@ pub async fn run(
                     // The client was told nothing yet.
                     conn.inventory = inventory_before;
                     conn.inventory_dirty = was_dirty;
+                    conn.ledger_rollback(ledger_mark);
                     tracing::error!(
                         owner = owner_cid,
                         error = %e,
@@ -8191,6 +8270,13 @@ pub async fn run(
                 };
                 conn.inventory_dirty = true;
                 let (item_path, count) = destroyed;
+                conn.ledger(ledger::item_event(
+                    ItemAction::Destroy,
+                    &item_path,
+                    count,
+                    -i64::from(count),
+                    None,
+                ));
                 let payload = conn.inventory.peek_at(&intent.location, intent.slot);
                 let (delta_path, delta_count) = match payload {
                     Some((p, c)) => (Some(p), c),
@@ -8308,6 +8394,13 @@ pub async fn run(
                     }
                 };
                 conn.inventory_dirty = true;
+                conn.ledger(ledger::item_event(
+                    if is_food || is_drink { ItemAction::Eat } else { ItemAction::Use },
+                    &item.path,
+                    1,
+                    -1,
+                    Some("by hand".to_string()),
+                ));
                 // Inventory Delta for the touched slot.
                 let payload = conn.inventory.peek_at(&intent.location, intent.slot);
                 let (delta_path, delta_count) = match payload {
@@ -8421,6 +8514,13 @@ pub async fn run(
                     continue;
                 }
                 conn.inventory_dirty = true;
+                conn.ledger(ledger::item_event(
+                    ItemAction::GmGive,
+                    &item.path,
+                    placed,
+                    i64::from(placed),
+                    Some("gm".to_string()),
+                ));
                 let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
                     .iter()
                     .map(|(loc, slot)| (loc.clone(), *slot, conn.inventory.peek_at(loc, *slot)))
@@ -8575,6 +8675,15 @@ pub async fn run(
                 conn.coins.spend(actual_cost);
                 conn.coins_dirty = true;
                 conn.inventory_dirty = true;
+                let mut bought = ledger::item_event(
+                    ItemAction::Buy,
+                    &item_path,
+                    placed,
+                    i64::from(placed),
+                    Some(format!("npc:{}", seller.id)),
+                );
+                bought.copper = -actual_cost;
+                conn.ledger(bought);
                 let coins_after = conn.coins;
                 let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
                     .iter()
@@ -8644,8 +8753,9 @@ pub async fn run(
                 let Some(conn) = connections.get_mut(&owner_cid) else {
                     continue;
                 };
-                // Same proximity gate as BuyItem above.
-                match conn.npc_service("vendor") {
+                // Same proximity gate as BuyItem above. The merchant in reach
+                // names the ledger row.
+                let vendor_detail = match conn.npc_service("vendor") {
                     Err(None) => {
                         tracing::info!(
                             owner = intent.owner,
@@ -8660,8 +8770,8 @@ pub async fn run(
                         handlers::send_refusal(&mut server, owner_cid, &format!("{} will not deal with you.", npc.name));
                         continue;
                     }
-                    Ok(_) => {}
-                }
+                    Ok(npc) => format!("npc:{}", npc.id),
+                };
                 // Resolve the slot reference + read the held item
                 // path/count without mutating yet so we can compute
                 // the price first.
@@ -8787,6 +8897,15 @@ pub async fn run(
                 conn.coins.add_payout(total_credit);
                 conn.coins_dirty = true;
                 conn.inventory_dirty = true;
+                let mut sold = ledger::item_event(
+                    ItemAction::Sell,
+                    &item_path,
+                    qty,
+                    -i64::from(qty),
+                    Some(vendor_detail),
+                );
+                sold.copper = total_credit;
+                conn.ledger(sold);
                 let coins_after = conn.coins;
                 let delta_item: Option<String> = if new_count > 0 {
                     Some(item_path.clone())
@@ -8860,6 +8979,11 @@ pub async fn run(
             conn.bank_coins = conn.bank_coins.add_each(intent.coins);
             conn.coins_dirty = true;
             conn.bank_dirty = true;
+            conn.ledger(ledger::coin_event(
+                ItemAction::BankCoinIn,
+                0,
+                Some(format!("{} copper", intent.coins.total_copper())),
+            ));
             let (wallet, bank) = (conn.coins, conn.bank_coins);
             handlers::send_coins_update(&mut server, cid, wallet);
             handlers::send_bank_snapshot(&mut server, cid, bank);
@@ -8904,6 +9028,11 @@ pub async fn run(
             conn.coins = conn.coins.add_each(intent.coins);
             conn.coins_dirty = true;
             conn.bank_dirty = true;
+            conn.ledger(ledger::coin_event(
+                ItemAction::BankCoinOut,
+                0,
+                Some(format!("{} copper", intent.coins.total_copper())),
+            ));
             let (wallet, bank) = (conn.coins, conn.bank_coins);
             handlers::send_coins_update(&mut server, cid, wallet);
             handlers::send_bank_snapshot(&mut server, cid, bank);
@@ -8934,6 +9063,14 @@ pub async fn run(
             match conn.coins.exchange(intent.from_tier, intent.to_tier, intent.qty) {
                 Ok(()) => {
                     conn.coins_dirty = true;
+                    conn.ledger(ledger::coin_event(
+                        ItemAction::BankExchange,
+                        0,
+                        Some(format!(
+                            "{} of tier {} to tier {}",
+                            intent.qty, intent.from_tier, intent.to_tier
+                        )),
+                    ));
                     let wallet = conn.coins;
                     handlers::send_coins_update(&mut server, cid, wallet);
                     tracing::info!(
@@ -9024,6 +9161,13 @@ pub async fn run(
                 conn.bank_items.deposit(&path, removed);
                 conn.bank_items_dirty = true;
             }
+            conn.ledger(ledger::item_event(
+                ItemAction::BankIn,
+                &path,
+                removed,
+                0,
+                Some(if intent.shared { "account vault" } else { "vault" }.to_string()),
+            ));
             let post = conn.inventory.peek_at(&intent.src_location, intent.src_slot);
             let (dpath, dcount) = match post {
                 Some((p, c)) => (Some(p), c),
@@ -9100,6 +9244,15 @@ pub async fn run(
             }
             if !touched.is_empty() {
                 conn.inventory_dirty = true;
+            }
+            if count > leftover {
+                conn.ledger(ledger::item_event(
+                    ItemAction::BankOut,
+                    &path,
+                    count - leftover,
+                    0,
+                    Some(if intent.shared { "account vault" } else { "vault" }.to_string()),
+                ));
             }
             for (loc, slot) in &touched {
                 let (dp, dc) = match conn.inventory.peek_at(loc, *slot) {
@@ -10449,6 +10602,15 @@ pub async fn run(
                     match conn.inventory.add_item_locating(path, *count) {
                         Ok((touched, leftover)) => {
                             conn.inventory_dirty = true;
+                            if *count > leftover {
+                                conn.ledger(ledger::item_event(
+                                    ItemAction::QuestReward,
+                                    path,
+                                    *count - leftover,
+                                    i64::from(*count - leftover),
+                                    Some(quest_id.clone()),
+                                ));
+                            }
                             if leftover > 0 {
                                 tracing::error!(char_id = responder, quest_id = %quest_id, %path, leftover, "quest reward partially placed despite capacity pre-check");
                             }
@@ -10645,8 +10807,8 @@ pub async fn run(
                     let corpse_coins_before = corpses.get(&corpse_id).unwrap().coins;
                     let had_content = !corpse_items_before.is_empty()
                         || corpse_coins_before != protocol::world::Coins::ZERO;
-                    let (inv_before, coins_before) = match connections.get(&looter_cid) {
-                        Some(c) => (c.inventory.clone(), c.coins),
+                    let (inv_before, coins_before, ledger_before) = match connections.get(&looter_cid) {
+                        Some(c) => (c.inventory.clone(), c.coins, c.ledger_mark()),
                         None => continue,
                     };
 
@@ -10673,6 +10835,11 @@ pub async fn run(
                         if let Some(c) = connections.get_mut(&looter_cid) {
                             c.coins = c.coins.add_each(corpse_coins);
                             c.coins_dirty = true;
+                            c.ledger(ledger::coin_event(
+                                ItemAction::CorpseCoins,
+                                corpse_coins.total_copper(),
+                                Some(format!("corpse:{corpse_id}")),
+                            ));
                             coin_update = Some(c.coins);
                         }
                     }
@@ -10715,6 +10882,13 @@ pub async fn run(
                             if let Some(conn) = connections.get_mut(&looter_cid) {
                                 if conn.inventory.restore_worn(&path, count, slot) {
                                     conn.inventory_dirty = true;
+                                    conn.ledger(ledger::item_event(
+                                        ItemAction::CorpseLoot,
+                                        &path,
+                                        count,
+                                        i64::from(count),
+                                        Some(format!("corpse:{corpse_id}")),
+                                    ));
                                     reequipped += 1;
                                     inv_deltas.push(("equip".to_string(), slot as u32, path.clone(), count));
                                     granted_lines.push((path, count));
@@ -10736,6 +10910,15 @@ pub async fn run(
                                 placed_count = count - leftover;
                                 leftover_count = leftover;
                                 conn.inventory_dirty = true;
+                                if placed_count > 0 {
+                                    conn.ledger(ledger::item_event(
+                                        ItemAction::CorpseLoot,
+                                        &path,
+                                        placed_count,
+                                        i64::from(placed_count),
+                                        Some(format!("corpse:{corpse_id}")),
+                                    ));
+                                }
                             }
                         }
                         if placed_count > 0 {
@@ -10785,8 +10968,8 @@ pub async fn run(
                     // so no `connections` borrow is held across the await.
                     let persist_data = connections
                         .get(&looter_cid)
-                        .map(|c| (c.inventory.to_rows(), c.coins));
-                    let persist_ok = if let Some((inv_rows, looter_coins)) = persist_data {
+                        .map(|c| (c.inventory.to_rows(), c.coins, c.item_events.clone()));
+                    let persist_ok = if let Some((inv_rows, looter_coins, events)) = persist_data {
                         match db::apply_corpse_loot(
                             &pool,
                             intent.looter as i64,
@@ -10796,6 +10979,7 @@ pub async fn run(
                             &corpse_items_now,
                             corpse_coins_now,
                             delete_now,
+                            &events,
                         )
                         .await
                         {
@@ -10815,6 +10999,8 @@ pub async fn run(
                         if let Some(c) = connections.get_mut(&looter_cid) {
                             c.inventory_dirty = false;
                             c.coins_dirty = false;
+                            // apply_corpse_loot wrote the whole queue.
+                            c.item_events.clear();
                         }
                         if let Some(coins) = coin_update {
                             handlers::send_coins_update(&mut server, looter_cid, coins);
@@ -10883,6 +11069,7 @@ pub async fn run(
                         if let Some(conn) = connections.get_mut(&looter_cid) {
                             conn.inventory = inv_before;
                             conn.coins = coins_before;
+                            conn.ledger_rollback(ledger_before);
                             // Undo the gear bonuses of anything put back on.
                             if reequipped > 0 {
                                 inventory::recompute_equipped_stats(conn);
@@ -11034,6 +11221,11 @@ pub async fn run(
                         if let Some(c) = connections.get_mut(&r) {
                             c.coins.add_payout(amount);
                             c.coins_dirty = true;
+                            c.ledger(ledger::coin_event(
+                                ItemAction::LootCoins,
+                                amount,
+                                Some(format!("bag:{}", intent.bag_id)),
+                            ));
                             let coins_after = c.coins;
                             handlers::send_coins_update(&mut server, r, coins_after);
                         }
@@ -11047,6 +11239,14 @@ pub async fn run(
                         "coin looted"
                     );
                 }
+                // The ledger: a creature's bag is loot, a player's drop a
+                // pickup, named by the bag and what it was.
+                let loot_kind = if bag.creature_name.is_empty() { ItemAction::Pickup } else { ItemAction::Loot };
+                let loot_detail = if bag.creature_name.is_empty() {
+                    format!("bag:{}", intent.bag_id)
+                } else {
+                    format!("bag:{} {}", intent.bag_id, bag.creature_name)
+                };
                 let mut granted: Vec<(String, u32)> = Vec::new();
                 match intent.slot {
                     Some(idx) => {
@@ -11090,6 +11290,15 @@ pub async fn run(
                                 }
                                 placed_count = count - leftover;
                                 leftover_count = leftover;
+                                if placed_count > 0 {
+                                    conn.ledger(ledger::item_event(
+                                        loot_kind,
+                                        &path,
+                                        placed_count,
+                                        i64::from(placed_count),
+                                        Some(loot_detail.clone()),
+                                    ));
+                                }
                             }
                             Err(e) => {
                                 tracing::info!(
@@ -11181,7 +11390,7 @@ pub async fn run(
                 let Some(looter_pos) = connections.get(&looter_cid).map(|c| c.pos) else {
                     continue;
                 };
-                let stack = {
+                let (stack, dropped_by_a_player) = {
                     let Some(bag) = loot_bags.get_mut(&bag_id) else {
                         handlers::send_refusal(
                             &mut server,
@@ -11248,7 +11457,7 @@ pub async fn run(
                         );
                         continue;
                     }
-                    bag.items[0].clone()
+                    (bag.items[0].clone(), bag.creature_name.is_empty())
                 };
                 let Some(conn) = connections.get_mut(&looter_cid) else {
                     continue;
@@ -11267,6 +11476,13 @@ pub async fn run(
                     count: stack.count,
                 });
                 conn.inventory_dirty = true;
+                conn.ledger(ledger::item_event(
+                    if dropped_by_a_player { ItemAction::Pickup } else { ItemAction::Loot },
+                    &stack.item_path,
+                    stack.count,
+                    i64::from(stack.count),
+                    Some(format!("bag:{bag_id}")),
+                ));
                 handlers::send_inventory_delta(
                     &mut server,
                     looter_cid,
@@ -11973,6 +12189,31 @@ pub async fn run(
             //    half-happen. Written separately (as they were), a crash between
             //    them left the corpse holding everything while the player still
             //    had it: a straight duplication, of coin especially.
+            //    The ledger's death rows (one per stack and one for the coin)
+            //    join the queue the flush above emptied and ride the same
+            //    transaction; a failed save takes them back off the queue
+            //    with the retry.
+            let death_mark = connections.get(&client_id).map(|c| c.ledger_mark()).unwrap_or(0);
+            let events: Vec<db::ItemEventRow> = match connections.get_mut(&client_id) {
+                Some(c) => {
+                    let detail = Some(format!("corpse:{corpse_id}"));
+                    for (path, count, _) in &items {
+                        c.ledger(ledger::item_event(
+                            ItemAction::Death,
+                            path,
+                            *count,
+                            -i64::from(*count),
+                            detail.clone(),
+                        ));
+                    }
+                    let copper = coins.total_copper();
+                    if copper != 0 {
+                        c.ledger(ledger::coin_event(ItemAction::DeathCoins, -copper, detail));
+                    }
+                    c.item_events.clone()
+                }
+                None => continue,
+            };
             if let Err(e) = db::save_corpse(
                 &pool,
                 corpse_id as i64,
@@ -11988,12 +12229,14 @@ pub async fn run(
                 // a crash cannot hand the XP back while the corpse still holds
                 // its refund.
                 Some(after_death),
+                &events,
             )
             .await
             {
                 tracing::error!(char_id = cid, error = %e, "save_corpse failed; inventory intact, corpse retried next tick");
                 if let Some(c) = connections.get_mut(&client_id) {
                     c.corpse_pending = true;
+                    c.ledger_rollback(death_mark);
                 }
                 continue;
             }
@@ -12009,6 +12252,7 @@ pub async fn run(
                 // stops the next checkpoint rewriting rows it does not need to.
                 conn.inventory_dirty = false;
                 conn.coins_dirty = false;
+                conn.item_events.clear();
                 let entries = conn.inventory.to_snapshot_entries();
                 handlers::send_inventory_snapshot(&mut server, client_id, entries);
                 handlers::fan_out_resources(&mut server, std::slice::from_ref(&client_id), conn);
@@ -12085,6 +12329,13 @@ pub async fn run(
                         continue;
                     }
                     conn.inventory_dirty = true;
+                    conn.ledger(ledger::item_event(
+                        ItemAction::Eat,
+                        &item.path,
+                        1,
+                        -1,
+                        Some("hunger".to_string()),
+                    ));
                     let (path, count) = match conn.inventory.peek_at(&loc, slot) {
                         Some((p, c)) => (Some(p), c),
                         None => (None, 0),
@@ -12372,6 +12623,17 @@ pub async fn run(
                     let _ = tx.send(banned);
                 });
             }
+        }
+        //    The item ledger's sweep (world/ledger.rs): the fold-and-prune of
+        //    rows past the retention, then the conservation check, once at
+        //    boot and every LEDGER_SWEEP_INTERVAL, on its own task like the
+        //    ban sweep so the loop never waits on the database for it.
+        if last_ledger_sweep.is_none_or(|t| now.duration_since(t) >= ledger::LEDGER_SWEEP_INTERVAL) {
+            last_ledger_sweep = Some(now);
+            let sweep_pool = pool.clone();
+            tokio::spawn(async move {
+                ledger::sweep(&sweep_pool).await;
+            });
         }
         while let Ok(banned) = ban_rx.try_recv() {
             ban_sweep_in_flight = false;

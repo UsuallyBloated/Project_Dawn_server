@@ -54,7 +54,11 @@ struct Character {
     bank_gold: i64,
     bank_silver: i64,
     bank_copper: i64,
-    alignment_score: i64,
+    /// A float since the factions build (2026-10-23): every cast moves it by a
+    /// fraction of a point, and SQLite keeps a fraction in the 0001 `INTEGER`
+    /// column as a REAL, which an `i64` read refuses ("mismatched types").
+    /// `CHARACTER_QUERY` casts it, as the server's own loader does.
+    alignment_score: f64,
     zone: Option<String>,
     created_at: Option<String>,
     last_played_at: Option<String>,
@@ -62,6 +66,16 @@ struct Character {
     /// so the name stays reserved and the character can be inspected/restored.
     deleted_at: Option<String>,
 }
+
+/// Every character, soft-deleted ones included (no `deleted_at IS NULL`
+/// filter: the report WANTS those rows). One home for the query so the
+/// regression test below runs exactly what the report runs.
+const CHARACTER_QUERY: &str = "SELECT id, account_id, name, race, class, level,
+            platinum, gold, silver, copper,
+            bank_platinum, bank_gold, bank_silver, bank_copper,
+            CAST(alignment_score AS REAL) AS alignment_score,
+            zone, created_at, last_played_at, deleted_at
+     FROM characters ORDER BY account_id, id";
 
 /// Per-character inventory aggregate from `character_items` (rows are per-stack,
 /// `count` is the stack size; `location` is 'base' / 'bag_<i>' / 'equip').
@@ -117,17 +131,10 @@ async fn main() -> Result<()> {
     .await
     .context("querying accounts")?;
 
-    // No `deleted_at IS NULL` filter — we WANT the soft-deleted rows here.
-    let characters: Vec<Character> = sqlx::query_as(
-        "SELECT id, account_id, name, race, class, level,
-                platinum, gold, silver, copper,
-                bank_platinum, bank_gold, bank_silver, bank_copper,
-                alignment_score, zone, created_at, last_played_at, deleted_at
-         FROM characters ORDER BY account_id, id",
-    )
-    .fetch_all(&pool)
-    .await
-    .context("querying characters")?;
+    let characters: Vec<Character> = sqlx::query_as(CHARACTER_QUERY)
+        .fetch_all(&pool)
+        .await
+        .context("querying characters")?;
 
     // Per-character inventory rollup, one grouped query. char_id -> aggregate.
     let item_rows: Vec<ItemAgg> = sqlx::query_as(
@@ -712,7 +719,7 @@ fn render_char_table(h: &mut String, chars: &[&Character], items: &HashMap<i64, 
                 agg.stacks, agg.equipped, agg.items
             );
         }
-        let _ = write!(h, "<td>{}</td>", c.alignment_score);
+        let _ = write!(h, "<td>{:.2}</td>", c.alignment_score);
         let _ = write!(h, "<td class=\"muted\">{}</td>", cell(c.created_at.as_deref(), "?"));
         let _ = write!(h, "<td>{}</td>", cell(c.last_played_at.as_deref(), "never"));
         match &c.deleted_at {
@@ -828,3 +835,53 @@ function applyFilter() {
   });
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    //! The report's own queries against a migrated database, so a column whose
+    //! type moves under the report fails here and not at the operator's
+    //! terminal. Alignment became a float on 2026-10-23 and the report went on
+    //! reading it as an integer for a week; the first run on a world with a
+    //! fractional score (the R720, 2026-10-30) died before the ledger cards.
+    use super::*;
+
+    /// A migrated database in a fresh temp directory, as the db tests build one.
+    async fn fresh_pool() -> (sqlx::SqlitePool, tempfile::TempDir) {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("report.db").display());
+        let pool = db::open(&url).await.expect("open");
+        db::migrate(&pool).await.expect("migrate");
+        (pool, tmp)
+    }
+
+    /// A character whose alignment carries a fraction (every cast moves it by
+    /// one) must still load. With `alignment_score: i64` this fails with
+    /// "mismatched types; Rust type `i64` ... not compatible with SQL type `REAL`".
+    #[tokio::test]
+    async fn the_report_reads_a_fractional_alignment() {
+        let (pool, _tmp) = fresh_pool().await;
+        let account = db::create_account(&pool, "reporter", "password123", None)
+            .await
+            .expect("account");
+        let char_id = db::create_character(&pool, account, "Fraction", "Human", "Cleric")
+            .await
+            .expect("character");
+        sqlx::query("UPDATE characters SET alignment_score = 0.37, alignment_seeded = 1 WHERE id = ?1")
+            .bind(char_id)
+            .execute(&pool)
+            .await
+            .expect("write a fractional score");
+
+        let characters: Vec<Character> = sqlx::query_as(CHARACTER_QUERY)
+            .fetch_all(&pool)
+            .await
+            .expect("the report's character query");
+        let c = characters
+            .iter()
+            .find(|c| c.id == char_id)
+            .expect("the character is listed");
+        // Compared as the report prints it, so the test compiles against the
+        // old `i64` field too and fails there at the query, where the report did.
+        assert_eq!(format!("{:.2}", c.alignment_score), "0.37");
+    }
+}

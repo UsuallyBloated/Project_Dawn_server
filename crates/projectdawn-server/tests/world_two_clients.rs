@@ -11777,6 +11777,134 @@ async fn the_ledger_records_the_bank_and_balances() {
     assert!(ledger_mismatches(&h.db_url).await.is_empty(), "the books balance after the bank");
 }
 
+/// Held-item bank and vendor interactions (2026-10-30, PD_W0029): a stack
+/// lifted onto the cursor goes into the vault from the hand (`BankStoreItem`
+/// with the cursor location, the delta emptying the hand), comes back, and
+/// sells from the hand (`SlotRef::Cursor`, the coin credited, the rest still
+/// held); a held bag with something in it is refused by the merchant and the
+/// bank with their own lines; the ledger carries the three moves and
+/// balances. The sell half cannot be expressed on the previous protocol (no
+/// cursor variant), which is why it rides the bump.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_bank_and_the_merchant_take_what_you_hold() {
+    const POUCH: &str = "res://data/loot/items/small_pouch.tres";
+    const POTION: &str = "res://data/loot/items/minor_healing_potion.tres";
+    let h = start_both().await;
+    let (session, char_id, token) =
+        provision_client(&h.auth_url, "heldsell", "Heldsell", "Human", "Warrior").await;
+    give_char_item(&h.db_url, char_id, "base", 0, BREAD, 3).await;
+    give_char_item(&h.db_url, char_id, "base", 1, POUCH, 1).await;
+    give_char_item(&h.db_url, char_id, "bag_1", 0, POTION, 1).await;
+    {
+        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        sqlx::query("UPDATE characters SET copper = 0, pos_x = 0.0, pos_z = 0.0 WHERE id = ?1")
+            .bind(char_id)
+            .execute(&pool)
+            .await
+            .expect("seed");
+    }
+    seed_ledger_openings(&h.db_url).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+    })
+    .await
+    .expect("snapshot");
+
+    // Lift the loaves and put them in the vault from the hand.
+    a.send_move_item("base", 0, "cursor", 0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), count: 3, .. }
+            if location == "cursor" && p == BREAD)
+    })
+    .await
+    .expect("the loaves ride the cursor");
+    a.send_bank_store_item("cursor", 0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: None, .. } if location == "cursor")
+    })
+    .await
+    .expect("the hand empties");
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::BankItemSnapshot { shared: false, entries }
+            if entries.iter().any(|(_, p, c)| p == BREAD && *c == 3))
+    })
+    .await
+    .expect("the vault holds the loaves");
+
+    // Back to the bags, lifted again, and two sold from the hand.
+    a.send_bank_withdraw_item(0);
+    let back = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), count: 3, .. }
+                if location == "base" && p == BREAD)
+        })
+        .await
+        .expect("the loaves come back to the bags");
+    let ServerWorldMsg::InventoryDelta { slot: bread_slot, .. } = back else { unreachable!() };
+    a.send_move_item("base", bread_slot, "cursor", 0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), count: 3, .. }
+            if location == "cursor" && p == BREAD)
+    })
+    .await
+    .expect("lifted again");
+    a.send_sell_item(SlotRef::Cursor, 2);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), count: 1, .. }
+            if location == "cursor" && p == BREAD)
+    })
+    .await
+    .expect("one loaf stays in the hand");
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.copper == 4)
+    })
+    .await
+    .expect("two loaves at half of 4 each");
+    a.send_move_item("cursor", 0, "base", bread_slot);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), count: 1, .. }
+            if location == "base" && p == BREAD)
+    })
+    .await
+    .expect("the last loaf put down");
+
+    // A held bag with something in it: neither the merchant nor the bank.
+    a.send_move_item("base", 1, "cursor", 0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), .. }
+            if location == "cursor" && p == POUCH)
+    })
+    .await
+    .expect("the pouch rides the cursor with its potion");
+    a.send_sell_item(SlotRef::Cursor, 1);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("Empty the bag before selling it."))
+    })
+    .await
+    .expect("the merchant refuses the full pouch");
+    a.send_bank_store_item("cursor", 0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::BankRejected { reason } if reason == "Bags can't go in the bank vault.")
+    })
+    .await
+    .expect("the bank refuses the pouch");
+    a.send_disconnect();
+    a.pump_for(Duration::from_millis(300)).await;
+
+    let rows = ledger_rows(&h.db_url, char_id).await;
+    assert_eq!(
+        rows,
+        vec![
+            ("bank_in".to_string(), Some(BREAD.to_string()), 3, 0, 0),
+            ("bank_out".to_string(), Some(BREAD.to_string()), 3, 0, 0),
+            ("sell".to_string(), Some(BREAD.to_string()), 2, -2, 4),
+        ],
+        "the vault moves and the sale from the hand, nothing for the refusals"
+    );
+    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "the books balance with the pouch still in hand");
+}
+
 /// The death strip and the corpse loot in the ledger: the strip's rows (one
 /// per stack, one for the coin) ride the corpse transaction, the loot's rows
 /// the corpse-loot transaction, and the books balance at both ends, with what

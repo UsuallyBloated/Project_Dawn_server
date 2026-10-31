@@ -155,7 +155,10 @@ use serde::{Deserialize, Serialize};
 /// relays (it always carried a `yaw`; it was the login value forever), so
 /// players turn on each other's screens. EQ and WoW both send the heading
 /// with every movement packet. A shape change on a client intent, so both
-/// sides deploy together.
+/// sides deploy together. Riding the same bump (2026-10-30): `SlotRef` gains
+/// a `Cursor` variant, appended last, so `SellItem` and `UseConsumable` can
+/// name what the player holds (sell-from-cursor); `BankStoreItem` already
+/// took `"cursor"` as a location string.
 pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3239; // "PD_W0029"
 
 pub type EntityId = u64;
@@ -464,6 +467,10 @@ pub enum SlotRef {
     BaseSlot { idx: u8 },
     BagSlot { base: u8, slot: u8 },
     EquipSlot(EquipSlot),
+    /// PD_W0029: the cursor slot, what the player holds (the `"cursor"`
+    /// location of `MoveItem`), for selling and eating from the hand.
+    /// Appended last: the encoding is positional.
+    Cursor,
 }
 
 // ─── Client → Server ─────────────────────────────────────────────────────
@@ -909,7 +916,9 @@ pub enum ClientWorldMsg {
     /// `(src_location, src_slot)` in the player's inventory into a bank item
     /// vault: `shared = false` is the 10-slot per-character vault, `true` is the
     /// 2-slot account-shared vault. The server merges into same-item stacks then
-    /// claims free vault slots; any remainder stays in inventory.
+    /// claims free vault slots; any remainder stays in inventory. The location
+    /// may be `"cursor"` (slot 0): the held stack, from a click on a vault slot
+    /// while holding (2026-10-30); bags are refused from anywhere.
     BankStoreItem {
         src_location: String,
         src_slot: u32,

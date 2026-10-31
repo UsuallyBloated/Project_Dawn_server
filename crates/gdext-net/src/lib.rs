@@ -1469,6 +1469,8 @@ impl NetClient {
         let slot_u8 = slot.clamp(0, u8::MAX as i64) as u8;
         let slot_ref = if loc == "base" {
             protocol::world::SlotRef::BaseSlot { idx: slot_u8 }
+        } else if loc == "cursor" {
+            protocol::world::SlotRef::Cursor
         } else if let Some(rest) = loc.strip_prefix("bag_") {
             let base: u8 = match rest.parse() {
                 Ok(v) => v,
@@ -1533,16 +1535,18 @@ impl NetClient {
     }
 
     /// Track 14 follow-up — vendor sell intent. `location` is one of
-    /// "base" or "bag_<i>"; equip slots reject server-side. The
-    /// GDScript caller uses the same string `location` it'd use for
-    /// `send_move_item`, so the vendor UI never has to mint a typed
-    /// SlotRef.
+    /// "base", "bag_<i>" or "cursor" (the held stack, PD_W0029); equip
+    /// slots reject server-side. The GDScript caller uses the same string
+    /// `location` it'd use for `send_move_item`, so the vendor UI never has
+    /// to mint a typed SlotRef.
     #[func]
     fn send_sell_item(&mut self, location: GString, slot: i64, qty: i64) -> bool {
         let loc = location.to_string();
         let slot_u8 = slot.clamp(0, u8::MAX as i64) as u8;
         let slot_ref = if loc == "base" {
             protocol::world::SlotRef::BaseSlot { idx: slot_u8 }
+        } else if loc == "cursor" {
+            protocol::world::SlotRef::Cursor
         } else if let Some(rest) = loc.strip_prefix("bag_") {
             let base: u8 = match rest.parse() {
                 Ok(v) => v,

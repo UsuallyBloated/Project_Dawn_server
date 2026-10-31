@@ -8761,6 +8761,7 @@ pub async fn run(
                     protocol::world::SlotRef::BagSlot { base, slot } => {
                         (format!("bag_{base}"), slot as u32)
                     }
+                    protocol::world::SlotRef::Cursor => ("cursor".to_string(), 0),
                     protocol::world::SlotRef::EquipSlot(_) => (String::new(), 0),
                 };
                 if !lock_loc.is_empty()
@@ -8845,6 +8846,16 @@ pub async fn run(
                             entry.count,
                         )
                     }
+                    // Sell-from-cursor (PD_W0029, 2026-10-30): the held stack,
+                    // which the client lists ahead of the bags at a merchant.
+                    protocol::world::SlotRef::Cursor => {
+                        let Some(entry) = conn.inventory.cursor.as_ref() else {
+                            tracing::info!(owner = intent.owner, "SellItem rejected — nothing in hand");
+                            handlers::send_refusal(&mut server, owner_cid, "There's nothing in your hand to sell.");
+                            continue;
+                        };
+                        ("cursor".to_string(), 0, entry.item_path.clone(), entry.count)
+                    }
                     protocol::world::SlotRef::EquipSlot(_) => {
                         tracing::info!(
                             owner = intent.owner,
@@ -8875,18 +8886,20 @@ pub async fn run(
                 }
                 let qty = intent.qty.min(available_count);
                 let total_credit = unit_price.saturating_mul(qty as i64);
-                // Refuse to sell a non-empty bag.
-                if let protocol::world::SlotRef::BaseSlot { idx } = intent.slot {
-                    if conn.inventory.bags.get(&idx).map_or(false, |arr| {
-                        arr.iter().any(|s| s.is_some())
-                    }) {
-                        tracing::info!(
-                            owner = intent.owner,
-                            "SellItem rejected — bag has contents"
-                        );
-                        handlers::send_refusal(&mut server, owner_cid, "Empty the bag before selling it.");
-                        continue;
-                    }
+                // Refuse to sell a non-empty bag, from a base slot or the hand
+                // (a bag's contents ride the cursor with it since 2026-09-27).
+                let bag_key = match intent.slot {
+                    protocol::world::SlotRef::BaseSlot { idx } => Some(idx),
+                    protocol::world::SlotRef::Cursor => Some(inventory::CURSOR_BAG_KEY),
+                    _ => None,
+                };
+                if bag_key.is_some_and(|k| conn.inventory.bag_key_is_nonempty(k)) {
+                    tracing::info!(
+                        owner = intent.owner,
+                        "SellItem rejected — bag has contents"
+                    );
+                    handlers::send_refusal(&mut server, owner_cid, "Empty the bag before selling it.");
+                    continue;
                 }
                 // Mutate: subtract from the source slot.
                 let new_count = match intent.slot {
@@ -8907,6 +8920,16 @@ pub async fn run(
                         let nc = entry.count;
                         if nc == 0 {
                             arr[slot as usize] = None;
+                        }
+                        nc
+                    }
+                    // The hand, as `Inventory::destroy_at` empties it.
+                    protocol::world::SlotRef::Cursor => {
+                        let entry = conn.inventory.cursor.as_mut().expect("checked");
+                        entry.count -= qty;
+                        let nc = entry.count;
+                        if nc == 0 {
+                            conn.inventory.cursor = None;
                         }
                         nc
                     }

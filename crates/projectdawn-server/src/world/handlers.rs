@@ -2028,6 +2028,9 @@ pub fn handle_message(
                 protocol::world::SlotRef::BagSlot { base, slot } => {
                     (format!("bag_{base}"), slot as u32)
                 }
+                // Eating from the hand (PD_W0029): the apply phase already
+                // reads the cursor as a location, under the same hunger rules.
+                protocol::world::SlotRef::Cursor => ("cursor".to_string(), 0),
                 protocol::world::SlotRef::EquipSlot(_) => {
                     return Outcome::Continue;
                 }

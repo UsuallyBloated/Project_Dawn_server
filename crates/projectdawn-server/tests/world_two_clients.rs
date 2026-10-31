@@ -821,6 +821,28 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
+    fn send_bank_store_item(&mut self, src_location: &str, src_slot: u32) {
+        let msg = ClientWorldMsg::BankStoreItem {
+            src_location: src_location.into(),
+            src_slot,
+            shared: false,
+        };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
+    fn send_bank_deposit_coins(&mut self, coins: protocol::world::Coins) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::BankDepositCoins { coins });
+    }
+
+    fn send_bank_withdraw_coins(&mut self, coins: protocol::world::Coins) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::BankWithdrawCoins { coins });
+    }
+
+    fn send_bank_exchange(&mut self, from_tier: u8, to_tier: u8, qty: u32) {
+        let msg = ClientWorldMsg::BankExchange { from_tier, to_tier, qty };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
     fn send_sell_item(&mut self, slot: protocol::world::SlotRef, qty: u32) {
         let msg = ClientWorldMsg::SellItem { slot, qty };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
@@ -11448,6 +11470,114 @@ async fn the_ledger_records_a_sale_a_purchase_a_drop_and_a_pickup_and_balances()
     let found = ledger_mismatches(&h.db_url).await;
     assert_eq!(found.len(), 1, "the planted stack is the one mismatch: {found:?}");
     assert_eq!((found[0].item_path.as_deref(), found[0].ledger, found[0].held), (Some(BREAD), 1, 6));
+}
+
+/// The bank in the ledger: a vault deposit and withdrawal (delta 0, the
+/// vault named: the item stays the account's), a coin deposit and withdrawal
+/// (copper 0, the amount in the detail: the coin stays the account's) and a
+/// tier exchange (copper 0: the value is unchanged), all written with the
+/// logout flush, in order, and the books balance with the loaves back in
+/// the bags and the coin on both sides of the counter. The three kinds the
+/// 2026-10-30 sitting did not play (`item_ledger_and_rtt_checklist.md` §2)
+/// had no test until this one; it fails on the previous server at the
+/// first row assertion (no table).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_ledger_records_the_bank_and_balances() {
+    use protocol::world::Coins;
+    let h = start_both().await;
+    let (session, char_id, token) =
+        provision_client(&h.auth_url, "ledgerbank", "Ledgerbank", "Human", "Warrior").await;
+    give_char_item(&h.db_url, char_id, "base", 0, BREAD, 3).await;
+    {
+        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        // At the spawn, in reach of the banker, with coin to bank.
+        sqlx::query("UPDATE characters SET copper = 1000, pos_x = 0.0, pos_z = 0.0 WHERE id = ?1")
+            .bind(char_id)
+            .execute(&pool)
+            .await
+            .expect("seed");
+    }
+    seed_ledger_openings(&h.db_url).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+    })
+    .await
+    .expect("snapshot");
+
+    a.send_bank_store_item("base", 0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::BankItemSnapshot { shared: false, entries }
+            if entries.iter().any(|(_, p, c)| p == BREAD && *c == 3))
+    })
+    .await
+    .expect("the loaves reach the vault");
+    a.send_bank_withdraw_item(0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), count: 3, .. } if p == BREAD)
+    })
+    .await
+    .expect("the loaves come back to the bags");
+    a.send_bank_deposit_coins(Coins { platinum: 0, gold: 0, silver: 0, copper: 150 });
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::BankSnapshot { coins } if coins.copper == 150)
+    })
+    .await
+    .expect("the bank holds the deposit");
+    a.send_bank_withdraw_coins(Coins { platinum: 0, gold: 0, silver: 0, copper: 50 });
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::BankSnapshot { coins } if coins.copper == 100)
+    })
+    .await
+    .expect("the bank gives some back");
+    // 100 of the 900 copper in hand into one silver: the wallet's value is
+    // unchanged, so the exchange is a row with no copper on it.
+    a.send_bank_exchange(0, 1, 100);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.silver == 1 && coins.copper == 800)
+    })
+    .await
+    .expect("the exchange lands");
+    a.send_disconnect();
+    a.pump_for(Duration::from_millis(300)).await;
+
+    let rows = ledger_rows(&h.db_url, char_id).await;
+    assert_eq!(
+        rows,
+        vec![
+            ("bank_in".to_string(), Some(BREAD.to_string()), 3, 0, 0),
+            ("bank_out".to_string(), Some(BREAD.to_string()), 3, 0, 0),
+            ("bank_coin_in".to_string(), None, 0, 0, 0),
+            ("bank_coin_out".to_string(), None, 0, 0, 0),
+            ("bank_exchange".to_string(), None, 0, 0, 0),
+        ],
+        "the bank's rows, written with the logout flush"
+    );
+    {
+        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        let details: Vec<(Option<String>,)> = sqlx::query_as(
+            "SELECT detail FROM item_events WHERE char_id = ?1 AND action LIKE 'bank%' ORDER BY id",
+        )
+        .bind(char_id)
+        .fetch_all(&pool)
+        .await
+        .expect("details");
+        let details: Vec<&str> = details.iter().map(|(d,)| d.as_deref().unwrap_or("")).collect();
+        assert_eq!(
+            details,
+            vec!["vault", "vault", "150 copper", "50 copper", "100 of tier 0 to tier 1"],
+            "each row names the vault, the amount or the conversion"
+        );
+        let (wallet, bank): (i64, i64) = sqlx::query_as(
+            "SELECT silver * 100 + copper, bank_copper FROM characters WHERE id = ?1",
+        )
+        .bind(char_id)
+        .fetch_one(&pool)
+        .await
+        .expect("the stores");
+        assert_eq!((wallet, bank), (900, 100), "the coin sits on both sides of the counter");
+    }
+    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "the books balance after the bank");
 }
 
 /// The death strip and the corpse loot in the ledger: the strip's rows (one

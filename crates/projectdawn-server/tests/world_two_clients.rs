@@ -439,6 +439,11 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
+    fn send_cast_fail(&mut self, reason: &str) {
+        let msg = ClientWorldMsg::CastFailBroadcast { reason: reason.into() };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
     fn send_cast_complete(&mut self, spell_name: &str) {
         let msg = ClientWorldMsg::CastCompleteBroadcast {
             spell_name: spell_name.into(),
@@ -827,6 +832,28 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
+    fn send_bank_store_item(&mut self, src_location: &str, src_slot: u32) {
+        let msg = ClientWorldMsg::BankStoreItem {
+            src_location: src_location.into(),
+            src_slot,
+            shared: false,
+        };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
+    fn send_bank_deposit_coins(&mut self, coins: protocol::world::Coins) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::BankDepositCoins { coins });
+    }
+
+    fn send_bank_withdraw_coins(&mut self, coins: protocol::world::Coins) {
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::BankWithdrawCoins { coins });
+    }
+
+    fn send_bank_exchange(&mut self, from_tier: u8, to_tier: u8, qty: u32) {
+        let msg = ClientWorldMsg::BankExchange { from_tier, to_tier, qty };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
     fn send_sell_item(&mut self, slot: protocol::world::SlotRef, qty: u32) {
         let msg = ClientWorldMsg::SellItem { slot, qty };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
@@ -1036,9 +1063,15 @@ async fn two_clients_server_authoritative_resources() {
     }
 }
 
-/// Track 4 sub-task 2: cast lifecycle replication. A broadcasts CastStart
-/// then CastComplete; B sees both ServerWorldMsg variants carrying A's id
-/// and the spell name.
+/// Cast lifecycle replication, carrying the server's numbers (Track 4 sub-task
+/// 2, then the client-authority audit's Phase 4 on 2026-10-30). A broadcasts
+/// CastStart then CastComplete for Ice Spear with a forged 2.5 s bar; B sees
+/// both carrying A's id, the spell's name and the server's own 1.0 s cast
+/// time, never the 2.5. A CastStart or CastComplete naming a spell the server
+/// does not know reaches nobody, and a cancelled cast's CastFail carries the
+/// fixed word, not the string the client wrote. The caster gets no echo. On
+/// the previous server B's bar read 2.5, the made-up spell was relayed under
+/// its made-up name and the forged reason went out as written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_clients_cast_fanout() {
     let h = start_both().await;
@@ -1051,7 +1084,7 @@ async fn two_clients_cast_fanout() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
 
-    a.send_cast_start("Frostbolt", 2.5);
+    a.send_cast_start("Ice Spear", 2.5);
     for _ in 0..4 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
@@ -1069,11 +1102,11 @@ async fn two_clients_cast_fanout() {
         ..
     } = cast_at_b
     {
-        assert_eq!(spell_name, "Frostbolt");
-        assert!((duration - 2.5).abs() < 0.01, "duration roundtrip: {duration}");
+        assert_eq!(spell_name, "Ice Spear");
+        assert!((duration - 1.0).abs() < 0.01, "the server's cast time, not the client's 2.5: {duration}");
     }
 
-    a.send_cast_complete("Frostbolt");
+    a.send_cast_complete("Ice Spear");
     for _ in 0..4 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
@@ -1086,7 +1119,7 @@ async fn two_clients_cast_fanout() {
         .await
         .expect("B receives CastComplete for A");
     if let ServerWorldMsg::CastComplete { spell_name, .. } = complete_at_b {
-        assert_eq!(spell_name, "Frostbolt");
+        assert_eq!(spell_name, "Ice Spear");
     }
 
     // Owner should not receive own cast events back.
@@ -1097,6 +1130,26 @@ async fn two_clients_cast_fanout() {
         })
         .await;
     assert!(echoed.is_none(), "A should not receive own cast events");
+
+    // A spell the server does not know is relayed under no name at all, and
+    // a cancel carries the fixed word.
+    a.send_cast_start("Totally Made Up <script>", 5.0);
+    a.send_cast_complete("Totally Made Up <script>");
+    a.send_cast_start("Ice Spear", 1.0);
+    a.send_cast_fail("<forged reason on every screen>");
+    a.pump_for(Duration::from_millis(200)).await;
+    let seen = b.collect_for(Duration::from_millis(600)).await;
+    assert!(
+        !seen.iter().any(|m| matches!(m,
+            ServerWorldMsg::CastStart { spell_name, .. } | ServerWorldMsg::CastComplete { spell_name, .. }
+                if spell_name.contains("Made Up"))),
+        "the made-up spell reaches nobody: {seen:?}"
+    );
+    let fail = seen.iter().find(|m| matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64));
+    assert!(
+        matches!(fail, Some(ServerWorldMsg::CastFail { reason, .. }) if reason == "cancelled"),
+        "the cancel carries the fixed word, not the client's: {fail:?}"
+    );
 }
 
 /// The client-made HitBroadcast is a dev command (the Test Panel's). A plain
@@ -1410,17 +1463,20 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     // Swings must be PACED. This used to burst 10 Attacks in a single
     // frame, which the melee swing-rate limit (added 2026-07-29) now
     // correctly treats as forgery: it enforces a per-hand minimum
-    // interval derived from the weapon's delay â€” 0.65 s bare-handed â€”
+    // interval derived from the weapon's delay and the player's haste,
     // and silently drops anything faster. All but the first swing
     // vanished and the skeleton survived. Sleeping past the floor
     // between swings is what an honest client does anyway.
-    // 1000 ms, not 700: the bare-hand swing-rate floor is 0.65 s, so a 700 ms
-    // pace left only 50 ms of margin and timing jitter pushed swings under the
-    // floor, where they are silently dropped and the skeleton survives. Widening
-    // the margin makes it much more reliable, though this test still has residual
+    // 1800 ms: since 2026-10-30 the limiter reads the player's own haste, so an
+    // unhasted bare hand is held to 1.65 s (the 2.0 s fist delay minus the
+    // jitter grace); swinging at the weapon's own delay is what an honest
+    // client does, and a slow test thread only ever lengthens a gap. A 1000 ms
+    // pace used to pass under the fully-hasted allowance everyone got, and a
+    // 700 ms one before that left 50 ms of margin to jitter, where swings are
+    // silently dropped and the skeleton survives. This test still has residual
     // enemy-AI timing sensitivity (see docs/flaky_integration_tests.md) â€” it
     // depends on an enemy wandering into range, locking on, and STAYING in melee.
-    const SWING_GAP: Duration = Duration::from_millis(1000);
+    const SWING_GAP: Duration = Duration::from_millis(1800);
     for _ in 0..8 {
         a.send_attack(enemy_id, "", false, DamageType::Physical);
         // Pump the transport across the gap so the Attack actually goes
@@ -4445,7 +4501,8 @@ async fn cast_interrupted_by_incoming_pvp_hit() {
     // default melee envelope.
     // The server rolls the miss now (combat.rs), and only a hit interrupts.
     // B's hand_to_hand is mastered (a 5% miss), and B swings again, at a
-    // legal cadence, until a hit lands inside A's 5 s cast: four misses in a
+    // legal cadence (an unhasted bare hand is held to 1.65 s; the cache keeps
+    // the cast until something ends it), until a hit lands: four misses in a
     // row is about one in 160,000.
     let mut fail = None;
     for _ in 0..4 {
@@ -4456,7 +4513,7 @@ async fn cast_interrupted_by_incoming_pvp_hit() {
             tokio::time::sleep(TICK_DT).await;
         }
         fail = a
-            .wait_for(CHANNEL_SYSTEM, Duration::from_millis(1_050), |m| {
+            .wait_for(CHANNEL_SYSTEM, Duration::from_millis(1_750), |m| {
                 matches!(m, ServerWorldMsg::CastFail { caster, reason }
                     if *caster == a_char_id as u64
                         && reason == "interrupted (hit during cast)")
@@ -5109,8 +5166,8 @@ async fn dead_group_member_gets_no_xp_share() {
 
     // A conjures a level-1 dummy that walks to A on its own (aggro 12,
     // 1 dmg so its swings are harmless), then kills it with paced swings
-    // (the swing-rate limiter drops anything faster than the 0.65 s
-    // bare-hand floor). 10 HP vs ~5-8 per swing = 2-3 landed hits. Same
+    // (the swing-rate limiter drops anything faster than the 1.65 s
+    // unhasted bare-hand gate). 10 HP vs ~5-8 per swing = 2-3 landed hits. Same
     // shape as player_attack_kills_enemy_and_corpse_despawns: waiting for
     // ITS hit on us proves it closed into melee range first.
     a.send_dev_spawn("XP Filter Dummy", 1, 10.0, 1, 1.8, 12.0);
@@ -5151,7 +5208,7 @@ async fn dead_group_member_gets_no_xp_share() {
     }
     assert!(adjacent, "the dummy walks into melee and swings");
 
-    const SWING_GAP: Duration = Duration::from_millis(1000);
+    const SWING_GAP: Duration = Duration::from_millis(1800);
     for _ in 0..6 {
         a.send_attack(enemy_id, "", false, DamageType::Physical);
         let until = Instant::now() + SWING_GAP;
@@ -8674,7 +8731,10 @@ async fn the_server_decides_run_speed() {
 }
 
 /// The jump relay (the "Remote players never show a jump" To-Do, cosmetic
-/// version). A watcher stands beside a jumper at the spawn. One Move with
+/// version). A watcher stands beside a jumper at the spawn; since 2026-10-29
+/// (the user's jump check) a second watches from 128 m, in view but past the
+/// say range, and sees the cue too, while a third two cells away, out of
+/// view, sees nothing. One Move with
 /// `jumping: true` reaches the watcher as exactly one PlayerJumped naming the
 /// jumper, and never reaches the jumper; a burst of ten alternating flags
 /// inside the half-second interval relays nothing more; an edge after the
@@ -8692,9 +8752,25 @@ async fn a_jump_reaches_the_players_nearby_once_and_moves_nobody() {
     let w_token = request_world_token(&h.auth_url, &w_session, w_char_id).await;
     let mut w = WorldClient::start(w_token, &w_session, w_char_id).await;
     pump_both_for(&mut j, &mut w, Duration::from_millis(400)).await;
+    // The jump check: a watcher in view past the say range (128 m away, the
+    // same AOI cell; row z = 80 is clear of every camp) and one two cells
+    // away, out of view.
+    let (f_session, f_char_id, _) =
+        provision_client(&h.auth_url, "jumpfar", "Farsee", "Human", "Warrior").await;
+    let (o_session, o_char_id, _) =
+        provision_client(&h.auth_url, "jumpout", "Outsee", "Human", "Warrior").await;
+    set_char_pos(&h.db_url, f_char_id, 100.0, 80.0).await;
+    set_char_pos(&h.db_url, o_char_id, 248.0, 60.0).await;
+    let f_token = request_world_token(&h.auth_url, &f_session, f_char_id).await;
+    let mut f = WorldClient::start(f_token, &f_session, f_char_id).await;
+    let o_token = request_world_token(&h.auth_url, &o_session, o_char_id).await;
+    let mut o = WorldClient::start(o_token, &o_session, o_char_id).await;
+    pump_both_for(&mut f, &mut o, Duration::from_millis(400)).await;
     // Drain what entering fanned, so the counts below are the jumps only.
     let _ = collect_system(&mut w, Duration::from_millis(200)).await;
     let _ = collect_system(&mut j, Duration::from_millis(200)).await;
+    let _ = collect_system(&mut f, Duration::from_millis(200)).await;
+    let _ = collect_system(&mut o, Duration::from_millis(200)).await;
     let still = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
     let jumps_in = |msgs: &[ServerWorldMsg]| {
         msgs.iter()
@@ -8710,12 +8786,16 @@ async fn a_jump_reaches_the_players_nearby_once_and_moves_nobody() {
         tick_one(&mut j.client, &mut j.transport);
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let (w_msgs, j_msgs) = tokio::join!(
+    let (w_msgs, j_msgs, f_msgs, o_msgs) = tokio::join!(
         collect_system(&mut w, Duration::from_millis(600)),
         collect_system(&mut j, Duration::from_millis(600)),
+        collect_system(&mut f, Duration::from_millis(600)),
+        collect_system(&mut o, Duration::from_millis(600)),
     );
     assert_eq!(jumps_in(&w_msgs), 1, "the watcher sees one jump; the burst inside the interval adds none");
     assert_eq!(jumps_in(&j_msgs), 0, "the jumper is not told about their own jump");
+    assert_eq!(jumps_in(&f_msgs), 1, "a watcher in view past the say range sees the jump: the jump check");
+    assert_eq!(jumps_in(&o_msgs), 0, "a watcher two cells away, out of view, sees nothing");
 
     // Past the interval, the next edge relays again.
     pump_both_for(&mut j, &mut w, Duration::from_millis(400)).await;
@@ -8736,8 +8816,12 @@ async fn a_jump_reaches_the_players_nearby_once_and_moves_nobody() {
 
     j.send_disconnect();
     w.send_disconnect();
+    f.send_disconnect();
+    o.send_disconnect();
     j.pump_for(Duration::from_millis(200)).await;
     w.pump_for(Duration::from_millis(200)).await;
+    f.pump_for(Duration::from_millis(200)).await;
+    o.pump_for(Duration::from_millis(200)).await;
 }
 
 /// The Test Panel's "Despawn All Enemies" removes the mobs on the SERVER. It
@@ -8940,10 +9024,13 @@ async fn the_server_rolls_the_melee_miss() {
     let mut seq: u32 = 1;
     walk_until_within(&mut a, &mut seq, a_char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, dummy_pos, 1.0).await;
 
+    // Six swings at the staff's own 2.0 s delay (the limiter holds an
+    // unhasted hand to 1.65 s): six straight landings at an 80% miss would be
+    // about one in 16,000.
     let (mut misses, mut hits) = (0, 0);
-    for _ in 0..8 {
+    for _ in 0..6 {
         a.send_attack(dummy, "", false, DamageType::Physical);
-        let until = Instant::now() + Duration::from_millis(1_100);
+        let until = Instant::now() + Duration::from_millis(1_800);
         while Instant::now() < until {
             tick_one(&mut a.client, &mut a.transport);
             while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
@@ -8958,8 +9045,96 @@ async fn the_server_rolls_the_melee_miss() {
             tokio::time::sleep(TICK_DT).await;
         }
     }
-    assert_eq!(misses + hits, 8, "every swing was answered: {misses} misses, {hits} hits");
+    assert_eq!(misses + hits, 6, "every swing was answered: {misses} misses, {hits} hits");
     assert!(misses >= 1, "the server rolled at least one miss ({hits} hits)");
+}
+
+/// The swing-rate limit reads the player's real haste (the client-authority
+/// audit's Phase 4, 2026-10-30): an Enchanter under their own Haste swings
+/// bare-handed every 1.3 s and every swing is answered (2.0 s at 30% is 1.4 s,
+/// and the gate sits a grace below it), while an unhasted Warrior swinging at
+/// the same rate has every second swing dropped, held to the unhasted 1.65 s.
+/// The previous server assumed everyone fully hasted and answered all four of
+/// the Warrior's; it fails here at the Warrior's count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_swing_rate_limit_reads_the_players_haste() {
+    let h = start_both().await;
+    let (e_session, e_char_id, _stale) =
+        provision_client(&h.auth_url, "hasteench", "Hastea", "Human", "Enchanter").await;
+    let (w_session, w_char_id, w_token) =
+        provision_client(&h.auth_url, "hastewar", "Hasteb", "Human", "Warrior").await;
+    set_char_level(&h.db_url, e_char_id, 16).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "hasteench", true).await.expect("set is_gm");
+    let e_token = request_world_token(&h.auth_url, &e_session, e_char_id).await;
+    let mut e = WorldClient::start(e_token, &e_session, e_char_id).await;
+    let mut w = WorldClient::start(w_token, &w_session, w_char_id).await;
+    pump_both_for(&mut e, &mut w, Duration::from_millis(300)).await;
+
+    e.send_dev_spawn("Haste Dummy", 1, 100_000.0, 0, 0.0, 0.0);
+    let spawn = wait_on_a_pumping_b(&mut e, &mut w, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Haste Dummy")
+    })
+    .await
+    .expect("the dummy spawns");
+    let (dummy, dummy_pos) = match spawn {
+        ServerWorldMsg::EnemySpawn { id, pos, .. } => (id, pos),
+        _ => unreachable!(),
+    };
+    let origin = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    let (mut se, mut sw) = (1u32, 1u32);
+    walk_until_within(&mut e, &mut se, e_char_id, origin, dummy_pos, 1.0).await;
+    walk_until_within(&mut w, &mut sw, w_char_id, origin, dummy_pos, 1.0).await;
+
+    // The Enchanter hastes itself (an untargeted ALLY cast lands on the caster).
+    e.send_cast_start("Haste", 1.5);
+    pump_both_for(&mut e, &mut w, Duration::from_millis(1_700)).await;
+    e.send_cast_spell("Haste", None);
+    wait_on_a_pumping_b(&mut e, &mut w, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::BuffSnapshot { target, buffs }
+            if *target == e_char_id as u64 && buffs.iter().any(|(n, _)| n == "Haste"))
+    })
+    .await
+    .expect("the Enchanter is hasted");
+
+    /// Swing `n` times at `gap`, servicing both sockets, and count the
+    /// swings the server answered with a Hit or a Miss.
+    async fn paced_swings(
+        c: &mut WorldClient,
+        other: &mut WorldClient,
+        attacker: i64,
+        target: u64,
+        n: usize,
+        gap: Duration,
+    ) -> usize {
+        let mut answered = 0;
+        for _ in 0..n {
+            c.send_attack(target, "", false, DamageType::Physical);
+            let until = Instant::now() + gap;
+            while Instant::now() < until {
+                tick_one(&mut c.client, &mut c.transport);
+                tick_one(&mut other.client, &mut other.transport);
+                while let Some(bytes) = c.client.receive_message(CHANNEL_SYSTEM) {
+                    if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) {
+                        if matches!(msg, ServerWorldMsg::Hit { attacker: a, target: t, .. }
+                            | ServerWorldMsg::Miss { attacker: a, target: t }
+                            if a == attacker as u64 && t == target)
+                        {
+                            answered += 1;
+                        }
+                    }
+                }
+                tokio::time::sleep(TICK_DT).await;
+            }
+        }
+        answered
+    }
+
+    let gap = Duration::from_millis(1_300);
+    let hasted = paced_swings(&mut e, &mut w, e_char_id, dummy, 4, gap).await;
+    assert_eq!(hasted, 4, "the hasted Enchanter's four swings at 1.3 s are all answered");
+    let unhasted = paced_swings(&mut w, &mut e, w_char_id, dummy, 4, gap).await;
+    assert_eq!(unhasted, 2, "the unhasted Warrior at the same rate: every second swing is dropped");
 }
 
 /// Send one Attack from `c` and report whether the server answered it with a
@@ -9183,6 +9358,99 @@ async fn equipping_is_refused_by_class_and_dual_wield() {
         next_equip_delta(&mut b, 3, Duration::from_millis(500)).await.is_none(),
         "the vest never reaches the chest slot"
     );
+}
+
+/// EQ's two-hander rule (user, 2026-10-29: a two-hander beside an off-hand
+/// weapon is an end-game Warrior ability; nobody until then). A Warrior 15
+/// (dual wield earned) wearing a club in the off hand is refused a Carved
+/// Staff for the main hand ("Empty your off hand first."); with the club off
+/// and the staff on, the club is refused for the off hand ("You cannot hold
+/// that with a two-handed weapon."). The swing backstop, for gear worn before
+/// the rule: a second Warrior 15 seeded wearing the staff AND a club swings
+/// the staff and gets no answer for the off hand. On the previous server the
+/// staff went on beside the club (both staves lacked the two-handed flag)
+/// and the off hand swung beside it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_two_hander_needs_an_empty_off_hand() {
+    const STAFF: &str = "res://data/loot/items/carved_staff.tres";
+    const CLUB: &str = "res://data/loot/items/cracked_wooden_club.tres";
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale_a) =
+        provision_client(&h.auth_url, "twohand_a", "Staffa", "Human", "Warrior").await;
+    let (b_session, b_char_id, _stale_b) =
+        provision_client(&h.auth_url, "twohand_b", "Staffb", "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "twohand_a", true).await.expect("set is_gm");
+    set_char_level(&h.db_url, a_char_id, 15).await;
+    set_char_level(&h.db_url, b_char_id, 15).await;
+    give_char_item(&h.db_url, a_char_id, "base", 0, STAFF, 1).await;
+    give_char_item(&h.db_url, a_char_id, "base", 1, CLUB, 1).await;
+    // Gear from before the rule: the pairing the equip now refuses.
+    give_char_item(&h.db_url, b_char_id, "equip", 0, STAFF, 1).await;
+    give_char_item(&h.db_url, b_char_id, "equip", 1, CLUB, 1).await;
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
+
+    // The club into the off hand: worn (a Warrior 15 dual wields).
+    a.send_equip_item("base", 1, 1);
+    assert_eq!(
+        next_equip_delta(&mut a, 1, Duration::from_secs(3)).await,
+        Some(Some(CLUB.to_string())),
+        "the club goes into the off hand"
+    );
+    // The staff into the main hand beside it: refused, no paperdoll change.
+    a.send_equip_item("base", 0, 0);
+    let line = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "Empty your off hand first.")
+        })
+        .await;
+    assert!(line.is_some(), "a two-hander is refused beside an off-hand weapon");
+    assert!(
+        next_equip_delta(&mut a, 0, Duration::from_millis(500)).await.is_none(),
+        "the staff never reaches the main hand"
+    );
+    // Off hand emptied, the staff goes on; then the club is refused beside it.
+    a.send_unequip_item(1, "base", 1);
+    assert_eq!(next_equip_delta(&mut a, 1, Duration::from_secs(3)).await, Some(None), "the off hand empties");
+    a.send_equip_item("base", 0, 0);
+    assert_eq!(
+        next_equip_delta(&mut a, 0, Duration::from_secs(3)).await,
+        Some(Some(STAFF.to_string())),
+        "the staff goes into the empty-off-hand main hand"
+    );
+    a.send_equip_item("base", 1, 1);
+    let line = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "You cannot hold that with a two-handed weapon.")
+        })
+        .await;
+    assert!(line.is_some(), "nothing joins a two-hander");
+    assert!(
+        next_equip_delta(&mut a, 1, Duration::from_millis(500)).await.is_none(),
+        "the club never reaches the off hand"
+    );
+
+    // The swing backstop for gear worn before the rule.
+    a.send_dev_spawn("Staff Dummy", 1, 100_000.0, 0, 0.0, 0.0);
+    let spawn = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Staff Dummy")
+    })
+    .await
+    .expect("the dummy spawns");
+    let (dummy, dummy_pos) = match spawn {
+        ServerWorldMsg::EnemySpawn { id, pos, .. } => (id, pos),
+        _ => unreachable!(),
+    };
+    let origin = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    let mut sb = 1u32;
+    walk_until_within(&mut b, &mut sb, b_char_id, origin, dummy_pos, 1.0).await;
+    a.send_heartbeat();
+    assert!(swing_answered(&mut b, b_char_id, dummy, false).await, "the staff swings");
+    assert!(!swing_answered(&mut b, b_char_id, dummy, true).await, "the off hand beside it is unanswered");
 }
 
 /// A `/say` carries SAY_RANGE (50 m; user, 2026-10-27: "the volume of a
@@ -11244,4 +11512,443 @@ async fn a_quest_turn_in_saves_its_reward_xp_with_the_completion() {
 
     let after = char_xp_level(&h.db_url, char_id).await;
     assert_ne!(after, before, "the reward XP must be saved with the completion");
+}
+
+// ─── The item ledger (2026-10-30) ────────────────────────────────────────────
+
+/// Opening rows for everything the database holds right now, as migration
+/// 0017 writes them when the table is created: the tests seed stores straight
+/// into the tables, which the ledger never saw.
+async fn seed_ledger_openings(db_url: &str) {
+    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    for sql in [
+        "INSERT INTO item_events (at, char_id, action, item_path, count, delta, copper, detail)
+         SELECT 1, char_id, 'opening', item_path, SUM(count), SUM(count), 0, 'inventory'
+         FROM character_items GROUP BY char_id, item_path",
+        "INSERT INTO item_events (at, char_id, action, item_path, count, delta, copper, detail)
+         SELECT 1, char_id, 'opening', item_path, SUM(count), SUM(count), 0, 'vault'
+         FROM bank_items GROUP BY char_id, item_path",
+        "INSERT INTO item_events (at, char_id, action, item_path, count, delta, copper, detail)
+         SELECT 1, id, 'opening', NULL, 0, 0,
+                platinum * 1000000 + gold * 10000 + silver * 100 + copper
+                  + bank_platinum * 1000000 + bank_gold * 10000 + bank_silver * 100 + bank_copper,
+                'wallet and bank'
+         FROM characters",
+    ] {
+        sqlx::query(sql).execute(&pool).await.expect("opening rows");
+    }
+}
+
+/// A character's ledger rows after the opening ones, oldest first:
+/// (action, item path, count, delta, copper).
+async fn ledger_rows(db_url: &str, char_id: i64) -> Vec<(String, Option<String>, i64, i64, i64)> {
+    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    sqlx::query_as(
+        "SELECT action, item_path, count, delta, copper FROM item_events
+         WHERE char_id = ?1 AND action != 'opening' ORDER BY id",
+    )
+    .bind(char_id)
+    .fetch_all(&pool)
+    .await
+    .expect("ledger rows")
+}
+
+async fn ledger_mismatches(db_url: &str) -> Vec<projectdawn_server::db::LedgerMismatch> {
+    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    projectdawn_server::db::ledger_mismatches(&pool).await.expect("ledger check")
+}
+
+/// The item ledger: a sale, a purchase and a drop leave the seller's rows, the
+/// pickup leaves the picker's, each written with the transaction that
+/// persisted the move (the sale and the purchase ride the logout flush, the
+/// drop and the pickup their immediate saves), and the conservation query
+/// finds the books balanced. A stack then planted straight into the table,
+/// the shape of every dupe, is the one mismatch, named by account and item.
+/// Fails on the previous server at the first row assertion: no table.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_ledger_records_a_sale_a_purchase_a_drop_and_a_pickup_and_balances() {
+    const POTION: &str = "res://data/loot/items/minor_healing_potion.tres";
+    let h = start_both().await;
+    let (a_session, a_char, a_token) =
+        provision_client(&h.auth_url, "ledgera", "Ledgera", "Human", "Warrior").await;
+    let (b_session, b_char, b_token) =
+        provision_client(&h.auth_url, "ledgerb", "Ledgerb", "Human", "Warrior").await;
+    give_char_item(&h.db_url, a_char, "base", 0, BREAD, 3).await;
+    {
+        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        // At the spawn, in reach of the merchant, with coin for the potion.
+        sqlx::query("UPDATE characters SET copper = 1000, pos_x = 0.0, pos_z = 0.0 WHERE id = ?1")
+            .bind(a_char)
+            .execute(&pool)
+            .await
+            .expect("seed");
+    }
+    seed_ledger_openings(&h.db_url).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char).await;
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+    })
+    .await
+    .expect("snapshot");
+    b.pump_for(Duration::from_millis(200)).await;
+
+    a.send_sell_item(SlotRef::BaseSlot { idx: 0 }, 1);
+    // The sale's own delta (the stack 3 to 2), not the enter-world wallet
+    // send: the buy below must reach a later tick (within one tick the
+    // server applies buys before sells, which would reorder the rows).
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, slot: 0, item_path: Some(p), count: 2 }
+            if location == "base" && p == BREAD)
+    })
+    .await
+    .expect("the sale takes one loaf");
+    a.send_buy_item(0, "Minor Healing Potion", 1);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == POTION)
+    })
+    .await
+    .expect("the potion arrives");
+    a.send_drop_item("base", 0, 1);
+    a.pump_for(Duration::from_millis(100)).await;
+    let bag_id = match b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::LootBagSpawn { items, .. }
+                if items.iter().any(|(p, _)| p == BREAD))
+        })
+        .await
+        .expect("the bag reaches B")
+    {
+        ServerWorldMsg::LootBagSpawn { bag_id, .. } => bag_id,
+        _ => unreachable!(),
+    };
+    b.send_loot_all(bag_id);
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD)
+    })
+    .await
+    .expect("the loaf reaches B");
+
+    a.send_disconnect();
+    b.send_disconnect();
+    a.pump_for(Duration::from_millis(300)).await;
+    b.pump_for(Duration::from_millis(300)).await;
+
+    let a_rows = ledger_rows(&h.db_url, a_char).await;
+    let actions: Vec<&str> = a_rows.iter().map(|r| r.0.as_str()).collect();
+    assert_eq!(actions, vec!["sell", "buy", "drop"], "A's rows in order: {a_rows:?}");
+    let sale = &a_rows[0];
+    assert_eq!((sale.1.as_deref(), sale.2, sale.3), (Some(BREAD), 1, -1), "{sale:?}");
+    assert!(sale.4 > 0, "the sale credits coin: {sale:?}");
+    let purchase = &a_rows[1];
+    assert_eq!((purchase.1.as_deref(), purchase.2, purchase.3), (Some(POTION), 1, 1), "{purchase:?}");
+    assert!(purchase.4 < 0, "the purchase costs coin: {purchase:?}");
+    let drop = &a_rows[2];
+    assert_eq!((drop.1.as_deref(), drop.2, drop.3, drop.4), (Some(BREAD), 1, -1, 0), "{drop:?}");
+    let b_rows = ledger_rows(&h.db_url, b_char).await;
+    assert_eq!(
+        b_rows,
+        vec![("pickup".to_string(), Some(BREAD.to_string()), 1, 1, 0)],
+        "B's one row is the pickup"
+    );
+    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "the books balance after every move");
+
+    {
+        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        sqlx::query(
+            "INSERT INTO character_items (char_id, location, slot, item_path, count) VALUES (?1, 'base', 7, ?2, 5)",
+        )
+        .bind(b_char)
+        .bind(BREAD)
+        .execute(&pool)
+        .await
+        .expect("plant a dupe");
+    }
+    let found = ledger_mismatches(&h.db_url).await;
+    assert_eq!(found.len(), 1, "the planted stack is the one mismatch: {found:?}");
+    assert_eq!((found[0].item_path.as_deref(), found[0].ledger, found[0].held), (Some(BREAD), 1, 6));
+}
+
+/// The bank in the ledger: a vault deposit and withdrawal (delta 0, the
+/// vault named: the item stays the account's), a coin deposit and withdrawal
+/// (copper 0, the amount in the detail: the coin stays the account's) and a
+/// tier exchange (copper 0: the value is unchanged), all written with the
+/// logout flush, in order, and the books balance with the loaves back in
+/// the bags and the coin on both sides of the counter. The three kinds the
+/// 2026-10-30 sitting did not play (`item_ledger_and_rtt_checklist.md` §2)
+/// had no test until this one; it fails on the previous server at the
+/// first row assertion (no table).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_ledger_records_the_bank_and_balances() {
+    use protocol::world::Coins;
+    let h = start_both().await;
+    let (session, char_id, token) =
+        provision_client(&h.auth_url, "ledgerbank", "Ledgerbank", "Human", "Warrior").await;
+    give_char_item(&h.db_url, char_id, "base", 0, BREAD, 3).await;
+    {
+        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        // At the spawn, in reach of the banker, with coin to bank.
+        sqlx::query("UPDATE characters SET copper = 1000, pos_x = 0.0, pos_z = 0.0 WHERE id = ?1")
+            .bind(char_id)
+            .execute(&pool)
+            .await
+            .expect("seed");
+    }
+    seed_ledger_openings(&h.db_url).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+    })
+    .await
+    .expect("snapshot");
+
+    a.send_bank_store_item("base", 0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::BankItemSnapshot { shared: false, entries }
+            if entries.iter().any(|(_, p, c)| p == BREAD && *c == 3))
+    })
+    .await
+    .expect("the loaves reach the vault");
+    a.send_bank_withdraw_item(0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), count: 3, .. } if p == BREAD)
+    })
+    .await
+    .expect("the loaves come back to the bags");
+    a.send_bank_deposit_coins(Coins { platinum: 0, gold: 0, silver: 0, copper: 150 });
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::BankSnapshot { coins } if coins.copper == 150)
+    })
+    .await
+    .expect("the bank holds the deposit");
+    a.send_bank_withdraw_coins(Coins { platinum: 0, gold: 0, silver: 0, copper: 50 });
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::BankSnapshot { coins } if coins.copper == 100)
+    })
+    .await
+    .expect("the bank gives some back");
+    // 100 of the 900 copper in hand into one silver: the wallet's value is
+    // unchanged, so the exchange is a row with no copper on it.
+    a.send_bank_exchange(0, 1, 100);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.silver == 1 && coins.copper == 800)
+    })
+    .await
+    .expect("the exchange lands");
+    a.send_disconnect();
+    a.pump_for(Duration::from_millis(300)).await;
+
+    let rows = ledger_rows(&h.db_url, char_id).await;
+    assert_eq!(
+        rows,
+        vec![
+            ("bank_in".to_string(), Some(BREAD.to_string()), 3, 0, 0),
+            ("bank_out".to_string(), Some(BREAD.to_string()), 3, 0, 0),
+            ("bank_coin_in".to_string(), None, 0, 0, 0),
+            ("bank_coin_out".to_string(), None, 0, 0, 0),
+            ("bank_exchange".to_string(), None, 0, 0, 0),
+        ],
+        "the bank's rows, written with the logout flush"
+    );
+    {
+        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        let details: Vec<(Option<String>,)> = sqlx::query_as(
+            "SELECT detail FROM item_events WHERE char_id = ?1 AND action LIKE 'bank%' ORDER BY id",
+        )
+        .bind(char_id)
+        .fetch_all(&pool)
+        .await
+        .expect("details");
+        let details: Vec<&str> = details.iter().map(|(d,)| d.as_deref().unwrap_or("")).collect();
+        assert_eq!(
+            details,
+            vec!["vault", "vault", "150 copper", "50 copper", "100 of tier 0 to tier 1"],
+            "each row names the vault, the amount or the conversion"
+        );
+        let (wallet, bank): (i64, i64) = sqlx::query_as(
+            "SELECT silver * 100 + copper, bank_copper FROM characters WHERE id = ?1",
+        )
+        .bind(char_id)
+        .fetch_one(&pool)
+        .await
+        .expect("the stores");
+        assert_eq!((wallet, bank), (900, 100), "the coin sits on both sides of the counter");
+    }
+    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "the books balance after the bank");
+}
+
+/// The death strip and the corpse loot in the ledger: the strip's rows (one
+/// per stack, one for the coin) ride the corpse transaction, the loot's rows
+/// the corpse-loot transaction, and the books balance at both ends, with what
+/// lies on the corpse counted as out of the holdings in between. Fails on the
+/// previous server at the first row assertion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_death_and_the_corpse_loot_keep_the_books_balanced() {
+    const CAP: &str = "res://data/loot/items/cloth_cap.tres";
+    let h = start_both().await;
+    let (session, char_id, _) =
+        provision_client(&h.auth_url, "ledgerdie", "Ledgerdie", "Human", "Warrior").await;
+    give_char_item(&h.db_url, char_id, "equip", 2, CAP, 1).await;
+    give_char_item(&h.db_url, char_id, "base", 0, BREAD, 2).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    sqlx::query("UPDATE characters SET copper = 40 WHERE id = ?1")
+        .bind(char_id)
+        .execute(&pool)
+        .await
+        .expect("coin");
+    db::set_account_gm(&pool, "ledgerdie", true).await.expect("set is_gm");
+    seed_ledger_openings(&h.db_url).await;
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    a.send_damage_self(1_000_000);
+    let contents = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::CorpseContents { .. })
+        })
+        .await
+        .expect("dying leaves a corpse");
+    let ServerWorldMsg::CorpseContents { corpse_id, .. } = contents else {
+        unreachable!()
+    };
+    let rows = ledger_rows(&h.db_url, char_id).await;
+    assert_eq!(
+        rows,
+        vec![
+            ("death".to_string(), Some(CAP.to_string()), 1, -1, 0),
+            ("death".to_string(), Some(BREAD.to_string()), 2, -2, 0),
+            ("death_coins".to_string(), None, 0, 0, -40),
+        ],
+        "the strip's rows, written with the corpse"
+    );
+    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "balanced with the gear on the corpse");
+
+    a.send_respawn();
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| matches!(m, ServerWorldMsg::Teleport { .. }))
+        .await
+        .expect("respawned beside the corpse");
+    a.send_loot_all(corpse_id);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), .. }
+            if location == "equip" && p == CAP)
+    })
+    .await
+    .expect("the cap goes back on");
+    a.pump_for(Duration::from_millis(200)).await;
+    let rows = ledger_rows(&h.db_url, char_id).await;
+    assert_eq!(
+        rows[3..].to_vec(),
+        vec![
+            ("corpse_coins".to_string(), None, 0, 0, 40),
+            ("corpse_loot".to_string(), Some(CAP.to_string()), 1, 1, 0),
+            ("corpse_loot".to_string(), Some(BREAD.to_string()), 2, 2, 0),
+        ],
+        "the loot's rows, written with the loot: {rows:?}"
+    );
+    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "balanced with everything back");
+    a.send_disconnect();
+    a.pump_for(Duration::from_millis(200)).await;
+}
+
+/// A trade in the ledger: the giver's queued GM rows and the trade rows (one
+/// per stack out, one for the coin) and the receiver's (one per stack in, one
+/// for the coin) are all written by the trade's own commit, both sides name
+/// the partner, and the books balance with nothing but recorded moves behind
+/// every holding. Fails on the previous server at the first row assertion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_trade_writes_both_sides_of_the_ledger_and_balances() {
+    let h = start_both().await;
+    let (mut a, a_char_id, mut b, b_char_id, bread_loc, bread_slot) =
+        trade_pair(&h, "ledgertra", "Ledgertra", "ledgertrb", "Ledgertrb").await;
+    macro_rules! pump_a {
+        () => {{
+            for _ in 0..4 {
+                tick_one(&mut a.client, &mut a.transport);
+                tokio::time::sleep(TICK_DT).await;
+            }
+        }};
+    }
+
+    a.send_trade_request(b_char_id as u64);
+    pump_a!();
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { partner_id, .. }
+            if *partner_id == b_char_id as u64)
+    })
+    .await
+    .expect("A's window opens");
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { .. })
+    })
+    .await
+    .expect("B's window opens");
+    a.send_trade_offer_item(0, &bread_loc, bread_slot);
+    pump_a!();
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOfferUpdate { mine: false, .. })
+    })
+    .await
+    .expect("B sees the offer");
+    a.send_trade_offer_coins(protocol::world::Coins { platinum: 0, gold: 0, silver: 0, copper: 25 });
+    pump_a!();
+    a.send_trade_accept();
+    pump_a!();
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeAcceptState { you: false, them: true })
+    })
+    .await
+    .expect("B sees A accepted");
+    b.send_trade_accept();
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::TradeClosed { committed: true, .. })
+    })
+    .await
+    .expect("the trade commits");
+    a.pump_for(Duration::from_millis(200)).await;
+
+    let mut a_rows = ledger_rows(&h.db_url, a_char_id).await;
+    // The two GM grants land in one tick, the coin grant at intake and the
+    // give at the apply phase, so their order between themselves is not a
+    // rule; the trade's rows follow both.
+    assert_eq!(a_rows.len(), 4, "{a_rows:?}");
+    a_rows[..2].sort();
+    assert_eq!(
+        a_rows,
+        vec![
+            ("gm_coins".to_string(), None, 0, 0, 25),
+            ("gm_give".to_string(), Some(BREAD.to_string()), 3, 3, 0),
+            ("trade_out".to_string(), Some(BREAD.to_string()), 3, -3, 0),
+            ("trade_coins".to_string(), None, 0, 0, -25),
+        ],
+        "the giver's rows, the queued GM grants and the trade, all with the commit"
+    );
+    let b_rows = ledger_rows(&h.db_url, b_char_id).await;
+    assert_eq!(
+        b_rows,
+        vec![
+            ("trade_in".to_string(), Some(BREAD.to_string()), 3, 3, 0),
+            ("trade_coins".to_string(), None, 0, 0, 25),
+        ],
+        "the receiver's rows"
+    );
+    {
+        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        let details: Vec<(Option<String>,)> = sqlx::query_as(
+            "SELECT detail FROM item_events WHERE action LIKE 'trade%' ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("details");
+        assert!(
+            details.iter().take(2).all(|(d,)| d.as_deref() == Some(&format!("char:{b_char_id}")))
+                && details.iter().skip(2).all(|(d,)| d.as_deref() == Some(&format!("char:{a_char_id}"))),
+            "each side's rows name the partner: {details:?}"
+        );
+    }
+    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "the books balance after the trade");
+    a.send_disconnect();
+    b.send_disconnect();
+    a.pump_for(Duration::from_millis(200)).await;
+    b.pump_for(Duration::from_millis(200)).await;
 }

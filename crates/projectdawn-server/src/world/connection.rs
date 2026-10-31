@@ -218,6 +218,15 @@ pub struct PerConnection {
     /// tick; a single combined timer would false-throttle a legit dual-wielder.
     /// Advanced only on a swing the rate gate accepts (`tick.rs`).
     pub last_swing_at: [Option<Instant>; 2],
+    /// The pacing the hand's last ACCEPTED swing was judged by (the honest
+    /// interval from its weapon and the haste the server saw at the time),
+    /// `f32::INFINITY` before the hand has swung. The limiter holds a swing
+    /// to the lesser of this and the current pacing, because the client
+    /// timed THIS swing when the LAST one fired: a Haste buff that ran out,
+    /// or a slower weapon swapped in, between the two must not cost the
+    /// honest swing already timed under the old pacing. Stamped with
+    /// `last_swing_at`.
+    pub last_swing_pace: [f32; 2],
 
     /// Wall-clock of the last Meditate skill-up tick. The regen loop advances
     /// the `meditate` casting skill roughly once per 6 s of medding (sitting with
@@ -369,6 +378,13 @@ pub struct PerConnection {
     /// `authorize_dev_cmd`, which is also the gate: a command is queued here
     /// or it does not run.
     pub gm_audit: Vec<GmAuditEntry>,
+    /// The item ledger's queue (`world/ledger.rs`): one row per movement of
+    /// items or coin into or out of this character's holdings since the last
+    /// store write, pushed by `ledger` beside the dirty flag the move set and
+    /// written inside the next transaction that persists the stores (the
+    /// flush, the trade commit, the corpse loot, the death strip), which
+    /// clears it. Rolled back with the in-memory move on a failed persist.
+    pub item_events: Vec<crate::db::ItemEventRow>,
     /// The command budget (see `GM_CMD_BURST`): tokens left, and when they
     /// were last refilled.
     pub gm_cmd_tokens: f32,
@@ -658,6 +674,7 @@ impl PerConnection {
             last_attack_at: None,
             bind: spawn.bind,
             last_swing_at: [None, None],
+            last_swing_pace: [f32::INFINITY; 2],
             last_meditate_at: None,
             // A character loaded at 0 HP died before it left (a crash, a
             // window-X, a server restart while dead) and has paid: the death
@@ -709,6 +726,7 @@ impl PerConnection {
             // only sees the character spawn, not the account's GM flag).
             is_gm: false,
             gm_audit: Vec::new(),
+            item_events: Vec::new(),
             gm_cmd_tokens: GM_CMD_BURST,
             gm_cmd_refill_at: now,
             gm_cmd_refused: 0,
@@ -931,6 +949,28 @@ impl PerConnection {
             || self.account_bank_items_dirty
     }
 
+    /// Queue an item ledger row for this character, stamped now
+    /// (`world/ledger.rs`). Called at the site that makes the move in memory,
+    /// beside the dirty flag it sets; the row is written with the next store
+    /// transaction and leaves the queue only when that commits.
+    pub fn ledger(&mut self, mut row: crate::db::ItemEventRow) {
+        row.at = super::ledger::unix_now_secs();
+        row.char_id = self.char_id;
+        self.item_events.push(row);
+    }
+
+    /// Where the ledger queue stands, for a site that may have to undo its
+    /// in-memory move on a failed persist: `ledger_rollback(mark)` drops
+    /// everything queued since, as the inventory snapshot it restores drops
+    /// the move.
+    pub fn ledger_mark(&self) -> usize {
+        self.item_events.len()
+    }
+
+    pub fn ledger_rollback(&mut self, mark: usize) {
+        self.item_events.truncate(mark);
+    }
+
     pub fn mark_persisted(&mut self) {
         self.last_persisted_pos = self.pos;
         self.last_persisted_yaw = self.yaw;
@@ -986,6 +1026,21 @@ impl PerConnection {
     pub fn note_damage_taken(&mut self, now: Instant) {
         self.last_damaged_at = Some(now);
         self.is_sitting = false;
+    }
+
+    /// The sum of the player's active Haste buffs (the Enchanter's Haste, a
+    /// Bard's Wanderer's Chord), 0.0 with none: what the client's attack
+    /// timer paces by, read from the same buffs the server fans it. The
+    /// swing-rate limit reads it so an unhasted player is held to an
+    /// unhasted pace.
+    pub fn haste_total(&self) -> f32 {
+        self.active_buffs
+            .iter()
+            .filter_map(|b| match b.effect {
+                super::buffs::BuffEffect::Haste { amount } => Some(amount),
+                _ => None,
+            })
+            .sum()
     }
 
     /// Where `Respawn` should put this player: their bind point, or the starter

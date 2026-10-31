@@ -491,6 +491,12 @@ fn quest_id_well_formed(quest_id: &str) -> bool {
 /// same way: Unicode scalar values, which is what a Godot String's length is).
 pub const MAX_CHAT_CHARS: usize = 250;
 
+/// What a client-cancelled cast is relayed to peers as. The client's own
+/// `CastFailBroadcast` reason is never shown anywhere (a peer only ends the
+/// bar it drew), so the relay carries this one word rather than whatever a
+/// client wrote.
+pub const CAST_CANCELLED_RELAY: &str = "cancelled";
+
 /// Cut `text` to at most `max_chars` characters. Counting characters, never
 /// slicing by byte: `&text[..n]` panics when `n` falls inside a multibyte
 /// character, and a panic in the tick task takes the whole server down, so
@@ -782,7 +788,8 @@ pub fn handle_message(
             // peer has drawn a bar yet. The client spent its mana at the
             // start, so the true value goes with the refusal. Songs are
             // exempt; an unknown spell is left to the CastSpell gate.
-            let song = super::spells::lookup(&spell_name).is_some_and(|s| s.is_song);
+            let known = super::spells::lookup(&spell_name);
+            let song = known.is_some_and(|s| s.is_song);
             if !song {
                 if let Some(until) = conn.gcd_until {
                     if now < until {
@@ -806,7 +813,7 @@ pub fn handle_message(
             // spell pages list a 2.25 s "fizzle time"), caches no bar and
             // trains nothing. Private, as the refusals above. An instant
             // spell has no CastStart and rolls at its CastSpell instead.
-            if let Some(spell) = super::spells::lookup(&spell_name) {
+            if let Some(spell) = known {
                 if conn.fizzles && super::cast_gate::roll_fizzle(conn, spell) {
                     let burned = super::cast_gate::fizzle_mana(spell.mana_cost, conn.mp);
                     conn.mp -= burned;
@@ -827,8 +834,12 @@ pub fn handle_message(
                     return Outcome::Continue;
                 }
             }
+            // The cache keeps the client's name for the cast-time gate, which
+            // refuses an unknown spell in its own words; the bar's length is
+            // the server's own cast time (the late-joiner seed reads it), 0
+            // for a spell the server does not know.
             conn.cast_spell_name = spell_name.clone();
-            conn.cast_total_duration = duration;
+            conn.cast_total_duration = known.map_or(0.0, |s| s.cast_time);
             conn.cast_set_at = Some(now);
             // Track 17.2 — snapshot the caster's position so the
             // CastSpell gate can reject movement-during-cast forgeries.
@@ -836,7 +847,27 @@ pub fn handle_message(
             // Casting stands you, as a swing does (spell batch step 0): the
             // seated regen rate does not run under a cast bar.
             conn.is_sitting = false;
-            Outcome::CastStartFanOut { spell_name, duration }
+            // The relay carries the server's numbers, not the client's (the
+            // client-authority audit, Phase 4): peers' bars used to be drawn
+            // from whatever name and duration the client wrote, so a modified
+            // client could put any string on every screen in view and stretch
+            // or shrink its bar at will (and a non-finite duration was never
+            // checked). Only a spell the server knows is relayed, under its
+            // own name and at its own cast time; an honest client sent that
+            // number already. A mismatch marks a modified client, at debug.
+            let Some(spell) = known else {
+                return Outcome::Continue;
+            };
+            if !duration.is_finite() || (duration - spell.cast_time).abs() > 0.01 {
+                tracing::debug!(
+                    caster = conn.char_id,
+                    spell = %spell_name,
+                    client_duration = duration,
+                    server_cast_time = spell.cast_time,
+                    "CastStart duration differs from the server's; the server's is relayed"
+                );
+            }
+            Outcome::CastStartFanOut { spell_name: spell.name.clone(), duration: spell.cast_time }
         }
 
         ClientWorldMsg::CastCompleteBroadcast { spell_name } => {
@@ -846,7 +877,12 @@ pub fn handle_message(
             conn.cast_spell_name.clear();
             conn.cast_total_duration = 0.0;
             conn.cast_set_at = None;
-            Outcome::CastCompleteFanOut { spell_name }
+            // Relayed only for a spell the server knows, under its own name
+            // (the CastStart rule above).
+            match super::spells::lookup(&spell_name) {
+                Some(spell) => Outcome::CastCompleteFanOut { spell_name: spell.name.clone() },
+                None => Outcome::Continue,
+            }
         }
 
         ClientWorldMsg::HitBroadcast {
@@ -1396,11 +1432,22 @@ pub fn handle_message(
             // Exact per-tier credit, no reduction — a raw-copper grant must
             // stay raw copper (that's what makes it useful for encumbrance
             // testing). Negative grants allowed (dev drain), floored at 0.
+            let before = conn.coins.total_copper();
             conn.coins.platinum = conn.coins.platinum.saturating_add(platinum).max(0);
             conn.coins.gold = conn.coins.gold.saturating_add(gold).max(0);
             conn.coins.silver = conn.coins.silver.saturating_add(silver).max(0);
             conn.coins.copper = conn.coins.copper.saturating_add(copper).max(0);
             conn.coins_dirty = true;
+            // The ledger gets what the wallet really gained (the floor at 0
+            // can make a drain smaller than asked).
+            let gained = conn.coins.total_copper() - before;
+            if gained != 0 {
+                conn.ledger(super::ledger::coin_event(
+                    super::ledger::ItemAction::GmCoins,
+                    gained,
+                    Some("gm".to_string()),
+                ));
+            }
             send_coins_update(server, client_id, conn.coins);
             tracing::info!(
                 char_id = conn.char_id,
@@ -1524,14 +1571,18 @@ pub fn handle_message(
             Outcome::Continue
         }
 
-        ClientWorldMsg::CastFailBroadcast { reason } => {
+        ClientWorldMsg::CastFailBroadcast { reason: _ } => {
             if !conn.ready {
                 return Outcome::Continue;
             }
             conn.cast_spell_name.clear();
             conn.cast_total_duration = 0.0;
             conn.cast_set_at = None;
-            Outcome::CastFailFanOut { reason }
+            // The client's reason never reaches a screen (a peer only ends
+            // the bar it drew; the caster is not among the recipients), so
+            // the relay carries one fixed word instead of whatever the client
+            // wrote (the CastStart rule above).
+            Outcome::CastFailFanOut { reason: CAST_CANCELLED_RELAY.to_string() }
         }
 
         ClientWorldMsg::Sit => {

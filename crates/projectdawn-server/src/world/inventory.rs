@@ -266,14 +266,15 @@ impl ItemVault {
         Self { slots: vec![None; n] }
     }
 
-    /// NO RENT: empty every slot holding a NO RENT item. Returns how many
-    /// stacks went.
-    pub fn purge_no_rent(&mut self) -> usize {
-        let mut gone = 0;
+    /// NO RENT: empty every slot holding a NO RENT item. Returns the stacks
+    /// that went, (item path, count), for the ledger.
+    pub fn purge_no_rent(&mut self) -> Vec<(String, u32)> {
+        let mut gone = Vec::new();
         for slot in self.slots.iter_mut() {
             if slot.as_ref().is_some_and(|e| super::items::is_no_rent(&e.item_path)) {
-                *slot = None;
-                gone += 1;
+                if let Some(e) = slot.take() {
+                    gone.push((e.item_path, e.count));
+                }
             }
         }
         gone
@@ -627,33 +628,37 @@ impl PlayerInventory {
     }
 
     /// NO RENT: remove every NO RENT stack the character carries (base slots,
-    /// worn gear, every bag including a held one, the cursor). Returns how
-    /// many stacks went.
-    pub fn purge_no_rent(&mut self) -> usize {
+    /// worn gear, every bag including a held one, the cursor). Returns the
+    /// stacks that went, (item path, count), for the ledger.
+    pub fn purge_no_rent(&mut self) -> Vec<(String, u32)> {
         let doomed = |e: &InventoryEntry| super::items::is_no_rent(&e.item_path);
-        let mut gone = 0;
+        let mut gone: Vec<(String, u32)> = Vec::new();
         for slot in self.base.iter_mut() {
             if slot.as_ref().is_some_and(doomed) {
-                *slot = None;
-                gone += 1;
+                if let Some(e) = slot.take() {
+                    gone.push((e.item_path, e.count));
+                }
             }
         }
         let worn: Vec<u8> = self.equipment.iter().filter(|(_, e)| doomed(e)).map(|(k, _)| *k).collect();
         for k in worn {
-            self.equipment.remove(&k);
-            gone += 1;
+            if let Some(e) = self.equipment.remove(&k) {
+                gone.push((e.item_path, e.count));
+            }
         }
         for arr in self.bags.values_mut() {
             for slot in arr.iter_mut() {
                 if slot.as_ref().is_some_and(doomed) {
-                    *slot = None;
-                    gone += 1;
+                    if let Some(e) = slot.take() {
+                        gone.push((e.item_path, e.count));
+                    }
                 }
             }
         }
         if self.cursor.as_ref().is_some_and(doomed) {
-            self.cursor = None;
-            gone += 1;
+            if let Some(e) = self.cursor.take() {
+                gone.push((e.item_path, e.count));
+            }
         }
         gone
     }

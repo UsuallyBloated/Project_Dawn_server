@@ -31,6 +31,7 @@ mod handlers;
 pub mod hunger;
 mod inventory;
 mod items;
+pub mod ledger;
 mod loot;
 mod named;
 mod npcs;

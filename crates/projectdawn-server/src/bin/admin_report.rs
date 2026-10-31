@@ -17,6 +17,7 @@
 //! no network surface and no live-server dependency.
 
 use anyhow::{Context, Result};
+use projectdawn_server::db;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::FromRow;
 use std::collections::HashMap;
@@ -53,7 +54,11 @@ struct Character {
     bank_gold: i64,
     bank_silver: i64,
     bank_copper: i64,
-    alignment_score: i64,
+    /// A float since the factions build (2026-10-23): every cast moves it by a
+    /// fraction of a point, and SQLite keeps a fraction in the 0001 `INTEGER`
+    /// column as a REAL, which an `i64` read refuses ("mismatched types").
+    /// `CHARACTER_QUERY` casts it, as the server's own loader does.
+    alignment_score: f64,
     zone: Option<String>,
     created_at: Option<String>,
     last_played_at: Option<String>,
@@ -61,6 +66,16 @@ struct Character {
     /// so the name stays reserved and the character can be inspected/restored.
     deleted_at: Option<String>,
 }
+
+/// Every character, soft-deleted ones included (no `deleted_at IS NULL`
+/// filter: the report WANTS those rows). One home for the query so the
+/// regression test below runs exactly what the report runs.
+const CHARACTER_QUERY: &str = "SELECT id, account_id, name, race, class, level,
+            platinum, gold, silver, copper,
+            bank_platinum, bank_gold, bank_silver, bank_copper,
+            CAST(alignment_score AS REAL) AS alignment_score,
+            zone, created_at, last_played_at, deleted_at
+     FROM characters ORDER BY account_id, id";
 
 /// Per-character inventory aggregate from `character_items` (rows are per-stack,
 /// `count` is the stack size; `location` is 'base' / 'bag_<i>' / 'equip').
@@ -86,6 +101,8 @@ struct GmAction {
 
 /// How many of the newest audit rows the report shows.
 const GM_ACTIONS_SHOWN: i64 = 50;
+/// How many of the newest item ledger rows the report shows.
+const LEDGER_ROWS_SHOWN: i64 = 50;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -114,17 +131,10 @@ async fn main() -> Result<()> {
     .await
     .context("querying accounts")?;
 
-    // No `deleted_at IS NULL` filter — we WANT the soft-deleted rows here.
-    let characters: Vec<Character> = sqlx::query_as(
-        "SELECT id, account_id, name, race, class, level,
-                platinum, gold, silver, copper,
-                bank_platinum, bank_gold, bank_silver, bank_copper,
-                alignment_score, zone, created_at, last_played_at, deleted_at
-         FROM characters ORDER BY account_id, id",
-    )
-    .fetch_all(&pool)
-    .await
-    .context("querying characters")?;
+    let characters: Vec<Character> = sqlx::query_as(CHARACTER_QUERY)
+        .fetch_all(&pool)
+        .await
+        .context("querying characters")?;
 
     // Per-character inventory rollup, one grouped query. char_id -> aggregate.
     let item_rows: Vec<ItemAgg> = sqlx::query_as(
@@ -157,10 +167,25 @@ async fn main() -> Result<()> {
     .await
     .context("querying gm_actions")?;
 
+    // The item ledger (migration 0017; the rules in the server's
+    // world/ledger.rs): the newest rows, and the conservation check, which
+    // names every account and item whose ledger and stores disagree.
+    let ledger_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM item_events")
+        .fetch_one(&pool)
+        .await
+        .context("counting item_events")?;
+    let ledger_rows = db::recent_item_events(&pool, LEDGER_ROWS_SHOWN)
+        .await
+        .context("querying item_events")?;
+    let mismatches = db::ledger_mismatches(&pool)
+        .await
+        .context("checking the ledger against the stores")?;
+
     let generated = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
 
     print_console_summary(&db_path, &accounts, &characters, &items);
     print_gm_actions(&gm_actions, gm_total);
+    print_ledger(&ledger_rows, ledger_total, &mismatches);
 
     let html = render_html(
         &db_path,
@@ -170,6 +195,9 @@ async fn main() -> Result<()> {
         &items,
         &gm_actions,
         gm_total,
+        &ledger_rows,
+        ledger_total,
+        &mismatches,
     );
     std::fs::write(&out_path, html).with_context(|| format!("writing '{out_path}'"))?;
     println!("\nHTML report written to: {out_path}");
@@ -337,6 +365,7 @@ fn total_copper(p: i64, g: i64, s: i64, c: i64) -> i64 {
     p * 1_000_000 + g * 10_000 + s * 100 + c
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_html(
     db_path: &str,
     generated: &str,
@@ -345,6 +374,9 @@ fn render_html(
     items: &HashMap<i64, ItemAgg>,
     gm_actions: &[GmAction],
     gm_total: i64,
+    ledger_rows: &[db::ItemEventView],
+    ledger_total: i64,
+    mismatches: &[db::LedgerMismatch],
 ) -> String {
     let deleted = characters.iter().filter(|c| c.deleted_at.is_some()).count();
     let active = characters.len() - deleted;
@@ -442,6 +474,7 @@ fn render_html(
     }
 
     render_gm_actions(&mut h, gm_actions, gm_total);
+    render_ledger(&mut h, ledger_rows, ledger_total, mismatches);
 
     h.push_str("</main>\n");
     h.push_str("<footer>Read-only ops view. Generated by <code>admin_report</code> — no changes were written to the database.</footer>\n");
@@ -493,6 +526,134 @@ fn render_gm_actions(h: &mut String, actions: &[GmAction], total: i64) {
         let _ = write!(h, "<td>{}</td>", cell(g.char_name.as_deref(), "-"));
         let _ = write!(h, "<td class=\"mono\">{}</td>", esc(&g.command));
         let _ = write!(h, "<td class=\"mono\">{}</td>", cell(g.args.as_deref(), ""));
+        h.push_str("</tr>\n");
+    }
+    h.push_str("</tbody>\n</table>\n</div>\n</section>\n");
+}
+
+/// The item ledger on the console: the conservation check first (the part an
+/// operator acts on), then the newest rows.
+fn print_ledger(rows: &[db::ItemEventView], total: i64, mismatches: &[db::LedgerMismatch]) {
+    println!("{}", "-".repeat(72));
+    if mismatches.is_empty() {
+        println!("Item ledger check: the books balance (every account's rows match its stores).");
+    } else {
+        println!("Item ledger check: {} MISMATCH(ES), a dupe or a loss each:", mismatches.len());
+        for m in mismatches {
+            println!(
+                "  account #{:<4} {:<34} ledger says {:>8}   stores hold {:>8}",
+                m.account_id,
+                m.item_path.as_deref().map(short_item).unwrap_or_else(|| "coin (copper)".to_string()),
+                m.ledger,
+                m.held
+            );
+        }
+    }
+    if total == 0 {
+        println!("Item ledger: no rows.");
+        return;
+    }
+    if total > rows.len() as i64 {
+        println!("Item ledger: {total} rows (newest {} shown)", rows.len());
+    } else {
+        println!("Item ledger: {total} rows");
+    }
+    for r in rows {
+        println!(
+            "  {}  {:<16} {:<13} {:<30} {:>4} {:>+5} {:>+8}  {}",
+            fmt_at(r.at),
+            r.char_name.as_deref().unwrap_or("(character gone)"),
+            r.action,
+            r.item_path.as_deref().map(short_item).unwrap_or_default(),
+            r.count,
+            r.delta,
+            r.copper,
+            r.detail.as_deref().unwrap_or(""),
+        );
+    }
+}
+
+/// A unix-seconds stamp as UTC, the way `gm_actions` rows read.
+fn fmt_at(at: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(at, 0)
+        .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| at.to_string())
+}
+
+/// `res://data/loot/items/bread_loaf.tres` reads as `bread_loaf`.
+fn short_item(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).trim_end_matches(".tres").to_string()
+}
+
+/// The ledger as two cards: the check (red when the books do not balance),
+/// then the newest rows, each filterable by the character's name.
+fn render_ledger(
+    h: &mut String,
+    rows: &[db::ItemEventView],
+    total: i64,
+    mismatches: &[db::LedgerMismatch],
+) {
+    if mismatches.is_empty() {
+        h.push_str("<section class=\"card\" data-name=\"item ledger check\">\n");
+        h.push_str("<div class=\"card-head\"><span class=\"acc-name\">Item ledger check</span>");
+        h.push_str("<span class=\"badge ok\">BALANCED</span></div>\n");
+        h.push_str("<p class=\"acc-meta\"><span>Every account's ledger rows sum to what its inventories, vaults and wallets hold.</span></p>\n</section>\n");
+    } else {
+        h.push_str("<section class=\"card orphan\" data-name=\"item ledger check\">\n");
+        h.push_str("<div class=\"card-head\"><span class=\"acc-name\">Item ledger check</span>");
+        let _ = write!(h, "<span class=\"badge ban\">{} MISMATCH{}</span></div>\n", mismatches.len(), if mismatches.len() == 1 { "" } else { "ES" });
+        h.push_str("<p class=\"acc-meta\"><span>An account whose ledger and stores disagree: more held than the rows account for is a dupe, less is a loss. The newest rows below say when.</span></p>\n");
+        h.push_str("<div class=\"table-wrap\">\n<table class=\"chars\">\n<thead><tr>");
+        for col in ["Account", "Item", "Ledger says", "Stores hold"] {
+            let _ = write!(h, "<th>{col}</th>");
+        }
+        h.push_str("</tr></thead>\n<tbody>\n");
+        for m in mismatches {
+            let _ = write!(h, "<tr data-name=\"account {}\" data-deleted=\"false\">", m.account_id);
+            let _ = write!(h, "<td class=\"mono\">#{}</td>", m.account_id);
+            let _ = write!(
+                h,
+                "<td class=\"mono\">{}</td>",
+                esc(&m.item_path.as_deref().map(short_item).unwrap_or_else(|| "coin (copper)".to_string()))
+            );
+            let _ = write!(h, "<td>{}</td><td>{}</td>", m.ledger, m.held);
+            h.push_str("</tr>\n");
+        }
+        h.push_str("</tbody>\n</table>\n</div>\n</section>\n");
+    }
+
+    h.push_str("<section class=\"card\" data-name=\"item ledger\">\n");
+    h.push_str("<div class=\"card-head\"><span class=\"acc-name\">Item ledger</span>");
+    h.push_str("<span class=\"badge gm\">AUDIT</span></div>\n");
+    if total == 0 {
+        h.push_str("<p class=\"no-chars\">No rows yet.</p>\n</section>\n");
+        return;
+    }
+    let shown = if total > rows.len() as i64 {
+        format!("{total} rows, newest {} shown", rows.len())
+    } else {
+        format!("{total} rows")
+    };
+    let _ = write!(
+        h,
+        "<p class=\"acc-meta\"><span>{shown}. One row per movement of items or coin into or out of a \
+         character's holdings, written by the server with the move. <code>delta</code> is the change \
+         to the account's holdings of the item (0 for a vault move), <code>copper</code> the same for coin.</span></p>\n"
+    );
+    h.push_str("<div class=\"table-wrap\">\n<table class=\"chars\">\n<thead><tr>");
+    for col in ["When (UTC)", "Character", "Action", "Item", "Count", "Delta", "Copper", "Detail"] {
+        let _ = write!(h, "<th>{col}</th>");
+    }
+    h.push_str("</tr></thead>\n<tbody>\n");
+    for r in rows {
+        let filter_key = r.char_name.as_deref().unwrap_or("").to_lowercase();
+        let _ = write!(h, "<tr data-name=\"{}\" data-deleted=\"false\">", esc(&filter_key));
+        let _ = write!(h, "<td class=\"muted mono\">{}</td>", esc(&fmt_at(r.at)));
+        let _ = write!(h, "<td class=\"cname\">{}</td>", cell(r.char_name.as_deref(), "(character gone)"));
+        let _ = write!(h, "<td class=\"mono\">{}</td>", esc(&r.action));
+        let _ = write!(h, "<td class=\"mono\">{}</td>", cell(r.item_path.as_deref().map(short_item).as_deref(), ""));
+        let _ = write!(h, "<td>{}</td><td>{:+}</td><td>{:+}</td>", r.count, r.delta, r.copper);
+        let _ = write!(h, "<td class=\"mono\">{}</td>", cell(r.detail.as_deref(), ""));
         h.push_str("</tr>\n");
     }
     h.push_str("</tbody>\n</table>\n</div>\n</section>\n");
@@ -558,7 +719,7 @@ fn render_char_table(h: &mut String, chars: &[&Character], items: &HashMap<i64, 
                 agg.stacks, agg.equipped, agg.items
             );
         }
-        let _ = write!(h, "<td>{}</td>", c.alignment_score);
+        let _ = write!(h, "<td>{:.2}</td>", c.alignment_score);
         let _ = write!(h, "<td class=\"muted\">{}</td>", cell(c.created_at.as_deref(), "?"));
         let _ = write!(h, "<td>{}</td>", cell(c.last_played_at.as_deref(), "never"));
         match &c.deleted_at {
@@ -674,3 +835,53 @@ function applyFilter() {
   });
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    //! The report's own queries against a migrated database, so a column whose
+    //! type moves under the report fails here and not at the operator's
+    //! terminal. Alignment became a float on 2026-10-23 and the report went on
+    //! reading it as an integer for a week; the first run on a world with a
+    //! fractional score (the R720, 2026-10-30) died before the ledger cards.
+    use super::*;
+
+    /// A migrated database in a fresh temp directory, as the db tests build one.
+    async fn fresh_pool() -> (sqlx::SqlitePool, tempfile::TempDir) {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("report.db").display());
+        let pool = db::open(&url).await.expect("open");
+        db::migrate(&pool).await.expect("migrate");
+        (pool, tmp)
+    }
+
+    /// A character whose alignment carries a fraction (every cast moves it by
+    /// one) must still load. With `alignment_score: i64` this fails with
+    /// "mismatched types; Rust type `i64` ... not compatible with SQL type `REAL`".
+    #[tokio::test]
+    async fn the_report_reads_a_fractional_alignment() {
+        let (pool, _tmp) = fresh_pool().await;
+        let account = db::create_account(&pool, "reporter", "password123", None)
+            .await
+            .expect("account");
+        let char_id = db::create_character(&pool, account, "Fraction", "Human", "Cleric")
+            .await
+            .expect("character");
+        sqlx::query("UPDATE characters SET alignment_score = 0.37, alignment_seeded = 1 WHERE id = ?1")
+            .bind(char_id)
+            .execute(&pool)
+            .await
+            .expect("write a fractional score");
+
+        let characters: Vec<Character> = sqlx::query_as(CHARACTER_QUERY)
+            .fetch_all(&pool)
+            .await
+            .expect("the report's character query");
+        let c = characters
+            .iter()
+            .find(|c| c.id == char_id)
+            .expect("the character is listed");
+        // Compared as the report prints it, so the test compiles against the
+        // old `i64` field too and fails there at the query, where the report did.
+        assert_eq!(format!("{:.2}", c.alignment_score), "0.37");
+    }
+}

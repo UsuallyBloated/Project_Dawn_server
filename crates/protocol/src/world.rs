@@ -1230,6 +1230,10 @@ pub enum ServerWorldMsg {
     // spell-id table on either side yet, and the reliable system channel
     // makes the string cost negligible. A future track can add a SpellDefinitions
     // numeric id table and tighten the wire if it ever matters.
+    // Since 2026-10-30 the server relays only spells it knows, under its own
+    // name and at its own cast time (`duration`), and a cancelled cast's
+    // `CastFail` carries a fixed reason: nothing a client wrote reaches a
+    // peer's screen through these.
     CastStart {
         caster: EntityId,
         spell_name: String,

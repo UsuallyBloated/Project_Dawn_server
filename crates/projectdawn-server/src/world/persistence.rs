@@ -21,7 +21,7 @@ use sqlx::SqlitePool;
 /// reward saving the inventory while a bank withdrawal sits unsaved left the
 /// item in both). See db::save_stores_atomic.
 pub async fn persist_dirty_stores(pool: &SqlitePool, conn: &mut PerConnection) -> AuthResult<()> {
-    if !conn.any_store_dirty() {
+    if !conn.any_store_dirty() && conn.item_events.is_empty() {
         return Ok(());
     }
     let inv_rows = conn.inventory_dirty.then(|| conn.inventory.to_rows());
@@ -38,15 +38,18 @@ pub async fn persist_dirty_stores(pool: &SqlitePool, conn: &mut PerConnection) -
         conn.bank_dirty.then_some(conn.bank_coins),
         bank_rows.as_deref(),
         acct_rows.as_deref(),
+        &conn.item_events,
     )
     .await?;
     // All-or-nothing: the transaction committed, so every flag it covered is
     // clean. Clearing them individually would reopen the very window this closes.
+    // The ledger rows it wrote leave the queue with them (world/ledger.rs).
     conn.inventory_dirty = false;
     conn.coins_dirty = false;
     conn.bank_dirty = false;
     conn.bank_items_dirty = false;
     conn.account_bank_items_dirty = false;
+    conn.item_events.clear();
     Ok(())
 }
 
@@ -160,6 +163,7 @@ pub fn has_unsaved_state(conn: &PerConnection) -> bool {
     conn.is_dirty_for_persist()
         || conn.is_dirty_for_resource_persist()
         || conn.any_store_dirty()
+        || !conn.item_events.is_empty()
         || conn.skills_dirty
         || conn.factions_dirty
         || !conn.quests_dirty.is_empty()

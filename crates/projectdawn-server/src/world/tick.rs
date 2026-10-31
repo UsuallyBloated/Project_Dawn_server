@@ -14,6 +14,7 @@ use super::{
     handlers::{self, Outcome},
     inventory,
     items,
+    ledger::{self, ItemAction},
     loot::{self, LootBag},
     persistence,
     pet_templates,
@@ -98,11 +99,15 @@ const FIST_WEAPON_DELAY: f32 = 2.0;
 /// Off-hand swings are slower than main-hand by this factor (client
 /// `OFFHAND_DELAY_MULT`).
 const OFFHAND_DELAY_MULT: f32 = 1.5;
-/// Strongest single non-stacking haste the client models (Enchanter "Haste",
-/// `haste_amount` 0.5 = 50% faster). The floor assumes a player is fully hasted
-/// so a legitimately-hasted swing is never rejected. (Player haste is otherwise
-/// a server no-op today; this is the safe over-estimate.)
+/// The strongest haste the gate honours, however many Haste buffs the server
+/// holds for a player: a cap on their sum (the Enchanter's 30% and a song's
+/// 10% are the most the data stacks), never an assumption about anyone.
+/// Until 2026-10-30 the gate assumed everyone had this much, since player
+/// haste was client-paced; a modified client could swing at twice an
+/// unhasted honest rate. It reads each player's real haste now.
 const MAX_MODELED_HASTE: f32 = 0.5;
+/// The client's own floor on a swing interval (`combat.gd`'s `maxf(0.5, ...)`).
+const CLIENT_MIN_SWING_SECS: f32 = 0.5;
 /// Tolerance subtracted from the computed minimum to absorb the 20 Hz tick, UDP
 /// bunching, and Godot timer granularity — so honest jitter never trips it.
 /// Sized for the tightest legit case: a fully-hasted player on the fastest
@@ -151,26 +156,33 @@ struct PendingSave {
 /// client drops one stack per click, far below it.
 const MAX_DROPS_PER_TICK: u32 = 4;
 
-/// Minimum wall-clock seconds allowed between two SAME-HAND swings before the
-/// faster one is a forgery. Mirrors the client pacing (`combat.gd`):
-/// `weapon_delay` (fists 2.0) times the off-hand multiplier, scaled by the
-/// strongest modeled haste so a fully-hasted player never trips, minus a jitter
-/// grace, floored at `HARD_MIN_SWING_SECS`. Only ever used to reject "too fast"
-/// — never "too slow" (the client sends one Attack per swing at its own
-/// cadence, so real arrivals are already >= the interval).
-///
-/// Deliberate residual: because we can't tell a hasted client from a non-hasted
-/// one at the gate (haste is client-paced, a server no-op today), we ASSUME max
-/// haste for everyone. A forged non-hasted client can therefore swing up to the
-/// fully-hasted rate (~2x a non-hasted honest swing). That is an accepted trade
-/// — the gate exists to kill wire-speed spam (dozens/sec), not to enforce exact
-/// cadence. Tighten `MAX_MODELED_HASTE` toward the player's real haste only once
-/// server-authoritative haste exists, or false positives return for hasted play.
-fn min_swing_interval_secs(weapon_delay: f32, is_offhand: bool) -> f32 {
+/// The fastest same-hand interval an honest client paces at: `weapon_delay`
+/// (fists 2.0) times the off-hand multiplier, scaled by the player's haste
+/// (`combat.gd::_update_attack_interval`, which reads the Haste buff the
+/// server fans; the server sums its Haste buffs, which can only be as
+/// lenient as the client's single strongest), floored at the client's own
+/// 0.5 s. The client sends one Attack per swing at this cadence with no burst
+/// or catch-up, and restarts the interval on a re-target or a toggle, so real
+/// arrivals are already >= it.
+fn honest_swing_pace(weapon_delay: f32, is_offhand: bool, haste: f32) -> f32 {
     let hand_mult = if is_offhand { OFFHAND_DELAY_MULT } else { 1.0 };
-    let fastest_legit =
-        (weapon_delay * hand_mult * (1.0 - MAX_MODELED_HASTE)).max(HARD_MIN_SWING_SECS);
-    (fastest_legit - SWING_RATE_GRACE_SECS).max(HARD_MIN_SWING_SECS)
+    let haste = haste.clamp(0.0, MAX_MODELED_HASTE);
+    (weapon_delay * hand_mult * (1.0 - haste)).max(CLIENT_MIN_SWING_SECS)
+}
+
+/// Minimum wall-clock seconds allowed between two SAME-HAND swings before the
+/// faster one is a forgery: the honest pace minus a jitter grace, floored at
+/// `HARD_MIN_SWING_SECS`. Only ever used to reject "too fast", never "too
+/// slow". `pace_now` is the honest pace from the weapon and haste at this
+/// swing; `last_pace` the pace the hand's last accepted swing was judged by
+/// (`PerConnection::last_swing_pace`). The client timed this swing when that
+/// one fired (a Godot Timer applies a new wait time at its next start), so
+/// the gate takes the faster of the two: a Haste buff that ran out, or a
+/// slower weapon swapped in, between them costs no honest swing. A forged
+/// client gains one swing at the old pacing from either change and nothing
+/// more, since every accepted swing re-stamps the pace.
+fn min_swing_interval_secs(pace_now: f32, last_pace: f32) -> f32 {
+    (pace_now.min(last_pace) - SWING_RATE_GRACE_SECS).max(HARD_MIN_SWING_SECS)
 }
 
 /// True if a same-hand swing arriving `now` is faster than `min_interval` since
@@ -1143,8 +1155,10 @@ fn pet_owner_cid(entity: &Entity) -> Option<ClientId> {
 /// Who is told an entity is gone for real: the in-world players who could
 /// see its cell, plus a pet's owner wherever they are (`pet_owner_cid`).
 /// The room: every in-world player within `SAY_RANGE` of `speaker`, never the
-/// speaker. What a `/say`, the eating emote and the jump relay reach. Written
-/// keep-only-when-in-range, so a non-finite position hears nothing.
+/// speaker. What a `/say` and the eating emote reach (the jump relay reaches
+/// the jumper's AOI view instead, since 2026-10-29: a jump is seen, not
+/// heard). Written keep-only-when-in-range, so a non-finite position hears
+/// nothing.
 fn say_recipients(speaker: ClientId, connections: &HashMap<ClientId, PerConnection>) -> Vec<ClientId> {
     let Some(from) = connections.get(&speaker) else {
         return Vec::new();
@@ -1156,12 +1170,10 @@ fn say_recipients(speaker: ClientId, connections: &HashMap<ClientId, PerConnecti
         .collect()
 }
 
-/// Wall-clock unix seconds (the logout stamp for NO RENT items).
+/// Wall-clock unix seconds (the logout stamp for NO RENT items; the ledger's
+/// rows are stamped by the same clock).
 fn unix_now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    ledger::unix_now_secs()
 }
 
 /// Track 18.1 — a swing at a mob trains the hand's weapon skill and defense,
@@ -1596,14 +1608,15 @@ async fn shut_down_world(
     }
 
     // A few ticks of transport service so the reliable kicks are delivered
-    // (and resent if one was lost), then close every connection.
+    // (and resent if one was lost), then close every connection. The clock
+    // before the transport, as in the live loop.
     for _ in 0..5 {
         transport.send_packets(server);
         tokio::time::sleep(TICK_DT).await;
+        server.update(TICK_DT);
         if let Err(e) = transport.update(TICK_DT, server) {
             tracing::warn!(error = %e, "transport update error during shutdown");
         }
-        server.update(TICK_DT);
     }
     transport.send_packets(server);
     transport.disconnect_all(server);
@@ -1647,6 +1660,9 @@ pub async fn run(
     let mut enemy_pos_sent: u64 = 0;
     let mut last_fan_report = Instant::now();
     let mut last_ban_sweep = Instant::now();
+    // The item ledger's daily sweep (world/ledger.rs): None until it has run
+    // once, so the first tick runs it at boot.
+    let mut last_ledger_sweep: Option<Instant> = None;
     let mut last_time_broadcast = Instant::now();
     // The ban sweep's query runs on its own task and reports back here, so
     // the world loop never waits on the database for it.
@@ -1732,18 +1748,24 @@ pub async fn run(
             return Ok(());
         }
 
-        // 1. Advance the transport (reads UDP packets, processes netcode handshakes).
+        // 1. Advance renet's per-connection clocks, then the transport (UDP
+        //    packets in, netcode handshakes, the clients' acks handed to renet).
+        //    That is renet's documented order, and the one its RTT needs: an
+        //    ack is timed against the connection's clock as the transport hands
+        //    it over, and that clock moves nowhere but in `server.update`. With
+        //    the transport first (until 2026-10-30), an ack read in the tick
+        //    after its packet went out measured zero, so the `player link`
+        //    line read rtt_ms=0.0 for everyone. An RTT now reads in whole
+        //    ticks, rounded up: 50 ms is the floor. The same clock drives the
+        //    reliable resends: a lost packet is resent only when the clock
+        //    passes its resend time, and this call was missing until
+        //    2026-10-12, so a lost reliable packet (an inventory delta, a chat
+        //    line, a kick) was never resent; invisible on a lossless tailnet,
+        //    not on the internet.
+        server.update(TICK_DT);
         if let Err(e) = transport.update(TICK_DT, &mut server) {
             tracing::warn!(error = %e, "transport update error");
         }
-        //    And renet itself: its reliable channels resend a lost packet only
-        //    when the connection's clock has moved past the resend time, and
-        //    that clock advances nowhere but here (the transport's update does
-        //    not call it). This call was missing until 2026-10-12, so a lost
-        //    reliable packet (an inventory delta, a chat line, a kick) was
-        //    never resent; invisible on a lossless tailnet, not on the
-        //    internet.
-        server.update(TICK_DT);
 
         // 2. Drain transport-level events (Connected/Disconnected).
         while let Some(event) = server.get_event() {
@@ -1976,14 +1998,25 @@ pub async fn run(
                                 // so the next checkpoint writes the loss.
                                 let away = logged_out_at.map(|t| unix_now_secs() - t);
                                 if away.is_some_and(|a| a >= items::NO_RENT_AFTER_SECS) {
-                                    let gone = conn.inventory.purge_no_rent()
-                                        + conn.bank_items.purge_no_rent()
-                                        + conn.account_bank_items.purge_no_rent();
-                                    if gone > 0 {
+                                    let mut gone = conn.inventory.purge_no_rent();
+                                    gone.extend(conn.bank_items.purge_no_rent());
+                                    gone.extend(conn.account_bank_items.purge_no_rent());
+                                    if !gone.is_empty() {
                                         conn.inventory_dirty = true;
                                         conn.bank_items_dirty = true;
                                         conn.account_bank_items_dirty = true;
-                                        tracing::info!(char_id, gone, away_secs = away, "NO RENT items purged at login");
+                                        let stacks = gone.len();
+                                        let detail = Some(format!("away {} s", away.unwrap_or(0)));
+                                        for (path, count) in gone {
+                                            conn.ledger(ledger::item_event(
+                                                ItemAction::NoRent,
+                                                &path,
+                                                count,
+                                                -i64::from(count),
+                                                detail.clone(),
+                                            ));
+                                        }
+                                        tracing::info!(char_id, gone = stacks, away_secs = away, "NO RENT items purged at login");
                                     }
                                 }
                             }
@@ -3136,10 +3169,12 @@ pub async fn run(
         }
 
         // 4b-jump. The jump relay: one PlayerJumped per jump begun this tick,
-        //     to the in-world players within the Say channel's reach of the
-        //     jumper, never to the jumper, whose own client already played
-        //     the hop. Position is untouched: the relay is the peers'
-        //     animation cue and nothing else.
+        //     to the in-world players who can see the jumper (the AOI view,
+        //     the same audience as the jumper's Position fan in step 6; a
+        //     jump is seen, not heard: the user's "jump check" on someone
+        //     far off, 2026-10-29), never to the jumper, whose own client
+        //     already played the hop. Position is untouched: the relay is
+        //     the peers' animation cue and nothing else.
         for jumper_id in jump_fanouts.drain(..) {
             if to_disconnect.contains(&jumper_id) {
                 continue;
@@ -3147,7 +3182,12 @@ pub async fn run(
             let Some(jumper) = connections.get(&jumper_id) else {
                 continue;
             };
-            let recipients = say_recipients(jumper_id, &connections);
+            let visible = aoi.entities_visible_from(jumper.aoi_cell);
+            let recipients: Vec<ClientId> = connections
+                .iter()
+                .filter(|(id, c)| **id != jumper_id && c.in_world && visible.contains(id))
+                .map(|(id, _)| *id)
+                .collect();
             handlers::fan_out_player_jumped(&mut server, &recipients, jumper.char_id as u64);
         }
 
@@ -3940,23 +3980,22 @@ pub async fn run(
                 // before the class's level (skills::dual_wield_level), and
                 // never for a class without it. A Monk fights with both
                 // fists, so with BOTH hands empty a Monk's off hand punches;
-                // everyone else still needs a real off-hand weapon.
+                // everyone else still needs a real off-hand weapon. And no
+                // off hand swings beside a two-handed main hand (2026-10-29;
+                // the equip refuses the pairing, this is the backstop). One
+                // home for the rule: skills::offhand_swing_refusal.
                 if intent.is_offhand {
-                    if !skills::can_dual_wield(&attacker_conn.class, attacker_conn.level) {
+                    if let Some(why) = skills::offhand_swing_refusal(
+                        &attacker_conn.class,
+                        attacker_conn.level,
+                        &attacker_conn.equipped_weapon_path(false),
+                        &server_weapon_path,
+                    ) {
                         tracing::info!(
                             attacker = intent.attacker,
                             class = %attacker_conn.class,
                             level = attacker_conn.level,
-                            "Attack rejected — off-hand swing before the class can dual wield"
-                        );
-                        continue;
-                    }
-                    let monk_fists = attacker_conn.class == "Monk"
-                        && attacker_conn.equipped_weapon_path(false).is_empty();
-                    if server_weapon_path.is_empty() && !monk_fists {
-                        tracing::info!(
-                            attacker = intent.attacker,
-                            "Attack rejected — off-hand swing with no off-hand weapon equipped"
+                            "Attack rejected — off-hand swing {why}"
                         );
                         continue;
                     }
@@ -3975,12 +4014,17 @@ pub async fn run(
                 // Dropped silently (no Miss fan-out — that would reward the spammer
                 // and desync their local timer). The timestamp advances only on an
                 // ACCEPTED swing (below, after calc_swing), so a spammer can't walk
-                // the window forward with rejected swings.
+                // the window forward with rejected swings. The pace is the
+                // player's own: the weapon and the haste the server holds for
+                // them (the client-authority audit's Phase 4), not the
+                // fully-hasted allowance everyone used to get.
                 let hand = intent.is_offhand as usize;
                 let base_delay = items::lookup(&server_weapon_path)
                     .map(|w| w.weapon_delay)
                     .unwrap_or(FIST_WEAPON_DELAY);
-                let min_interval = min_swing_interval_secs(base_delay, intent.is_offhand);
+                let haste = attacker_conn.haste_total();
+                let pace_now = honest_swing_pace(base_delay, intent.is_offhand, haste);
+                let min_interval = min_swing_interval_secs(pace_now, attacker_conn.last_swing_pace[hand]);
                 // A skill's swing is outside the auto-attack limiter: its own
                 // cooldown paces it (step 4g charged it), and it neither reads
                 // nor advances the hand's timer.
@@ -3989,6 +4033,7 @@ pub async fn run(
                         attacker = intent.attacker,
                         is_offhand = intent.is_offhand,
                         weapon_delay = base_delay,
+                        haste,
                         min_interval,
                         "Attack rejected — swing-rate limit (too fast)"
                     );
@@ -4013,6 +4058,7 @@ pub async fn run(
                 if intent.skill.is_none() {
                     if let Some(a) = connections.get_mut(&attacker_cid) {
                         a.last_swing_at[hand] = Some(now);
+                        a.last_swing_pace[hand] = pace_now;
                     }
                 }
                 // The first swing from the shadows ends a Hide, skill or not.
@@ -5314,6 +5360,13 @@ pub async fn run(
                                     let placed = n - leftover;
                                     if placed > 0 {
                                         conn.inventory_dirty = true;
+                                        conn.ledger(ledger::item_event(
+                                            ItemAction::Summon,
+                                            &spell.summon_item,
+                                            placed,
+                                            i64::from(placed),
+                                            Some(spell.name.clone()),
+                                        ));
                                     }
                                     let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
                                         .iter()
@@ -7488,9 +7541,14 @@ pub async fn run(
                             close_trade(&mut server, &mut trade_manager, acid, "Trade failed.");
                             continue;
                         };
+                        // The ledger queues roll back with the snapshots if
+                        // the commit fails.
+                        let a_mark = connections.get(&acid).map(|c| c.ledger_mark()).unwrap_or(0);
+                        let b_mark = connections.get(&bcid).map(|c| c.ledger_mark()).unwrap_or(0);
                         let mut touched_by: HashMap<ClientId, Vec<(String, u32)>> =
                             HashMap::new();
                         let mut apply_side = |cid: ClientId,
+                                              partner: ClientId,
                                               gives: &[(String, u32, String, u32)],
                                               receives: &[(String, u32, String, u32)],
                                               pay: protocol::world::Coins,
@@ -7522,10 +7580,36 @@ pub async fn run(
                             conn.coins.silver += gain.silver;
                             conn.coins.copper += gain.copper;
                             conn.inventory_dirty = true;
+                            // The ledger: one row per stack each way and one
+                            // for the coin, written with the commit below.
+                            let detail = Some(format!("char:{partner}"));
+                            for (_, _, path, count) in gives {
+                                conn.ledger(ledger::item_event(
+                                    ItemAction::TradeOut,
+                                    path,
+                                    *count,
+                                    -i64::from(*count),
+                                    detail.clone(),
+                                ));
+                            }
+                            for (_, _, path, count) in receives {
+                                conn.ledger(ledger::item_event(
+                                    ItemAction::TradeIn,
+                                    path,
+                                    *count,
+                                    i64::from(*count),
+                                    detail.clone(),
+                                ));
+                            }
+                            let net = gain.total_copper() - pay.total_copper();
+                            if net != 0 {
+                                conn.ledger(ledger::coin_event(ItemAction::TradeCoins, net, detail));
+                            }
                             true
                         };
                         let applied = apply_side(
                             acid,
+                            bcid,
                             &a_gives,
                             &b_gives,
                             session.a.coins,
@@ -7533,6 +7617,7 @@ pub async fn run(
                             &mut connections,
                         ) && apply_side(
                             bcid,
+                            acid,
                             &b_gives,
                             &a_gives,
                             session.b.coins,
@@ -7542,20 +7627,22 @@ pub async fn run(
                         let persist_ok = if applied {
                             let rows_a = connections
                                 .get(&acid)
-                                .map(|c| (c.inventory.to_rows(), c.coins));
+                                .map(|c| (c.inventory.to_rows(), c.coins, c.item_events.clone()));
                             let rows_b = connections
                                 .get(&bcid)
-                                .map(|c| (c.inventory.to_rows(), c.coins));
+                                .map(|c| (c.inventory.to_rows(), c.coins, c.item_events.clone()));
                             match (rows_a, rows_b) {
-                                (Some((ra, ca)), Some((rb, cb))) => {
+                                (Some((ra, ca, ea)), Some((rb, cb, eb))) => {
                                     match db::commit_trade(
                                         &pool,
                                         acid as i64,
                                         &ra,
                                         ca,
+                                        &ea,
                                         bcid as i64,
                                         &rb,
                                         cb,
+                                        &eb,
                                     )
                                     .await
                                     {
@@ -7583,10 +7670,12 @@ pub async fn run(
                             if let Some(c) = connections.get_mut(&acid) {
                                 c.inventory = a_before.0.clone();
                                 c.coins = a_before.1;
+                                c.ledger_rollback(a_mark);
                             }
                             if let Some(c) = connections.get_mut(&bcid) {
                                 c.inventory = b_before.0.clone();
                                 c.coins = b_before.1;
+                                c.ledger_rollback(b_mark);
                             }
                             close_trade(&mut server, &mut trade_manager, acid, "Trade failed.");
                             continue;
@@ -7595,6 +7684,13 @@ pub async fn run(
                         // deltas for every touched slot, wallets, and the
                         // committed close. The window itself granted nothing.
                         trade_manager.close(acid);
+                        // commit_trade wrote both queues whole; they leave with
+                        // the commit, as the store flush clears its own.
+                        for c in [acid, bcid] {
+                            if let Some(conn) = connections.get_mut(&c) {
+                                conn.item_events.clear();
+                            }
+                        }
                         for c in [acid, bcid] {
                             if let Some(conn) = connections.get(&c) {
                                 if let Some(touched) = touched_by.get(&c) {
@@ -7765,7 +7861,8 @@ pub async fn run(
                 item_path: String,
                 count: u32,
             }
-            let mut before: HashMap<ClientId, (inventory::PlayerInventory, bool)> = HashMap::new();
+            let mut before: HashMap<ClientId, (inventory::PlayerInventory, bool, usize)> =
+                HashMap::new();
             let mut drops_seen: HashMap<ClientId, u32> = HashMap::new();
             let mut done: Vec<DoneDrop> = Vec::new();
             for intent in drop_item_intents.drain(..) {
@@ -7789,7 +7886,7 @@ pub async fn run(
                 // tick, so a failed save can restore exactly what was there.
                 before
                     .entry(owner_cid)
-                    .or_insert_with(|| (conn.inventory.clone(), conn.inventory_dirty));
+                    .or_insert_with(|| (conn.inventory.clone(), conn.inventory_dirty, conn.ledger_mark()));
                 // Bag-aware removal (base or bag_<i>); mirrors the
                 // DestroyItem apply path. Rejects a non-empty
                 // bag-typed slot (the bag must be emptied first).
@@ -7799,6 +7896,13 @@ pub async fn run(
                 {
                     Ok((item_path, count)) => {
                         conn.inventory_dirty = true;
+                        conn.ledger(ledger::item_event(
+                            ItemAction::Drop,
+                            &item_path,
+                            count,
+                            -i64::from(count),
+                            Some("ground".to_string()),
+                        ));
                         done.push(DoneDrop {
                             owner_cid,
                             location: intent.location,
@@ -7820,7 +7924,7 @@ pub async fn run(
                 }
             }
             let mut unsaved: Vec<ClientId> = Vec::new();
-            for (owner_cid, (inventory_before, was_dirty)) in before {
+            for (owner_cid, (inventory_before, was_dirty, ledger_mark)) in before {
                 if !done.iter().any(|d| d.owner_cid == owner_cid) {
                     continue;
                 }
@@ -7832,6 +7936,7 @@ pub async fn run(
                     // The client was told nothing yet.
                     conn.inventory = inventory_before;
                     conn.inventory_dirty = was_dirty;
+                    conn.ledger_rollback(ledger_mark);
                     tracing::error!(
                         owner = owner_cid,
                         error = %e,
@@ -7933,7 +8038,15 @@ pub async fn run(
                 // it can dual wield, is refused with the line the client
                 // already printed; only a modified client reaches this.
                 if let Some((path, _)) = conn.inventory.peek_at(&intent.src_location, intent.src_slot) {
-                    if let Some(line) = skills::equip_refusal(&conn.class, conn.level, &path, intent.equip_slot) {
+                    // The other weapon hand, for the two-hander rule.
+                    let other_hand = match intent.equip_slot {
+                        0 => conn.equipped_weapon_path(true),
+                        1 => conn.equipped_weapon_path(false),
+                        _ => String::new(),
+                    };
+                    if let Some(line) =
+                        skills::equip_refusal(&conn.class, conn.level, &path, intent.equip_slot, &other_hand)
+                    {
                         tracing::info!(
                             owner = intent.owner,
                             src_loc = %intent.src_location,
@@ -8175,6 +8288,13 @@ pub async fn run(
                 };
                 conn.inventory_dirty = true;
                 let (item_path, count) = destroyed;
+                conn.ledger(ledger::item_event(
+                    ItemAction::Destroy,
+                    &item_path,
+                    count,
+                    -i64::from(count),
+                    None,
+                ));
                 let payload = conn.inventory.peek_at(&intent.location, intent.slot);
                 let (delta_path, delta_count) = match payload {
                     Some((p, c)) => (Some(p), c),
@@ -8292,6 +8412,13 @@ pub async fn run(
                     }
                 };
                 conn.inventory_dirty = true;
+                conn.ledger(ledger::item_event(
+                    if is_food || is_drink { ItemAction::Eat } else { ItemAction::Use },
+                    &item.path,
+                    1,
+                    -1,
+                    Some("by hand".to_string()),
+                ));
                 // Inventory Delta for the touched slot.
                 let payload = conn.inventory.peek_at(&intent.location, intent.slot);
                 let (delta_path, delta_count) = match payload {
@@ -8405,6 +8532,13 @@ pub async fn run(
                     continue;
                 }
                 conn.inventory_dirty = true;
+                conn.ledger(ledger::item_event(
+                    ItemAction::GmGive,
+                    &item.path,
+                    placed,
+                    i64::from(placed),
+                    Some("gm".to_string()),
+                ));
                 let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
                     .iter()
                     .map(|(loc, slot)| (loc.clone(), *slot, conn.inventory.peek_at(loc, *slot)))
@@ -8559,6 +8693,15 @@ pub async fn run(
                 conn.coins.spend(actual_cost);
                 conn.coins_dirty = true;
                 conn.inventory_dirty = true;
+                let mut bought = ledger::item_event(
+                    ItemAction::Buy,
+                    &item_path,
+                    placed,
+                    i64::from(placed),
+                    Some(format!("npc:{}", seller.id)),
+                );
+                bought.copper = -actual_cost;
+                conn.ledger(bought);
                 let coins_after = conn.coins;
                 let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
                     .iter()
@@ -8628,8 +8771,9 @@ pub async fn run(
                 let Some(conn) = connections.get_mut(&owner_cid) else {
                     continue;
                 };
-                // Same proximity gate as BuyItem above.
-                match conn.npc_service("vendor") {
+                // Same proximity gate as BuyItem above. The merchant in reach
+                // names the ledger row.
+                let vendor_detail = match conn.npc_service("vendor") {
                     Err(None) => {
                         tracing::info!(
                             owner = intent.owner,
@@ -8644,8 +8788,8 @@ pub async fn run(
                         handlers::send_refusal(&mut server, owner_cid, &format!("{} will not deal with you.", npc.name));
                         continue;
                     }
-                    Ok(_) => {}
-                }
+                    Ok(npc) => format!("npc:{}", npc.id),
+                };
                 // Resolve the slot reference + read the held item
                 // path/count without mutating yet so we can compute
                 // the price first.
@@ -8771,6 +8915,15 @@ pub async fn run(
                 conn.coins.add_payout(total_credit);
                 conn.coins_dirty = true;
                 conn.inventory_dirty = true;
+                let mut sold = ledger::item_event(
+                    ItemAction::Sell,
+                    &item_path,
+                    qty,
+                    -i64::from(qty),
+                    Some(vendor_detail),
+                );
+                sold.copper = total_credit;
+                conn.ledger(sold);
                 let coins_after = conn.coins;
                 let delta_item: Option<String> = if new_count > 0 {
                     Some(item_path.clone())
@@ -8844,6 +8997,11 @@ pub async fn run(
             conn.bank_coins = conn.bank_coins.add_each(intent.coins);
             conn.coins_dirty = true;
             conn.bank_dirty = true;
+            conn.ledger(ledger::coin_event(
+                ItemAction::BankCoinIn,
+                0,
+                Some(format!("{} copper", intent.coins.total_copper())),
+            ));
             let (wallet, bank) = (conn.coins, conn.bank_coins);
             handlers::send_coins_update(&mut server, cid, wallet);
             handlers::send_bank_snapshot(&mut server, cid, bank);
@@ -8888,6 +9046,11 @@ pub async fn run(
             conn.coins = conn.coins.add_each(intent.coins);
             conn.coins_dirty = true;
             conn.bank_dirty = true;
+            conn.ledger(ledger::coin_event(
+                ItemAction::BankCoinOut,
+                0,
+                Some(format!("{} copper", intent.coins.total_copper())),
+            ));
             let (wallet, bank) = (conn.coins, conn.bank_coins);
             handlers::send_coins_update(&mut server, cid, wallet);
             handlers::send_bank_snapshot(&mut server, cid, bank);
@@ -8918,6 +9081,14 @@ pub async fn run(
             match conn.coins.exchange(intent.from_tier, intent.to_tier, intent.qty) {
                 Ok(()) => {
                     conn.coins_dirty = true;
+                    conn.ledger(ledger::coin_event(
+                        ItemAction::BankExchange,
+                        0,
+                        Some(format!(
+                            "{} of tier {} to tier {}",
+                            intent.qty, intent.from_tier, intent.to_tier
+                        )),
+                    ));
                     let wallet = conn.coins;
                     handlers::send_coins_update(&mut server, cid, wallet);
                     tracing::info!(
@@ -9008,6 +9179,13 @@ pub async fn run(
                 conn.bank_items.deposit(&path, removed);
                 conn.bank_items_dirty = true;
             }
+            conn.ledger(ledger::item_event(
+                ItemAction::BankIn,
+                &path,
+                removed,
+                0,
+                Some(if intent.shared { "account vault" } else { "vault" }.to_string()),
+            ));
             let post = conn.inventory.peek_at(&intent.src_location, intent.src_slot);
             let (dpath, dcount) = match post {
                 Some((p, c)) => (Some(p), c),
@@ -9084,6 +9262,15 @@ pub async fn run(
             }
             if !touched.is_empty() {
                 conn.inventory_dirty = true;
+            }
+            if count > leftover {
+                conn.ledger(ledger::item_event(
+                    ItemAction::BankOut,
+                    &path,
+                    count - leftover,
+                    0,
+                    Some(if intent.shared { "account vault" } else { "vault" }.to_string()),
+                ));
             }
             for (loc, slot) in &touched {
                 let (dp, dc) = match conn.inventory.peek_at(loc, *slot) {
@@ -10433,6 +10620,15 @@ pub async fn run(
                     match conn.inventory.add_item_locating(path, *count) {
                         Ok((touched, leftover)) => {
                             conn.inventory_dirty = true;
+                            if *count > leftover {
+                                conn.ledger(ledger::item_event(
+                                    ItemAction::QuestReward,
+                                    path,
+                                    *count - leftover,
+                                    i64::from(*count - leftover),
+                                    Some(quest_id.clone()),
+                                ));
+                            }
                             if leftover > 0 {
                                 tracing::error!(char_id = responder, quest_id = %quest_id, %path, leftover, "quest reward partially placed despite capacity pre-check");
                             }
@@ -10629,8 +10825,8 @@ pub async fn run(
                     let corpse_coins_before = corpses.get(&corpse_id).unwrap().coins;
                     let had_content = !corpse_items_before.is_empty()
                         || corpse_coins_before != protocol::world::Coins::ZERO;
-                    let (inv_before, coins_before) = match connections.get(&looter_cid) {
-                        Some(c) => (c.inventory.clone(), c.coins),
+                    let (inv_before, coins_before, ledger_before) = match connections.get(&looter_cid) {
+                        Some(c) => (c.inventory.clone(), c.coins, c.ledger_mark()),
                         None => continue,
                     };
 
@@ -10657,6 +10853,11 @@ pub async fn run(
                         if let Some(c) = connections.get_mut(&looter_cid) {
                             c.coins = c.coins.add_each(corpse_coins);
                             c.coins_dirty = true;
+                            c.ledger(ledger::coin_event(
+                                ItemAction::CorpseCoins,
+                                corpse_coins.total_copper(),
+                                Some(format!("corpse:{corpse_id}")),
+                            ));
                             coin_update = Some(c.coins);
                         }
                     }
@@ -10699,6 +10900,13 @@ pub async fn run(
                             if let Some(conn) = connections.get_mut(&looter_cid) {
                                 if conn.inventory.restore_worn(&path, count, slot) {
                                     conn.inventory_dirty = true;
+                                    conn.ledger(ledger::item_event(
+                                        ItemAction::CorpseLoot,
+                                        &path,
+                                        count,
+                                        i64::from(count),
+                                        Some(format!("corpse:{corpse_id}")),
+                                    ));
                                     reequipped += 1;
                                     inv_deltas.push(("equip".to_string(), slot as u32, path.clone(), count));
                                     granted_lines.push((path, count));
@@ -10720,6 +10928,15 @@ pub async fn run(
                                 placed_count = count - leftover;
                                 leftover_count = leftover;
                                 conn.inventory_dirty = true;
+                                if placed_count > 0 {
+                                    conn.ledger(ledger::item_event(
+                                        ItemAction::CorpseLoot,
+                                        &path,
+                                        placed_count,
+                                        i64::from(placed_count),
+                                        Some(format!("corpse:{corpse_id}")),
+                                    ));
+                                }
                             }
                         }
                         if placed_count > 0 {
@@ -10769,8 +10986,8 @@ pub async fn run(
                     // so no `connections` borrow is held across the await.
                     let persist_data = connections
                         .get(&looter_cid)
-                        .map(|c| (c.inventory.to_rows(), c.coins));
-                    let persist_ok = if let Some((inv_rows, looter_coins)) = persist_data {
+                        .map(|c| (c.inventory.to_rows(), c.coins, c.item_events.clone()));
+                    let persist_ok = if let Some((inv_rows, looter_coins, events)) = persist_data {
                         match db::apply_corpse_loot(
                             &pool,
                             intent.looter as i64,
@@ -10780,6 +10997,7 @@ pub async fn run(
                             &corpse_items_now,
                             corpse_coins_now,
                             delete_now,
+                            &events,
                         )
                         .await
                         {
@@ -10799,6 +11017,8 @@ pub async fn run(
                         if let Some(c) = connections.get_mut(&looter_cid) {
                             c.inventory_dirty = false;
                             c.coins_dirty = false;
+                            // apply_corpse_loot wrote the whole queue.
+                            c.item_events.clear();
                         }
                         if let Some(coins) = coin_update {
                             handlers::send_coins_update(&mut server, looter_cid, coins);
@@ -10867,6 +11087,7 @@ pub async fn run(
                         if let Some(conn) = connections.get_mut(&looter_cid) {
                             conn.inventory = inv_before;
                             conn.coins = coins_before;
+                            conn.ledger_rollback(ledger_before);
                             // Undo the gear bonuses of anything put back on.
                             if reequipped > 0 {
                                 inventory::recompute_equipped_stats(conn);
@@ -11018,6 +11239,11 @@ pub async fn run(
                         if let Some(c) = connections.get_mut(&r) {
                             c.coins.add_payout(amount);
                             c.coins_dirty = true;
+                            c.ledger(ledger::coin_event(
+                                ItemAction::LootCoins,
+                                amount,
+                                Some(format!("bag:{}", intent.bag_id)),
+                            ));
                             let coins_after = c.coins;
                             handlers::send_coins_update(&mut server, r, coins_after);
                         }
@@ -11031,6 +11257,14 @@ pub async fn run(
                         "coin looted"
                     );
                 }
+                // The ledger: a creature's bag is loot, a player's drop a
+                // pickup, named by the bag and what it was.
+                let loot_kind = if bag.creature_name.is_empty() { ItemAction::Pickup } else { ItemAction::Loot };
+                let loot_detail = if bag.creature_name.is_empty() {
+                    format!("bag:{}", intent.bag_id)
+                } else {
+                    format!("bag:{} {}", intent.bag_id, bag.creature_name)
+                };
                 let mut granted: Vec<(String, u32)> = Vec::new();
                 match intent.slot {
                     Some(idx) => {
@@ -11074,6 +11308,15 @@ pub async fn run(
                                 }
                                 placed_count = count - leftover;
                                 leftover_count = leftover;
+                                if placed_count > 0 {
+                                    conn.ledger(ledger::item_event(
+                                        loot_kind,
+                                        &path,
+                                        placed_count,
+                                        i64::from(placed_count),
+                                        Some(loot_detail.clone()),
+                                    ));
+                                }
                             }
                             Err(e) => {
                                 tracing::info!(
@@ -11165,7 +11408,7 @@ pub async fn run(
                 let Some(looter_pos) = connections.get(&looter_cid).map(|c| c.pos) else {
                     continue;
                 };
-                let stack = {
+                let (stack, dropped_by_a_player) = {
                     let Some(bag) = loot_bags.get_mut(&bag_id) else {
                         handlers::send_refusal(
                             &mut server,
@@ -11232,7 +11475,7 @@ pub async fn run(
                         );
                         continue;
                     }
-                    bag.items[0].clone()
+                    (bag.items[0].clone(), bag.creature_name.is_empty())
                 };
                 let Some(conn) = connections.get_mut(&looter_cid) else {
                     continue;
@@ -11251,6 +11494,13 @@ pub async fn run(
                     count: stack.count,
                 });
                 conn.inventory_dirty = true;
+                conn.ledger(ledger::item_event(
+                    if dropped_by_a_player { ItemAction::Pickup } else { ItemAction::Loot },
+                    &stack.item_path,
+                    stack.count,
+                    i64::from(stack.count),
+                    Some(format!("bag:{bag_id}")),
+                ));
                 handlers::send_inventory_delta(
                     &mut server,
                     looter_cid,
@@ -11957,6 +12207,31 @@ pub async fn run(
             //    half-happen. Written separately (as they were), a crash between
             //    them left the corpse holding everything while the player still
             //    had it: a straight duplication, of coin especially.
+            //    The ledger's death rows (one per stack and one for the coin)
+            //    join the queue the flush above emptied and ride the same
+            //    transaction; a failed save takes them back off the queue
+            //    with the retry.
+            let death_mark = connections.get(&client_id).map(|c| c.ledger_mark()).unwrap_or(0);
+            let events: Vec<db::ItemEventRow> = match connections.get_mut(&client_id) {
+                Some(c) => {
+                    let detail = Some(format!("corpse:{corpse_id}"));
+                    for (path, count, _) in &items {
+                        c.ledger(ledger::item_event(
+                            ItemAction::Death,
+                            path,
+                            *count,
+                            -i64::from(*count),
+                            detail.clone(),
+                        ));
+                    }
+                    let copper = coins.total_copper();
+                    if copper != 0 {
+                        c.ledger(ledger::coin_event(ItemAction::DeathCoins, -copper, detail));
+                    }
+                    c.item_events.clone()
+                }
+                None => continue,
+            };
             if let Err(e) = db::save_corpse(
                 &pool,
                 corpse_id as i64,
@@ -11972,12 +12247,14 @@ pub async fn run(
                 // a crash cannot hand the XP back while the corpse still holds
                 // its refund.
                 Some(after_death),
+                &events,
             )
             .await
             {
                 tracing::error!(char_id = cid, error = %e, "save_corpse failed; inventory intact, corpse retried next tick");
                 if let Some(c) = connections.get_mut(&client_id) {
                     c.corpse_pending = true;
+                    c.ledger_rollback(death_mark);
                 }
                 continue;
             }
@@ -11993,6 +12270,7 @@ pub async fn run(
                 // stops the next checkpoint rewriting rows it does not need to.
                 conn.inventory_dirty = false;
                 conn.coins_dirty = false;
+                conn.item_events.clear();
                 let entries = conn.inventory.to_snapshot_entries();
                 handlers::send_inventory_snapshot(&mut server, client_id, entries);
                 handlers::fan_out_resources(&mut server, std::slice::from_ref(&client_id), conn);
@@ -12069,6 +12347,13 @@ pub async fn run(
                         continue;
                     }
                     conn.inventory_dirty = true;
+                    conn.ledger(ledger::item_event(
+                        ItemAction::Eat,
+                        &item.path,
+                        1,
+                        -1,
+                        Some("hunger".to_string()),
+                    ));
                     let (path, count) = match conn.inventory.peek_at(&loc, slot) {
                         Some((p, c)) => (Some(p), c),
                         None => (None, 0),
@@ -12356,6 +12641,17 @@ pub async fn run(
                     let _ = tx.send(banned);
                 });
             }
+        }
+        //    The item ledger's sweep (world/ledger.rs): the fold-and-prune of
+        //    rows past the retention, then the conservation check, once at
+        //    boot and every LEDGER_SWEEP_INTERVAL, on its own task like the
+        //    ban sweep so the loop never waits on the database for it.
+        if last_ledger_sweep.is_none_or(|t| now.duration_since(t) >= ledger::LEDGER_SWEEP_INTERVAL) {
+            last_ledger_sweep = Some(now);
+            let sweep_pool = pool.clone();
+            tokio::spawn(async move {
+                ledger::sweep(&sweep_pool).await;
+            });
         }
         while let Ok(banned) = ban_rx.try_recv() {
             ban_sweep_in_flight = false;
@@ -13245,41 +13541,75 @@ mod tests {
 
     // Melee swing-rate limit: the per-hand minimum interval the server allows
     // between same-hand swings. It must (a) sit comfortably BELOW the fastest a
-    // legit fully-hasted client swings for each weapon (so no false positives),
-    // and (b) never fall below the absolute hard floor. Mirror of combat.gd
-    // pacing (weapon_delay x offhand-mult x (1-haste), maxf 0.5).
+    // legit client swings for each weapon AT ITS OWN HASTE (so no false
+    // positives), (b) never fall below the absolute hard floor, and (c) read
+    // the player's real haste, so an unhasted forged client no longer gets the
+    // fully-hasted allowance. Mirror of combat.gd pacing (weapon_delay x
+    // offhand-mult x (1-haste), maxf 0.5).
     #[test]
     fn swing_rate_min_interval_is_below_client_fastest_but_above_floor() {
-        use super::{
-            min_swing_interval_secs, HARD_MIN_SWING_SECS, MAX_MODELED_HASTE, OFFHAND_DELAY_MULT,
-        };
+        use super::{honest_swing_pace, min_swing_interval_secs, HARD_MIN_SWING_SECS, OFFHAND_DELAY_MULT};
         let approx = |a: f32, b: f32| (a - b).abs() < 1e-4;
-        // Default 2.0 weapon, main hand: 2.0*0.5=1.0 fastest legit, minus 0.35 grace = 0.65.
-        assert!(approx(min_swing_interval_secs(2.0, false), 0.65));
-        // Off hand 2.0: 2.0*1.5*0.5=1.5, minus grace = 1.15.
-        assert!(approx(min_swing_interval_secs(2.0, true), 1.15));
-        // Slow war axe 3.2 main: 3.2*0.5=1.6, minus grace = 1.25.
-        assert!(approx(min_swing_interval_secs(3.2, false), 1.25));
+        // A hand's first swing: judged by its own pacing alone.
+        let gate = |delay: f32, off: bool, haste: f32| {
+            min_swing_interval_secs(honest_swing_pace(delay, off, haste), f32::INFINITY)
+        };
+        // Fists, main hand, no haste: 2.0 minus the 0.35 grace = 1.65. (The
+        // old gate gave everyone the 50% allowance, 0.65, hasted or not.)
+        assert!(approx(gate(2.0, false, 0.0), 1.65));
+        // The Enchanter's 30%: 2.0 * 0.7 = 1.4, minus grace = 1.05.
+        assert!(approx(gate(2.0, false, 0.3), 1.05));
+        // The cap: 2.0 * 0.5 = 1.0, minus grace = 0.65; a sum past it reads as the cap.
+        assert!(approx(gate(2.0, false, 0.5), 0.65));
+        assert!(approx(gate(2.0, false, 0.9), gate(2.0, false, 0.5)));
+        // Off hand 2.0, no haste: 2.0 * 1.5 = 3.0, minus grace = 2.65.
+        assert!(approx(gate(2.0, true, 0.0), 2.65));
+        // Slow war axe 3.2 main, no haste: 2.85.
+        assert!(approx(gate(3.2, false, 0.0), 2.85));
         // The gate must ALWAYS be <= the client's fastest legit same-hand interval
-        // (weapon_delay * hand_mult * (1-max_haste), floored 0.5 client-side) so a
-        // fully-hasted legit swing is never rejected. Sweep the real range PLUS
-        // hypothetical fast weapons (<2.0) where the client's 0.5s floor and the
-        // server's 0.4s floor diverge most.
-        for &delay in &[1.0_f32, 1.4, 2.0, 2.5, 2.8, 3.0, 3.2] {
-            for &off in &[false, true] {
-                let hand_mult = if off { OFFHAND_DELAY_MULT } else { 1.0 };
-                let client_fastest = (delay * hand_mult * (1.0 - MAX_MODELED_HASTE)).max(0.5);
-                assert!(
-                    min_swing_interval_secs(delay, off) <= client_fastest,
-                    "gate {} must be <= client fastest {} (delay {delay}, off {off})",
-                    min_swing_interval_secs(delay, off),
-                    client_fastest
-                );
+        // at that haste (weapon_delay * hand_mult * (1-haste), floored 0.5
+        // client-side) so a legit swing is never rejected. Sweep the real range
+        // PLUS hypothetical fast weapons (<2.0) where the client's 0.5s floor and
+        // the server's 0.4s floor diverge most.
+        for &haste in &[0.0_f32, 0.1, 0.3, 0.5] {
+            for &delay in &[1.0_f32, 1.4, 2.0, 2.5, 2.8, 3.0, 3.2] {
+                for &off in &[false, true] {
+                    let hand_mult = if off { OFFHAND_DELAY_MULT } else { 1.0 };
+                    let client_fastest = (delay * hand_mult * (1.0 - haste)).max(0.5);
+                    assert!(
+                        gate(delay, off, haste) <= client_fastest,
+                        "gate {} must be <= client fastest {} (delay {delay}, off {off}, haste {haste})",
+                        gate(delay, off, haste),
+                        client_fastest
+                    );
+                }
             }
         }
         // Never below the absolute floor, even for an implausibly fast weapon.
-        assert!(min_swing_interval_secs(0.1, false) >= HARD_MIN_SWING_SECS);
-        assert!(min_swing_interval_secs(0.0, true) >= HARD_MIN_SWING_SECS);
+        assert!(gate(0.1, false, 0.5) >= HARD_MIN_SWING_SECS);
+        assert!(gate(0.0, true, 0.0) >= HARD_MIN_SWING_SECS);
+    }
+
+    // The pacing a hand's last accepted swing was judged by carries into the
+    // next, since the client timed that next swing when the last one fired: a
+    // Haste that ran out between two swings (1.4 s pacing, then 2.0 s) lets
+    // the swing timed at 1.4 s through and holds the one after to the unhasted
+    // gate; a slow weapon swapped in for a fast one does the same; a buff
+    // landing between two swings only ever loosens the gate.
+    #[test]
+    fn the_last_accepted_swings_pacing_covers_the_next_swing() {
+        use super::{honest_swing_pace, min_swing_interval_secs};
+        let approx = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        let hasted = honest_swing_pace(2.0, false, 0.3);
+        let unhasted = honest_swing_pace(2.0, false, 0.0);
+        assert!(approx(min_swing_interval_secs(unhasted, hasted), 1.05), "the swing timed under haste passes");
+        assert!(approx(min_swing_interval_secs(unhasted, unhasted), 1.65), "the one after is held to the unhasted gate");
+        let fast = honest_swing_pace(1.4, false, 0.0);
+        let slow = honest_swing_pace(3.2, false, 0.0);
+        assert!(approx(min_swing_interval_secs(slow, fast), 1.05), "the swing timed on the fast weapon passes");
+        assert!(approx(min_swing_interval_secs(slow, slow), 2.85), "then the slow weapon's gate");
+        assert!(approx(min_swing_interval_secs(unhasted, f32::INFINITY), 1.65), "a first swing is judged by its own pacing");
+        assert!(min_swing_interval_secs(hasted, unhasted) <= min_swing_interval_secs(unhasted, unhasted));
     }
 
     // The per-hand accept/reject decision: a never-swung hand is always allowed;

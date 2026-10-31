@@ -9543,7 +9543,7 @@ async fn yaws_seen(watcher: &mut WorldClient, other: &mut WorldClient, id: u64, 
 /// client's own body yaw and the Position fan relays it, so B sees A turn.
 /// A stands 5 m from B and sends a Move with yaw 1.25: B's Positions for A
 /// carry 1.25. A Move with a non-finite yaw is dropped whole (B keeps seeing
-/// 1.25), and a yaw past PI comes back wrapped into (-PI, PI]. On the previous
+/// 1.25), and a yaw past PI comes back wrapped into [-PI, PI). On the previous
 /// server A's yaw stayed at its login value whatever the client sent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_players_facing_reaches_the_watcher() {

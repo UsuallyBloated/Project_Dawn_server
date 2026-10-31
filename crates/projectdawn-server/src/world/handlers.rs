@@ -747,8 +747,8 @@ pub fn handle_message(
             // Position fan so peers see each other turn (before it, everyone
             // faced their login yaw forever). Cosmetic: nothing reads it into
             // movement or combat, and a rooted player may still turn. Wrapped
-            // into (-PI, PI], Godot's own range, so a forged huge value stays
-            // a facing and not a 1e30 in the database.
+            // into [-PI, PI) (an exact PI reads as -PI, the same facing), so a
+            // forged huge value stays a facing and not a 1e30 in the database.
             conn.yaw = (yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
             // The jump is cosmetic and separate from the direction: it is
             // relayed as a one-shot for peers to animate, and nothing here

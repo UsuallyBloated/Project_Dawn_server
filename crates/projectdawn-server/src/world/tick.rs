@@ -8888,7 +8888,6 @@ pub async fn run(
                     continue;
                 }
                 let qty = intent.qty.min(available_count);
-                let total_credit = unit_price.saturating_mul(qty as i64);
                 // Refuse to sell a non-empty bag, from a base slot or the hand
                 // (a bag's contents ride the cursor with it since 2026-09-27).
                 let bag_key = match intent.slot {
@@ -8904,40 +8903,28 @@ pub async fn run(
                     handlers::send_refusal(&mut server, owner_cid, "Empty the bag before selling it.");
                     continue;
                 }
-                // Mutate: subtract from the source slot.
-                let new_count = match intent.slot {
-                    protocol::world::SlotRef::BaseSlot { idx } => {
-                        let entry = conn.inventory.base[idx as usize].as_mut().expect("checked");
-                        entry.count -= qty;
-                        let nc = entry.count;
-                        if nc == 0 {
-                            conn.inventory.base[idx as usize] = None;
-                            conn.inventory.ensure_bag_init(idx as usize);
-                        }
-                        nc
+                // Mutate: take the sold count off the source through the one
+                // removal path (`destroy_at`: a base slot, a bag slot or the
+                // hand; it empties the slot at zero and tidies a bag's inner
+                // store), then read the slot back for the delta. The three
+                // hand-rolled copies it replaces were the 2026-10-30 review's
+                // finding when the cursor became the third.
+                let qty = match conn.inventory.destroy_at(&location_str, slot_u32, qty) {
+                    Ok((_, removed)) => removed,
+                    Err(why) => {
+                        tracing::warn!(
+                            owner = intent.owner,
+                            %location_str,
+                            slot = slot_u32,
+                            why,
+                            "SellItem rejected — could not take the item"
+                        );
+                        handlers::send_refusal(&mut server, owner_cid, "The merchant won't take that.");
+                        continue;
                     }
-                    protocol::world::SlotRef::BagSlot { base, slot } => {
-                        let arr = conn.inventory.bags.get_mut(&base).expect("checked");
-                        let entry = arr[slot as usize].as_mut().expect("checked");
-                        entry.count -= qty;
-                        let nc = entry.count;
-                        if nc == 0 {
-                            arr[slot as usize] = None;
-                        }
-                        nc
-                    }
-                    // The hand, as `Inventory::destroy_at` empties it.
-                    protocol::world::SlotRef::Cursor => {
-                        let entry = conn.inventory.cursor.as_mut().expect("checked");
-                        entry.count -= qty;
-                        let nc = entry.count;
-                        if nc == 0 {
-                            conn.inventory.cursor = None;
-                        }
-                        nc
-                    }
-                    protocol::world::SlotRef::EquipSlot(_) => unreachable!(),
                 };
+                let total_credit = unit_price.saturating_mul(qty as i64);
+                let new_count = conn.inventory.peek_at(&location_str, slot_u32).map_or(0, |(_, c)| c);
                 conn.coins.add_payout(total_credit);
                 conn.coins_dirty = true;
                 conn.inventory_dirty = true;

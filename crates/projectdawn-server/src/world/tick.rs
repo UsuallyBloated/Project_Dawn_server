@@ -173,16 +173,18 @@ fn honest_swing_pace(weapon_delay: f32, is_offhand: bool, haste: f32) -> f32 {
 /// Minimum wall-clock seconds allowed between two SAME-HAND swings before the
 /// faster one is a forgery: the honest pace minus a jitter grace, floored at
 /// `HARD_MIN_SWING_SECS`. Only ever used to reject "too fast", never "too
-/// slow". `pace_now` is the honest pace from the weapon and haste at this
-/// swing; `last_pace` the pace the hand's last accepted swing was judged by
-/// (`PerConnection::last_swing_pace`). The client timed this swing when that
-/// one fired (a Godot Timer applies a new wait time at its next start), so
-/// the gate takes the faster of the two: a Haste buff that ran out, or a
-/// slower weapon swapped in, between them costs no honest swing. A forged
-/// client gains one swing at the old pacing from either change and nothing
-/// more, since every accepted swing re-stamps the pace.
-fn min_swing_interval_secs(pace_now: f32, last_pace: f32) -> f32 {
-    (pace_now.min(last_pace) - SWING_RATE_GRACE_SECS).max(HARD_MIN_SWING_SECS)
+/// slow". The pace is computed at the greater of the player's haste now and
+/// the haste the hand's last accepted swing was judged at
+/// (`PerConnection::last_swing_haste`): the client timed this swing when
+/// that one fired (a Godot Timer applies a new wait time at its next start),
+/// so a Haste buff that ran out between the two costs no honest swing, and a
+/// forged client gains one swing at the expired haste and nothing more, since
+/// every accepted swing re-stamps it. The weapon does not carry: a client
+/// alternating a fast and a slow weapon every swing would otherwise swing the
+/// slow one at the fast one's pace indefinitely (the 2026-10-30 review); the
+/// client re-times its swing when a weapon changes instead.
+fn min_swing_interval_secs(pace: f32) -> f32 {
+    (pace - SWING_RATE_GRACE_SECS).max(HARD_MIN_SWING_SECS)
 }
 
 /// True if a same-hand swing arriving `now` is faster than `min_interval` since
@@ -4022,9 +4024,10 @@ pub async fn run(
                 let base_delay = items::lookup(&server_weapon_path)
                     .map(|w| w.weapon_delay)
                     .unwrap_or(FIST_WEAPON_DELAY);
-                let haste = attacker_conn.haste_total();
-                let pace_now = honest_swing_pace(base_delay, intent.is_offhand, haste);
-                let min_interval = min_swing_interval_secs(pace_now, attacker_conn.last_swing_pace[hand]);
+                let haste_now = attacker_conn.haste_total();
+                let haste = haste_now.max(attacker_conn.last_swing_haste[hand]);
+                let min_interval =
+                    min_swing_interval_secs(honest_swing_pace(base_delay, intent.is_offhand, haste));
                 // A skill's swing is outside the auto-attack limiter: its own
                 // cooldown paces it (step 4g charged it), and it neither reads
                 // nor advances the hand's timer.
@@ -4058,7 +4061,7 @@ pub async fn run(
                 if intent.skill.is_none() {
                     if let Some(a) = connections.get_mut(&attacker_cid) {
                         a.last_swing_at[hand] = Some(now);
-                        a.last_swing_pace[hand] = pace_now;
+                        a.last_swing_haste[hand] = haste_now;
                     }
                 }
                 // The first swing from the shadows ends a Hide, skill or not.
@@ -13220,6 +13223,12 @@ fn refuse_cast(
     handlers::fan_out_cast_fail(server, &[caster_cid], caster_id, line.to_string());
     if let Some(c) = connections.get(&caster_cid) {
         handlers::fan_out_mana_update(server, &[caster_cid], caster_id, c.mp, c.max_mp);
+        // The caster's true buffs too: the client applies a self-buff at the
+        // release, before the server has judged the cast, and a refusal left
+        // it believing in a buff the server never held (a phantom Haste paced
+        // its swings faster than the limiter allows; the 2026-10-30 review).
+        // The snapshot's reconcile drops anything the server does not hold.
+        handlers::fan_out_buff_snapshot(server, &[caster_cid], c);
     }
 }
 
@@ -13573,9 +13582,8 @@ mod tests {
     fn swing_rate_min_interval_is_below_client_fastest_but_above_floor() {
         use super::{honest_swing_pace, min_swing_interval_secs, HARD_MIN_SWING_SECS, OFFHAND_DELAY_MULT};
         let approx = |a: f32, b: f32| (a - b).abs() < 1e-4;
-        // A hand's first swing: judged by its own pacing alone.
         let gate = |delay: f32, off: bool, haste: f32| {
-            min_swing_interval_secs(honest_swing_pace(delay, off, haste), f32::INFINITY)
+            min_swing_interval_secs(honest_swing_pace(delay, off, haste))
         };
         // Fists, main hand, no haste: 2.0 minus the 0.35 grace = 1.65. (The
         // old gate gave everyone the 50% allowance, 0.65, hasted or not.)
@@ -13613,26 +13621,26 @@ mod tests {
         assert!(gate(0.0, true, 0.0) >= HARD_MIN_SWING_SECS);
     }
 
-    // The pacing a hand's last accepted swing was judged by carries into the
+    // The haste a hand's last accepted swing was judged at carries into the
     // next, since the client timed that next swing when the last one fired: a
-    // Haste that ran out between two swings (1.4 s pacing, then 2.0 s) lets
-    // the swing timed at 1.4 s through and holds the one after to the unhasted
-    // gate; a slow weapon swapped in for a fast one does the same; a buff
-    // landing between two swings only ever loosens the gate.
+    // Haste that ran out between two swings (30%, then none) lets the swing
+    // timed at 1.4 s through and holds the one after to the unhasted gate. The
+    // weapon never carries: a staff swung after a dagger is held to the
+    // staff's own gate at once (the review of 2026-10-30: alternating the two
+    // every swing would otherwise swing the staff at the dagger's pace for
+    // good), and a buff landing between two swings only ever loosens the gate.
     #[test]
-    fn the_last_accepted_swings_pacing_covers_the_next_swing() {
+    fn the_last_accepted_swings_haste_covers_the_next_swing_but_the_weapon_does_not() {
         use super::{honest_swing_pace, min_swing_interval_secs};
         let approx = |a: f32, b: f32| (a - b).abs() < 1e-4;
-        let hasted = honest_swing_pace(2.0, false, 0.3);
-        let unhasted = honest_swing_pace(2.0, false, 0.0);
-        assert!(approx(min_swing_interval_secs(unhasted, hasted), 1.05), "the swing timed under haste passes");
-        assert!(approx(min_swing_interval_secs(unhasted, unhasted), 1.65), "the one after is held to the unhasted gate");
-        let fast = honest_swing_pace(1.4, false, 0.0);
-        let slow = honest_swing_pace(3.2, false, 0.0);
-        assert!(approx(min_swing_interval_secs(slow, fast), 1.05), "the swing timed on the fast weapon passes");
-        assert!(approx(min_swing_interval_secs(slow, slow), 2.85), "then the slow weapon's gate");
-        assert!(approx(min_swing_interval_secs(unhasted, f32::INFINITY), 1.65), "a first swing is judged by its own pacing");
-        assert!(min_swing_interval_secs(hasted, unhasted) <= min_swing_interval_secs(unhasted, unhasted));
+        let gate = |delay: f32, haste_now: f32, last_haste: f32| {
+            min_swing_interval_secs(honest_swing_pace(delay, false, haste_now.max(last_haste)))
+        };
+        assert!(approx(gate(2.0, 0.0, 0.3), 1.05), "the swing timed under haste passes");
+        assert!(approx(gate(2.0, 0.0, 0.0), 1.65), "the one after is held to the unhasted gate");
+        assert!(approx(gate(3.2, 0.0, 0.0), 2.85), "a staff after a dagger is held to the staff's gate at once");
+        assert!(approx(gate(1.4, 0.0, 0.0), 1.05), "and the dagger after the staff to the dagger's");
+        assert!(gate(2.0, 0.3, 0.0) <= gate(2.0, 0.0, 0.0), "a buff landing between swings only loosens the gate");
     }
 
     // The per-hand accept/reject decision: a never-swung hand is always allowed;

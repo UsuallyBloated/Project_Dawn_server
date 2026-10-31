@@ -9052,10 +9052,13 @@ async fn the_server_rolls_the_melee_miss() {
 /// The swing-rate limit reads the player's real haste (the client-authority
 /// audit's Phase 4, 2026-10-30): an Enchanter under their own Haste swings
 /// bare-handed every 1.3 s and every swing is answered (2.0 s at 30% is 1.4 s,
-/// and the gate sits a grace below it), while an unhasted Warrior swinging at
-/// the same rate has every second swing dropped, held to the unhasted 1.65 s.
-/// The previous server assumed everyone fully hasted and answered all four of
-/// the Warrior's; it fails here at the Warrior's count.
+/// and the gate sits a grace below it), while an unhasted Warrior swinging
+/// every 0.9 s has every second swing dropped, held to the unhasted 1.65 s
+/// (0.9 leaves the dropped swings 750 ms of margin against a slow test
+/// thread, which only ever lengthens a gap; the accepted ones can only get
+/// later). The previous server assumed everyone fully hasted (a 0.65 s gate)
+/// and answered all four of the Warrior's; it fails here at the Warrior's
+/// count.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_swing_rate_limit_reads_the_players_haste() {
     let h = start_both().await;
@@ -9130,11 +9133,10 @@ async fn the_swing_rate_limit_reads_the_players_haste() {
         answered
     }
 
-    let gap = Duration::from_millis(1_300);
-    let hasted = paced_swings(&mut e, &mut w, e_char_id, dummy, 4, gap).await;
+    let hasted = paced_swings(&mut e, &mut w, e_char_id, dummy, 4, Duration::from_millis(1_300)).await;
     assert_eq!(hasted, 4, "the hasted Enchanter's four swings at 1.3 s are all answered");
-    let unhasted = paced_swings(&mut w, &mut e, w_char_id, dummy, 4, gap).await;
-    assert_eq!(unhasted, 2, "the unhasted Warrior at the same rate: every second swing is dropped");
+    let unhasted = paced_swings(&mut w, &mut e, w_char_id, dummy, 4, Duration::from_millis(900)).await;
+    assert_eq!(unhasted, 2, "the unhasted Warrior at 0.9 s: every second swing is dropped");
 }
 
 /// Send one Attack from `c` and report whether the server answered it with a

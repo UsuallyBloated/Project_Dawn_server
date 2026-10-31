@@ -433,6 +433,11 @@ impl WorldClient {
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
+    fn send_cast_fail(&mut self, reason: &str) {
+        let msg = ClientWorldMsg::CastFailBroadcast { reason: reason.into() };
+        send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
+    }
+
     fn send_cast_complete(&mut self, spell_name: &str) {
         let msg = ClientWorldMsg::CastCompleteBroadcast {
             spell_name: spell_name.into(),
@@ -1052,9 +1057,15 @@ async fn two_clients_server_authoritative_resources() {
     }
 }
 
-/// Track 4 sub-task 2: cast lifecycle replication. A broadcasts CastStart
-/// then CastComplete; B sees both ServerWorldMsg variants carrying A's id
-/// and the spell name.
+/// Cast lifecycle replication, carrying the server's numbers (Track 4 sub-task
+/// 2, then the client-authority audit's Phase 4 on 2026-10-30). A broadcasts
+/// CastStart then CastComplete for Ice Spear with a forged 2.5 s bar; B sees
+/// both carrying A's id, the spell's name and the server's own 1.0 s cast
+/// time, never the 2.5. A CastStart or CastComplete naming a spell the server
+/// does not know reaches nobody, and a cancelled cast's CastFail carries the
+/// fixed word, not the string the client wrote. The caster gets no echo. On
+/// the previous server B's bar read 2.5, the made-up spell was relayed under
+/// its made-up name and the forged reason went out as written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_clients_cast_fanout() {
     let h = start_both().await;
@@ -1067,7 +1078,7 @@ async fn two_clients_cast_fanout() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
 
-    a.send_cast_start("Frostbolt", 2.5);
+    a.send_cast_start("Ice Spear", 2.5);
     for _ in 0..4 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
@@ -1085,11 +1096,11 @@ async fn two_clients_cast_fanout() {
         ..
     } = cast_at_b
     {
-        assert_eq!(spell_name, "Frostbolt");
-        assert!((duration - 2.5).abs() < 0.01, "duration roundtrip: {duration}");
+        assert_eq!(spell_name, "Ice Spear");
+        assert!((duration - 1.0).abs() < 0.01, "the server's cast time, not the client's 2.5: {duration}");
     }
 
-    a.send_cast_complete("Frostbolt");
+    a.send_cast_complete("Ice Spear");
     for _ in 0..4 {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
@@ -1102,7 +1113,7 @@ async fn two_clients_cast_fanout() {
         .await
         .expect("B receives CastComplete for A");
     if let ServerWorldMsg::CastComplete { spell_name, .. } = complete_at_b {
-        assert_eq!(spell_name, "Frostbolt");
+        assert_eq!(spell_name, "Ice Spear");
     }
 
     // Owner should not receive own cast events back.
@@ -1113,6 +1124,26 @@ async fn two_clients_cast_fanout() {
         })
         .await;
     assert!(echoed.is_none(), "A should not receive own cast events");
+
+    // A spell the server does not know is relayed under no name at all, and
+    // a cancel carries the fixed word.
+    a.send_cast_start("Totally Made Up <script>", 5.0);
+    a.send_cast_complete("Totally Made Up <script>");
+    a.send_cast_start("Ice Spear", 1.0);
+    a.send_cast_fail("<forged reason on every screen>");
+    a.pump_for(Duration::from_millis(200)).await;
+    let seen = b.collect_for(Duration::from_millis(600)).await;
+    assert!(
+        !seen.iter().any(|m| matches!(m,
+            ServerWorldMsg::CastStart { spell_name, .. } | ServerWorldMsg::CastComplete { spell_name, .. }
+                if spell_name.contains("Made Up"))),
+        "the made-up spell reaches nobody: {seen:?}"
+    );
+    let fail = seen.iter().find(|m| matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64));
+    assert!(
+        matches!(fail, Some(ServerWorldMsg::CastFail { reason, .. }) if reason == "cancelled"),
+        "the cancel carries the fixed word, not the client's: {fail:?}"
+    );
 }
 
 /// The client-made HitBroadcast is a dev command (the Test Panel's). A plain
@@ -1426,17 +1457,20 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     // Swings must be PACED. This used to burst 10 Attacks in a single
     // frame, which the melee swing-rate limit (added 2026-07-29) now
     // correctly treats as forgery: it enforces a per-hand minimum
-    // interval derived from the weapon's delay â€” 0.65 s bare-handed â€”
+    // interval derived from the weapon's delay and the player's haste,
     // and silently drops anything faster. All but the first swing
     // vanished and the skeleton survived. Sleeping past the floor
     // between swings is what an honest client does anyway.
-    // 1000 ms, not 700: the bare-hand swing-rate floor is 0.65 s, so a 700 ms
-    // pace left only 50 ms of margin and timing jitter pushed swings under the
-    // floor, where they are silently dropped and the skeleton survives. Widening
-    // the margin makes it much more reliable, though this test still has residual
+    // 1800 ms: since 2026-10-30 the limiter reads the player's own haste, so an
+    // unhasted bare hand is held to 1.65 s (the 2.0 s fist delay minus the
+    // jitter grace); swinging at the weapon's own delay is what an honest
+    // client does, and a slow test thread only ever lengthens a gap. A 1000 ms
+    // pace used to pass under the fully-hasted allowance everyone got, and a
+    // 700 ms one before that left 50 ms of margin to jitter, where swings are
+    // silently dropped and the skeleton survives. This test still has residual
     // enemy-AI timing sensitivity (see docs/flaky_integration_tests.md) â€” it
     // depends on an enemy wandering into range, locking on, and STAYING in melee.
-    const SWING_GAP: Duration = Duration::from_millis(1000);
+    const SWING_GAP: Duration = Duration::from_millis(1800);
     for _ in 0..8 {
         a.send_attack(enemy_id, "", false, DamageType::Physical);
         // Pump the transport across the gap so the Attack actually goes
@@ -4461,7 +4495,8 @@ async fn cast_interrupted_by_incoming_pvp_hit() {
     // default melee envelope.
     // The server rolls the miss now (combat.rs), and only a hit interrupts.
     // B's hand_to_hand is mastered (a 5% miss), and B swings again, at a
-    // legal cadence, until a hit lands inside A's 5 s cast: four misses in a
+    // legal cadence (an unhasted bare hand is held to 1.65 s; the cache keeps
+    // the cast until something ends it), until a hit lands: four misses in a
     // row is about one in 160,000.
     let mut fail = None;
     for _ in 0..4 {
@@ -4472,7 +4507,7 @@ async fn cast_interrupted_by_incoming_pvp_hit() {
             tokio::time::sleep(TICK_DT).await;
         }
         fail = a
-            .wait_for(CHANNEL_SYSTEM, Duration::from_millis(1_050), |m| {
+            .wait_for(CHANNEL_SYSTEM, Duration::from_millis(1_750), |m| {
                 matches!(m, ServerWorldMsg::CastFail { caster, reason }
                     if *caster == a_char_id as u64
                         && reason == "interrupted (hit during cast)")
@@ -5125,8 +5160,8 @@ async fn dead_group_member_gets_no_xp_share() {
 
     // A conjures a level-1 dummy that walks to A on its own (aggro 12,
     // 1 dmg so its swings are harmless), then kills it with paced swings
-    // (the swing-rate limiter drops anything faster than the 0.65 s
-    // bare-hand floor). 10 HP vs ~5-8 per swing = 2-3 landed hits. Same
+    // (the swing-rate limiter drops anything faster than the 1.65 s
+    // unhasted bare-hand gate). 10 HP vs ~5-8 per swing = 2-3 landed hits. Same
     // shape as player_attack_kills_enemy_and_corpse_despawns: waiting for
     // ITS hit on us proves it closed into melee range first.
     a.send_dev_spawn("XP Filter Dummy", 1, 10.0, 1, 1.8, 12.0);
@@ -5167,7 +5202,7 @@ async fn dead_group_member_gets_no_xp_share() {
     }
     assert!(adjacent, "the dummy walks into melee and swings");
 
-    const SWING_GAP: Duration = Duration::from_millis(1000);
+    const SWING_GAP: Duration = Duration::from_millis(1800);
     for _ in 0..6 {
         a.send_attack(enemy_id, "", false, DamageType::Physical);
         let until = Instant::now() + SWING_GAP;
@@ -8983,10 +9018,13 @@ async fn the_server_rolls_the_melee_miss() {
     let mut seq: u32 = 1;
     walk_until_within(&mut a, &mut seq, a_char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, dummy_pos, 1.0).await;
 
+    // Six swings at the staff's own 2.0 s delay (the limiter holds an
+    // unhasted hand to 1.65 s): six straight landings at an 80% miss would be
+    // about one in 16,000.
     let (mut misses, mut hits) = (0, 0);
-    for _ in 0..8 {
+    for _ in 0..6 {
         a.send_attack(dummy, "", false, DamageType::Physical);
-        let until = Instant::now() + Duration::from_millis(1_100);
+        let until = Instant::now() + Duration::from_millis(1_800);
         while Instant::now() < until {
             tick_one(&mut a.client, &mut a.transport);
             while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
@@ -9001,8 +9039,96 @@ async fn the_server_rolls_the_melee_miss() {
             tokio::time::sleep(TICK_DT).await;
         }
     }
-    assert_eq!(misses + hits, 8, "every swing was answered: {misses} misses, {hits} hits");
+    assert_eq!(misses + hits, 6, "every swing was answered: {misses} misses, {hits} hits");
     assert!(misses >= 1, "the server rolled at least one miss ({hits} hits)");
+}
+
+/// The swing-rate limit reads the player's real haste (the client-authority
+/// audit's Phase 4, 2026-10-30): an Enchanter under their own Haste swings
+/// bare-handed every 1.3 s and every swing is answered (2.0 s at 30% is 1.4 s,
+/// and the gate sits a grace below it), while an unhasted Warrior swinging at
+/// the same rate has every second swing dropped, held to the unhasted 1.65 s.
+/// The previous server assumed everyone fully hasted and answered all four of
+/// the Warrior's; it fails here at the Warrior's count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_swing_rate_limit_reads_the_players_haste() {
+    let h = start_both().await;
+    let (e_session, e_char_id, _stale) =
+        provision_client(&h.auth_url, "hasteench", "Hastea", "Human", "Enchanter").await;
+    let (w_session, w_char_id, w_token) =
+        provision_client(&h.auth_url, "hastewar", "Hasteb", "Human", "Warrior").await;
+    set_char_level(&h.db_url, e_char_id, 16).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "hasteench", true).await.expect("set is_gm");
+    let e_token = request_world_token(&h.auth_url, &e_session, e_char_id).await;
+    let mut e = WorldClient::start(e_token, &e_session, e_char_id).await;
+    let mut w = WorldClient::start(w_token, &w_session, w_char_id).await;
+    pump_both_for(&mut e, &mut w, Duration::from_millis(300)).await;
+
+    e.send_dev_spawn("Haste Dummy", 1, 100_000.0, 0, 0.0, 0.0);
+    let spawn = wait_on_a_pumping_b(&mut e, &mut w, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Haste Dummy")
+    })
+    .await
+    .expect("the dummy spawns");
+    let (dummy, dummy_pos) = match spawn {
+        ServerWorldMsg::EnemySpawn { id, pos, .. } => (id, pos),
+        _ => unreachable!(),
+    };
+    let origin = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    let (mut se, mut sw) = (1u32, 1u32);
+    walk_until_within(&mut e, &mut se, e_char_id, origin, dummy_pos, 1.0).await;
+    walk_until_within(&mut w, &mut sw, w_char_id, origin, dummy_pos, 1.0).await;
+
+    // The Enchanter hastes itself (an untargeted ALLY cast lands on the caster).
+    e.send_cast_start("Haste", 1.5);
+    pump_both_for(&mut e, &mut w, Duration::from_millis(1_700)).await;
+    e.send_cast_spell("Haste", None);
+    wait_on_a_pumping_b(&mut e, &mut w, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::BuffSnapshot { target, buffs }
+            if *target == e_char_id as u64 && buffs.iter().any(|(n, _)| n == "Haste"))
+    })
+    .await
+    .expect("the Enchanter is hasted");
+
+    /// Swing `n` times at `gap`, servicing both sockets, and count the
+    /// swings the server answered with a Hit or a Miss.
+    async fn paced_swings(
+        c: &mut WorldClient,
+        other: &mut WorldClient,
+        attacker: i64,
+        target: u64,
+        n: usize,
+        gap: Duration,
+    ) -> usize {
+        let mut answered = 0;
+        for _ in 0..n {
+            c.send_attack(target, "", false, DamageType::Physical);
+            let until = Instant::now() + gap;
+            while Instant::now() < until {
+                tick_one(&mut c.client, &mut c.transport);
+                tick_one(&mut other.client, &mut other.transport);
+                while let Some(bytes) = c.client.receive_message(CHANNEL_SYSTEM) {
+                    if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) {
+                        if matches!(msg, ServerWorldMsg::Hit { attacker: a, target: t, .. }
+                            | ServerWorldMsg::Miss { attacker: a, target: t }
+                            if a == attacker as u64 && t == target)
+                        {
+                            answered += 1;
+                        }
+                    }
+                }
+                tokio::time::sleep(TICK_DT).await;
+            }
+        }
+        answered
+    }
+
+    let gap = Duration::from_millis(1_300);
+    let hasted = paced_swings(&mut e, &mut w, e_char_id, dummy, 4, gap).await;
+    assert_eq!(hasted, 4, "the hasted Enchanter's four swings at 1.3 s are all answered");
+    let unhasted = paced_swings(&mut w, &mut e, w_char_id, dummy, 4, gap).await;
+    assert_eq!(unhasted, 2, "the unhasted Warrior at the same rate: every second swing is dropped");
 }
 
 /// Send one Attack from `c` and report whether the server answered it with a

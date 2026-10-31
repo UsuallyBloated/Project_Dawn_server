@@ -218,6 +218,15 @@ pub struct PerConnection {
     /// tick; a single combined timer would false-throttle a legit dual-wielder.
     /// Advanced only on a swing the rate gate accepts (`tick.rs`).
     pub last_swing_at: [Option<Instant>; 2],
+    /// The pacing the hand's last ACCEPTED swing was judged by (the honest
+    /// interval from its weapon and the haste the server saw at the time),
+    /// `f32::INFINITY` before the hand has swung. The limiter holds a swing
+    /// to the lesser of this and the current pacing, because the client
+    /// timed THIS swing when the LAST one fired: a Haste buff that ran out,
+    /// or a slower weapon swapped in, between the two must not cost the
+    /// honest swing already timed under the old pacing. Stamped with
+    /// `last_swing_at`.
+    pub last_swing_pace: [f32; 2],
 
     /// Wall-clock of the last Meditate skill-up tick. The regen loop advances
     /// the `meditate` casting skill roughly once per 6 s of medding (sitting with
@@ -665,6 +674,7 @@ impl PerConnection {
             last_attack_at: None,
             bind: spawn.bind,
             last_swing_at: [None, None],
+            last_swing_pace: [f32::INFINITY; 2],
             last_meditate_at: None,
             // A character loaded at 0 HP died before it left (a crash, a
             // window-X, a server restart while dead) and has paid: the death
@@ -1016,6 +1026,21 @@ impl PerConnection {
     pub fn note_damage_taken(&mut self, now: Instant) {
         self.last_damaged_at = Some(now);
         self.is_sitting = false;
+    }
+
+    /// The sum of the player's active Haste buffs (the Enchanter's Haste, a
+    /// Bard's Wanderer's Chord), 0.0 with none: what the client's attack
+    /// timer paces by, read from the same buffs the server fans it. The
+    /// swing-rate limit reads it so an unhasted player is held to an
+    /// unhasted pace.
+    pub fn haste_total(&self) -> f32 {
+        self.active_buffs
+            .iter()
+            .filter_map(|b| match b.effect {
+                super::buffs::BuffEffect::Haste { amount } => Some(amount),
+                _ => None,
+            })
+            .sum()
     }
 
     /// Where `Respawn` should put this player: their bind point, or the starter

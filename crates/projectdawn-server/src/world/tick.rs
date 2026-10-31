@@ -99,11 +99,15 @@ const FIST_WEAPON_DELAY: f32 = 2.0;
 /// Off-hand swings are slower than main-hand by this factor (client
 /// `OFFHAND_DELAY_MULT`).
 const OFFHAND_DELAY_MULT: f32 = 1.5;
-/// Strongest single non-stacking haste the client models (Enchanter "Haste",
-/// `haste_amount` 0.5 = 50% faster). The floor assumes a player is fully hasted
-/// so a legitimately-hasted swing is never rejected. (Player haste is otherwise
-/// a server no-op today; this is the safe over-estimate.)
+/// The strongest haste the gate honours, however many Haste buffs the server
+/// holds for a player: a cap on their sum (the Enchanter's 30% and a song's
+/// 10% are the most the data stacks), never an assumption about anyone.
+/// Until 2026-10-30 the gate assumed everyone had this much, since player
+/// haste was client-paced; a modified client could swing at twice an
+/// unhasted honest rate. It reads each player's real haste now.
 const MAX_MODELED_HASTE: f32 = 0.5;
+/// The client's own floor on a swing interval (`combat.gd`'s `maxf(0.5, ...)`).
+const CLIENT_MIN_SWING_SECS: f32 = 0.5;
 /// Tolerance subtracted from the computed minimum to absorb the 20 Hz tick, UDP
 /// bunching, and Godot timer granularity — so honest jitter never trips it.
 /// Sized for the tightest legit case: a fully-hasted player on the fastest
@@ -152,26 +156,33 @@ struct PendingSave {
 /// client drops one stack per click, far below it.
 const MAX_DROPS_PER_TICK: u32 = 4;
 
-/// Minimum wall-clock seconds allowed between two SAME-HAND swings before the
-/// faster one is a forgery. Mirrors the client pacing (`combat.gd`):
-/// `weapon_delay` (fists 2.0) times the off-hand multiplier, scaled by the
-/// strongest modeled haste so a fully-hasted player never trips, minus a jitter
-/// grace, floored at `HARD_MIN_SWING_SECS`. Only ever used to reject "too fast"
-/// — never "too slow" (the client sends one Attack per swing at its own
-/// cadence, so real arrivals are already >= the interval).
-///
-/// Deliberate residual: because we can't tell a hasted client from a non-hasted
-/// one at the gate (haste is client-paced, a server no-op today), we ASSUME max
-/// haste for everyone. A forged non-hasted client can therefore swing up to the
-/// fully-hasted rate (~2x a non-hasted honest swing). That is an accepted trade
-/// — the gate exists to kill wire-speed spam (dozens/sec), not to enforce exact
-/// cadence. Tighten `MAX_MODELED_HASTE` toward the player's real haste only once
-/// server-authoritative haste exists, or false positives return for hasted play.
-fn min_swing_interval_secs(weapon_delay: f32, is_offhand: bool) -> f32 {
+/// The fastest same-hand interval an honest client paces at: `weapon_delay`
+/// (fists 2.0) times the off-hand multiplier, scaled by the player's haste
+/// (`combat.gd::_update_attack_interval`, which reads the Haste buff the
+/// server fans; the server sums its Haste buffs, which can only be as
+/// lenient as the client's single strongest), floored at the client's own
+/// 0.5 s. The client sends one Attack per swing at this cadence with no burst
+/// or catch-up, and restarts the interval on a re-target or a toggle, so real
+/// arrivals are already >= it.
+fn honest_swing_pace(weapon_delay: f32, is_offhand: bool, haste: f32) -> f32 {
     let hand_mult = if is_offhand { OFFHAND_DELAY_MULT } else { 1.0 };
-    let fastest_legit =
-        (weapon_delay * hand_mult * (1.0 - MAX_MODELED_HASTE)).max(HARD_MIN_SWING_SECS);
-    (fastest_legit - SWING_RATE_GRACE_SECS).max(HARD_MIN_SWING_SECS)
+    let haste = haste.clamp(0.0, MAX_MODELED_HASTE);
+    (weapon_delay * hand_mult * (1.0 - haste)).max(CLIENT_MIN_SWING_SECS)
+}
+
+/// Minimum wall-clock seconds allowed between two SAME-HAND swings before the
+/// faster one is a forgery: the honest pace minus a jitter grace, floored at
+/// `HARD_MIN_SWING_SECS`. Only ever used to reject "too fast", never "too
+/// slow". `pace_now` is the honest pace from the weapon and haste at this
+/// swing; `last_pace` the pace the hand's last accepted swing was judged by
+/// (`PerConnection::last_swing_pace`). The client timed this swing when that
+/// one fired (a Godot Timer applies a new wait time at its next start), so
+/// the gate takes the faster of the two: a Haste buff that ran out, or a
+/// slower weapon swapped in, between them costs no honest swing. A forged
+/// client gains one swing at the old pacing from either change and nothing
+/// more, since every accepted swing re-stamps the pace.
+fn min_swing_interval_secs(pace_now: f32, last_pace: f32) -> f32 {
+    (pace_now.min(last_pace) - SWING_RATE_GRACE_SECS).max(HARD_MIN_SWING_SECS)
 }
 
 /// True if a same-hand swing arriving `now` is faster than `min_interval` since
@@ -4003,12 +4014,17 @@ pub async fn run(
                 // Dropped silently (no Miss fan-out — that would reward the spammer
                 // and desync their local timer). The timestamp advances only on an
                 // ACCEPTED swing (below, after calc_swing), so a spammer can't walk
-                // the window forward with rejected swings.
+                // the window forward with rejected swings. The pace is the
+                // player's own: the weapon and the haste the server holds for
+                // them (the client-authority audit's Phase 4), not the
+                // fully-hasted allowance everyone used to get.
                 let hand = intent.is_offhand as usize;
                 let base_delay = items::lookup(&server_weapon_path)
                     .map(|w| w.weapon_delay)
                     .unwrap_or(FIST_WEAPON_DELAY);
-                let min_interval = min_swing_interval_secs(base_delay, intent.is_offhand);
+                let haste = attacker_conn.haste_total();
+                let pace_now = honest_swing_pace(base_delay, intent.is_offhand, haste);
+                let min_interval = min_swing_interval_secs(pace_now, attacker_conn.last_swing_pace[hand]);
                 // A skill's swing is outside the auto-attack limiter: its own
                 // cooldown paces it (step 4g charged it), and it neither reads
                 // nor advances the hand's timer.
@@ -4017,6 +4033,7 @@ pub async fn run(
                         attacker = intent.attacker,
                         is_offhand = intent.is_offhand,
                         weapon_delay = base_delay,
+                        haste,
                         min_interval,
                         "Attack rejected — swing-rate limit (too fast)"
                     );
@@ -4041,6 +4058,7 @@ pub async fn run(
                 if intent.skill.is_none() {
                     if let Some(a) = connections.get_mut(&attacker_cid) {
                         a.last_swing_at[hand] = Some(now);
+                        a.last_swing_pace[hand] = pace_now;
                     }
                 }
                 // The first swing from the shadows ends a Hide, skill or not.
@@ -13523,41 +13541,75 @@ mod tests {
 
     // Melee swing-rate limit: the per-hand minimum interval the server allows
     // between same-hand swings. It must (a) sit comfortably BELOW the fastest a
-    // legit fully-hasted client swings for each weapon (so no false positives),
-    // and (b) never fall below the absolute hard floor. Mirror of combat.gd
-    // pacing (weapon_delay x offhand-mult x (1-haste), maxf 0.5).
+    // legit client swings for each weapon AT ITS OWN HASTE (so no false
+    // positives), (b) never fall below the absolute hard floor, and (c) read
+    // the player's real haste, so an unhasted forged client no longer gets the
+    // fully-hasted allowance. Mirror of combat.gd pacing (weapon_delay x
+    // offhand-mult x (1-haste), maxf 0.5).
     #[test]
     fn swing_rate_min_interval_is_below_client_fastest_but_above_floor() {
-        use super::{
-            min_swing_interval_secs, HARD_MIN_SWING_SECS, MAX_MODELED_HASTE, OFFHAND_DELAY_MULT,
-        };
+        use super::{honest_swing_pace, min_swing_interval_secs, HARD_MIN_SWING_SECS, OFFHAND_DELAY_MULT};
         let approx = |a: f32, b: f32| (a - b).abs() < 1e-4;
-        // Default 2.0 weapon, main hand: 2.0*0.5=1.0 fastest legit, minus 0.35 grace = 0.65.
-        assert!(approx(min_swing_interval_secs(2.0, false), 0.65));
-        // Off hand 2.0: 2.0*1.5*0.5=1.5, minus grace = 1.15.
-        assert!(approx(min_swing_interval_secs(2.0, true), 1.15));
-        // Slow war axe 3.2 main: 3.2*0.5=1.6, minus grace = 1.25.
-        assert!(approx(min_swing_interval_secs(3.2, false), 1.25));
+        // A hand's first swing: judged by its own pacing alone.
+        let gate = |delay: f32, off: bool, haste: f32| {
+            min_swing_interval_secs(honest_swing_pace(delay, off, haste), f32::INFINITY)
+        };
+        // Fists, main hand, no haste: 2.0 minus the 0.35 grace = 1.65. (The
+        // old gate gave everyone the 50% allowance, 0.65, hasted or not.)
+        assert!(approx(gate(2.0, false, 0.0), 1.65));
+        // The Enchanter's 30%: 2.0 * 0.7 = 1.4, minus grace = 1.05.
+        assert!(approx(gate(2.0, false, 0.3), 1.05));
+        // The cap: 2.0 * 0.5 = 1.0, minus grace = 0.65; a sum past it reads as the cap.
+        assert!(approx(gate(2.0, false, 0.5), 0.65));
+        assert!(approx(gate(2.0, false, 0.9), gate(2.0, false, 0.5)));
+        // Off hand 2.0, no haste: 2.0 * 1.5 = 3.0, minus grace = 2.65.
+        assert!(approx(gate(2.0, true, 0.0), 2.65));
+        // Slow war axe 3.2 main, no haste: 2.85.
+        assert!(approx(gate(3.2, false, 0.0), 2.85));
         // The gate must ALWAYS be <= the client's fastest legit same-hand interval
-        // (weapon_delay * hand_mult * (1-max_haste), floored 0.5 client-side) so a
-        // fully-hasted legit swing is never rejected. Sweep the real range PLUS
-        // hypothetical fast weapons (<2.0) where the client's 0.5s floor and the
-        // server's 0.4s floor diverge most.
-        for &delay in &[1.0_f32, 1.4, 2.0, 2.5, 2.8, 3.0, 3.2] {
-            for &off in &[false, true] {
-                let hand_mult = if off { OFFHAND_DELAY_MULT } else { 1.0 };
-                let client_fastest = (delay * hand_mult * (1.0 - MAX_MODELED_HASTE)).max(0.5);
-                assert!(
-                    min_swing_interval_secs(delay, off) <= client_fastest,
-                    "gate {} must be <= client fastest {} (delay {delay}, off {off})",
-                    min_swing_interval_secs(delay, off),
-                    client_fastest
-                );
+        // at that haste (weapon_delay * hand_mult * (1-haste), floored 0.5
+        // client-side) so a legit swing is never rejected. Sweep the real range
+        // PLUS hypothetical fast weapons (<2.0) where the client's 0.5s floor and
+        // the server's 0.4s floor diverge most.
+        for &haste in &[0.0_f32, 0.1, 0.3, 0.5] {
+            for &delay in &[1.0_f32, 1.4, 2.0, 2.5, 2.8, 3.0, 3.2] {
+                for &off in &[false, true] {
+                    let hand_mult = if off { OFFHAND_DELAY_MULT } else { 1.0 };
+                    let client_fastest = (delay * hand_mult * (1.0 - haste)).max(0.5);
+                    assert!(
+                        gate(delay, off, haste) <= client_fastest,
+                        "gate {} must be <= client fastest {} (delay {delay}, off {off}, haste {haste})",
+                        gate(delay, off, haste),
+                        client_fastest
+                    );
+                }
             }
         }
         // Never below the absolute floor, even for an implausibly fast weapon.
-        assert!(min_swing_interval_secs(0.1, false) >= HARD_MIN_SWING_SECS);
-        assert!(min_swing_interval_secs(0.0, true) >= HARD_MIN_SWING_SECS);
+        assert!(gate(0.1, false, 0.5) >= HARD_MIN_SWING_SECS);
+        assert!(gate(0.0, true, 0.0) >= HARD_MIN_SWING_SECS);
+    }
+
+    // The pacing a hand's last accepted swing was judged by carries into the
+    // next, since the client timed that next swing when the last one fired: a
+    // Haste that ran out between two swings (1.4 s pacing, then 2.0 s) lets
+    // the swing timed at 1.4 s through and holds the one after to the unhasted
+    // gate; a slow weapon swapped in for a fast one does the same; a buff
+    // landing between two swings only ever loosens the gate.
+    #[test]
+    fn the_last_accepted_swings_pacing_covers_the_next_swing() {
+        use super::{honest_swing_pace, min_swing_interval_secs};
+        let approx = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        let hasted = honest_swing_pace(2.0, false, 0.3);
+        let unhasted = honest_swing_pace(2.0, false, 0.0);
+        assert!(approx(min_swing_interval_secs(unhasted, hasted), 1.05), "the swing timed under haste passes");
+        assert!(approx(min_swing_interval_secs(unhasted, unhasted), 1.65), "the one after is held to the unhasted gate");
+        let fast = honest_swing_pace(1.4, false, 0.0);
+        let slow = honest_swing_pace(3.2, false, 0.0);
+        assert!(approx(min_swing_interval_secs(slow, fast), 1.05), "the swing timed on the fast weapon passes");
+        assert!(approx(min_swing_interval_secs(slow, slow), 2.85), "then the slow weapon's gate");
+        assert!(approx(min_swing_interval_secs(unhasted, f32::INFINITY), 1.65), "a first swing is judged by its own pacing");
+        assert!(min_swing_interval_secs(hasted, unhasted) <= min_swing_interval_secs(unhasted, unhasted));
     }
 
     // The per-hand accept/reject decision: a never-swung hand is always allowed;

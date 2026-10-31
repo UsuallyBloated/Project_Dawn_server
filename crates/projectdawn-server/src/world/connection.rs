@@ -218,15 +218,16 @@ pub struct PerConnection {
     /// tick; a single combined timer would false-throttle a legit dual-wielder.
     /// Advanced only on a swing the rate gate accepts (`tick.rs`).
     pub last_swing_at: [Option<Instant>; 2],
-    /// The pacing the hand's last ACCEPTED swing was judged by (the honest
-    /// interval from its weapon and the haste the server saw at the time),
-    /// `f32::INFINITY` before the hand has swung. The limiter holds a swing
-    /// to the lesser of this and the current pacing, because the client
-    /// timed THIS swing when the LAST one fired: a Haste buff that ran out,
-    /// or a slower weapon swapped in, between the two must not cost the
-    /// honest swing already timed under the old pacing. Stamped with
-    /// `last_swing_at`.
-    pub last_swing_pace: [f32; 2],
+    /// The haste the hand's last ACCEPTED swing was judged at (0.0 before
+    /// the hand has swung). The limiter paces a swing at the greater of this
+    /// and the current haste, because the client timed THIS swing when the
+    /// LAST one fired: a Haste buff that ran out between the two must not
+    /// cost the honest swing already timed under it. Only the haste carries,
+    /// never the weapon (a client alternating a dagger and a staff every
+    /// swing would otherwise swing the staff at the dagger's pace for good;
+    /// the client re-times its swing on a weapon change instead). Stamped
+    /// with `last_swing_at`.
+    pub last_swing_haste: [f32; 2],
 
     /// Wall-clock of the last Meditate skill-up tick. The regen loop advances
     /// the `meditate` casting skill roughly once per 6 s of medding (sitting with
@@ -674,7 +675,7 @@ impl PerConnection {
             last_attack_at: None,
             bind: spawn.bind,
             last_swing_at: [None, None],
-            last_swing_pace: [f32::INFINITY; 2],
+            last_swing_haste: [0.0; 2],
             last_meditate_at: None,
             // A character loaded at 0 HP died before it left (a crash, a
             // window-X, a server restart while dead) and has paid: the death

@@ -898,7 +898,7 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                     }
                 }
                 if let Some(tc) = connections.get(&target_cid) {
-                    fan_out_server_buff_snapshot(
+                    handlers::fan_out_buff_snapshot(
                         &mut *server,
                         &in_world_recipients_now,
                         tc,

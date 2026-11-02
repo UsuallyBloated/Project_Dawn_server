@@ -4,7 +4,7 @@
 
 use super::*;
 
-pub(super) fn run_spawning(world: &mut WorldState, q: &mut Intents, now: Instant) -> Vec<ClientId> {
+pub(super) fn run_spawning(world: &mut WorldState, q: &mut Intents, now: Instant, in_world_recipients_now: &[ClientId]) {
     let WorldState { server, connections, aoi, spawner, enemies, .. } = world;
     let Intents { newly_in_world, dev_spawn_intents, dev_despawn_intents, .. } = q;
     // 4g. Enemy spawner phase. Tick the respawn timers; for any spawn
@@ -126,15 +126,6 @@ pub(super) fn run_spawning(world: &mut WorldState, q: &mut Intents, now: Instant
             &format!("Despawned {} enemies.", doomed.len()),
         );
     }
-
-    // The in-world players, snapshot once after the spawner and handed back
-    // to run() for the enemy-related fan-outs of every later step (combat,
-    // casting, inventory, the AI, the sweeps).
-    let in_world_recipients_now: Vec<ClientId> = connections
-        .iter()
-        .filter(|(_, c)| c.in_world)
-        .map(|(id, _)| *id)
-        .collect();
 
     // 4g2. Track 12 Piece B — auto-summon a warder for each
     //      freshly-EnterWorld'd Beast Master. Runs once when
@@ -276,5 +267,4 @@ pub(super) fn run_spawning(world: &mut WorldState, q: &mut Intents, now: Instant
         );
         tracing::info!(pet_id, mob_id, charmer = ?charmer, "charm expired — mob returned hostile");
     }
-    in_world_recipients_now
 }

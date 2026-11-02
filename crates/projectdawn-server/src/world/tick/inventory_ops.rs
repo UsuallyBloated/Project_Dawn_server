@@ -38,13 +38,9 @@ pub(super) fn correct_client_slots(
         targets.push((dst_loc, dst_slot));
     }
     for (loc, slot) in targets {
-        let (item_path, count) = match conn.inventory.peek_at(loc, slot) {
-            Some((p, c)) => (Some(p), c),
-            // Empty is a real answer and the one the client most needs: it is
-            // usually the phantom item that started the divergence.
-            None => (None, 0),
-        };
-        handlers::send_inventory_delta(server, cid, loc.to_string(), slot, item_path, count);
+        // Empty is a real answer and the one the client most needs: it is
+        // usually the phantom item that started the divergence.
+        handlers::send_slot_delta(server, cid, loc.to_string(), slot, conn.inventory.peek_at(loc, slot));
         // Full-bags-move: when the corrected slot is a base slot holding a
         // bag, a different-bag correction makes the client re-init that
         // bag's contents vec and wait for inner rows — so re-fan the
@@ -154,18 +150,7 @@ pub(super) fn apply_moves(world: &mut WorldState, q: &mut Intents, _now: Instant
                 .map(|(loc, slot)| (loc.clone(), *slot, conn.inventory.peek_at(loc, *slot)))
                 .collect();
             for (loc, slot, payload) in deltas {
-                let (item_path, count) = match payload {
-                    Some((p, c)) => (Some(p), c),
-                    None => (None, 0),
-                };
-                handlers::send_inventory_delta(
-                    &mut *server,
-                    owner_cid,
-                    loc,
-                    slot,
-                    item_path,
-                    count,
-                );
+                handlers::send_slot_delta(&mut *server, owner_cid, loc, slot, payload);
             }
             tracing::info!(
                 owner = intent.owner,
@@ -243,18 +228,7 @@ pub(super) fn apply_splits(world: &mut WorldState, q: &mut Intents, _now: Instan
                 })
                 .collect();
             for (slot, payload) in deltas {
-                let (item_path, count) = match payload {
-                    Some((p, c)) => (Some(p), c),
-                    None => (None, 0),
-                };
-                handlers::send_inventory_delta(
-                    &mut *server,
-                    owner_cid,
-                    "base".to_string(),
-                    slot,
-                    item_path,
-                    count,
-                );
+                handlers::send_slot_delta(&mut *server, owner_cid, "base".to_string(), slot, payload);
             }
             tracing::debug!(owner = intent.owner, src, dst, count = intent.count, "SplitStack applied");
         }
@@ -390,18 +364,7 @@ pub(super) async fn apply_drops(world: &mut WorldState, q: &mut Intents, now: In
             let post = connections
                 .get(&drop.owner_cid)
                 .and_then(|c| c.inventory.peek_at(&drop.location, drop.slot));
-            let (delta_path, delta_count) = match post {
-                Some((p, c)) => (Some(p), c),
-                None => (None, 0),
-            };
-            handlers::send_inventory_delta(
-                &mut *server,
-                drop.owner_cid,
-                drop.location.clone(),
-                drop.slot,
-                delta_path,
-                delta_count,
-            );
+            handlers::send_slot_delta(&mut *server, drop.owner_cid, drop.location.clone(), drop.slot, post);
             // Spawn a single-stack LootBag at the player's feet
             // and fan via the existing AOI-filtered loot pipeline.
             // Dropped items are public (no kill-owner) — anyone in
@@ -538,18 +501,7 @@ pub(super) fn apply_equips(world: &mut WorldState, q: &mut Intents, _now: Instan
                 })
                 .collect();
             for (loc, slot, payload) in deltas {
-                let (item_path, count) = match payload {
-                    Some((p, c)) => (Some(p), c),
-                    None => (None, 0),
-                };
-                handlers::send_inventory_delta(
-                    &mut *server,
-                    owner_cid,
-                    loc,
-                    slot,
-                    item_path,
-                    count,
-                );
+                handlers::send_slot_delta(&mut *server, owner_cid, loc, slot, payload);
             }
             if recompute.any_resource_max_changed() {
                 handlers::fan_out_resources(
@@ -661,18 +613,7 @@ pub(super) fn apply_unequips(world: &mut WorldState, q: &mut Intents, _now: Inst
                 })
                 .collect();
             for (loc, slot, payload) in deltas {
-                let (item_path, count) = match payload {
-                    Some((p, c)) => (Some(p), c),
-                    None => (None, 0),
-                };
-                handlers::send_inventory_delta(
-                    &mut *server,
-                    owner_cid,
-                    loc,
-                    slot,
-                    item_path,
-                    count,
-                );
+                handlers::send_slot_delta(&mut *server, owner_cid, loc, slot, payload);
             }
             if recompute.any_resource_max_changed() {
                 handlers::fan_out_resources(
@@ -740,18 +681,7 @@ pub(super) fn apply_destroys(world: &mut WorldState, q: &mut Intents, _now: Inst
                 None,
             ));
             let payload = conn.inventory.peek_at(&intent.location, intent.slot);
-            let (delta_path, delta_count) = match payload {
-                Some((p, c)) => (Some(p), c),
-                None => (None, 0),
-            };
-            handlers::send_inventory_delta(
-                &mut *server,
-                owner_cid,
-                intent.location.clone(),
-                intent.slot,
-                delta_path,
-                delta_count,
-            );
+            handlers::send_slot_delta(&mut *server, owner_cid, intent.location.clone(), intent.slot, payload);
             tracing::info!(
                 owner = intent.owner,
                 loc = %intent.location,
@@ -865,18 +795,7 @@ pub(super) fn apply_consumables(world: &mut WorldState, q: &mut Intents, _now: I
             ));
             // Inventory Delta for the touched slot.
             let payload = conn.inventory.peek_at(&intent.location, intent.slot);
-            let (delta_path, delta_count) = match payload {
-                Some((p, c)) => (Some(p), c),
-                None => (None, 0),
-            };
-            handlers::send_inventory_delta(
-                &mut *server,
-                owner_cid,
-                intent.location.clone(),
-                intent.slot,
-                delta_path,
-                delta_count,
-            );
+            handlers::send_slot_delta(&mut *server, owner_cid, intent.location.clone(), intent.slot, payload);
             // Apply the effect.
             if heal_amt > 0.0 {
                 let before = conn.hp;
@@ -992,11 +911,7 @@ pub(super) fn apply_gm_gives(world: &mut WorldState, q: &mut Intents, _now: Inst
                 .map(|(loc, slot)| (loc.clone(), *slot, conn.inventory.peek_at(loc, *slot)))
                 .collect();
             for (loc, slot, payload) in deltas {
-                let (dp, dc) = match payload {
-                    Some((p, c)) => (Some(p), c),
-                    None => (None, 0),
-                };
-                handlers::send_inventory_delta(&mut *server, owner_cid, loc, slot, dp, dc);
+                handlers::send_slot_delta(&mut *server, owner_cid, loc, slot, payload);
             }
             tracing::info!(
                 owner = intent.owner,

@@ -186,11 +186,7 @@ pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents
                             tracing::error!(char_id = responder, quest_id = %quest_id, %path, leftover, "quest reward partially placed despite capacity pre-check");
                         }
                         for (loc, slot) in &touched {
-                            let (dpath, dcount) = match conn.inventory.peek_at(loc, *slot) {
-                                Some((p, c)) => (Some(p), c),
-                                None => (None, 0),
-                            };
-                            handlers::send_inventory_delta(&mut *server, responder_cid, loc.clone(), *slot, dpath, dcount);
+                            handlers::send_slot_delta(&mut *server, responder_cid, loc.clone(), *slot, conn.inventory.peek_at(loc, *slot));
                         }
                         handlers::send_loot_granted(&mut *server, responder_cid, path.clone(), count.saturating_sub(leftover));
                     }

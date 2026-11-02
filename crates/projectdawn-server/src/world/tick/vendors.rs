@@ -154,11 +154,7 @@ pub(super) fn apply_buys(world: &mut WorldState, q: &mut Intents, _now: Instant)
                 .map(|(loc, slot)| (loc.clone(), *slot, conn.inventory.peek_at(loc, *slot)))
                 .collect();
             for (loc, slot, payload) in deltas {
-                let (dp, dc) = match payload {
-                    Some((p, c)) => (Some(p), c),
-                    None => (None, 0),
-                };
-                handlers::send_inventory_delta(&mut *server, owner_cid, loc, slot, dp, dc);
+                handlers::send_slot_delta(&mut *server, owner_cid, loc, slot, payload);
             }
             handlers::send_coins_update(&mut *server, owner_cid, coins_after);
             if leftover > 0 {

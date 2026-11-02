@@ -244,32 +244,9 @@ pub(super) fn apply_pet_spell_buffs(pet: &mut Entity, spell: &spells::Spell, now
     changed
 }
 
-/// Track 6 sub-task 4a — rebuild conn.buff_snapshot from
-/// active_buffs and fan a BuffSnapshot to in-world peers. Server is
-/// authoritative on buff state now; the client-driven
-/// BuffSnapshotBroadcast path is deprecated (kept as a no-op for one
-/// release so transitional builds don't crash on the variant).
-pub(super) fn fan_out_server_buff_snapshot(
-    server: &mut renet::RenetServer,
-    recipients: &[renet::ClientId],
-    conn: &PerConnection,
-) {
-    let payload = buffs::snapshot_pairs(&conn.active_buffs);
-    let msg = protocol::world::ServerWorldMsg::BuffSnapshot {
-        target: conn.char_id as u64,
-        buffs: payload,
-    };
-    let Ok(bytes) = bincode::serde::encode_to_vec(&msg, bincode::config::standard()) else {
-        return;
-    };
-    for &recipient in recipients {
-        server.send_message(recipient, CHANNEL_SYSTEM, bytes.clone());
-    }
-}
-
 /// Track 13 — fan a BuffSnapshot for a pet's or a mob's status under its
 /// id, so the owner + bystanders render its buff bar (the client routes
-/// the snapshot by id partition). Mirror of `fan_out_server_buff_snapshot`.
+/// the snapshot by id partition). Mirror of `handlers::fan_out_buff_snapshot`.
 /// Since spell batch step 5 the payload is `Entity::status_pairs`: buffs,
 /// DoTs and crowd control, so a mob's target frame shows what is on it.
 pub(super) fn fan_out_pet_buff_snapshot(
@@ -282,7 +259,7 @@ pub(super) fn fan_out_pet_buff_snapshot(
         target: pet.id,
         buffs: payload,
     };
-    let Ok(bytes) = bincode::serde::encode_to_vec(&msg, bincode::config::standard()) else {
+    let Some(bytes) = handlers::encode(&msg) else {
         return;
     };
     for &recipient in recipients {

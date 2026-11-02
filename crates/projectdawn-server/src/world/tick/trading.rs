@@ -168,13 +168,7 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                                             })
                                             .collect();
                                     for (tl, ts, payload) in deltas {
-                                        let (p, c2) = match payload {
-                                            Some((p, c2)) => (Some(p), c2),
-                                            None => (None, 0),
-                                        };
-                                        handlers::send_inventory_delta(
-                                            &mut *server, cid, tl, ts, p, c2,
-                                        );
+                                        handlers::send_slot_delta(&mut *server, cid, tl, ts, payload);
                                     }
                                 }
                                 (l, s)
@@ -678,18 +672,7 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                         if let Some(conn) = connections.get(&c) {
                             if let Some(touched) = touched_by.get(&c) {
                                 for (l, s) in touched {
-                                    let (p, cnt) = match conn.inventory.peek_at(l, *s) {
-                                        Some((p, cnt)) => (Some(p), cnt),
-                                        None => (None, 0),
-                                    };
-                                    handlers::send_inventory_delta(
-                                        &mut *server,
-                                        c,
-                                        l.clone(),
-                                        *s,
-                                        p,
-                                        cnt,
-                                    );
+                                    handlers::send_slot_delta(&mut *server, c, l.clone(), *s, conn.inventory.peek_at(l, *s));
                                 }
                             }
                             handlers::send_coins_update(&mut *server, c, conn.coins);

@@ -87,7 +87,7 @@ use fanout::{say_recipients, despawn_recipients, fan_entity_cell_crossing};
 use kills::{FactionKill, award_kill, kill_enemy, apply_spell_damage_to_enemy, wipe_hate, clear_player_dots_from};
 use pet_life::{summon_scaled_pet, pet_owner_cid, despawn_owned_pets, return_charmed_mob};
 use session::{PENDING_SAVE_RETRY, PENDING_SAVE_GIVE_UP, shut_down_world};
-use spell_buffs::{apply_buff, apply_stat_buff, apply_mp_regen_exclusive, apply_player_spell_buffs, apply_pet_spell_buffs, fan_out_server_buff_snapshot, fan_out_pet_buff_snapshot};
+use spell_buffs::{apply_buff, apply_stat_buff, apply_mp_regen_exclusive, apply_player_spell_buffs, apply_pet_spell_buffs, fan_out_pet_buff_snapshot};
 use swing::{FIST_WEAPON_DELAY, honest_swing_pace, min_swing_interval_secs, carried_haste, stamp_swing_haste, swing_too_fast, train_swing_skills, skill_swing};
 use trading::trade_locked;
 
@@ -265,11 +265,16 @@ pub async fn run(
 
         session::reap_linkdead(&mut world, &mut q, now).await;
 
+        // The players in the world, listed once: nothing after the session
+        // steps above adds a connection, removes one or puts one in the
+        // world, so the list holds for every fan-out in the rest of the tick.
+        let in_world_recipients_now = session::in_world_ids(&world.connections);
+
         fanout::seed_joiners(&mut world, &mut q, now);
 
-        fanout::fan_out_events(&mut world, &mut q, now);
+        fanout::fan_out_events(&mut world, &mut q, now, &in_world_recipients_now);
 
-        let in_world_recipients_now = spawning::run_spawning(&mut world, &mut q, now);
+        spawning::run_spawning(&mut world, &mut q, now, &in_world_recipients_now);
 
         melee::apply_active_skills(&mut world, &mut q, now, &in_world_recipients_now);
 
@@ -335,9 +340,9 @@ pub async fn run(
 
         regen_tick::run_regen(&mut world, &mut q, now, dt);
 
-        let in_world_ids = position_fan::fan_out_positions(&mut world, &mut q, now);
+        position_fan::fan_out_positions(&mut world, &mut q, now, &in_world_recipients_now);
 
-        upkeep::run_upkeep(&mut world, &mut q, now, &in_world_ids).await;
+        upkeep::run_upkeep(&mut world, &mut q, now, &in_world_recipients_now).await;
 
         // 8. Push outbound packets to the network.
         transport.send_packets(&mut world.server);

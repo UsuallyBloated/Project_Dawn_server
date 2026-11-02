@@ -368,7 +368,7 @@ pub(super) fn seed_joiners(world: &mut WorldState, q: &mut Intents, now: Instant
     }
 }
 
-pub(super) fn fan_out_events(world: &mut WorldState, q: &mut Intents, _now: Instant) {
+pub(super) fn fan_out_events(world: &mut WorldState, q: &mut Intents, _now: Instant, in_world_recipients: &[ClientId]) {
     let WorldState { server, connections, aoi, group_manager, .. } = world;
     let Intents { to_disconnect, cast_fanouts, jump_fanouts, buff_fanouts, combat_fanouts, death_fanouts, player_target_fanouts, chat_fanouts, inspect_intents, .. } = q;
     // 4b. (Track 6 removed the client-driven ResourceUpdate fan-out.
@@ -378,12 +378,6 @@ pub(super) fn fan_out_events(world: &mut WorldState, q: &mut Intents, _now: Inst
     //     in_world clients including the owner. Step 4a still uses
     //     `fan_out_resources` to seed new joiners with the current
     //     value.)
-    let in_world_recipients: Vec<ClientId> = connections
-        .iter()
-        .filter(|(_, c)| c.in_world)
-        .map(|(id, _)| *id)
-        .collect();
-
     // 4d. Buff snapshot fan-out — owning client → every other in_world
     //     peer.
     for sender_id in buff_fanouts.iter() {

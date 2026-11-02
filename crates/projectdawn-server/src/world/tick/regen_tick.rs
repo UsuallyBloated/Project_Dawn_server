@@ -56,11 +56,7 @@ pub(super) fn run_regen(world: &mut WorldState, q: &mut Intents, now: Instant, d
                     -1,
                     Some("hunger".to_string()),
                 ));
-                let (path, count) = match conn.inventory.peek_at(&loc, slot) {
-                    Some((p, c)) => (Some(p), c),
-                    None => (None, 0),
-                };
-                handlers::send_inventory_delta(&mut *server, *client_id, loc.clone(), slot, path, count);
+                handlers::send_slot_delta(&mut *server, *client_id, loc.clone(), slot, conn.inventory.peek_at(&loc, slot));
                 let added = hunger::feed(conn, need, hunger::fullness_of(item));
                 fed_now[i] = true;
                 eat_emotes.push((*client_id, hunger::eat_emote(&conn.name, &item.name, need)));

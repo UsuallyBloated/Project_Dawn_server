@@ -141,7 +141,7 @@ pub(super) async fn apply_res_accepts(world: &mut WorldState, q: &mut Intents, n
             .map(|(id, _)| *id)
             .collect();
         if let Some(conn) = connections.get(&responder_cid) {
-            fan_out_server_buff_snapshot(&mut *server, &recipients, conn);
+            handlers::fan_out_buff_snapshot(&mut *server, &recipients, conn);
             handlers::fan_out_health_update(&mut *server, &recipients, responder, conn.hp, conn.max_hp);
             handlers::fan_out_mana_update(&mut *server, &recipients, responder, conn.mp, conn.max_mp);
         }

@@ -44,7 +44,7 @@ pub(super) fn run_movement(world: &mut WorldState, _q: &mut Intents, now: Instan
             // skills): the mobs that forgot or never noticed the player
             // may notice them now.
             if buffs::end_on_move(&mut conn.active_buffs) {
-                fan_out_server_buff_snapshot(&mut *server, &in_world_recipients_now, conn);
+                handlers::fan_out_buff_snapshot(&mut *server, &in_world_recipients_now, conn);
             }
         }
         // The server decides the speed (RUN_SPEED's note): its own speed

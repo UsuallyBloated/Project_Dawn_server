@@ -459,7 +459,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     .is_some_and(|c| buffs::break_stealth(&mut c.active_buffs));
                 if stealth_broken {
                     if let Some(c) = connections.get(&caster_cid) {
-                        fan_out_server_buff_snapshot(&mut *server, &in_world_recipients_now, c);
+                        handlers::fan_out_buff_snapshot(&mut *server, &in_world_recipients_now, c);
                     }
                 }
             }
@@ -590,11 +590,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     match placement {
                         Ok((placed, leftover, deltas)) if placed > 0 => {
                             for (loc, slot, payload) in deltas {
-                                let (dp, dc) = match payload {
-                                    Some((p, c)) => (Some(p), c),
-                                    None => (None, 0),
-                                };
-                                handlers::send_inventory_delta(&mut *server, caster_cid, loc, slot, dp, dc);
+                                handlers::send_slot_delta(&mut *server, caster_cid, loc, slot, payload);
                             }
                             let item_name = items::lookup(&spell.summon_item)
                                 .map(|i| i.name.clone())
@@ -707,7 +703,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     }
                     if buff_changed {
                         if let Some(cc) = connections.get(&caster_cid) {
-                            fan_out_server_buff_snapshot(
+                            handlers::fan_out_buff_snapshot(
                                 &mut *server,
                                 &in_world_recipients_now,
                                 cc,
@@ -834,7 +830,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     );
                     if ally_buff_changed {
                         if let Some(tc) = connections.get(&target_cid) {
-                            fan_out_server_buff_snapshot(
+                            handlers::fan_out_buff_snapshot(
                                 &mut *server,
                                 &in_world_recipients_now,
                                 tc,
@@ -912,7 +908,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                                 }
                             }
                             if let Some(tc) = connections.get(&target_cid) {
-                                fan_out_server_buff_snapshot(
+                                handlers::fan_out_buff_snapshot(
                                     &mut *server,
                                     &in_world_recipients_now,
                                     tc,
@@ -1117,7 +1113,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                         }
                         if cc_changed {
                             if let Some(tc) = connections.get(&target_cid) {
-                                fan_out_server_buff_snapshot(
+                                handlers::fan_out_buff_snapshot(
                                     &mut *server,
                                     &in_world_recipients_now,
                                     tc,
@@ -1564,7 +1560,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     }
                     for bearer in clear_player_dots_from(&mut *connections, &mover_ids) {
                         if let Some(conn) = connections.get(&bearer) {
-                            fan_out_server_buff_snapshot(&mut *server, &in_world_recipients_now, conn);
+                            handlers::fan_out_buff_snapshot(&mut *server, &in_world_recipients_now, conn);
                         }
                     }
                     for &m in &movers {

@@ -234,7 +234,7 @@ pub(super) fn run_buff_tick(world: &mut WorldState, _q: &mut Intents, now: Insta
             .collect();
         for id in buff_snapshot_dirty {
             if let Some(conn) = connections.get(&(id as ClientId)) {
-                fan_out_server_buff_snapshot(&mut *server, &recipients, conn);
+                handlers::fan_out_buff_snapshot(&mut *server, &recipients, conn);
             }
         }
         for cid in res_sickness_ended {

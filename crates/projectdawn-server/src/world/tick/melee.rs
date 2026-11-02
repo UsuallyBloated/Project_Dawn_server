@@ -205,7 +205,7 @@ pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: 
             }
             if snapshot_changed {
                 if let Some(u) = connections.get(&user_cid) {
-                    fan_out_server_buff_snapshot(&mut *server, &in_world_recipients_now, u);
+                    handlers::fan_out_buff_snapshot(&mut *server, &in_world_recipients_now, u);
                 }
             }
         }
@@ -357,7 +357,7 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                 .is_some_and(|a| buffs::break_stealth(&mut a.active_buffs));
             if stealth_broken {
                 if let Some(a) = connections.get(&attacker_cid) {
-                    fan_out_server_buff_snapshot(&mut *server, &in_world_recipients_now, a);
+                    handlers::fan_out_buff_snapshot(&mut *server, &in_world_recipients_now, a);
                 }
             }
 
@@ -521,7 +521,7 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                         }
                     }
                     if let Some(tc) = connections.get(&target_cid) {
-                        fan_out_server_buff_snapshot(
+                        handlers::fan_out_buff_snapshot(
                             &mut *server,
                             &in_world_recipients_now,
                             tc,
@@ -690,7 +690,7 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                             tracing::info!(caster = intent.target_id, spell = %spell, "PvP cast interrupted by a stun");
                         }
                         if let Some(tc) = connections.get(&target_cid) {
-                            fan_out_server_buff_snapshot(&mut *server, &in_world_recipients_now, tc);
+                            handlers::fan_out_buff_snapshot(&mut *server, &in_world_recipients_now, tc);
                         }
                     }
                 }

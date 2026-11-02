@@ -4,7 +4,7 @@
 
 use super::*;
 
-pub(super) fn fan_out_positions(world: &mut WorldState, _q: &mut Intents, now: Instant) -> Vec<ClientId> {
+pub(super) fn fan_out_positions(world: &mut WorldState, _q: &mut Intents, now: Instant, in_world_ids: &[ClientId]) {
     let WorldState { server, connections, aoi, enemy_pos_sent, last_fan_report, enemies, .. } = world;
     // 6. Position fan-out. Track 7: AOI-filtered. Each sender's
     //    position goes only to in_world players whose AOI cell is
@@ -12,12 +12,7 @@ pub(super) fn fan_out_positions(world: &mut WorldState, _q: &mut Intents, now: I
     //    Self-broadcast is preserved (sender is in its own
     //    neighbourhood) — Track 2 snap-or-lerp still needs it.
     //    Encode each sender once; clone bytes only to visible peers.
-    let in_world_ids: Vec<ClientId> = connections
-        .iter()
-        .filter(|(_, c)| c.in_world)
-        .map(|(id, _)| *id)
-        .collect();
-    for sender_id in &in_world_ids {
+    for sender_id in in_world_ids {
         let Some(sender) = connections.get(sender_id) else {
             continue;
         };
@@ -25,7 +20,7 @@ pub(super) fn fan_out_positions(world: &mut WorldState, _q: &mut Intents, now: I
             continue;
         };
         let visible = aoi.entities_visible_from(sender.aoi_cell);
-        for recipient_id in &in_world_ids {
+        for recipient_id in in_world_ids {
             if visible.contains(recipient_id) {
                 server.send_message(*recipient_id, CHANNEL_POSITION, bytes.clone());
             }
@@ -109,5 +104,4 @@ pub(super) fn fan_out_positions(world: &mut WorldState, _q: &mut Intents, now: I
             *last_fan_report = now;
         }
     }
-    in_world_ids
 }

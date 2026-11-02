@@ -132,7 +132,25 @@ pub async fn serve(cfg: Arc<Config>, pool: SqlitePool) -> anyhow::Result<()> {
     let listener = TcpListener::bind(&cfg.auth_bind).await?;
     let actual = listener.local_addr()?;
     tracing::info!(addr = %actual, "auth WS listening");
+    accept_loop(listener, cfg, pool).await;
+    Ok(())
+}
 
+/// Like `serve` but returns the bound address. Used by integration tests
+/// to start the server on an ephemeral port and discover where it landed.
+pub async fn serve_bound(
+    cfg: Arc<Config>,
+    pool: SqlitePool,
+) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+    let listener = TcpListener::bind(&cfg.auth_bind).await?;
+    let addr = listener.local_addr()?;
+    let handle = tokio::spawn(accept_loop(listener, cfg, pool));
+    Ok((addr, handle))
+}
+
+/// The accept loop both entry points run, so the tests exercise the same
+/// one the server does.
+async fn accept_loop(listener: TcpListener, cfg: Arc<Config>, pool: SqlitePool) {
     // Precompute the auth-timing equalizer hash now so no live request pays the
     // one-time init (see db::verify_login's enumeration defense).
     db::warm_login_timing_defense();
@@ -155,32 +173,6 @@ pub async fn serve(cfg: Arc<Config>, pool: SqlitePool) -> anyhow::Result<()> {
             }
         });
     }
-}
-
-/// Like `serve` but returns the bound address. Used by integration tests
-/// to start the server on an ephemeral port and discover where it landed.
-pub async fn serve_bound(
-    cfg: Arc<Config>,
-    pool: SqlitePool,
-) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
-    let listener = TcpListener::bind(&cfg.auth_bind).await?;
-    let addr = listener.local_addr()?;
-    let limiter = Arc::new(LoginRateLimiter::new());
-    let handle = tokio::spawn(async move {
-        loop {
-            let (stream, peer) = match listener.accept().await {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            let cfg = cfg.clone();
-            let pool = pool.clone();
-            let limiter = limiter.clone();
-            tokio::spawn(async move {
-                let _ = handle_connection(stream, peer, cfg, pool, limiter).await;
-            });
-        }
-    });
-    Ok((addr, handle))
 }
 
 async fn handle_connection(

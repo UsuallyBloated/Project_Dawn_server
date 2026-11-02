@@ -135,7 +135,7 @@ pub(super) async fn reap_connection(
                 .collect();
             for bearer in bearers {
                 if let Some(conn) = connections.get(&bearer) {
-                    fan_out_server_buff_snapshot(server, &recipients, conn);
+                    handlers::fan_out_buff_snapshot(server, &recipients, conn);
                 }
             }
         }
@@ -723,6 +723,16 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
             }
         }
     }
+}
+
+/// The ids of every connection in the world (linkdead bodies included: they
+/// are still in the world to be seen and killed).
+pub(super) fn in_world_ids(connections: &HashMap<ClientId, PerConnection>) -> Vec<ClientId> {
+    connections
+        .iter()
+        .filter(|(_, c)| c.in_world)
+        .map(|(id, _)| *id)
+        .collect()
 }
 
 /// Step 3-bis: drop every client whose message handling panicked this tick

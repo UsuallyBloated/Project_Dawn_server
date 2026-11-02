@@ -49,7 +49,7 @@ pub(super) async fn run_death_sweep(world: &mut WorldState, _q: &mut Intents, no
         }
         for bearer in clear_player_dots_from(&mut *connections, &newly_dead) {
             if let Some(conn) = connections.get(&bearer) {
-                fan_out_server_buff_snapshot(&mut *server, &in_world_recipients_now, conn);
+                handlers::fan_out_buff_snapshot(&mut *server, &in_world_recipients_now, conn);
             }
         }
     }

@@ -248,13 +248,7 @@ pub(super) fn apply_item_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
             Some(if intent.shared { "account vault" } else { "vault" }.to_string()),
         ));
         let post = conn.inventory.peek_at(&intent.src_location, intent.src_slot);
-        let (dpath, dcount) = match post {
-            Some((p, c)) => (Some(p), c),
-            None => (None, 0),
-        };
-        handlers::send_inventory_delta(
-            &mut *server, cid, intent.src_location.clone(), intent.src_slot, dpath, dcount,
-        );
+        handlers::send_slot_delta(&mut *server, cid, intent.src_location.clone(), intent.src_slot, post);
         let entries = if intent.shared {
             conn.account_bank_items.to_snapshot_entries()
         } else {
@@ -334,11 +328,7 @@ pub(super) fn apply_item_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
             ));
         }
         for (loc, slot) in &touched {
-            let (dp, dc) = match conn.inventory.peek_at(loc, *slot) {
-                Some((p, c)) => (Some(p), c),
-                None => (None, 0),
-            };
-            handlers::send_inventory_delta(&mut *server, cid, loc.clone(), *slot, dp, dc);
+            handlers::send_slot_delta(&mut *server, cid, loc.clone(), *slot, conn.inventory.peek_at(loc, *slot));
         }
         let entries = if intent.shared {
             conn.account_bank_items.to_snapshot_entries()

@@ -2919,6 +2919,22 @@ pub fn send_inventory_delta(
     server.send_message(recipient, CHANNEL_SYSTEM, bytes);
 }
 
+/// Send one slot's current contents as an `InventoryDelta`. `contents` is what
+/// `Inventory::peek_at` returned for the slot; `None` means it is now empty.
+pub fn send_slot_delta(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    location: String,
+    slot: u32,
+    contents: Option<(String, u32)>,
+) {
+    let (item_path, count) = match contents {
+        Some((path, count)) => (Some(path), count),
+        None => (None, 0),
+    };
+    send_inventory_delta(server, recipient, location, slot, item_path, count);
+}
+
 /// Track 11 — fan out `PetSpawn` for a freshly summoned pet. Same
 /// pattern as `fan_out_enemy_spawn`; the variant carries the owner's
 /// char_id so the client can route the pet under the right player.
@@ -3490,7 +3506,7 @@ pub fn send_kick_with_reconnect(
     }
 }
 
-fn encode(msg: &ServerWorldMsg) -> Option<Vec<u8>> {
+pub(crate) fn encode(msg: &ServerWorldMsg) -> Option<Vec<u8>> {
     match bincode::serde::encode_to_vec(msg, bincode_cfg()) {
         Ok(b) => Some(b),
         Err(e) => {

@@ -483,7 +483,7 @@ pub(super) fn song_pulse(
     }
     if changed {
         if let Some(c) = connections.get(&cid) {
-            fan_out_server_buff_snapshot(server, recipients, c);
+            handlers::fan_out_buff_snapshot(server, recipients, c);
         }
     }
     if effects.attack_slow > 0.0 {

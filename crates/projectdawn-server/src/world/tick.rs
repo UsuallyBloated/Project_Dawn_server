@@ -1676,6 +1676,11 @@ pub async fn run(
     // current report window, logged every ENEMY_FAN_REPORT_INTERVAL.
     let mut enemy_pos_sent: u64 = 0;
     let mut last_fan_report = Instant::now();
+    // The loop's own timings (world/health.rs): each tick's work and each
+    // checkpoint, reported as the `world health` line.
+    let mut tick_health = super::health::TickHealth::default();
+    let mut tick_started: Option<Instant> = None;
+    let mut last_health_report = Instant::now();
     let mut last_ban_sweep = Instant::now();
     // The item ledger's daily sweep (world/ledger.rs): None until it has run
     // once, so the first tick runs it at boot.
@@ -1747,8 +1752,15 @@ pub async fn run(
     }
 
     loop {
+        // The previous tick's work ends here, before the wait for the next:
+        // measured at the top so every path out of the body (a `continue`
+        // included) is counted.
+        if let Some(started) = tick_started {
+            tick_health.record_tick(started.elapsed());
+        }
         interval.tick().await;
         let now = Instant::now();
+        tick_started = Some(now);
 
         // 0. A stop signal (SIGTERM from systemd, or Ctrl-C) ends the world
         //    cleanly: everyone is told, everyone is saved, then the loop
@@ -12609,9 +12621,37 @@ pub async fn run(
 
         // 7. Periodic checkpoint.
         if now.duration_since(last_checkpoint) >= CHECKPOINT_INTERVAL {
+            let started = Instant::now();
             let mut dirty: Vec<&mut PerConnection> = connections.values_mut().collect();
+            let walked = dirty.len();
             persistence::checkpoint_dirty(&pool, &mut dirty).await;
+            tick_health.record_checkpoint(started.elapsed(), walked);
             last_checkpoint = now;
+        }
+
+        // 7-health. The `world health` line: tick work times (median, 99th
+        //    percentile, worst), the ticks that ran past TICK_DT, and the
+        //    checkpoint's time. Logged while anyone is in the world, and with
+        //    nobody in it only when a tick overran (a slow disk with no
+        //    players still deserves a line); otherwise the window just resets.
+        if now.duration_since(last_health_report) >= ENEMY_FAN_REPORT_INTERVAL {
+            let report = tick_health.take_report();
+            if !in_world_ids.is_empty() || report.has_overrun() {
+                tracing::info!(
+                    window_secs = now.duration_since(last_health_report).as_secs(),
+                    ticks = report.ticks,
+                    p50_ms = report.p50_ms,
+                    p99_ms = report.p99_ms,
+                    max_ms = report.max_ms,
+                    over_budget = report.over_budget,
+                    checkpoints = report.checkpoints,
+                    checkpoint_max_ms = report.checkpoint_max_ms,
+                    checkpoint_conns = report.checkpoint_conns,
+                    players_in_world = in_world_ids.len(),
+                    "world health"
+                );
+            }
+            last_health_report = now;
         }
 
         // 7-bis. Retry the logout saves that did not land. Once one does, that

@@ -191,7 +191,7 @@ pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents
                         handlers::send_loot_granted(&mut *server, responder_cid, path.clone(), count.saturating_sub(leftover));
                     }
                     Err(e) => {
-                        tracing::error!(char_id = responder, quest_id = %quest_id, %path, error = e, "quest reward grant failed after completion recorded");
+                        tracing::error!(char_id = responder, quest_id = %quest_id, %path, error = %e, "quest reward grant failed after completion recorded");
                     }
                 }
             }

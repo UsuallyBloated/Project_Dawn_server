@@ -359,7 +359,7 @@ pub(super) fn apply_sells(world: &mut WorldState, q: &mut Intents, _now: Instant
                         owner = intent.owner,
                         %location_str,
                         slot = slot_u32,
-                        why,
+                        %why,
                         "SellItem rejected — could not take the item"
                     );
                     handlers::send_refusal(&mut *server, owner_cid, "The merchant won't take that.");

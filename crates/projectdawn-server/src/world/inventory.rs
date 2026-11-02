@@ -44,14 +44,76 @@ fn is_bag_item(path: &str) -> bool {
 /// The key can never collide with a real base slot (BASE_SLOT_COUNT is 8).
 pub const CURSOR_BAG_KEY: u8 = 255;
 
+/// Why an inventory operation was refused. The text is for the log; the tick
+/// turns a refusal a player can reach into its own chat line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum MoveError {
+    #[error("that bag is in your hand")]
+    BagInHand,
+    #[error("cannot place a bag inside a bag")]
+    BagInsideBag,
+    #[error("cannot swap a bag into another bag's inner slot")]
+    BagIntoBagSlot,
+    #[error("bag must be emptied first")]
+    BagNotEmpty,
+    #[error("bag must be emptied before destroying")]
+    BagNotEmptyToDestroy,
+    #[error("bag slot out of range")]
+    BagSlotOutOfRange,
+    #[error("your bags are full")]
+    BagsFull,
+    #[error("base item not equippable in this slot")]
+    BaseItemNotEquippableHere,
+    #[error("base slot out of range")]
+    BaseSlotOutOfRange,
+    #[error("cursor occupied")]
+    CursorOccupied,
+    #[error("destination bag slot out of range")]
+    DestinationBagSlotOutOfRange,
+    #[error("dst holds a different item")]
+    DifferentItem,
+    #[error("empty item_path")]
+    EmptyItemPath,
+    #[error("equip slot empty")]
+    EquipSlotEmpty,
+    #[error("equip slot out of range")]
+    EquipSlotOutOfRange,
+    #[error("inventory full")]
+    InventoryFull,
+    #[error("bag does not exist at base index")]
+    NoBagAtSlot,
+    #[error("destination bag does not exist")]
+    NoDestinationBag,
+    #[error("source bag does not exist")]
+    NoSourceBag,
+    #[error("item not equippable in this slot")]
+    NotEquippableHere,
+    #[error("src == dst")]
+    SameSlot,
+    #[error("slot out of range")]
+    SlotOutOfRange,
+    #[error("source bag slot out of range")]
+    SourceBagSlotOutOfRange,
+    #[error("source slot empty")]
+    SourceEmpty,
+    #[error("destination stack would exceed the item's stack size")]
+    StackSizeExceeded,
+    #[error("source has fewer items than split count")]
+    TooFewToSplit,
+    #[error("unsupported location")]
+    UnsupportedLocation,
+    #[error("zero count")]
+    ZeroCount,
+}
+
 /// The held bag's contents are not addressable from the wire — no window
 /// is open on a bag riding the cursor, so any intent naming `bag_255` is
 /// forged or stale. Applied by every mutating entry point; `peek_at`
 /// stays permissive so the delta fan can still read re-keyed inners.
-fn reject_held_bag_slot(parsed: &SlotRefInt) -> Result<(), &'static str> {
+fn reject_held_bag_slot(parsed: &SlotRefInt) -> Result<(), MoveError> {
     if let SlotRefInt::Bag(b, _) = parsed {
         if *b == CURSOR_BAG_KEY {
-            return Err("that bag is in your hand");
+            return Err(MoveError::BagInHand);
         }
     }
     Ok(())
@@ -66,11 +128,11 @@ enum SlotRefInt {
     Cursor,
 }
 
-fn parse_slot_ref(loc: &str, slot: u32) -> Result<SlotRefInt, &'static str> {
+fn parse_slot_ref(loc: &str, slot: u32) -> Result<SlotRefInt, MoveError> {
     if loc == "base" {
         let idx = slot as usize;
         if idx >= BASE_SLOT_COUNT {
-            return Err("base slot out of range");
+            return Err(MoveError::BaseSlotOutOfRange);
         }
         return Ok(SlotRefInt::Base(idx));
     }
@@ -80,7 +142,7 @@ fn parse_slot_ref(loc: &str, slot: u32) -> Result<SlotRefInt, &'static str> {
     if let Some(base_idx) = parse_bag_location(loc) {
         return Ok(SlotRefInt::Bag(base_idx, slot as usize));
     }
-    Err("unsupported location")
+    Err(MoveError::UnsupportedLocation)
 }
 
 /// Track 14.2 — running totals of stat bonuses contributed by the
@@ -856,12 +918,12 @@ impl PlayerInventory {
         &mut self,
         item_path: &str,
         count: u32,
-    ) -> Result<(Vec<(String, u32)>, u32), &'static str> {
+    ) -> Result<(Vec<(String, u32)>, u32), MoveError> {
         if count == 0 {
-            return Err("zero count");
+            return Err(MoveError::ZeroCount);
         }
         if item_path.is_empty() {
-            return Err("empty item_path");
+            return Err(MoveError::EmptyItemPath);
         }
         let cap = items::max_stack(item_path);
         let mut remaining = count;
@@ -1014,23 +1076,23 @@ impl PlayerInventory {
         src: usize,
         dst: usize,
         count: u32,
-    ) -> Result<Vec<usize>, &'static str> {
+    ) -> Result<Vec<usize>, MoveError> {
         if src >= BASE_SLOT_COUNT || dst >= BASE_SLOT_COUNT {
-            return Err("slot out of range");
+            return Err(MoveError::SlotOutOfRange);
         }
         if src == dst {
-            return Err("src == dst");
+            return Err(MoveError::SameSlot);
         }
         if count == 0 {
-            return Err("zero count");
+            return Err(MoveError::ZeroCount);
         }
         let src_entry = self
             .base
             .get(src)
             .and_then(|s| s.as_ref())
-            .ok_or("source slot empty")?;
+            .ok_or(MoveError::SourceEmpty)?;
         if src_entry.count < count {
-            return Err("source has fewer items than split count");
+            return Err(MoveError::TooFewToSplit);
         }
         let src_path = src_entry.item_path.clone();
         // Validate dst before mutating either slot.
@@ -1042,10 +1104,10 @@ impl PlayerInventory {
                 // so silently moving fewer than asked would be the confusing
                 // option. The caller now resyncs on a rejection anyway.
                 if existing.count.saturating_add(count) > items::max_stack(&src_path) {
-                    return Err("destination stack would exceed the item's stack size");
+                    return Err(MoveError::StackSizeExceeded);
                 }
             }
-            Some(_) => return Err("dst holds a different item"),
+            Some(_) => return Err(MoveError::DifferentItem),
         }
         // Apply: subtract from src (clear if zero) then add to dst.
         let src_now_zero;
@@ -1088,23 +1150,23 @@ impl PlayerInventory {
         &mut self,
         equip_slot: u8,
         dst: usize,
-    ) -> Result<Vec<(&'static str, u32)>, &'static str> {
+    ) -> Result<Vec<(&'static str, u32)>, MoveError> {
         if equip_slot >= EQUIP_SLOT_COUNT {
-            return Err("equip slot out of range");
+            return Err(MoveError::EquipSlotOutOfRange);
         }
         if dst >= BASE_SLOT_COUNT {
-            return Err("base slot out of range");
+            return Err(MoveError::BaseSlotOutOfRange);
         }
         // Track 14.3 — if the swap would land an unsuitable item
         // (bag, consumable, mismatched gear type) in the paperdoll,
         // reject before any mutation.
         if let Some(existing) = self.base.get(dst).and_then(|s| s.as_ref()) {
             if !items::is_equippable_in_slot(&existing.item_path, equip_slot) {
-                return Err("base item not equippable in this slot");
+                return Err(MoveError::BaseItemNotEquippableHere);
             }
         }
         let Some(equip_entry) = self.equipment.remove(&equip_slot) else {
-            return Err("equip slot empty");
+            return Err(MoveError::EquipSlotEmpty);
         };
         let prev_base = self.base[dst].take();
         self.base[dst] = Some(equip_entry);
@@ -1122,15 +1184,15 @@ impl PlayerInventory {
     pub fn unequip_to_cursor(
         &mut self,
         equip_slot: u8,
-    ) -> Result<Vec<(&'static str, u32)>, &'static str> {
+    ) -> Result<Vec<(&'static str, u32)>, MoveError> {
         if equip_slot >= EQUIP_SLOT_COUNT {
-            return Err("equip slot out of range");
+            return Err(MoveError::EquipSlotOutOfRange);
         }
         if self.cursor.is_some() {
-            return Err("cursor occupied");
+            return Err(MoveError::CursorOccupied);
         }
         let Some(equip_entry) = self.equipment.remove(&equip_slot) else {
-            return Err("equip slot empty");
+            return Err(MoveError::EquipSlotEmpty);
         };
         self.cursor = Some(equip_entry);
         Ok(vec![("cursor", 0), ("equip", equip_slot as u32)])
@@ -1147,9 +1209,9 @@ impl PlayerInventory {
         src_loc: &str,
         src_slot: u32,
         equip_slot: u8,
-    ) -> Result<Vec<(String, u32)>, &'static str> {
+    ) -> Result<Vec<(String, u32)>, MoveError> {
         if equip_slot >= EQUIP_SLOT_COUNT {
-            return Err("equip slot out of range");
+            return Err(MoveError::EquipSlotOutOfRange);
         }
         let src = parse_slot_ref(src_loc, src_slot)?;
         reject_held_bag_slot(&src)?;
@@ -1157,16 +1219,16 @@ impl PlayerInventory {
         let src_path = match src {
             SlotRefInt::Base(s) => match self.base.get(s).and_then(|e| e.as_ref()) {
                 Some(e) => e.item_path.clone(),
-                None => return Err("source slot empty"),
+                None => return Err(MoveError::SourceEmpty),
             },
             SlotRefInt::Bag(b, s) => {
-                let arr = self.bags.get(&b).ok_or("source bag does not exist")?;
+                let arr = self.bags.get(&b).ok_or(MoveError::NoSourceBag)?;
                 if s >= arr.len() {
-                    return Err("bag slot out of range");
+                    return Err(MoveError::BagSlotOutOfRange);
                 }
                 match arr[s].as_ref() {
                     Some(e) => e.item_path.clone(),
-                    None => return Err("source slot empty"),
+                    None => return Err(MoveError::SourceEmpty),
                 }
             }
             // PD_W0027 — equip straight from the hand (EQ's
@@ -1174,11 +1236,11 @@ impl PlayerInventory {
             // previously-worn item onto the cursor.
             SlotRefInt::Cursor => match self.cursor.as_ref() {
                 Some(e) => e.item_path.clone(),
-                None => return Err("source slot empty"),
+                None => return Err(MoveError::SourceEmpty),
             },
         };
         if !items::is_equippable_in_slot(&src_path, equip_slot) {
-            return Err("item not equippable in this slot");
+            return Err(MoveError::NotEquippableHere);
         }
         // Take src, swap with paperdoll.
         let src_entry = match src {
@@ -1225,19 +1287,19 @@ impl PlayerInventory {
         loc: &str,
         slot: u32,
         count: u32,
-    ) -> Result<(String, u32), &'static str> {
+    ) -> Result<(String, u32), MoveError> {
         let parsed = parse_slot_ref(loc, slot)?;
         reject_held_bag_slot(&parsed)?;
         match parsed {
             SlotRefInt::Base(s) => {
                 if self.bag_key_is_nonempty(s as u8) {
-                    return Err("bag must be emptied before destroying");
+                    return Err(MoveError::BagNotEmptyToDestroy);
                 }
                 let entry = self
                     .base
                     .get_mut(s)
                     .and_then(|e| e.as_mut())
-                    .ok_or("source slot empty")?;
+                    .ok_or(MoveError::SourceEmpty)?;
                 let path = entry.item_path.clone();
                 let to_remove = if count == 0 || count >= entry.count {
                     entry.count
@@ -1252,11 +1314,11 @@ impl PlayerInventory {
                 Ok((path, to_remove))
             }
             SlotRefInt::Bag(b, s) => {
-                let arr = self.bags.get_mut(&b).ok_or("source bag does not exist")?;
+                let arr = self.bags.get_mut(&b).ok_or(MoveError::NoSourceBag)?;
                 if s >= arr.len() {
-                    return Err("bag slot out of range");
+                    return Err(MoveError::BagSlotOutOfRange);
                 }
-                let entry = arr[s].as_mut().ok_or("source slot empty")?;
+                let entry = arr[s].as_mut().ok_or(MoveError::SourceEmpty)?;
                 let path = entry.item_path.clone();
                 let to_remove = if count == 0 || count >= entry.count {
                     entry.count
@@ -1277,9 +1339,9 @@ impl PlayerInventory {
             // orphan the contents and dropping it would strand them.
             SlotRefInt::Cursor => {
                 if self.bag_key_is_nonempty(CURSOR_BAG_KEY) {
-                    return Err("bag must be emptied first");
+                    return Err(MoveError::BagNotEmpty);
                 }
-                let entry = self.cursor.as_mut().ok_or("source slot empty")?;
+                let entry = self.cursor.as_mut().ok_or(MoveError::SourceEmpty)?;
                 let path = entry.item_path.clone();
                 let to_remove = if count == 0 || count >= entry.count {
                     entry.count
@@ -1305,7 +1367,7 @@ impl PlayerInventory {
         &mut self,
         loc: &str,
         slot: u32,
-    ) -> Result<String, &'static str> {
+    ) -> Result<String, MoveError> {
         let parsed = parse_slot_ref(loc, slot)?;
         reject_held_bag_slot(&parsed)?;
         match parsed {
@@ -1314,7 +1376,7 @@ impl PlayerInventory {
                     .base
                     .get_mut(s)
                     .and_then(|e| e.as_mut())
-                    .ok_or("source slot empty")?;
+                    .ok_or(MoveError::SourceEmpty)?;
                 let path = entry.item_path.clone();
                 entry.count -= 1;
                 if entry.count == 0 {
@@ -1324,11 +1386,11 @@ impl PlayerInventory {
                 Ok(path)
             }
             SlotRefInt::Bag(b, s) => {
-                let arr = self.bags.get_mut(&b).ok_or("source bag does not exist")?;
+                let arr = self.bags.get_mut(&b).ok_or(MoveError::NoSourceBag)?;
                 if s >= arr.len() {
-                    return Err("bag slot out of range");
+                    return Err(MoveError::BagSlotOutOfRange);
                 }
-                let entry = arr[s].as_mut().ok_or("source slot empty")?;
+                let entry = arr[s].as_mut().ok_or(MoveError::SourceEmpty)?;
                 let path = entry.item_path.clone();
                 entry.count -= 1;
                 if entry.count == 0 {
@@ -1338,7 +1400,7 @@ impl PlayerInventory {
             }
             // PD_W0027 — eat / drink straight from the hand.
             SlotRefInt::Cursor => {
-                let entry = self.cursor.as_mut().ok_or("source slot empty")?;
+                let entry = self.cursor.as_mut().ok_or(MoveError::SourceEmpty)?;
                 let path = entry.item_path.clone();
                 entry.count -= 1;
                 if entry.count == 0 {
@@ -1357,8 +1419,8 @@ impl PlayerInventory {
     /// `(location, slot)` plus the touched-slot list for the delta fan.
     pub fn park_cursor_stack(
         &mut self,
-    ) -> Result<((String, u32), Vec<(String, u32)>), &'static str> {
-        let held = self.cursor.as_ref().ok_or("source slot empty")?;
+    ) -> Result<((String, u32), Vec<(String, u32)>), MoveError> {
+        let held = self.cursor.as_ref().ok_or(MoveError::SourceEmpty)?;
         let held_is_bag = is_bag_item(&held.item_path);
         for i in 0..BASE_SLOT_COUNT {
             if self.base[i].is_none() {
@@ -1386,7 +1448,7 @@ impl PlayerInventory {
                 }
             }
         }
-        Err("your bags are full")
+        Err(MoveError::BagsFull)
     }
 
     /// Track 13.2 / 14.3 — atomic move/swap between base slots.
@@ -1405,15 +1467,15 @@ impl PlayerInventory {
         &mut self,
         src: usize,
         dst: usize,
-    ) -> Result<Vec<(String, u32)>, &'static str> {
+    ) -> Result<Vec<(String, u32)>, MoveError> {
         if src >= BASE_SLOT_COUNT || dst >= BASE_SLOT_COUNT {
-            return Err("slot out of range");
+            return Err(MoveError::SlotOutOfRange);
         }
         if src == dst {
             return Ok(Vec::new());
         }
         if self.base[src].is_none() {
-            return Err("source slot empty");
+            return Err(MoveError::SourceEmpty);
         }
         let src_key = src as u8;
         let dst_key = dst as u8;
@@ -1474,21 +1536,21 @@ impl PlayerInventory {
         base_idx: usize,
         src: usize,
         dst: usize,
-    ) -> Result<Vec<(String, u32)>, &'static str> {
+    ) -> Result<Vec<(String, u32)>, MoveError> {
         let key = base_idx as u8;
         let arr = self
             .bags
             .get_mut(&key)
-            .ok_or("bag does not exist at base index")?;
+            .ok_or(MoveError::NoBagAtSlot)?;
         if src >= arr.len() || dst >= arr.len() {
-            return Err("bag slot out of range");
+            return Err(MoveError::BagSlotOutOfRange);
         }
         if src == dst {
             return Ok(Vec::new());
         }
         let src_entry = arr[src].take();
         let Some(src_entry) = src_entry else {
-            return Err("source slot empty");
+            return Err(MoveError::SourceEmpty);
         };
         let dst_entry = arr[dst].take();
         match dst_entry {
@@ -1520,7 +1582,7 @@ impl PlayerInventory {
         src_slot: u32,
         dst_loc: &str,
         dst_slot: u32,
-    ) -> Result<Vec<(String, u32)>, &'static str> {
+    ) -> Result<Vec<(String, u32)>, MoveError> {
         let src = parse_slot_ref(src_loc, src_slot)?;
         let dst = parse_slot_ref(dst_loc, dst_slot)?;
         reject_held_bag_slot(&src)?;
@@ -1559,12 +1621,12 @@ impl PlayerInventory {
     /// item into the vacated base slot (its own contents re-keying
     /// back the other way); bags never merge, so a same-path pair of
     /// bags swaps.
-    fn move_base_to_cursor(&mut self, src: usize) -> Result<Vec<(String, u32)>, &'static str> {
+    fn move_base_to_cursor(&mut self, src: usize) -> Result<Vec<(String, u32)>, MoveError> {
         if src >= BASE_SLOT_COUNT {
-            return Err("base slot out of range");
+            return Err(MoveError::BaseSlotOutOfRange);
         }
         if self.base[src].is_none() {
-            return Err("source slot empty");
+            return Err(MoveError::SourceEmpty);
         }
         let src_key = src as u8;
         let mut touched: Vec<(String, u32)> = vec![
@@ -1614,12 +1676,12 @@ impl PlayerInventory {
     /// hand), a different item swaps onto the cursor. Full bags place
     /// and swap WITH their contents (2026-09-17 scope), re-keying
     /// between `CURSOR_BAG_KEY` and the base slot; bags never merge.
-    fn move_cursor_to_base(&mut self, dst: usize) -> Result<Vec<(String, u32)>, &'static str> {
+    fn move_cursor_to_base(&mut self, dst: usize) -> Result<Vec<(String, u32)>, MoveError> {
         if dst >= BASE_SLOT_COUNT {
-            return Err("base slot out of range");
+            return Err(MoveError::BaseSlotOutOfRange);
         }
         if self.cursor.is_none() {
-            return Err("source slot empty");
+            return Err(MoveError::SourceEmpty);
         }
         let dst_key = dst as u8;
         let mut touched: Vec<(String, u32)> = vec![
@@ -1669,27 +1731,27 @@ impl PlayerInventory {
         &mut self,
         base_idx: u8,
         src: usize,
-    ) -> Result<Vec<(String, u32)>, &'static str> {
+    ) -> Result<Vec<(String, u32)>, MoveError> {
         if let Some(held) = &self.cursor {
             // Only a swap or merge can follow; pre-check the swap ban
             // before mutating anything.
-            let arr = self.bags.get(&base_idx).ok_or("source bag does not exist")?;
+            let arr = self.bags.get(&base_idx).ok_or(MoveError::NoSourceBag)?;
             let src_entry = arr
                 .get(src)
                 .and_then(|s| s.as_ref())
-                .ok_or("source slot empty")?;
+                .ok_or(MoveError::SourceEmpty)?;
             if held.item_path != src_entry.item_path && is_bag_item(&held.item_path) {
-                return Err("cannot place a bag inside a bag");
+                return Err(MoveError::BagInsideBag);
             }
         }
         let arr = self
             .bags
             .get_mut(&base_idx)
-            .ok_or("source bag does not exist")?;
+            .ok_or(MoveError::NoSourceBag)?;
         if src >= arr.len() {
-            return Err("bag slot out of range");
+            return Err(MoveError::BagSlotOutOfRange);
         }
-        let src_entry = arr[src].take().ok_or("source slot empty")?;
+        let src_entry = arr[src].take().ok_or(MoveError::SourceEmpty)?;
         match self.cursor.take() {
             None => {
                 self.cursor = Some(src_entry);
@@ -1725,20 +1787,20 @@ impl PlayerInventory {
         &mut self,
         base_idx: u8,
         dst: usize,
-    ) -> Result<Vec<(String, u32)>, &'static str> {
+    ) -> Result<Vec<(String, u32)>, MoveError> {
         let held_path = match &self.cursor {
             Some(e) => e.item_path.clone(),
-            None => return Err("source slot empty"),
+            None => return Err(MoveError::SourceEmpty),
         };
         if is_bag_item(&held_path) {
-            return Err("cannot place a bag inside a bag");
+            return Err(MoveError::BagInsideBag);
         }
         let arr = self
             .bags
             .get_mut(&base_idx)
-            .ok_or("destination bag does not exist")?;
+            .ok_or(MoveError::NoDestinationBag)?;
         if dst >= arr.len() {
-            return Err("bag slot out of range");
+            return Err(MoveError::BagSlotOutOfRange);
         }
         let held = self.cursor.take().expect("checked above");
         match arr[dst].take() {
@@ -1773,23 +1835,23 @@ impl PlayerInventory {
         src: usize,
         base_idx: u8,
         dst: usize,
-    ) -> Result<Vec<(String, u32)>, &'static str> {
+    ) -> Result<Vec<(String, u32)>, MoveError> {
         if src >= BASE_SLOT_COUNT {
-            return Err("base slot out of range");
+            return Err(MoveError::BaseSlotOutOfRange);
         }
         let src_path = match self.base.get(src).and_then(|s| s.as_ref()) {
             Some(e) => e.item_path.clone(),
-            None => return Err("source slot empty"),
+            None => return Err(MoveError::SourceEmpty),
         };
         if is_bag_item(&src_path) {
-            return Err("cannot place a bag inside a bag");
+            return Err(MoveError::BagInsideBag);
         }
         let arr = self
             .bags
             .get_mut(&base_idx)
-            .ok_or("destination bag does not exist")?;
+            .ok_or(MoveError::NoDestinationBag)?;
         if dst >= arr.len() {
-            return Err("bag slot out of range");
+            return Err(MoveError::BagSlotOutOfRange);
         }
         let src_entry = self.base[src].take().expect("checked above");
         let dst_entry = arr[dst].take();
@@ -1826,25 +1888,25 @@ impl PlayerInventory {
         base_idx: u8,
         src: usize,
         dst: usize,
-    ) -> Result<Vec<(String, u32)>, &'static str> {
+    ) -> Result<Vec<(String, u32)>, MoveError> {
         if dst >= BASE_SLOT_COUNT {
-            return Err("base slot out of range");
+            return Err(MoveError::BaseSlotOutOfRange);
         }
         let arr = self
             .bags
             .get_mut(&base_idx)
-            .ok_or("source bag does not exist")?;
+            .ok_or(MoveError::NoSourceBag)?;
         if src >= arr.len() {
-            return Err("bag slot out of range");
+            return Err(MoveError::BagSlotOutOfRange);
         }
         // Inspect the swap target before pulling from the bag so we
         // can reject cleanly.
         if let Some(existing) = self.base.get(dst).and_then(|s| s.as_ref()) {
             if is_bag_item(&existing.item_path) {
-                return Err("cannot swap a bag into another bag's inner slot");
+                return Err(MoveError::BagIntoBagSlot);
             }
         }
-        let src_entry = arr[src].take().ok_or("source slot empty")?;
+        let src_entry = arr[src].take().ok_or(MoveError::SourceEmpty)?;
         let dst_entry = self.base[dst].take();
         match dst_entry {
             None => {
@@ -1888,7 +1950,7 @@ impl PlayerInventory {
         src_slot: usize,
         dst_base: u8,
         dst_slot: usize,
-    ) -> Result<Vec<(String, u32)>, &'static str> {
+    ) -> Result<Vec<(String, u32)>, MoveError> {
         // Validate both bags exist + slots are in range before any
         // mutation. Snapshot the src entry, peek the dst, then
         // commit.
@@ -1896,11 +1958,11 @@ impl PlayerInventory {
             let arr = self
                 .bags
                 .get_mut(&src_base)
-                .ok_or("source bag does not exist")?;
+                .ok_or(MoveError::NoSourceBag)?;
             if src_slot >= arr.len() {
-                return Err("source bag slot out of range");
+                return Err(MoveError::SourceBagSlotOutOfRange);
             }
-            arr[src_slot].take().ok_or("source slot empty")?
+            arr[src_slot].take().ok_or(MoveError::SourceEmpty)?
         };
         // Restore on any subsequent failure.
         let restore = |inv: &mut Self, entry: InventoryEntry| {
@@ -1913,12 +1975,12 @@ impl PlayerInventory {
                 Some(a) => a,
                 None => {
                     restore(self, src_entry);
-                    return Err("destination bag does not exist");
+                    return Err(MoveError::NoDestinationBag);
                 }
             };
             if dst_slot >= arr.len() {
                 restore(self, src_entry);
-                return Err("destination bag slot out of range");
+                return Err(MoveError::DestinationBagSlotOutOfRange);
             }
             arr[dst_slot].take()
         };
@@ -1943,18 +2005,18 @@ impl PlayerInventory {
     }
 
     /// Convenience wrapper used by the unit tests below. Returns
-    /// `Err("inventory full")` if any of `count` failed to land
+    /// `Err(MoveError::InventoryFull)` if any of `count` failed to land
     /// (partial mutations are NOT rolled back — call
     /// `add_item_locating` directly if you need finer control over
     /// the leftover).
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn add_item(&mut self, item_path: &str, count: u32) -> Result<(), &'static str> {
+    pub fn add_item(&mut self, item_path: &str, count: u32) -> Result<(), MoveError> {
         if count == 0 {
             return Ok(());
         }
         let (_, leftover) = self.add_item_locating(item_path, count)?;
         if leftover > 0 {
-            return Err("inventory full");
+            return Err(MoveError::InventoryFull);
         }
         Ok(())
     }
@@ -3039,11 +3101,11 @@ mod tests {
         // Held-bag inners are not addressable from the wire.
         assert_eq!(
             inv.move_across(&format!("bag_{CURSOR_BAG_KEY}"), 0, "base", 1).unwrap_err(),
-            "that bag is in your hand"
+            MoveError::BagInHand
         );
         // Destroy/drop of the held non-empty bag refuses (contents would
         // orphan or strand).
-        assert_eq!(inv.destroy_at("cursor", 0, 0).unwrap_err(), "bag must be emptied first");
+        assert_eq!(inv.destroy_at("cursor", 0, 0).unwrap_err(), MoveError::BagNotEmpty);
         // Place it back down (swap with the sword now in base 0).
         inv.move_across("cursor", 0, "base", 0).expect("swap-place the full bag");
         assert_eq!(inv.base[0].as_ref().unwrap().item_path, POUCH);
@@ -3107,7 +3169,7 @@ mod tests {
         });
         // Direct place into an inner slot.
         let err = inv.move_across("cursor", 0, "bag_0", 0).unwrap_err();
-        assert_eq!(err, "cannot place a bag inside a bag");
+        assert_eq!(err, MoveError::BagInsideBag);
         // Swap variant: lifting an inner item while holding a bag
         // would push the bag into the inner slot.
         inv.bags.get_mut(&0u8).unwrap()[1] = Some(InventoryEntry {
@@ -3115,7 +3177,7 @@ mod tests {
             count: 2,
         });
         let err = inv.move_across("bag_0", 1, "cursor", 0).unwrap_err();
-        assert_eq!(err, "cannot place a bag inside a bag");
+        assert_eq!(err, MoveError::BagInsideBag);
     }
 
     #[test]
@@ -3200,7 +3262,7 @@ mod tests {
             count: 1,
         });
         let err = inv.unequip_to_cursor(0).unwrap_err();
-        assert_eq!(err, "cursor occupied");
+        assert_eq!(err, MoveError::CursorOccupied);
         assert!(inv.equipment.get(&0).is_some(), "nothing moved on refusal");
     }
 

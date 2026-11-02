@@ -133,7 +133,7 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                         // Ledger 8: busy / self refusals answer the
                         // SENDER only — quiet to the target, so a spammy
                         // requester cannot use refusal echoes to harass.
-                        Err(e) => handlers::send_refusal(&mut *server, rcid, e),
+                        Err(e) => handlers::send_refusal(&mut *server, rcid, &e.to_string()),
                     }
                 }
                 TradeI::OfferItem { owner, window_slot, from_location, from_slot } => {
@@ -174,7 +174,7 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                                 (l, s)
                             }
                             Some(Err(e)) => {
-                                handlers::send_refusal(&mut *server, cid, e);
+                                handlers::send_refusal(&mut *server, cid, &e.to_string());
                                 continue;
                             }
                             None => continue,
@@ -228,7 +228,7 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                                 fan_trade_state(&mut *server, session);
                             }
                         }
-                        Err(e) => handlers::send_refusal(&mut *server, cid, e),
+                        Err(e) => handlers::send_refusal(&mut *server, cid, &e.to_string()),
                     }
                 }
                 TradeI::RetrieveItem { owner, window_slot } => {
@@ -239,7 +239,7 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                                 fan_trade_state(&mut *server, session);
                             }
                         }
-                        Err(e) => handlers::send_refusal(&mut *server, cid, e),
+                        Err(e) => handlers::send_refusal(&mut *server, cid, &e.to_string()),
                     }
                 }
                 TradeI::OfferCoins { owner, coins: amount } => {
@@ -276,7 +276,7 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                                 fan_trade_state(&mut *server, session);
                             }
                         }
-                        Err(e) => handlers::send_refusal(&mut *server, cid, e),
+                        Err(e) => handlers::send_refusal(&mut *server, cid, &e.to_string()),
                     }
                 }
                 TradeI::Cancel { owner } => {
@@ -291,7 +291,7 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                     let cid = owner as ClientId;
                     let both = match trade_manager.accept(cid) {
                         Err(e) => {
-                            handlers::send_refusal(&mut *server, cid, e);
+                            handlers::send_refusal(&mut *server, cid, &e.to_string());
                             continue;
                         }
                         Ok(b) => b,

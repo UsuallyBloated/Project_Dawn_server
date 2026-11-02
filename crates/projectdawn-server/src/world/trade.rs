@@ -97,6 +97,28 @@ impl TradeSession {
     }
 }
 
+/// Why a trade action was refused. The text is shown to the player as is
+/// (`handlers::send_refusal`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum TradeError {
+    #[error("that item is already offered")]
+    AlreadyOffered,
+    #[error("you are already trading")]
+    AlreadyTrading,
+    #[error("no such trade slot")]
+    NoSuchSlot,
+    #[error("you are not trading")]
+    NotTrading,
+    #[error("they are busy")]
+    PartnerBusy,
+    #[error("you cannot trade with yourself")]
+    SelfTrade,
+    #[error("that trade slot is empty")]
+    SlotEmpty,
+    #[error("that trade slot is taken")]
+    SlotTaken,
+}
+
 /// All open sessions plus the one-session-per-player index. Owned by the
 /// tick loop like `GroupManager`.
 #[derive(Debug, Default)]
@@ -115,15 +137,15 @@ impl TradeManager {
     /// 2026-09-19, no accept prompt). Refuses self-trade and either party
     /// already being in a session (one session per player, which is also
     /// what makes "the same slot cannot enter a second session" free).
-    pub fn open(&mut self, a: ClientId, b: ClientId) -> Result<(), &'static str> {
+    pub fn open(&mut self, a: ClientId, b: ClientId) -> Result<(), TradeError> {
         if a == b {
-            return Err("you cannot trade with yourself");
+            return Err(TradeError::SelfTrade);
         }
         if self.by_cid.contains_key(&a) {
-            return Err("you are already trading");
+            return Err(TradeError::AlreadyTrading);
         }
         if self.by_cid.contains_key(&b) {
-            return Err("they are busy");
+            return Err(TradeError::PartnerBusy);
         }
         let id = self.next_id;
         self.next_id += 1;
@@ -157,23 +179,23 @@ impl TradeManager {
         cid: ClientId,
         window_slot: usize,
         offer: Offer,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), TradeError> {
         let session = self
             .sessions
-            .get_mut(self.by_cid.get(&cid).ok_or("you are not trading")?)
-            .ok_or("you are not trading")?;
+            .get_mut(self.by_cid.get(&cid).ok_or(TradeError::NotTrading)?)
+            .ok_or(TradeError::NotTrading)?;
         if window_slot >= TRADE_SLOTS {
-            return Err("no such trade slot");
+            return Err(TradeError::NoSuchSlot);
         }
-        let side = session.side_of_mut(cid).ok_or("you are not trading")?;
+        let side = session.side_of_mut(cid).ok_or(TradeError::NotTrading)?;
         if side
             .offered_slots()
             .any(|o| o.location == offer.location && o.slot == offer.slot)
         {
-            return Err("that item is already offered");
+            return Err(TradeError::AlreadyOffered);
         }
         if side.offers[window_slot].is_some() {
-            return Err("that trade slot is taken");
+            return Err(TradeError::SlotTaken);
         }
         side.offers[window_slot] = Some(offer);
         session.clear_accepts();
@@ -184,17 +206,17 @@ impl TradeManager {
         &mut self,
         cid: ClientId,
         window_slot: usize,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), TradeError> {
         let session = self
             .sessions
-            .get_mut(self.by_cid.get(&cid).ok_or("you are not trading")?)
-            .ok_or("you are not trading")?;
+            .get_mut(self.by_cid.get(&cid).ok_or(TradeError::NotTrading)?)
+            .ok_or(TradeError::NotTrading)?;
         if window_slot >= TRADE_SLOTS {
-            return Err("no such trade slot");
+            return Err(TradeError::NoSuchSlot);
         }
-        let side = session.side_of_mut(cid).ok_or("you are not trading")?;
+        let side = session.side_of_mut(cid).ok_or(TradeError::NotTrading)?;
         if side.offers[window_slot].take().is_none() {
-            return Err("that trade slot is empty");
+            return Err(TradeError::SlotEmpty);
         }
         session.clear_accepts();
         Ok(())
@@ -203,12 +225,12 @@ impl TradeManager {
     /// Absolute per-tier coin offer (wallet validation happens in tick/trading.rs,
     /// at offer time AND again at commit). A `CoinAmount`, so an offer can never
     /// hold a negative tier.
-    pub fn offer_coins(&mut self, cid: ClientId, coins: CoinAmount) -> Result<(), &'static str> {
+    pub fn offer_coins(&mut self, cid: ClientId, coins: CoinAmount) -> Result<(), TradeError> {
         let session = self
             .sessions
-            .get_mut(self.by_cid.get(&cid).ok_or("you are not trading")?)
-            .ok_or("you are not trading")?;
-        let side = session.side_of_mut(cid).ok_or("you are not trading")?;
+            .get_mut(self.by_cid.get(&cid).ok_or(TradeError::NotTrading)?)
+            .ok_or(TradeError::NotTrading)?;
+        let side = session.side_of_mut(cid).ok_or(TradeError::NotTrading)?;
         side.coins = coins.get();
         session.clear_accepts();
         Ok(())
@@ -216,14 +238,14 @@ impl TradeManager {
 
     /// Press Trade. Returns `true` when BOTH sides now stand accepted —
     /// the caller runs the commit in the same tick.
-    pub fn accept(&mut self, cid: ClientId) -> Result<bool, &'static str> {
+    pub fn accept(&mut self, cid: ClientId) -> Result<bool, TradeError> {
         let session = self
             .sessions
-            .get_mut(self.by_cid.get(&cid).ok_or("you are not trading")?)
-            .ok_or("you are not trading")?;
+            .get_mut(self.by_cid.get(&cid).ok_or(TradeError::NotTrading)?)
+            .ok_or(TradeError::NotTrading)?;
         session
             .side_of_mut(cid)
-            .ok_or("you are not trading")?
+            .ok_or(TradeError::NotTrading)?
             .accepted = true;
         Ok(session.a.accepted && session.b.accepted)
     }
@@ -298,10 +320,10 @@ mod tests {
     #[test]
     fn open_refuses_self_and_busy() {
         let mut tm = TradeManager::new();
-        assert_eq!(tm.open(1, 1).unwrap_err(), "you cannot trade with yourself");
+        assert_eq!(tm.open(1, 1).unwrap_err(), TradeError::SelfTrade);
         tm.open(1, 2).expect("first session opens");
-        assert_eq!(tm.open(1, 3).unwrap_err(), "you are already trading");
-        assert_eq!(tm.open(3, 2).unwrap_err(), "they are busy");
+        assert_eq!(tm.open(1, 3).unwrap_err(), TradeError::AlreadyTrading);
+        assert_eq!(tm.open(3, 2).unwrap_err(), TradeError::PartnerBusy);
     }
 
     #[test]
@@ -339,7 +361,7 @@ mod tests {
         tm.offer_item(1, 0, offer("base", 3, 5)).unwrap();
         assert_eq!(
             tm.offer_item(1, 1, offer("base", 3, 5)).unwrap_err(),
-            "that item is already offered"
+            TradeError::AlreadyOffered
         );
     }
 

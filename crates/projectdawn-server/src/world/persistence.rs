@@ -6,7 +6,7 @@
 
 use super::connection::PerConnection;
 use crate::db;
-use crate::error::AuthResult;
+use crate::error::DbResult;
 use sqlx::SqlitePool;
 
 /// Write every dirty item and coin store of `conn` in ONE transaction and
@@ -20,7 +20,7 @@ use sqlx::SqlitePool;
 /// save must never write one store alone while another is dirty (a quest
 /// reward saving the inventory while a bank withdrawal sits unsaved left the
 /// item in both). See db::save_stores_atomic.
-pub async fn persist_dirty_stores(pool: &SqlitePool, conn: &mut PerConnection) -> AuthResult<()> {
+pub async fn persist_dirty_stores(pool: &SqlitePool, conn: &mut PerConnection) -> DbResult<()> {
     if !conn.any_store_dirty() && conn.item_events.is_empty() {
         return Ok(());
     }

@@ -492,7 +492,7 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
                             let acct = db::load_account_bank_items(&pool, account_id).await?;
                             let gems = db::load_spell_gems(&pool, char_id).await?;
                             let logged_out_at = db::load_logged_out_at(&pool, char_id).await?;
-                            Ok::<_, crate::error::AuthError>((inv, skills, bank, acct, gems, logged_out_at))
+                            Ok::<_, crate::error::DbError>((inv, skills, bank, acct, gems, logged_out_at))
                         }
                         .await;
                         let (

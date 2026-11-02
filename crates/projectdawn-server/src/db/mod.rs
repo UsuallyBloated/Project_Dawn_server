@@ -1,9 +1,10 @@
-//! SQLite pool, migrations, and the small set of queries auth needs.
+//! SQLite pool, migrations, and every query: the auth service's (accounts,
+//! sessions, characters; `AuthResult`) and the world's persistence (`DbResult`).
 //!
 //! Uses runtime-checked `sqlx::query`/`query_as` rather than the compile-time
 //! `query!` macros so the build doesn't need a live DATABASE_URL.
 
-use crate::error::{AuthError, AuthResult};
+use crate::error::{AuthError, AuthResult, DbError, DbResult};
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
     Argon2, PasswordHash, PasswordVerifier,
@@ -494,7 +495,7 @@ pub async fn account_is_banned(pool: &SqlitePool, account_id: i64) -> AuthResult
 /// Every banned account id, for the world loop's ban sweep (which removes a
 /// banned account's character that is already in the world). A handful of
 /// rows at most; the sweep runs it every `BAN_SWEEP_INTERVAL`.
-pub async fn banned_account_ids(pool: &SqlitePool) -> AuthResult<Vec<i64>> {
+pub async fn banned_account_ids(pool: &SqlitePool) -> DbResult<Vec<i64>> {
     let rows = sqlx::query("SELECT id FROM accounts WHERE is_banned = 1")
         .fetch_all(pool)
         .await?;
@@ -603,7 +604,7 @@ pub struct GmActionRow {
 /// Note for whoever builds an account-delete tool: `gm_actions` references
 /// accounts and characters WITHOUT `ON DELETE CASCADE`, unlike every other
 /// child table, so a delete has to decide what happens to these rows.
-pub async fn record_gm_actions(pool: &SqlitePool, rows: &[GmActionRow]) -> AuthResult<()> {
+pub async fn record_gm_actions(pool: &SqlitePool, rows: &[GmActionRow]) -> DbResult<()> {
     if rows.is_empty() {
         return Ok(());
     }
@@ -647,7 +648,7 @@ pub struct ItemEventRow {
 pub async fn write_item_events(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     rows: &[ItemEventRow],
-) -> AuthResult<()> {
+) -> DbResult<()> {
     for row in rows {
         sqlx::query(
             "INSERT INTO item_events (at, char_id, action, item_path, count, delta, copper, detail)
@@ -672,7 +673,7 @@ pub async fn write_item_events(
 /// item holding the folded sums (stamped `cutoff`), then deleted, in one
 /// transaction. Returns (carry rows written, rows deleted). A character and
 /// item whose old rows sum to nothing gets no carry row.
-pub async fn fold_item_events_before(pool: &SqlitePool, cutoff: i64) -> AuthResult<(u64, u64)> {
+pub async fn fold_item_events_before(pool: &SqlitePool, cutoff: i64) -> DbResult<(u64, u64)> {
     let mut tx = pool.begin().await?;
     let carried = sqlx::query(
         "INSERT INTO item_events (at, char_id, action, item_path, count, delta, copper, detail)
@@ -711,7 +712,7 @@ pub struct LedgerMismatch {
 /// and vaults, and the sum of `copper` against their wallets. Empty when the
 /// books balance. Read-only; the daily sweep logs what it returns and
 /// `admin_report` shows it.
-pub async fn ledger_mismatches(pool: &SqlitePool) -> AuthResult<Vec<LedgerMismatch>> {
+pub async fn ledger_mismatches(pool: &SqlitePool) -> DbResult<Vec<LedgerMismatch>> {
     let mut out: Vec<LedgerMismatch> = sqlx::query_as(
         "WITH ledger AS (
             SELECT c.account_id AS account_id, e.item_path AS item_path, SUM(e.delta) AS delta
@@ -785,7 +786,7 @@ pub struct ItemEventView {
 
 /// The newest `limit` ledger rows with the character's name (a LEFT JOIN, so
 /// a row outlives its character). Read-only.
-pub async fn recent_item_events(pool: &SqlitePool, limit: i64) -> AuthResult<Vec<ItemEventView>> {
+pub async fn recent_item_events(pool: &SqlitePool, limit: i64) -> DbResult<Vec<ItemEventView>> {
     let rows: Vec<ItemEventView> = sqlx::query_as(
         "SELECT e.at, c.name AS char_name, e.action, e.item_path, e.count, e.delta, e.copper, e.detail
          FROM item_events e LEFT JOIN characters c ON c.id = e.char_id
@@ -913,7 +914,7 @@ struct SpawnRow {
 pub async fn load_character(
     pool: &SqlitePool,
     char_id: i64,
-) -> AuthResult<CharacterSpawn> {
+) -> DbResult<CharacterSpawn> {
     let row: Option<SpawnRow> = sqlx::query_as(
         "SELECT id, account_id, name, race, class, level, xp, xp_to_next,
                 base_strength, base_dexterity, base_agility,
@@ -932,7 +933,7 @@ pub async fn load_character(
     .bind(char_id)
     .fetch_optional(pool)
     .await?;
-    let row = row.ok_or(AuthError::NotFound)?;
+    let row = row.ok_or(DbError::NotFound)?;
 
     // Track 6 sub-task 2: always recompute stats + max resources from
     // race/class/level via `char_data`. The DB columns capture
@@ -1055,7 +1056,7 @@ pub async fn save_quest_progress(
     char_id: i64,
     quest_id: &str,
     progress: &[i32],
-) -> AuthResult<()> {
+) -> DbResult<()> {
     let json = serde_json::to_string(progress).expect("Vec<i32> serializes");
     sqlx::query(
         "INSERT INTO active_quests (char_id, quest_id, progress) VALUES (?1, ?2, ?3)
@@ -1075,7 +1076,7 @@ pub async fn delete_active_quest(
     pool: &SqlitePool,
     char_id: i64,
     quest_id: &str,
-) -> AuthResult<()> {
+) -> DbResult<()> {
     sqlx::query("DELETE FROM active_quests WHERE char_id = ?1 AND quest_id = ?2")
         .bind(char_id)
         .bind(quest_id)
@@ -1101,7 +1102,7 @@ async fn write_xp_progress(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     char_id: i64,
     progress: XpProgress,
-) -> AuthResult<()> {
+) -> DbResult<()> {
     sqlx::query("UPDATE characters SET xp = ?1, xp_to_next = ?2, level = ?3 WHERE id = ?4")
         .bind(progress.xp)
         .bind(progress.xp_to_next)
@@ -1124,7 +1125,7 @@ pub async fn record_quest_completion(
     char_id: i64,
     quest_id: &str,
     progress: XpProgress,
-) -> AuthResult<()> {
+) -> DbResult<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("INSERT OR IGNORE INTO completed_quests (char_id, quest_id) VALUES (?1, ?2)")
         .bind(char_id)
@@ -1149,7 +1150,7 @@ pub async fn set_bind_point(
     char_id: i64,
     zone: Option<&str>,
     pos: (f32, f32, f32),
-) -> AuthResult<()> {
+) -> DbResult<()> {
     sqlx::query(
         "UPDATE characters
          SET bind_zone = ?1, bind_x = ?2, bind_y = ?3, bind_z = ?4
@@ -1171,7 +1172,7 @@ pub async fn checkpoint_position(
     zone: Option<&str>,
     pos: (f32, f32, f32),
     yaw: f32,
-) -> AuthResult<()> {
+) -> DbResult<()> {
     sqlx::query(
         "UPDATE characters
          SET zone = ?1, pos_x = ?2, pos_y = ?3, pos_z = ?4, yaw = ?5,
@@ -1227,7 +1228,7 @@ pub async fn checkpoint_resources(
     hunger: f32,
     thirst: f32,
     alignment: f32,
-) -> AuthResult<()> {
+) -> DbResult<()> {
     sqlx::query(
         "UPDATE characters
          SET hp = ?1, mp = ?2, stamina = ?3, xp = ?4, xp_to_next = ?5,
@@ -1270,7 +1271,7 @@ pub struct InventoryRow {
 pub async fn load_inventory(
     pool: &SqlitePool,
     char_id: i64,
-) -> AuthResult<Vec<InventoryRow>> {
+) -> DbResult<Vec<InventoryRow>> {
     let rows: Vec<InventoryRow> = sqlx::query_as(
         "SELECT location, slot, item_path, count
          FROM character_items
@@ -1292,7 +1293,7 @@ pub async fn save_inventory(
     pool: &SqlitePool,
     char_id: i64,
     rows: &[InventoryRow],
-) -> AuthResult<()> {
+) -> DbResult<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM character_items WHERE char_id = ?1")
         .bind(char_id)
@@ -1372,7 +1373,7 @@ pub async fn save_corpse(
     strip_owner: bool,
     owner_progress: Option<XpProgress>,
     events: &[ItemEventRow],
-) -> AuthResult<()> {
+) -> DbResult<()> {
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1447,7 +1448,7 @@ pub async fn save_corpse(
 /// Load every corpse (+ its items) from the DB. Called ONCE at server boot,
 /// before any login is accepted, so a corpse is always in memory before its
 /// owner could log in and loot it.
-pub async fn load_corpses(pool: &SqlitePool) -> AuthResult<Vec<CorpseRow>> {
+pub async fn load_corpses(pool: &SqlitePool) -> DbResult<Vec<CorpseRow>> {
     let headers: Vec<CorpseHeaderRow> = sqlx::query_as(
         "SELECT corpse_id, char_id, owner_name, zone, pos_x, pos_y, pos_z,
                 platinum, gold, silver, copper, lost_xp, resurrected
@@ -1489,7 +1490,7 @@ pub async fn load_corpses(pool: &SqlitePool) -> AuthResult<Vec<CorpseRow>> {
 
 /// Delete a corpse + its items (decay, or fully-looted in Slice 2). Explicit
 /// two-table delete so it works regardless of the FK-cascade pragma.
-pub async fn delete_corpse(pool: &SqlitePool, corpse_id: i64) -> AuthResult<()> {
+pub async fn delete_corpse(pool: &SqlitePool, corpse_id: i64) -> DbResult<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM corpse_items WHERE corpse_id = ?1")
         .bind(corpse_id)
@@ -1512,7 +1513,7 @@ pub async fn set_corpse_resurrected(
     corpse_id: i64,
     owner_char_id: i64,
     owner_progress: XpProgress,
-) -> AuthResult<()> {
+) -> DbResult<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("UPDATE corpses SET resurrected = 1 WHERE corpse_id = ?1")
         .bind(corpse_id)
@@ -1543,7 +1544,7 @@ pub async fn apply_corpse_loot(
     corpse_coins: protocol::world::Coins,
     delete_corpse: bool,
     events: &[ItemEventRow],
-) -> AuthResult<()> {
+) -> DbResult<()> {
     let mut tx = pool.begin().await?;
     // Looter inventory — full DELETE + reINSERT (same shape as save_inventory).
     sqlx::query("DELETE FROM character_items WHERE char_id = ?1")
@@ -1626,7 +1627,7 @@ pub struct BankItemRow {
 
 /// Load the per-character bank vault rows (char-keyed). Empty for a
 /// character that has never banked an item.
-pub async fn load_bank_items(pool: &SqlitePool, char_id: i64) -> AuthResult<Vec<BankItemRow>> {
+pub async fn load_bank_items(pool: &SqlitePool, char_id: i64) -> DbResult<Vec<BankItemRow>> {
     let rows: Vec<BankItemRow> = sqlx::query_as(
         "SELECT slot, item_path, count FROM bank_items WHERE char_id = ?1 ORDER BY slot",
     )
@@ -1642,7 +1643,7 @@ pub async fn save_bank_items(
     pool: &SqlitePool,
     char_id: i64,
     rows: &[BankItemRow],
-) -> AuthResult<()> {
+) -> DbResult<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM bank_items WHERE char_id = ?1")
         .bind(char_id)
@@ -1668,7 +1669,7 @@ pub async fn save_bank_items(
 pub async fn load_account_bank_items(
     pool: &SqlitePool,
     account_id: i64,
-) -> AuthResult<Vec<BankItemRow>> {
+) -> DbResult<Vec<BankItemRow>> {
     let rows: Vec<BankItemRow> = sqlx::query_as(
         "SELECT slot, item_path, count FROM account_bank_items WHERE account_id = ?1 ORDER BY slot",
     )
@@ -1684,7 +1685,7 @@ pub async fn save_account_bank_items(
     pool: &SqlitePool,
     account_id: i64,
     rows: &[BankItemRow],
-) -> AuthResult<()> {
+) -> DbResult<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM account_bank_items WHERE account_id = ?1")
         .bind(account_id)
@@ -1741,7 +1742,7 @@ pub async fn save_stores_atomic(
     bank_items: Option<&[BankItemRow]>,
     account_bank_items: Option<&[BankItemRow]>,
     events: &[ItemEventRow],
-) -> AuthResult<()> {
+) -> DbResult<()> {
     let mut tx = pool.begin().await?;
 
     if let Some(rows) = inventory {
@@ -1842,7 +1843,7 @@ pub async fn save_stores_atomic(
 /// disconnect flush whenever `coins_dirty` is set — without this the
 /// in-session wallet (vendor buys/sells, dev grants) silently resets
 /// to the stale DB row on next login.
-pub async fn save_coins(pool: &SqlitePool, char_id: i64, coins: Coins) -> AuthResult<()> {
+pub async fn save_coins(pool: &SqlitePool, char_id: i64, coins: Coins) -> DbResult<()> {
     sqlx::query(
         "UPDATE characters SET platinum = ?1, gold = ?2, silver = ?3, copper = ?4
          WHERE id = ?5",
@@ -1860,7 +1861,7 @@ pub async fn save_coins(pool: &SqlitePool, char_id: i64, coins: Coins) -> AuthRe
 /// Persist the per-character bank wallet (Banker NPC, slice 1). Mirror of
 /// `save_coins`; gated on `bank_dirty` in the checkpoint sweep + disconnect
 /// flush so deposits / withdrawals / exchanges survive logout.
-pub async fn save_bank(pool: &SqlitePool, char_id: i64, bank: Coins) -> AuthResult<()> {
+pub async fn save_bank(pool: &SqlitePool, char_id: i64, bank: Coins) -> DbResult<()> {
     sqlx::query(
         "UPDATE characters SET bank_platinum = ?1, bank_gold = ?2,
                 bank_silver = ?3, bank_copper = ?4
@@ -1892,7 +1893,7 @@ pub struct SkillRow {
 pub async fn load_spell_gems(
     pool: &SqlitePool,
     char_id: i64,
-) -> AuthResult<(Vec<(i32, String)>, bool)> {
+) -> DbResult<(Vec<(i32, String)>, bool)> {
     let rows: Vec<(i32, String)> = sqlx::query_as(
         "SELECT gem, spell_name FROM character_spell_gems WHERE char_id = ?1 ORDER BY gem",
     )
@@ -1914,7 +1915,7 @@ pub async fn save_spell_gems(
     char_id: i64,
     gems: &[(i32, String)],
     seeded: bool,
-) -> AuthResult<()> {
+) -> DbResult<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM character_spell_gems WHERE char_id = ?1")
         .bind(char_id)
@@ -1939,7 +1940,7 @@ pub async fn save_spell_gems(
 
 /// When the character last left the world, unix seconds (NO RENT items,
 /// migration 0015); `None` until it first does.
-pub async fn load_logged_out_at(pool: &SqlitePool, char_id: i64) -> AuthResult<Option<i64>> {
+pub async fn load_logged_out_at(pool: &SqlitePool, char_id: i64) -> DbResult<Option<i64>> {
     let at: Option<i64> = sqlx::query_scalar("SELECT logged_out_at FROM characters WHERE id = ?1")
         .bind(char_id)
         .fetch_optional(pool)
@@ -1949,7 +1950,7 @@ pub async fn load_logged_out_at(pool: &SqlitePool, char_id: i64) -> AuthResult<O
 }
 
 /// Stamp the moment a character leaves the world.
-pub async fn set_logged_out_at(pool: &SqlitePool, char_id: i64, at: i64) -> AuthResult<()> {
+pub async fn set_logged_out_at(pool: &SqlitePool, char_id: i64, at: i64) -> DbResult<()> {
     sqlx::query("UPDATE characters SET logged_out_at = ?1 WHERE id = ?2")
         .bind(at)
         .bind(char_id)
@@ -1961,7 +1962,7 @@ pub async fn set_logged_out_at(pool: &SqlitePool, char_id: i64, at: i64) -> Auth
 pub async fn load_skills(
     pool: &SqlitePool,
     char_id: i64,
-) -> AuthResult<Vec<SkillRow>> {
+) -> DbResult<Vec<SkillRow>> {
     let rows: Vec<SkillRow> = sqlx::query_as(
         "SELECT kind, key, score
          FROM character_skills
@@ -1982,7 +1983,7 @@ pub async fn save_skills(
     pool: &SqlitePool,
     char_id: i64,
     rows: &[SkillRow],
-) -> AuthResult<()> {
+) -> DbResult<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM character_skills WHERE char_id = ?1")
         .bind(char_id)
@@ -2010,7 +2011,7 @@ pub async fn save_skills(
 pub async fn load_factions(
     pool: &SqlitePool,
     char_id: i64,
-) -> AuthResult<Vec<(String, f32)>> {
+) -> DbResult<Vec<(String, f32)>> {
     let rows: Vec<(String, f32)> = sqlx::query_as(
         "SELECT faction_id, standing
          FROM character_factions
@@ -2030,7 +2031,7 @@ pub async fn save_factions(
     pool: &SqlitePool,
     char_id: i64,
     rows: &[(String, f32)],
-) -> AuthResult<()> {
+) -> DbResult<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM character_factions WHERE char_id = ?1")
         .bind(char_id)
@@ -2069,7 +2070,7 @@ pub async fn commit_trade(
     b_inventory: &[InventoryRow],
     b_coins: Coins,
     b_events: &[ItemEventRow],
-) -> AuthResult<()> {
+) -> DbResult<()> {
     let mut tx = pool.begin().await?;
     for (char_id, rows, coins, events) in [
         (a_char_id, a_inventory, a_coins, a_events),

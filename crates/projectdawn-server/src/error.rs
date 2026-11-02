@@ -67,3 +67,28 @@ impl From<argon2::password_hash::Error> for AuthError {
 }
 
 pub type AuthResult<T> = Result<T, AuthError>;
+
+/// What the world's persistence can fail with: the saves and loads, corpses,
+/// the item ledger, the GM audit, the ban sweep. Kept apart from `AuthError`,
+/// the auth service's player-facing type, so a failed save is never read as a
+/// login outcome. The auth service converts it with `?` (a missing row stays
+/// `NotFound`, anything else is `Internal`).
+#[derive(Debug, thiserror::Error)]
+pub enum DbError {
+    /// The row asked for does not exist (a deleted character, say).
+    #[error("not found")]
+    NotFound,
+    #[error("database: {0}")]
+    Sqlx(#[from] sqlx::Error),
+}
+
+pub type DbResult<T> = Result<T, DbError>;
+
+impl From<DbError> for AuthError {
+    fn from(e: DbError) -> Self {
+        match e {
+            DbError::NotFound => AuthError::NotFound,
+            DbError::Sqlx(e) => AuthError::Internal(anyhow::Error::from(e)),
+        }
+    }
+}

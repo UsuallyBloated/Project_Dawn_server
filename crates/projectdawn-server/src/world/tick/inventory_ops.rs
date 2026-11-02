@@ -576,7 +576,7 @@ pub(super) fn apply_unequips(world: &mut WorldState, q: &mut Intents, _now: Inst
                         error = %e,
                         "UnequipItem rejected"
                     );
-                    let text = if e == "cursor occupied" {
+                    let text = if e == inventory::MoveError::CursorOccupied {
                         "You're already holding something."
                     } else {
                         "You can't take that off right now."

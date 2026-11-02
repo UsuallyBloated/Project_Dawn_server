@@ -13,7 +13,7 @@
 //! Eating by hand is refused when full with EQ's own line, and an item eaten
 //! early feeds for half its size, which is what makes the auto-eat order worth
 //! managing (EQ's stat-food trick). This module holds the pure rules and the
-//! inventory search; the world loop (`tick.rs`) runs them and sends the lines.
+//! inventory search; the world loop (`tick/regen_tick.rs`) runs them and sends the lines.
 
 use super::connection::PerConnection;
 use super::inventory::{PlayerInventory, CURSOR_BAG_KEY};

@@ -223,12 +223,12 @@ pub struct PerConnection {
     /// Attack's `is_offhand`). Kept separate from `last_attack_at` because
     /// dual-wield swings two independent hands that legitimately co-fire in one
     /// tick; a single combined timer would false-throttle a legit dual-wielder.
-    /// Advanced only on a swing the rate gate accepts (`tick.rs`).
+    /// Advanced only on a swing the rate gate accepts (`tick/melee.rs`).
     pub last_swing_at: [Option<Instant>; 2],
     /// Per hand, the haste the last two ACCEPTED swings were stamped with,
     /// newest first (0.0 before the hand has swung). The limiter paces a
     /// swing at the greatest of these and the current haste
-    /// (`tick::carried_haste`), because the client's attack timer runs a
+    /// (`tick::swing::carried_haste`), because the client's attack timer runs a
     /// wait time set two swings back: a Haste buff that ran out must not cost
     /// the honest swings already timed under it. Only the haste carries,
     /// never the weapon (a client alternating a dagger and a staff every
@@ -528,7 +528,7 @@ pub struct PerConnection {
 
     /// Track 13.1 — server-side inventory snapshot. Loaded from the
     /// `character_items` table on `load_character`, mutated when
-    /// loot grants land (loot intent dispatch in `tick.rs`),
+    /// loot grants land (loot intent dispatch in `tick/looting.rs`),
     /// persisted on disconnect + the periodic checkpoint cadence.
     /// `inventory_dirty` flips when add_item / future move/drop
     /// mutates the snapshot; the persistence sweep clears it.
@@ -735,7 +735,7 @@ impl PerConnection {
             is_dev: dev_cmds_enabled(),
             fizzles: true,
             // Defaulted here; the real value is stamped from the connect
-            // token's user_data at the connect site in tick.rs (from_spawn
+            // token's user_data at the connect site in tick/session.rs (from_spawn
             // only sees the character spawn, not the account's GM flag).
             is_gm: false,
             gm_audit: Vec::new(),
@@ -746,7 +746,7 @@ impl PerConnection {
             gm_overflow_row_at: None,
             gm_rate_notice_at: None,
             kicked_at: None,
-            aoi_cell: (0, 0), // tick.rs sets the real cell from aoi::cell_for after construction
+            aoi_cell: (0, 0), // tick/session.rs sets the real cell from aoi::cell_for after construction
             regen_hp_acc: 0.0,
             regen_mp_acc: 0.0,
             regen_stamina_acc: 0.0,

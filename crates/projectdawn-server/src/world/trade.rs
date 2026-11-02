@@ -3,13 +3,13 @@
 //! Escrow by LOCKING, not by moving: an offered item never leaves its
 //! owner's inventory. A session records `(location, slot)` REFERENCES, and
 //! every other inventory intent that touches a locked slot is refused while
-//! the trade is open (`is_locked`, checked in tick.rs). There is therefore
+//! the trade is open (`is_locked`, checked by the world loop's inventory steps through `tick::trading::trade_locked`). There is therefore
 //! no moment where an item exists only inside a session object — a server
 //! crash mid-trade loses the trade, never an item.
 //!
 //! This module is deliberately dumb data + reference bookkeeping so it unit
 //! tests without a world: everything that needs the real inventory (peeks,
-//! bag-empty checks, capacity, the commit itself) lives in tick.rs next to
+//! bag-empty checks, capacity, the commit itself) lives in tick/trading.rs next to
 //! the state it reads. The single most important rule lives here though:
 //! EVERY offer edit clears BOTH accepts (the anti-bait-and-switch law).
 
@@ -148,7 +148,7 @@ impl TradeManager {
     }
 
     /// Record an offer. Validation of the referenced item (existence,
-    /// bag-emptiness, cursor parking) happens in tick.rs BEFORE this call,
+    /// bag-emptiness, cursor parking) happens in tick/trading.rs BEFORE this call,
     /// which also takes the item and count snapshot. Refuses a
     /// `(location, slot)` that is already offered by this player in any
     /// window slot: one reference, one offer.
@@ -200,7 +200,7 @@ impl TradeManager {
         Ok(())
     }
 
-    /// Absolute per-tier coin offer (wallet validation happens in tick.rs,
+    /// Absolute per-tier coin offer (wallet validation happens in tick/trading.rs,
     /// at offer time AND again at commit).
     pub fn offer_coins(&mut self, cid: ClientId, coins: Coins) -> Result<(), &'static str> {
         let session = self

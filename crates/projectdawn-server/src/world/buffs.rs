@@ -500,7 +500,7 @@ pub fn snare_amount(buffs: &[ActiveBuff]) -> f32 {
 /// buff (for log + UI feedback) or None if nothing to dispel.
 /// Mirror of GDScript `enemy.strip_one_buff()`. Stat buffs need
 /// their deltas undone before removal so the caller (apply_dispel
-/// in tick.rs) does that.
+/// in tick/casting.rs) does that.
 pub fn first_dispellable_index(buffs: &[ActiveBuff]) -> Option<usize> {
     // Anything except CC-debuffs is dispellable: HoT / MP regen /
     // stat / speed / haste / shield / absorb / accuracy+crit /

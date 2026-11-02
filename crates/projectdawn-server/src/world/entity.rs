@@ -97,7 +97,7 @@ impl ActiveCc {
 /// non-pet AI never reads it. `Follow` is legacy follow-the-owner-
 /// and-inherit-target behaviour. `Guard` parks the pet at its current
 /// position (no following, but still chases commanded / inherited
-/// targets if attacked; the inheritance pre-pass in `tick.rs` skips
+/// targets if attacked; the inheritance pre-pass in `tick/enemy_ai.rs` skips
 /// auto-inheritance from owner attacks). `Sit` is full passive — pet
 /// drops any current target, doesn't follow, doesn't aggro on
 /// incoming damage.
@@ -469,7 +469,7 @@ impl Entity {
     /// Track 13 — apply (or refresh) a buff on this pet. A same-named
     /// re-cast undoes the old stat deltas before applying the new ones,
     /// so refresh never double-stacks. Mirrors the connection-side
-    /// `apply_buff` + `apply_stat_buff` in tick.rs.
+    /// `apply_buff` + `apply_stat_buff` in tick/spell_buffs.rs.
     pub fn apply_buff(&mut self, buff: ActiveBuff) {
         if let Some(idx) = self.active_buffs.iter().position(|b| b.name == buff.name) {
             if let BuffEffect::StatBuff {
@@ -943,7 +943,7 @@ impl Entity {
             return;
         };
         // Track 15.3 — SIT drops any current target and stands still
-        // before anything else runs. The tick.rs inheritance pre-pass
+        // before anything else runs. The inheritance pre-pass (tick/enemy_ai.rs)
         // already skips non-Follow stances, but a pre-existing target
         // (commanded or inherited before stance change) still needs
         // clearing here.

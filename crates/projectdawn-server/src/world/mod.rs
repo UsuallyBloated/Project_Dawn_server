@@ -342,7 +342,7 @@ pub fn mint_connect_token(
     //   [0..8]  account_id (LE u64)
     //   [8]     is_gm (0 / 1)
     //   [9..]   zeros (future: premium flag, group hint, etc.)
-    // Keep the world-side `parse_*_from_user_data` helpers in tick.rs in step
+    // Keep the world-side `parse_*_from_user_data` helpers in tick/session.rs in step
     // with this layout.
     let mut user_data = [0u8; 256];
     user_data[..8].copy_from_slice(&account_id.to_le_bytes());
@@ -369,7 +369,7 @@ pub fn mint_connect_token(
 
 /// Production entry — binds from `cfg.world_bind` and runs the tick loop
 /// until `shutdown` turns true (a clean stop: everyone saved, see
-/// `tick::shut_down_world`) or the loop fails. Either way it returns, so the
+/// `tick::session::shut_down_world`) or the loop fails. Either way it returns, so the
 /// caller can end the process; an error comes back as an error, so a dead
 /// world takes the process (and auth) down with it and systemd restarts it,
 /// rather than auth handing out tokens for a world that is gone.

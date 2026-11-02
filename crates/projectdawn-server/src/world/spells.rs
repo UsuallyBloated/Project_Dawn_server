@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn every_spell_is_class_and_level_tagged() {
-        // The Phase 1 cast gate (tick.rs) rejects a cast when the caster's
+        // The Phase 1 cast gate (tick/casting.rs) rejects a cast when the caster's
         // class isn't in `spell.classes` or their level < `spell.min_level`.
         // It leans on every spell carrying that data — an untagged spell (empty
         // classes) would reject EVERY caster and silently break casting for it.
@@ -455,7 +455,7 @@ mod tests {
 
     #[test]
     fn cast_gate_eligibility_matches_class_and_level() {
-        // Mirror of the tick.rs gate predicate (class in spell.classes AND
+        // Mirror of the cast gate's predicate (tick/casting.rs) (class in spell.classes AND
         // level >= spell.min_level), pinned to real table rows so a data or
         // logic drift trips a test rather than shipping an exploit or a
         // false rejection.

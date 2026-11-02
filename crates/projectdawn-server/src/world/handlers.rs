@@ -1565,7 +1565,7 @@ pub fn handle_message(
         ClientWorldMsg::BuffSnapshotBroadcast { buffs: _ } => {
             // Track 6 sub-task 4a: server is now the source of truth
             // for buff state. The client's snapshot is ignored — the
-            // server-originated fan-out from tick.rs step 5a is the
+            // server-originated fan-out from the buff tick (tick/buff_tick.rs, step 5a) is the
             // canonical signal. Variant kept for transitional builds;
             // sub-task 4b removes the wire variant entirely.
             Outcome::Continue
@@ -1616,7 +1616,7 @@ pub fn handle_message(
             // never reaches here. Reject silently if not seated, not ready, or
             // already camping. On accept, start the countdown and confirm to the
             // client so its display matches our clock; the per-tick camp sweep
-            // (tick.rs) drives cancel-on-stand/move/damage + completion.
+            // (tick/camp.rs) drives cancel-on-stand/move/damage + completion.
             if !conn.ready || !conn.is_sitting || conn.camp_since.is_some() {
                 return Outcome::Continue;
             }
@@ -2204,7 +2204,7 @@ pub fn handle_message(
         // The other ~30 ClientWorldMsg variants land in later tracks.
         // Unknown-but-decoded messages: ignore, don't kick. Unknown-and-
         // failed-to-decode messages don't reach here (decode error is
-        // logged in tick.rs).
+        // logged in tick/intake.rs).
         ClientWorldMsg::InspectPlayer { target_char_id } => {
             if !conn.in_world {
                 return Outcome::Continue;

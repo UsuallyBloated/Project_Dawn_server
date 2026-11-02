@@ -786,7 +786,7 @@ impl PlayerInventory {
     /// Returns `true` when the bag Vec under `key` has at least one
     /// occupied inner slot. Since full bags move with their contents
     /// (2026-09-27), the only remaining "must be empty" rules are
-    /// selling a bag (tick.rs) and destroying/dropping one from the
+    /// selling a bag (tick/vendors.rs) and destroying/dropping one from the
     /// hand (`destroy_at`'s cursor arm).
     pub fn bag_key_is_nonempty(&self, key: u8) -> bool {
         match self.bags.get(&key) {

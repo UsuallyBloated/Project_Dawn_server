@@ -1,4 +1,4 @@
-//! The pure decisions behind the CastSpell gate in `tick.rs`, kept here so
+//! The pure decisions behind the CastSpell gate in `tick/casting.rs`, kept here so
 //! they can be unit-tested without a world: whether a timed cast arrived
 //! early, on time, or so late it was being held, and whether an interrupt
 //! that landed after the cast began beats a completion in the same tick.

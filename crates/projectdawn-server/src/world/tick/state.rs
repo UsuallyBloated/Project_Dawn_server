@@ -264,4 +264,8 @@ pub(super) struct Intents {
     pub(super) bank_exchange_intents: Vec<BankExchangeI>,
     pub(super) bank_store_item_intents: Vec<BankStoreItemI>,
     pub(super) bank_withdraw_item_intents: Vec<BankWithdrawItemI>,
+    // EQ's eating emote for the people near anyone who eats or drinks this tick
+    // (by hand in the consumable step, on their own at the regen step), fanned
+    // once both steps have run.
+    pub(super) eat_emotes: Vec<(ClientId, String)>,
 }

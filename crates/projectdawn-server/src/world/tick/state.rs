@@ -266,6 +266,9 @@ pub(super) struct BankWithdrawItemI { pub(super) owner: u64, pub(super) shared: 
 #[derive(Default)]
 pub(super) struct Intents {
     pub(super) to_disconnect: Vec<ClientId>,
+    // Clients whose message handling panicked this tick (`intake`), dropped
+    // without saving straight after the drain (`session::drop_panicked`).
+    pub(super) panicked: Vec<ClientId>,
     pub(super) newly_in_world: Vec<ClientId>,
     // Cast lifecycle events from this tick. Stored verbatim and fanned
     // out in order — coalescing CastStart + CastComplete from the same

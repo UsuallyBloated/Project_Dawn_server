@@ -378,6 +378,16 @@ pub struct PerConnection {
     /// harness turns it off for every test but the fizzle test.
     pub fizzles: bool,
 
+    /// `Config::panic_probe`, stamped at the connect site: a chat line that
+    /// panics its handler. Always `None` on a running server.
+    pub panic_probe: Option<String>,
+
+    /// Set when handling one of this client's messages panicked
+    /// (`tick::intake`). Its in-memory state may be half-changed, so it is
+    /// never saved again: the connection is dropped the same tick and its
+    /// last saved state stands.
+    pub panicked: bool,
+
     /// Per-account GM flag, carried from the signed connect token's `user_data`
     /// (the auth service reads it from `accounts.is_gm` at token mint). Unlike
     /// `is_dev`, this is per-connection, so a hosted server run with
@@ -734,6 +744,8 @@ impl PerConnection {
             pvp_override_on: false,
             is_dev: dev_cmds_enabled(),
             fizzles: true,
+            panic_probe: None,
+            panicked: false,
             // Defaulted here; the real value is stamped from the connect
             // token's user_data at the connect site in tick/session.rs (from_spawn
             // only sees the character spawn, not the account's GM flag).

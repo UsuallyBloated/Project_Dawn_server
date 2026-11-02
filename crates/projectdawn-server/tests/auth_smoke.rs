@@ -30,6 +30,7 @@ async fn start_server() -> (String, TempDir) {
         // value doesn't matter; we just need *some* 32-byte array.
         netcode_private_key: projectdawn_server::config::NetcodeKey([0xA5; 32]),
         fizzles: true,
+        panic_probe: None,
     };
 
     let pool = db::open(&url).await.expect("open pool");

@@ -24,6 +24,11 @@ pub struct Config {
     /// harness sets it false, so its hundred single-cast tests are not a coin
     /// flip each, and turns it back on for the one test that is about fizzles.
     pub fizzles: bool,
+    /// A chat line that makes the server panic while handling it. Never set on
+    /// a running server (no env var reads it): only the integration harness
+    /// sets it, to prove that a panic while handling one client's message
+    /// drops that client and leaves the world running for everyone else.
+    pub panic_probe: Option<String>,
 }
 
 /// The 32-byte renet netcode private key. A newtype so its `Debug` can never
@@ -102,6 +107,7 @@ impl Config {
             min_client_version,
             netcode_private_key: NetcodeKey(netcode_private_key),
             fizzles: true,
+            panic_probe: None,
         })
     }
 }
@@ -144,6 +150,7 @@ mod tests {
             min_client_version: semver::Version { major: 0, minor: 1, patch: 0 },
             netcode_private_key: NetcodeKey([0xAB; 32]),
             fizzles: true,
+            panic_probe: None,
         };
         let shown = format!("{cfg:?}");
         assert!(shown.contains("<redacted>"), "{shown}");

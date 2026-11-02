@@ -2216,6 +2216,11 @@ pub fn handle_message(
             if !conn.in_world {
                 return Outcome::Continue;
             }
+            // The integration harness's stand-in for an unknown bug (see
+            // `Config::panic_probe`); never set on a running server.
+            if conn.panic_probe.as_deref() == Some(text.as_str()) {
+                panic!("panic probe: a chat line the harness armed");
+            }
             // The client stops at the same cap, so this only bites on a forged
             // client (a hostile or buggy one could still try to flood).
             let trimmed = truncate_to_chars(text, MAX_CHAT_CHARS);

@@ -201,6 +201,12 @@ pub(super) async fn reap_connection(
         if let Err(e) = db::set_logged_out_at(pool, conn.char_id, unix_now_secs()).await {
             tracing::warn!(char_id = conn.char_id, error = %e, "set_logged_out_at failed");
         }
+        // A connection whose message handling panicked is never saved: its
+        // in-memory state may be half changed, so its last saved state stands.
+        if conn.panicked {
+            tracing::error!(char_id = conn.char_id, "panicked connection removed without saving");
+            return;
+        }
         // One last save for the road, through the same flush as the checkpoint.
         // A character whose save did not fully land is NOT dropped: it waits in
         // `pending_saves`, retried every PENDING_SAVE_RETRY, and its account's
@@ -512,6 +518,7 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
                             };
                         let mut fresh = PerConnection::from_spawn(spawn, now);
                         fresh.fizzles = cfg.fizzles;
+                        fresh.panic_probe = cfg.panic_probe.clone();
                         connections.insert(client_id, fresh);
                         // Set the real AOI cell from spawn position +
                         // populate the inventory snapshot. Track 14.2:
@@ -636,7 +643,9 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
                             server.receive_message(client_id, channel)
                         {
                             if let Some(msg) = handlers::decode_client(&bytes) {
-                                let _ = handlers::handle_message(
+                                // A panic marks the connection, which the
+                                // reap below then removes without saving.
+                                let _ = intake::handle_contained(
                                     &mut *server, conn, client_id, msg, now,
                                 );
                             }
@@ -653,9 +662,11 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
                 // The reaper sweep removes it once LINKDEAD_SECS elapse. A
                 // connection not in `connections` (e.g. a refused duplicate login
                 // that never spawned) counts as clean — the reap is then a no-op.
+                // A panicked connection is reaped at once too: it may not
+                // linger, because the reap at the end of a linger saves.
                 let clean = connections
                     .get(&client_id)
-                    .map(|c| c.clean_disconnect)
+                    .map(|c| c.clean_disconnect || c.panicked)
                     .unwrap_or(true);
                 if clean {
                     reap_connection(
@@ -711,6 +722,32 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
                 }
             }
         }
+    }
+}
+
+/// Step 3-bis: drop every client whose message handling panicked this tick
+/// (`intake::handle_contained`). The transport goes, and the character leaves
+/// the world at once through the ordinary reap (peers see it despawn, its pet
+/// and group are cleaned up) except that nothing of it is saved: its state
+/// may be half changed, and the outcomes it queued this tick were discarded
+/// with it. No linger, because the end of a linger saves. The relogin loads
+/// the last save.
+pub(super) async fn drop_panicked(world: &mut WorldState, q: &mut Intents, now: Instant) {
+    let WorldState { server, connections, aoi, enemies, group_manager, pool, pending_saves, .. } = world;
+    for client_id in std::mem::take(&mut q.panicked) {
+        server.disconnect(client_id);
+        reap_connection(
+            &mut *server,
+            &mut *connections,
+            &mut *aoi,
+            &mut *enemies,
+            &mut *group_manager,
+            &*pool,
+            client_id,
+            now,
+            &mut *pending_saves,
+        )
+        .await;
     }
 }
 

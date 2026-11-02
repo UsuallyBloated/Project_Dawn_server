@@ -79,7 +79,7 @@ cargo test
 ```
 
 Integration tests under `tests/` spin up an in-process auth server AND world
-server on ephemeral ports. `world_two_clients.rs` drives real renet clients
+server on ephemeral ports. `tests/world/` (one test binary, a module per domain) drives real renet clients
 through the wire protocol and covers combat, pets, inventory, vendors, quests,
 groups, corpses, trading, and the exploit gates.
 

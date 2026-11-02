@@ -1,7 +1,7 @@
 //! The item ledger (migration 0017, `world/ledger.rs`) at the database level:
 //! rows ride the store transaction, the conservation query names a planted
 //! dupe and a planted loss, and the daily fold keeps the books balanced while
-//! it prunes. The world integration tests (`world_two_clients.rs`) cover the
+//! it prunes. The world integration tests (`tests/world/`) cover the
 //! sites that queue the rows; this file is about the table and its queries.
 //! Every test here fails on a database without the table.
 

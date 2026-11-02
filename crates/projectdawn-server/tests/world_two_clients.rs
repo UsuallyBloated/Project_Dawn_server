@@ -1152,6 +1152,48 @@ async fn two_clients_cast_fanout() {
     );
 }
 
+/// A player entering the world in the middle of a peer's cast gets the bar
+/// with the time that is left, read off the server's own cast time (the
+/// late-joiner seed), not the client's. Gate is 5 s on the server; A's client
+/// claims 9 s, so a seed built from the client's number would run past 5.
+/// The 2026-11-01 sitting could not tell the seed from the ordinary relay;
+/// this settles the server half.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_late_joiner_sees_a_cast_already_under_way() {
+    let h = start_both().await;
+
+    let (a_session, a_char_id, a_token) =
+        provision_client(&h.auth_url, "latecaster", "Lca", "Human", "Wizard").await;
+    let (b_session, b_char_id, b_token) =
+        provision_client(&h.auth_url, "latejoiner", "Ljo", "Elf", "Cleric").await;
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+    a.send_cast_start("Gate", 9.0);
+    let cast_began = std::time::Instant::now();
+    a.pump_for(Duration::from_millis(1200)).await;
+
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    let seed = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::CastStart { caster, .. } if *caster == a_char_id as u64)
+        })
+        .await
+        .expect("B, entering mid-cast, is sent A's bar");
+    let since_cast = cast_began.elapsed().as_secs_f32();
+    assert!(since_cast < 4.5, "the setup took too long to test the seed: {since_cast} s");
+    if let ServerWorldMsg::CastStart { spell_name, duration, .. } = seed {
+        assert_eq!(spell_name, "Gate");
+        assert!(
+            duration > 0.0 && duration <= 5.0 - 1.2 + 0.05,
+            "the time left on the server's 5 s, not the client's 9 s: {duration}"
+        );
+        assert!(
+            duration >= 5.0 - since_cast - 0.1,
+            "no more taken off than has passed ({since_cast} s): {duration}"
+        );
+    }
+}
+
 /// The client-made HitBroadcast is a dev command (the Test Panel's). A plain
 /// account's forged hit on another player reaches nobody: before, it was
 /// relayed as a real Hit, putting fake combat text on screens and, with the

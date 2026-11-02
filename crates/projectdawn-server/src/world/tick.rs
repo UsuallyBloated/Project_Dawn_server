@@ -173,18 +173,33 @@ fn honest_swing_pace(weapon_delay: f32, is_offhand: bool, haste: f32) -> f32 {
 /// Minimum wall-clock seconds allowed between two SAME-HAND swings before the
 /// faster one is a forgery: the honest pace minus a jitter grace, floored at
 /// `HARD_MIN_SWING_SECS`. Only ever used to reject "too fast", never "too
-/// slow". The pace is computed at the greater of the player's haste now and
-/// the haste the hand's last accepted swing was judged at
-/// (`PerConnection::last_swing_haste`): the client timed this swing when
-/// that one fired (a Godot Timer applies a new wait time at its next start),
-/// so a Haste buff that ran out between the two costs no honest swing, and a
-/// forged client gains one swing at the expired haste and nothing more, since
-/// every accepted swing re-stamps it. The weapon does not carry: a client
-/// alternating a fast and a slow weapon every swing would otherwise swing the
-/// slow one at the fast one's pace indefinitely (the 2026-10-30 review); the
-/// client re-times its swing when a weapon changes instead.
+/// slow". The pace is computed at `carried_haste`, which covers the client's
+/// timer lag; the weapon does not carry: a client alternating a fast and a
+/// slow weapon every swing would otherwise swing the slow one at the fast
+/// one's pace indefinitely (the 2026-10-30 review); the client re-times its
+/// swing when a weapon changes instead.
 fn min_swing_interval_secs(pace: f32) -> f32 {
     (pace - SWING_RATE_GRACE_SECS).max(HARD_MIN_SWING_SECS)
+}
+
+/// The haste a same-hand swing is paced at: the greatest of the haste now
+/// and the haste of the hand's last two ACCEPTED swings (newest first).
+/// Two, not one, because the client's attack timer lags by two: a Godot
+/// Timer reloads its `wait_time` before the timeout handler runs, so a wait
+/// time set in the handler of swing N first times the gap from N+1 to N+2
+/// (measured 2026-11-01: a 1.4 s timer changed to 2.0 fired after 1.4, 1.4,
+/// then 2.0), and a fresh `start()` after a stop runs the wait time set at
+/// the last swing before the stop. So a Haste that ran out costs no honest
+/// swing, whether it ends mid-fight or between fights, and a forged client
+/// gains at most two swings at the expired haste, since every accepted swing
+/// pushes its own haste into the history.
+fn carried_haste(haste_now: f32, history: [f32; 2]) -> f32 {
+    haste_now.max(history[0]).max(history[1])
+}
+
+/// Records an accepted swing's haste in the hand's history, newest first.
+fn stamp_swing_haste(history: &mut [f32; 2], haste_now: f32) {
+    *history = [haste_now, history[0]];
 }
 
 /// True if a same-hand swing arriving `now` is faster than `min_interval` since
@@ -4024,8 +4039,8 @@ pub async fn run(
                 let base_delay = items::lookup(&server_weapon_path)
                     .map(|w| w.weapon_delay)
                     .unwrap_or(FIST_WEAPON_DELAY);
-                let haste_now = attacker_conn.haste_total();
-                let haste = haste_now.max(attacker_conn.last_swing_haste[hand]);
+                let haste_now = attacker_conn.limiter_haste(now);
+                let haste = carried_haste(haste_now, attacker_conn.last_swing_haste[hand]);
                 let min_interval =
                     min_swing_interval_secs(honest_swing_pace(base_delay, intent.is_offhand, haste));
                 // A skill's swing is outside the auto-attack limiter: its own
@@ -4061,7 +4076,7 @@ pub async fn run(
                 if intent.skill.is_none() {
                     if let Some(a) = connections.get_mut(&attacker_cid) {
                         a.last_swing_at[hand] = Some(now);
-                        a.last_swing_haste[hand] = haste_now;
+                        stamp_swing_haste(&mut a.last_swing_haste[hand], haste_now);
                     }
                 }
                 // The first swing from the shadows ends a Hide, skill or not.
@@ -11983,6 +11998,11 @@ pub async fn run(
                     if conn.active_buffs[i].name == buffs::RES_SICKNESS_NAME {
                         res_sickness_ended.push(conn.char_id as ClientId);
                     }
+                    // The swing-rate limit keeps counting an expired Haste
+                    // for a moment, until the client has heard of it.
+                    if matches!(conn.active_buffs[i].effect, buffs::BuffEffect::Haste { .. }) {
+                        conn.haste_lapsed = Some((conn.haste_total(), now));
+                    }
                     conn.active_buffs.remove(i);
                     snapshot_changed = true;
                 } else {
@@ -13608,26 +13628,102 @@ mod tests {
         assert!(gate(0.0, true, 0.0) >= HARD_MIN_SWING_SECS);
     }
 
-    // The haste a hand's last accepted swing was judged at carries into the
-    // next, since the client timed that next swing when the last one fired: a
-    // Haste that ran out between two swings (30%, then none) lets the swing
-    // timed at 1.4 s through and holds the one after to the unhasted gate. The
-    // weapon never carries: a staff swung after a dagger is held to the
+    // The weapon never carries: a staff swung after a dagger is held to the
     // staff's own gate at once (the review of 2026-10-30: alternating the two
     // every swing would otherwise swing the staff at the dagger's pace for
     // good), and a buff landing between two swings only ever loosens the gate.
     #[test]
-    fn the_last_accepted_swings_haste_covers_the_next_swing_but_the_weapon_does_not() {
-        use super::{honest_swing_pace, min_swing_interval_secs};
+    fn the_carried_haste_covers_the_timed_swing_but_the_weapon_does_not() {
+        use super::{carried_haste, honest_swing_pace, min_swing_interval_secs};
         let approx = |a: f32, b: f32| (a - b).abs() < 1e-4;
-        let gate = |delay: f32, haste_now: f32, last_haste: f32| {
-            min_swing_interval_secs(honest_swing_pace(delay, false, haste_now.max(last_haste)))
+        let gate = |delay: f32, haste_now: f32, history: [f32; 2]| {
+            min_swing_interval_secs(honest_swing_pace(delay, false, carried_haste(haste_now, history)))
         };
-        assert!(approx(gate(2.0, 0.0, 0.3), 1.05), "the swing timed under haste passes");
-        assert!(approx(gate(2.0, 0.0, 0.0), 1.65), "the one after is held to the unhasted gate");
-        assert!(approx(gate(3.2, 0.0, 0.0), 2.85), "a staff after a dagger is held to the staff's gate at once");
-        assert!(approx(gate(1.4, 0.0, 0.0), 1.05), "and the dagger after the staff to the dagger's");
-        assert!(gate(2.0, 0.3, 0.0) <= gate(2.0, 0.0, 0.0), "a buff landing between swings only loosens the gate");
+        assert!(approx(gate(2.0, 0.0, [0.3, 0.3]), 1.05), "the swing timed under haste passes");
+        assert!(approx(gate(2.0, 0.0, [0.0, 0.3]), 1.05), "and the one after it, timed two swings back");
+        assert!(approx(gate(2.0, 0.0, [0.0, 0.0]), 1.65), "the third is held to the unhasted gate");
+        assert!(approx(gate(3.2, 0.0, [0.0, 0.0]), 2.85), "a staff after a dagger is held to the staff's gate at once");
+        assert!(approx(gate(1.4, 0.0, [0.0, 0.0]), 1.05), "and the dagger after the staff to the dagger's");
+        assert!(gate(2.0, 0.3, [0.0, 0.0]) <= gate(2.0, 0.0, [0.0, 0.0]), "a buff landing between swings only loosens the gate");
+    }
+
+    // The client's attack timer as a Godot Timer runs it (measured
+    // 2026-11-01): at a timeout the timer reloads its CURRENT wait_time, then
+    // the handler sends the swing and sets a new wait_time for the haste it
+    // holds; `start()` after a stop runs the current wait_time. Each fight is
+    // the haste held at each of its swings, the fights ten minutes apart.
+    // Returns how many of those honest swings the server's rule rejects;
+    // `one_deep` judges by the rule built on 2026-10-30, which carried one.
+    fn rejected_honest_swings(delay: f32, fights: &[&[f32]], one_deep: bool) -> usize {
+        use super::{carried_haste, honest_swing_pace, min_swing_interval_secs, stamp_swing_haste};
+        let mut wait_time = honest_swing_pace(delay, false, 0.0);
+        let mut t = 0.0_f32;
+        let mut last_at: Option<f32> = None;
+        let mut history = [0.0_f32; 2];
+        let mut rejected = 0;
+        for fight in fights {
+            t += 600.0;
+            let mut gap = wait_time;
+            for &haste in fight.iter() {
+                t += gap;
+                let carried = if one_deep { haste.max(history[0]) } else { carried_haste(haste, history) };
+                let min = min_swing_interval_secs(honest_swing_pace(delay, false, carried));
+                if last_at.is_some_and(|l| t - l < min) {
+                    rejected += 1;
+                } else {
+                    last_at = Some(t);
+                    stamp_swing_haste(&mut history, haste);
+                }
+                gap = wait_time;
+                wait_time = honest_swing_pace(delay, false, haste);
+            }
+        }
+        rejected
+    }
+
+    // The 2026-11-01 finding (WAROI, bare-handed: a Haste that ran out
+    // between fights cost the second swing of the next fight), the same
+    // expiry mid-fight, and a Haste landing mid-fight: no honest swing is
+    // rejected, where the one-swing carry rejected one in each expiry case.
+    #[test]
+    fn no_honest_swing_is_rejected_when_a_haste_ends_or_begins() {
+        let hasted: &[f32] = &[0.3; 6];
+        let unhasted: &[f32] = &[0.0; 6];
+        let ends_mid_fight: &[f32] = &[0.3, 0.3, 0.3, 0.0, 0.0, 0.0, 0.0];
+        let begins_mid_fight: &[f32] = &[0.0, 0.0, 0.3, 0.3, 0.3, 0.3];
+        for delay in [2.0_f32, 3.2, 1.4] {
+            assert_eq!(rejected_honest_swings(delay, &[hasted, unhasted], false), 0, "between fights, delay {delay}");
+            assert_eq!(rejected_honest_swings(delay, &[ends_mid_fight], false), 0, "mid-fight, delay {delay}");
+            assert_eq!(rejected_honest_swings(delay, &[begins_mid_fight], false), 0, "a haste landing, delay {delay}");
+            assert_eq!(rejected_honest_swings(delay, &[unhasted, hasted, unhasted], false), 0, "fights both ways, delay {delay}");
+        }
+        assert_eq!(rejected_honest_swings(2.0, &[hasted, unhasted], true), 1, "the one-swing carry dropped WAROI's swing");
+        assert_eq!(rejected_honest_swings(2.0, &[ends_mid_fight], true), 1, "and one mid-fight");
+    }
+
+    // The bound on a forged client: once its Haste is gone, swinging on at
+    // the hasted pace gets at most two swings through at that pace, then is
+    // held to the unhasted gate.
+    #[test]
+    fn a_forged_client_gains_at_most_two_swings_at_an_expired_haste() {
+        use super::{carried_haste, honest_swing_pace, min_swing_interval_secs, stamp_swing_haste};
+        let hasted_gap = honest_swing_pace(2.0, false, 0.3);
+        let mut history = [0.3_f32, 0.3];
+        let mut last_at = 0.0_f32;
+        let mut t = 0.0_f32;
+        let mut at_the_hasted_pace = 0;
+        for _ in 0..20 {
+            t += hasted_gap;
+            let min = min_swing_interval_secs(honest_swing_pace(2.0, false, carried_haste(0.0, history)));
+            if t - last_at >= min {
+                if t - last_at < 1.65 - 1e-4 {
+                    at_the_hasted_pace += 1;
+                }
+                last_at = t;
+                stamp_swing_haste(&mut history, 0.0);
+            }
+        }
+        assert_eq!(at_the_hasted_pace, 2);
     }
 
     // The per-hand accept/reject decision: a never-swung hand is always allowed;

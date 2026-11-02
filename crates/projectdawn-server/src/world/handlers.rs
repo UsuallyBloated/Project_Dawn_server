@@ -3550,12 +3550,13 @@ const CLIENT_MSG_DECODE_LIMIT: usize = 16 * 1024;
 /// refused: the protocol's compatibility rule is that a field appended to the
 /// end of a variant is safe, so a newer client must still be understood by an
 /// older server. Never panics; property tests feed it random and mutated bytes.
-pub fn decode_client(bytes: &[u8]) -> Option<ClientWorldMsg> {
+/// `from` names the sender in the (throttled) warning a failure logs.
+pub fn decode_client(bytes: &[u8], from: ClientId) -> Option<ClientWorldMsg> {
     let cfg = bincode_cfg().with_limit::<CLIENT_MSG_DECODE_LIMIT>();
     match bincode::serde::decode_from_slice::<ClientWorldMsg, _>(bytes, cfg) {
         Ok((msg, _)) => Some(msg),
         Err(e) => {
-            warn_decode_failure(&e);
+            warn_decode_failure(from, &e);
             None
         }
     }
@@ -3563,9 +3564,9 @@ pub fn decode_client(bytes: &[u8]) -> Option<ClientWorldMsg> {
 
 /// A forged client can send garbage as fast as it likes, and decoding comes
 /// before any intent budget, so a warning per bad message would let one
-/// client flood the log. At most one line a second, carrying how many
-/// failures it stands for.
-fn warn_decode_failure(error: &bincode::error::DecodeError) {
+/// client flood the log. At most one line a second, naming the client whose
+/// failure opened the window and carrying how many failures it stands for.
+fn warn_decode_failure(client_id: ClientId, error: &bincode::error::DecodeError) {
     use std::sync::Mutex;
     static WINDOW: Mutex<Option<(std::time::Instant, u64)>> = Mutex::new(None);
     let Ok(mut window) = WINDOW.lock() else {
@@ -3578,7 +3579,7 @@ fn warn_decode_failure(error: &bincode::error::DecodeError) {
         }
         _ => {
             let suppressed = window.map(|(_, count)| count).unwrap_or(0);
-            tracing::warn!(error = %error, suppressed_last_second = suppressed, "failed to bincode-decode ClientWorldMsg");
+            tracing::warn!(%client_id, error = %error, suppressed_last_second = suppressed, "failed to bincode-decode ClientWorldMsg");
             *window = Some((now, 0));
         }
     }
@@ -3606,7 +3607,7 @@ mod tests {
 
     #[test]
     fn a_valid_message_decodes() {
-        assert!(decode_client(&encode(&say("hello".into()))).is_some());
+        assert!(decode_client(&encode(&say("hello".into())), 0).is_some());
     }
 
     /// The append-only compatibility rule: a newer client's extra trailing
@@ -3615,13 +3616,13 @@ mod tests {
     fn trailing_bytes_are_ignored() {
         let mut bytes = encode(&say("hello".into()));
         bytes.extend_from_slice(&[1, 2, 3]);
-        assert!(decode_client(&bytes).is_some());
+        assert!(decode_client(&bytes, 0).is_some());
     }
 
     #[test]
     fn a_message_over_the_decode_limit_is_refused() {
         let bytes = encode(&say("a".repeat(CLIENT_MSG_DECODE_LIMIT + 1)));
-        assert!(decode_client(&bytes).is_none());
+        assert!(decode_client(&bytes, 0).is_none());
     }
 
     proptest::proptest! {
@@ -3629,7 +3630,7 @@ mod tests {
         /// input may panic it (a panic in the world loop ends the server).
         #[test]
         fn random_bytes_never_panic_the_decoder(bytes in proptest::collection::vec(proptest::num::u8::ANY, 0..4096)) {
-            let _ = decode_client(&bytes);
+            let _ = decode_client(&bytes, 0);
         }
 
         /// The same, starting from real messages with a few bytes changed:
@@ -3644,7 +3645,7 @@ mod tests {
                 let i = at % bytes.len();
                 bytes[i] = value;
             }
-            let _ = decode_client(&bytes);
+            let _ = decode_client(&bytes, 0);
         }
     }
 

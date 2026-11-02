@@ -22,12 +22,12 @@ pub(super) fn apply_coin_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
         // dungeon one second before dying, leaving the corpse empty.
         match conn.npc_service("banker") {
             Err(None) => {
-                tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
+                tracing::info!(char_id = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
                 handlers::send_bank_rejected(&mut *server, cid, "There is no banker near you.".to_string());
                 continue;
             }
             Err(Some(npc)) => {
-                tracing::info!(owner = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
+                tracing::info!(char_id = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
                 handlers::send_bank_rejected(&mut *server, cid, format!("{} will not deal with you.", npc.name));
                 continue;
             }
@@ -64,7 +64,7 @@ pub(super) fn apply_coin_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
         handlers::send_coins_update(&mut *server, cid, wallet);
         handlers::send_bank_snapshot(&mut *server, cid, bank);
         tracing::info!(
-            owner = intent.owner,
+            char_id = intent.owner,
             deposited = coins.total_copper(),
             bank = bank.total_copper(),
             "bank deposit"
@@ -76,12 +76,12 @@ pub(super) fn apply_coin_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
         // Same banker proximity gate as the deposit loop above.
         match conn.npc_service("banker") {
             Err(None) => {
-                tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
+                tracing::info!(char_id = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
                 handlers::send_bank_rejected(&mut *server, cid, "There is no banker near you.".to_string());
                 continue;
             }
             Err(Some(npc)) => {
-                tracing::info!(owner = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
+                tracing::info!(char_id = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
                 handlers::send_bank_rejected(&mut *server, cid, format!("{} will not deal with you.", npc.name));
                 continue;
             }
@@ -114,7 +114,7 @@ pub(super) fn apply_coin_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
         handlers::send_coins_update(&mut *server, cid, wallet);
         handlers::send_bank_snapshot(&mut *server, cid, bank);
         tracing::info!(
-            owner = intent.owner,
+            char_id = intent.owner,
             withdrew = coins.total_copper(),
             bank = bank.total_copper(),
             "bank withdraw"
@@ -126,12 +126,12 @@ pub(super) fn apply_coin_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
         // Same banker proximity gate as the deposit loop above.
         match conn.npc_service("banker") {
             Err(None) => {
-                tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
+                tracing::info!(char_id = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
                 handlers::send_bank_rejected(&mut *server, cid, "There is no banker near you.".to_string());
                 continue;
             }
             Err(Some(npc)) => {
-                tracing::info!(owner = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
+                tracing::info!(char_id = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
                 handlers::send_bank_rejected(&mut *server, cid, format!("{} will not deal with you.", npc.name));
                 continue;
             }
@@ -151,7 +151,7 @@ pub(super) fn apply_coin_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
                 let wallet = conn.coins;
                 handlers::send_coins_update(&mut *server, cid, wallet);
                 tracing::info!(
-                    owner = intent.owner,
+                    char_id = intent.owner,
                     from = intent.from_tier,
                     to = intent.to_tier,
                     qty = intent.qty,
@@ -187,12 +187,12 @@ pub(super) fn apply_item_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
         // Same banker proximity gate as the deposit loop above.
         match conn.npc_service("banker") {
             Err(None) => {
-                tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
+                tracing::info!(char_id = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
                 handlers::send_bank_rejected(&mut *server, cid, "There is no banker near you.".to_string());
                 continue;
             }
             Err(Some(npc)) => {
-                tracing::info!(owner = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
+                tracing::info!(char_id = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
                 handlers::send_bank_rejected(&mut *server, cid, format!("{} will not deal with you.", npc.name));
                 continue;
             }
@@ -257,7 +257,7 @@ pub(super) fn apply_item_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
             conn.bank_items.to_snapshot_entries()
         };
         handlers::send_bank_item_snapshot(&mut *server, cid, intent.shared, entries);
-        tracing::info!(owner = intent.owner, %path, deposited = take, shared = intent.shared, "bank store item");
+        tracing::info!(char_id = intent.owner, %path, deposited = take, shared = intent.shared, "bank store item");
     }
     for intent in bank_withdraw_item_intents.drain(..) {
         let cid = intent.owner as ClientId;
@@ -265,12 +265,12 @@ pub(super) fn apply_item_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
         // Same banker proximity gate as the deposit loop above.
         match conn.npc_service("banker") {
             Err(None) => {
-                tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
+                tracing::info!(char_id = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
                 handlers::send_bank_rejected(&mut *server, cid, "There is no banker near you.".to_string());
                 continue;
             }
             Err(Some(npc)) => {
-                tracing::info!(owner = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
+                tracing::info!(char_id = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
                 handlers::send_bank_rejected(&mut *server, cid, format!("{} will not deal with you.", npc.name));
                 continue;
             }
@@ -338,6 +338,6 @@ pub(super) fn apply_item_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
             conn.bank_items.to_snapshot_entries()
         };
         handlers::send_bank_item_snapshot(&mut *server, cid, intent.shared, entries);
-        tracing::info!(owner = intent.owner, %path, withdrew = count - leftover, shared = intent.shared, "bank withdraw item");
+        tracing::info!(char_id = intent.owner, %path, withdrew = count - leftover, shared = intent.shared, "bank withdraw item");
     }
 }

@@ -394,7 +394,7 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
             // the wire changes (Layer 4).
             if !bag.can_loot(intent.looter as ClientId, &group_manager) {
                 tracing::info!(
-                    looter = intent.looter,
+                    char_id = intent.looter,
                     bag_id = intent.bag_id,
                     "loot rejected: not the owner or owner's group"
                 );
@@ -426,7 +426,7 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
                 if let Some(turn) = bag.assigned_looter {
                     if (intent.looter as ClientId) != turn {
                         tracing::info!(
-                            looter = intent.looter,
+                            char_id = intent.looter,
                             bag_id = intent.bag_id,
                             assigned = turn,
                             "loot rejected: not your turn (round robin)"
@@ -449,7 +449,7 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
             if let Some(idx) = intent.slot {
                 if idx as usize >= bag.items.len() {
                     tracing::info!(
-                        looter = intent.looter,
+                        char_id = intent.looter,
                         bag_id = intent.bag_id,
                         slot = idx,
                         "loot rejected: no such slot in the bag"
@@ -525,7 +525,7 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
                     }
                 }
                 tracing::info!(
-                    looter = intent.looter,
+                    char_id = intent.looter,
                     bag_id = intent.bag_id,
                     pot,
                     recipients = recipients.len(),
@@ -596,7 +596,7 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
                         }
                         Err(e) => {
                             tracing::info!(
-                                looter = intent.looter,
+                                char_id = intent.looter,
                                 item_path = %path,
                                 count,
                                 error = %e,
@@ -637,7 +637,7 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
                         equip_slot: None,
                     });
                     tracing::info!(
-                        looter = intent.looter,
+                        char_id = intent.looter,
                         bag_id = bag.id,
                         leftover = leftover_count,
                         "loot partially placed; remainder refunded to bag"

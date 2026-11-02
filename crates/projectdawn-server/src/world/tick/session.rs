@@ -642,7 +642,7 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
                         while let Some(bytes) =
                             server.receive_message(client_id, channel)
                         {
-                            if let Some(msg) = handlers::decode_client(&bytes) {
+                            if let Some(msg) = handlers::decode_client(&bytes, client_id) {
                                 // A panic marks the connection, which the
                                 // reap below then removes without saving.
                                 let _ = intake::handle_contained(

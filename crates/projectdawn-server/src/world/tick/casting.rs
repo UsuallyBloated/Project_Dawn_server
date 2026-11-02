@@ -16,7 +16,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
             let caster_cid = intent.caster as ClientId;
             let Some(spell) = spells::lookup(&intent.spell_name) else {
                 tracing::info!(
-                    caster = intent.caster,
+                    char_id = intent.caster,
                     spell = %intent.spell_name,
                     "unknown spell name — server-side cast dropped"
                 );
@@ -52,7 +52,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                 .map_or(true, |c| c.hp <= 0.0 || c.death_processed)
             {
                 tracing::info!(
-                    caster = intent.caster,
+                    char_id = intent.caster,
                     spell = %spell.name,
                     "CastSpell rejected — caster is dead"
                 );
@@ -91,7 +91,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                         "You are not high enough level for that spell."
                     };
                     tracing::info!(
-                        caster = intent.caster,
+                        char_id = intent.caster,
                         spell = %spell.name,
                         class = %class,
                         level,
@@ -111,7 +111,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                 .is_some_and(|c| crate::world::spell_gems::is_memorized(&c.spell_gems, &spell.name));
             if !memorized {
                 tracing::info!(
-                    caster = intent.caster,
+                    char_id = intent.caster,
                     spell = %spell.name,
                     "CastSpell rejected — spell not memorized"
                 );
@@ -141,7 +141,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     CastTiming::Ready => {}
                     CastTiming::NotReady => {
                         tracing::info!(
-                            caster = intent.caster,
+                            char_id = intent.caster,
                             spell = %spell.name,
                             cast_time = spell.cast_time,
                             in_flight = %intent.cast_name_at_dispatch,
@@ -156,7 +156,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                         // instant it is needed) is refused, and the stale
                         // bar is dropped so the next cast starts clean.
                         tracing::info!(
-                            caster = intent.caster,
+                            char_id = intent.caster,
                             spell = %spell.name,
                             elapsed_ms = elapsed_ms.unwrap_or(0),
                             "CastSpell rejected — held past the bar"
@@ -181,7 +181,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     .and_then(|c| c.cast_interrupted_at);
                 if cast_gate::beaten_by_interrupt(interrupted_at, intent.cast_set_at_at_dispatch) {
                     tracing::info!(
-                        caster = intent.caster,
+                        char_id = intent.caster,
                         spell = %spell.name,
                         "CastSpell rejected — interrupted after the bar began"
                     );
@@ -220,7 +220,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     // so the gate passes songs through.
                     if moved > MAX_CAST_MOVE_DISTANCE && !spell.is_song {
                         tracing::info!(
-                            caster = intent.caster,
+                            char_id = intent.caster,
                             spell = %spell.name,
                             moved,
                             "CastSpell rejected — moved during cast"
@@ -246,7 +246,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     if now < *ready_at {
                         let remaining = ready_at.duration_since(now).as_secs_f32();
                         tracing::info!(
-                            caster = intent.caster,
+                            char_id = intent.caster,
                             spell = %spell.name,
                             remaining_secs = remaining,
                             "CastSpell rejected — on cooldown"
@@ -263,7 +263,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     if let Some(until) = caster_conn_now.gcd_until {
                         if now < until {
                             tracing::info!(
-                                caster = intent.caster,
+                                char_id = intent.caster,
                                 spell = %spell.name,
                                 remaining_ms = until.duration_since(now).as_millis(),
                                 "CastSpell rejected — inside the global cooldown"
@@ -282,7 +282,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
             };
             if caster_conn.mp < spell.mana_cost {
                 tracing::info!(
-                    caster = intent.caster,
+                    char_id = intent.caster,
                     spell = %spell.name,
                     mp = caster_conn.mp,
                     cost = spell.mana_cost,
@@ -339,7 +339,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                 Ok(resolved) => resolved,
                 Err(line) => {
                     tracing::info!(
-                        caster = intent.caster,
+                        char_id = intent.caster,
                         spell = %spell.name,
                         target = ?intent.target_id,
                         reason = %line,
@@ -390,7 +390,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     cc.cast_total_duration = 0.0;
                     cc.cast_set_at = None;
                     regen::mark_dirty(cc);
-                    tracing::info!(caster = intent.caster, spell = %spell.name, burned, "CastSpell fizzled");
+                    tracing::info!(char_id = intent.caster, spell = %spell.name, burned, "CastSpell fizzled");
                     (cc.mp, cc.max_mp)
                 };
                 handlers::fan_out_cast_fail(
@@ -541,7 +541,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                         );
                         continue;
                     };
-                    tracing::info!(caster = intent.caster, spell = %spell.name, corpse_id, "resurrection cast received");
+                    tracing::info!(char_id = intent.caster, spell = %spell.name, corpse_id, "resurrection cast received");
                     let xp_percent = spell.res_xp_percent.round() as u32;
                     let caster_name = connections.get(&caster_cid).map(|c| c.name.clone()).unwrap_or_default();
                     // Record the pending offer on the owner so the accept can't
@@ -550,7 +550,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                         owner_conn.pending_res_offer = Some((corpse_id, xp_percent));
                     }
                     handlers::send_resurrect_offer(&mut *server, owner_cid, corpse_id, caster_name, xp_percent);
-                    tracing::info!(caster = intent.caster, corpse_id, xp_percent, "resurrection offered");
+                    tracing::info!(char_id = intent.caster, corpse_id, xp_percent, "resurrection offered");
                 }
                 "SUMMON_ITEM" => {
                     // Summon Food / Drink (food slice 2): conjure the
@@ -603,7 +603,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                                 &format!("You conjure {} x{}.", item_name, placed),
                             );
                             tracing::info!(
-                                caster = intent.caster,
+                                char_id = intent.caster,
                                 spell = %spell.name,
                                 item = %spell.summon_item,
                                 qty = placed,
@@ -616,7 +616,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                             // this is the placer disagreeing with its own
                             // probe; say so, refund, and refuse.
                             tracing::warn!(
-                                caster = intent.caster,
+                                char_id = intent.caster,
                                 spell = %spell.name,
                                 outcome = ?other.as_ref().map(|(p, l, _)| (*p, *l)),
                                 "SUMMON_ITEM placed nothing after the pre-flight accepted it; refunded"
@@ -637,7 +637,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                 }
                 "SELF" => {
                     tracing::info!(
-                        caster = intent.caster,
+                        char_id = intent.caster,
                         spell = %spell.name,
                         absorb = spell.absorb_amount,
                         "SELF cast received"
@@ -662,7 +662,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                             max_hp,
                         );
                         tracing::info!(
-                            caster = intent.caster,
+                            char_id = intent.caster,
                             spell = %spell.name,
                             heal,
                             dmg,
@@ -748,7 +748,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                                     max_hp,
                                 );
                                 tracing::info!(
-                                    caster = intent.caster,
+                                    char_id = intent.caster,
                                     target = raw_target,
                                     spell = %spell.name,
                                     heal,
@@ -783,7 +783,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                                     pet,
                                 );
                                 tracing::info!(
-                                    caster = intent.caster,
+                                    char_id = intent.caster,
                                     target = raw_target,
                                     spell = %spell.name,
                                     "ALLY pet buff applied"
@@ -810,7 +810,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                             max_hp,
                         );
                         tracing::info!(
-                            caster = intent.caster,
+                            char_id = intent.caster,
                             target = target_entity_id,
                             spell = %spell.name,
                             heal,
@@ -837,7 +837,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                             );
                         }
                         tracing::info!(
-                            caster = intent.caster,
+                            char_id = intent.caster,
                             target = target_entity_id,
                             spell = %spell.name,
                             "ALLY buff applied"
@@ -932,7 +932,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                             max_hp,
                         );
                         tracing::info!(
-                            caster = intent.caster,
+                            char_id = intent.caster,
                             target = target_id,
                             spell = %spell.name,
                             applied,
@@ -1024,7 +1024,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                                         );
                                         tell_interrupt_charge(&mut *server, caster_cid, intent.caster, att_mp, att_max_mp, *mana_charged);
                                         tracing::info!(
-                                            caster = intent.caster,
+                                            char_id = intent.caster,
                                             spell = %spell_name,
                                             mana_charged,
                                             "PvP caster interrupted by own shield reflect"
@@ -1147,7 +1147,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     // server.log and hard to triage.
                     if IdKind::of(target_id) == IdKind::Pet {
                         tracing::info!(
-                            caster = intent.caster,
+                            char_id = intent.caster,
                             target = target_id,
                             spell = %spell.name,
                             "PvP spell applied vs pet"
@@ -1241,7 +1241,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                         }
                     }
                     tracing::info!(
-                        caster = intent.caster,
+                        char_id = intent.caster,
                         spell = %spell.name,
                         radius,
                         hits,
@@ -1269,7 +1269,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                         // resolution — skip, like the other resolver arms,
                         // rather than spawning an ownerless level-1 pet.
                         tracing::debug!(
-                            caster = intent.caster,
+                            char_id = intent.caster,
                             spell = %spell.name,
                             "PET_SUMMON dropped — caster no longer connected"
                         );
@@ -1451,7 +1451,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                             max_hp,
                         );
                         tracing::info!(
-                            caster = intent.caster,
+                            char_id = intent.caster,
                             pet_id,
                             spell = %spell.name,
                             heal,
@@ -1495,7 +1495,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     bc.bind = Some(crate::db::BindPoint { pos });
                     bind_intents.push((bc.char_id, bc.zone.clone(), pos));
                     tracing::info!(
-                        caster = intent.caster,
+                        char_id = intent.caster,
                         bound = bound_cid as u64,
                         x = pos.0, y = pos.1, z = pos.2,
                         "BIND applied"
@@ -1628,7 +1628,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                         }
                     }
                     tracing::info!(
-                        caster = intent.caster,
+                        char_id = intent.caster,
                         spell = %spell.name,
                         port = %spell.port,
                         moved = movers.len(),
@@ -1648,7 +1648,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     // failure should not be invisible at the default log
                     // level.
                     tracing::info!(
-                        caster = intent.caster,
+                        char_id = intent.caster,
                         spell = %spell.name,
                         target_type = %spell.target_type,
                         "spell target_type not yet processed server-side; mana deducted only"

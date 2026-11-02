@@ -129,7 +129,7 @@ pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: 
                     u.last_attack_at = Some(now);
                 }
             }
-            tracing::info!(user = intent.user, skill = %skill.name, cost = skill.stamina_cost, "skill used");
+            tracing::info!(char_id = intent.user, skill = %skill.name, cost = skill.stamina_cost, "skill used");
 
             if skill.is_damage() {
                 attack_intents.push(AttackIntent {
@@ -195,10 +195,10 @@ pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: 
                             snapshot_changed = true;
                         }
                         handlers::send_system_line(&mut *server, user_cid, "You feign death successfully.");
-                        tracing::info!(user = intent.user, "feign death succeeded");
+                        tracing::info!(char_id = intent.user, "feign death succeeded");
                     } else {
                         handlers::send_system_line(&mut *server, user_cid, "Your feign death fails!");
-                        tracing::info!(user = intent.user, "feign death failed");
+                        tracing::info!(char_id = intent.user, "feign death failed");
                     }
                 }
                 _ => {}

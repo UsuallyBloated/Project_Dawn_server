@@ -97,7 +97,7 @@ pub(super) fn apply_moves(world: &mut WorldState, q: &mut Intents, _now: Instant
                 Ok(t) => t,
                 Err(e) => {
                     tracing::info!(
-                        owner = intent.owner,
+                        char_id = intent.owner,
                         src_loc = %intent.src_location,
                         src_slot = intent.src_slot,
                         dst_loc = %intent.dst_location,
@@ -153,7 +153,7 @@ pub(super) fn apply_moves(world: &mut WorldState, q: &mut Intents, _now: Instant
                 handlers::send_slot_delta(&mut *server, owner_cid, loc, slot, payload);
             }
             tracing::info!(
-                owner = intent.owner,
+                char_id = intent.owner,
                 src_loc = %intent.src_location,
                 src_slot = intent.src_slot,
                 dst_loc = %intent.dst_location,
@@ -174,7 +174,7 @@ pub(super) fn apply_splits(world: &mut WorldState, q: &mut Intents, _now: Instan
         for intent in split_stack_intents.drain(..) {
             if intent.src_location != "base" || intent.dst_location != "base" {
                 tracing::debug!(
-                    owner = intent.owner,
+                    char_id = intent.owner,
                     src_loc = %intent.src_location,
                     dst_loc = %intent.dst_location,
                     "SplitStack rejected — non-base locations not yet supported"
@@ -203,7 +203,7 @@ pub(super) fn apply_splits(world: &mut WorldState, q: &mut Intents, _now: Instan
                 Ok(t) => t,
                 Err(e) => {
                     tracing::debug!(
-                        owner = intent.owner,
+                        char_id = intent.owner,
                         src,
                         dst,
                         count = intent.count,
@@ -230,7 +230,7 @@ pub(super) fn apply_splits(world: &mut WorldState, q: &mut Intents, _now: Instan
             for (slot, payload) in deltas {
                 handlers::send_slot_delta(&mut *server, owner_cid, "base".to_string(), slot, payload);
             }
-            tracing::debug!(owner = intent.owner, src, dst, count = intent.count, "SplitStack applied");
+            tracing::debug!(char_id = intent.owner, src, dst, count = intent.count, "SplitStack applied");
         }
     }
 }
@@ -320,7 +320,7 @@ pub(super) async fn apply_drops(world: &mut WorldState, q: &mut Intents, now: In
                 }
                 Err(e) => {
                     tracing::debug!(
-                        owner = intent.owner,
+                        char_id = intent.owner,
                         loc = %intent.location,
                         slot = intent.slot,
                         error = %e,
@@ -447,7 +447,7 @@ pub(super) fn apply_equips(world: &mut WorldState, q: &mut Intents, _now: Instan
                     skills::equip_refusal(&conn.class, conn.level, &path, intent.equip_slot, &other_hand)
                 {
                     tracing::info!(
-                        owner = intent.owner,
+                        char_id = intent.owner,
                         src_loc = %intent.src_location,
                         src_slot = intent.src_slot,
                         equip_slot = intent.equip_slot,
@@ -466,7 +466,7 @@ pub(super) fn apply_equips(world: &mut WorldState, q: &mut Intents, _now: Instan
                 Ok(t) => t,
                 Err(e) => {
                     tracing::info!(
-                        owner = intent.owner,
+                        char_id = intent.owner,
                         src_loc = %intent.src_location,
                         src_slot = intent.src_slot,
                         equip_slot = intent.equip_slot,
@@ -511,7 +511,7 @@ pub(super) fn apply_equips(world: &mut WorldState, q: &mut Intents, _now: Instan
                 );
             }
             tracing::info!(
-                owner = intent.owner,
+                char_id = intent.owner,
                 src_loc = %intent.src_location,
                 src_slot = intent.src_slot,
                 equip_slot = intent.equip_slot,
@@ -535,7 +535,7 @@ pub(super) fn apply_unequips(world: &mut WorldState, q: &mut Intents, _now: Inst
         for intent in unequip_item_intents.drain(..) {
             if intent.dst_location != "base" && intent.dst_location != "cursor" {
                 tracing::debug!(
-                    owner = intent.owner,
+                    char_id = intent.owner,
                     dst_loc = %intent.dst_location,
                     "UnequipItem rejected — dst must be 'base' or 'cursor'"
                 );
@@ -569,7 +569,7 @@ pub(super) fn apply_unequips(world: &mut WorldState, q: &mut Intents, _now: Inst
                 Ok(t) => t,
                 Err(e) => {
                     tracing::info!(
-                        owner = intent.owner,
+                        char_id = intent.owner,
                         equip_slot = intent.equip_slot,
                         dst_loc = %intent.dst_location,
                         dst,
@@ -623,7 +623,7 @@ pub(super) fn apply_unequips(world: &mut WorldState, q: &mut Intents, _now: Inst
                 );
             }
             tracing::info!(
-                owner = intent.owner,
+                char_id = intent.owner,
                 equip_slot = intent.equip_slot,
                 dst,
                 max_hp = conn.max_hp,
@@ -661,7 +661,7 @@ pub(super) fn apply_destroys(world: &mut WorldState, q: &mut Intents, _now: Inst
                 Ok(d) => d,
                 Err(e) => {
                     tracing::debug!(
-                        owner = intent.owner,
+                        char_id = intent.owner,
                         loc = %intent.location,
                         slot = intent.slot,
                         error = %e,
@@ -683,7 +683,7 @@ pub(super) fn apply_destroys(world: &mut WorldState, q: &mut Intents, _now: Inst
             let payload = conn.inventory.peek_at(&intent.location, intent.slot);
             handlers::send_slot_delta(&mut *server, owner_cid, intent.location.clone(), intent.slot, payload);
             tracing::info!(
-                owner = intent.owner,
+                char_id = intent.owner,
                 loc = %intent.location,
                 slot = intent.slot,
                 %item_path,
@@ -721,7 +721,7 @@ pub(super) fn apply_consumables(world: &mut WorldState, q: &mut Intents, _now: I
                 .map(|(p, _)| p);
             let Some(item_path) = peek_path else {
                 tracing::debug!(
-                    owner = intent.owner,
+                    char_id = intent.owner,
                     loc = %intent.location,
                     slot = intent.slot,
                     "UseConsumable rejected — slot empty"
@@ -731,7 +731,7 @@ pub(super) fn apply_consumables(world: &mut WorldState, q: &mut Intents, _now: I
             };
             let Some(item) = items::lookup(&item_path) else {
                 tracing::debug!(
-                    owner = intent.owner,
+                    char_id = intent.owner,
                     %item_path,
                     "UseConsumable rejected — unknown item path"
                 );
@@ -741,7 +741,7 @@ pub(super) fn apply_consumables(world: &mut WorldState, q: &mut Intents, _now: I
             let is_heal_potion = item.heal_on_use > 0.0 || item.mp_on_use > 0.0;
             if !item.is_food && !item.is_drink && !is_heal_potion {
                 tracing::debug!(
-                    owner = intent.owner,
+                    char_id = intent.owner,
                     %item_path,
                     "UseConsumable rejected — item is not consumable"
                 );
@@ -752,12 +752,12 @@ pub(super) fn apply_consumables(world: &mut WorldState, q: &mut Intents, _now: I
             // refused when there is no room, with EQ's own line, and
             // nothing is taken.
             if item.is_food && hunger::is_full(conn, hunger::Need::Food) {
-                tracing::debug!(owner = intent.owner, "UseConsumable rejected — full");
+                tracing::debug!(char_id = intent.owner, "UseConsumable rejected — full");
                 handlers::send_refusal(&mut *server, owner_cid, hunger::EXPLODE_FOOD);
                 continue;
             }
             if item.is_drink && hunger::is_full(conn, hunger::Need::Drink) {
-                tracing::debug!(owner = intent.owner, "UseConsumable rejected — full");
+                tracing::debug!(char_id = intent.owner, "UseConsumable rejected — full");
                 handlers::send_refusal(&mut *server, owner_cid, hunger::EXPLODE_DRINK);
                 continue;
             }
@@ -775,7 +775,7 @@ pub(super) fn apply_consumables(world: &mut WorldState, q: &mut Intents, _now: I
                 Ok(p) => p,
                 Err(e) => {
                     tracing::debug!(
-                        owner = intent.owner,
+                        char_id = intent.owner,
                         loc = %intent.location,
                         slot = intent.slot,
                         error = %e,
@@ -837,7 +837,7 @@ pub(super) fn apply_consumables(world: &mut WorldState, q: &mut Intents, _now: I
                 eat_emotes.push((owner_cid, hunger::eat_emote(&conn.name, &item.name, hunger::Need::Drink)));
             }
             tracing::info!(
-                owner = intent.owner,
+                char_id = intent.owner,
                 loc = %intent.location,
                 slot = intent.slot,
                 %item_path,
@@ -869,7 +869,7 @@ pub(super) fn apply_gm_gives(world: &mut WorldState, q: &mut Intents, _now: Inst
             };
             let Some(item) = items::lookup_by_name(&intent.item_name) else {
                 tracing::info!(
-                    owner = intent.owner,
+                    char_id = intent.owner,
                     item_name = %intent.item_name,
                     "GmGive rejected — unknown item name"
                 );
@@ -881,7 +881,7 @@ pub(super) fn apply_gm_gives(world: &mut WorldState, q: &mut Intents, _now: Inst
                     Ok(t) => t,
                     Err(e) => {
                         tracing::info!(
-                            owner = intent.owner,
+                            char_id = intent.owner,
                             item_name = %intent.item_name,
                             error = %e,
                             "GmGive rejected — add_item_locating error"
@@ -892,7 +892,7 @@ pub(super) fn apply_gm_gives(world: &mut WorldState, q: &mut Intents, _now: Inst
             let placed = intent.qty - leftover;
             if placed == 0 {
                 tracing::info!(
-                    owner = intent.owner,
+                    char_id = intent.owner,
                     item_name = %intent.item_name,
                     "GmGive rejected — inventory full, no stack placed"
                 );
@@ -914,7 +914,7 @@ pub(super) fn apply_gm_gives(world: &mut WorldState, q: &mut Intents, _now: Inst
                 handlers::send_slot_delta(&mut *server, owner_cid, loc, slot, payload);
             }
             tracing::info!(
-                owner = intent.owner,
+                char_id = intent.owner,
                 item_name = %intent.item_name,
                 qty = placed,
                 leftover,

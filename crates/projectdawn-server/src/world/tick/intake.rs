@@ -12,9 +12,13 @@ pub(super) fn drain_messages(world: &mut WorldState, q: &mut Intents, now: Insta
         // Skip clients whose Connected event is in the queue but whose
         // PerConnection row hasn't been built yet (load_character failed
         // and we already queued the kick).
-        if !connections.contains_key(&client_id) {
+        let Some(conn) = connections.get(&client_id) else {
             continue;
-        }
+        };
+        // Every line logged while this client's messages are handled (and
+        // their outcomes queued) names who sent them.
+        let _span =
+            tracing::info_span!("client", char_id = conn.char_id, account_id = conn.account_id).entered();
         // A client's outcomes wait here until its whole batch has been
         // handled. If one of its messages panics, none of them are acted on:
         // the client is dropped without saving (`session::drop_panicked`), so
@@ -23,7 +27,7 @@ pub(super) fn drain_messages(world: &mut WorldState, q: &mut Intents, now: Insta
         let mut panicked = false;
         'drain: for &channel in &[CHANNEL_SYSTEM, CHANNEL_POSITION] {
             while let Some(bytes) = server.receive_message(client_id, channel) {
-                let Some(msg) = handlers::decode_client(&bytes) else {
+                let Some(msg) = handlers::decode_client(&bytes, client_id) else {
                     continue;
                 };
                 let conn = connections.get_mut(&client_id).expect("checked above");

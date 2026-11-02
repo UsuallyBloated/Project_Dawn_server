@@ -205,7 +205,7 @@ pub enum Outcome {
     },
     TradeOfferCoinsIntent {
         owner: u64,
-        coins: protocol::world::Coins,
+        coins: protocol::world::CoinAmount,
     },
     TradeAcceptIntent {
         owner: u64,
@@ -317,12 +317,12 @@ pub enum Outcome {
     /// wallet into their bank (validated + applied in the tick loop).
     BankDepositIntent {
         owner: u64,
-        coins: Coins,
+        coins: protocol::world::CoinAmount,
     },
     /// PD_W0015 — Banker, slice 1. Move `coins` from the bank to the wallet.
     BankWithdrawIntent {
         owner: u64,
-        coins: Coins,
+        coins: protocol::world::CoinAmount,
     },
     /// PD_W0015 — Banker, slice 1. Convert `qty` coins of `from_tier` into
     /// `to_tier` on the carried wallet (tiers 0 = copper … 3 = platinum).
@@ -537,6 +537,19 @@ fn dev_cmd_allowed(
                 );
             }
             false
+        }
+    }
+}
+
+/// A coin amount from a client message, refused here if any tier is negative.
+/// Only a modified client sends one, so the refusal is silent (an answer would
+/// only help it probe); the log line names the character.
+fn client_coin_amount(conn: &PerConnection, coins: Coins, message: &str) -> Option<protocol::world::CoinAmount> {
+    match protocol::world::CoinAmount::try_from(coins) {
+        Ok(amount) => Some(amount),
+        Err(_) => {
+            tracing::info!(char_id = conn.char_id, message, ?coins, "refused a negative coin amount (a forged client)");
+            None
         }
     }
 }
@@ -1058,6 +1071,9 @@ pub fn handle_message(
             if !conn.in_world {
                 return Outcome::Continue;
             }
+            let Some(coins) = client_coin_amount(conn, coins, "TradeOfferCoins") else {
+                return Outcome::Continue;
+            };
             Outcome::TradeOfferCoinsIntent {
                 owner: conn.char_id as u64,
                 coins,
@@ -2105,6 +2121,9 @@ pub fn handle_message(
             if !conn.in_world {
                 return Outcome::Continue;
             }
+            let Some(coins) = client_coin_amount(conn, coins, "BankDepositCoins") else {
+                return Outcome::Continue;
+            };
             Outcome::BankDepositIntent { owner: conn.char_id as u64, coins }
         }
 
@@ -2112,6 +2131,9 @@ pub fn handle_message(
             if !conn.in_world {
                 return Outcome::Continue;
             }
+            let Some(coins) = client_coin_amount(conn, coins, "BankWithdrawCoins") else {
+                return Outcome::Continue;
+            };
             Outcome::BankWithdrawIntent { owner: conn.char_id as u64, coins }
         }
 

@@ -13,7 +13,7 @@
 //! the state it reads. The single most important rule lives here though:
 //! EVERY offer edit clears BOTH accepts (the anti-bait-and-switch law).
 
-use protocol::world::Coins;
+use protocol::world::{CoinAmount, Coins};
 use renet::ClientId;
 use std::collections::HashMap;
 
@@ -201,14 +201,15 @@ impl TradeManager {
     }
 
     /// Absolute per-tier coin offer (wallet validation happens in tick/trading.rs,
-    /// at offer time AND again at commit).
-    pub fn offer_coins(&mut self, cid: ClientId, coins: Coins) -> Result<(), &'static str> {
+    /// at offer time AND again at commit). A `CoinAmount`, so an offer can never
+    /// hold a negative tier.
+    pub fn offer_coins(&mut self, cid: ClientId, coins: CoinAmount) -> Result<(), &'static str> {
         let session = self
             .sessions
             .get_mut(self.by_cid.get(&cid).ok_or("you are not trading")?)
             .ok_or("you are not trading")?;
         let side = session.side_of_mut(cid).ok_or("you are not trading")?;
-        side.coins = coins;
+        side.coins = coins.get();
         session.clear_accepts();
         Ok(())
     }
@@ -323,7 +324,7 @@ mod tests {
         tm.offer_item(1, 0, offer("base", 0, 1)).unwrap();
         assert_cleared(&tm, "offer_item");
         both_accepted_then(&mut tm);
-        tm.offer_coins(2, Coins { platinum: 0, gold: 1, silver: 0, copper: 0 })
+        tm.offer_coins(2, CoinAmount::try_from(Coins { platinum: 0, gold: 1, silver: 0, copper: 0 }).unwrap())
             .unwrap();
         assert_cleared(&tm, "offer_coins");
         both_accepted_then(&mut tm);

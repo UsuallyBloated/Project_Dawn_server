@@ -33,10 +33,11 @@ pub(super) fn apply_coin_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
             }
             Ok(_) => {}
         }
-        if intent.coins.has_negative() || intent.coins == protocol::world::Coins::ZERO {
+        if intent.coins == protocol::world::CoinAmount::ZERO {
             handlers::send_bank_rejected(&mut *server, cid, "Nothing to deposit.".to_string());
             continue;
         }
+        let coins = intent.coins.get();
         // Pay by VALUE, not tier by tier. Depositing 5 silver from a purse
         // of 10 gold leaves 9 gold 95 silver, and depositing 1 gold from a
         // purse of 100 silver works too. Refusing either reads as a bug
@@ -44,27 +45,27 @@ pub(super) fn apply_coin_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
         // Banker already offers a free tier exchange, so refusing protected
         // nothing.
         let mut wallet_after = conn.coins;
-        if !wallet_after.pay_value_of(intent.coins) {
+        if !wallet_after.pay_value_of(coins) {
             handlers::send_bank_rejected(
                 &mut *server, cid, "You don't have that much coin to deposit.".to_string(),
             );
             continue;
         }
         conn.coins = wallet_after;
-        conn.bank_coins = conn.bank_coins.add_each(intent.coins);
+        conn.bank_coins = conn.bank_coins.add_each(coins);
         conn.coins_dirty = true;
         conn.bank_dirty = true;
         conn.ledger(ledger::coin_event(
             ItemAction::BankCoinIn,
             0,
-            Some(format!("{} copper", intent.coins.total_copper())),
+            Some(format!("{} copper", coins.total_copper())),
         ));
         let (wallet, bank) = (conn.coins, conn.bank_coins);
         handlers::send_coins_update(&mut *server, cid, wallet);
         handlers::send_bank_snapshot(&mut *server, cid, bank);
         tracing::info!(
             owner = intent.owner,
-            deposited = intent.coins.total_copper(),
+            deposited = coins.total_copper(),
             bank = bank.total_copper(),
             "bank deposit"
         );
@@ -86,34 +87,35 @@ pub(super) fn apply_coin_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
             }
             Ok(_) => {}
         }
-        if intent.coins.has_negative() || intent.coins == protocol::world::Coins::ZERO {
+        if intent.coins == protocol::world::CoinAmount::ZERO {
             handlers::send_bank_rejected(&mut *server, cid, "Nothing to withdraw.".to_string());
             continue;
         }
+        let coins = intent.coins.get();
         // Same rule on the way out, so the bank is symmetric: a balance is
         // worth what it is worth, whichever coins it happens to be in.
         let mut bank_after = conn.bank_coins;
-        if !bank_after.pay_value_of(intent.coins) {
+        if !bank_after.pay_value_of(coins) {
             handlers::send_bank_rejected(
                 &mut *server, cid, "Your bank doesn't hold that much coin.".to_string(),
             );
             continue;
         }
         conn.bank_coins = bank_after;
-        conn.coins = conn.coins.add_each(intent.coins);
+        conn.coins = conn.coins.add_each(coins);
         conn.coins_dirty = true;
         conn.bank_dirty = true;
         conn.ledger(ledger::coin_event(
             ItemAction::BankCoinOut,
             0,
-            Some(format!("{} copper", intent.coins.total_copper())),
+            Some(format!("{} copper", coins.total_copper())),
         ));
         let (wallet, bank) = (conn.coins, conn.bank_coins);
         handlers::send_coins_update(&mut *server, cid, wallet);
         handlers::send_bank_snapshot(&mut *server, cid, bank);
         tracing::info!(
             owner = intent.owner,
-            withdrew = intent.coins.total_copper(),
+            withdrew = coins.total_copper(),
             bank = bank.total_copper(),
             "bank withdraw"
         );

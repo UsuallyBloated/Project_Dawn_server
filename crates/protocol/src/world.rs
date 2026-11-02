@@ -398,6 +398,39 @@ impl Coins {
         self.copper = self.copper.saturating_add(p.copper);
     }
 }
+
+/// A coin amount a client asked to move, known to hold no negative tier.
+/// Client messages carry plain `Coins`, the signed wallet type, and a forged
+/// negative amount would mint coin at the bank or take it from a trade
+/// partner. The server converts each one once, where the message is handled,
+/// and the steps that move coin take only this type, so none of them can
+/// forget the check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoinAmount(Coins);
+
+/// A coin amount with a negative tier: only a modified client sends one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NegativeCoins;
+
+impl TryFrom<Coins> for CoinAmount {
+    type Error = NegativeCoins;
+
+    fn try_from(coins: Coins) -> Result<Self, NegativeCoins> {
+        if coins.has_negative() {
+            Err(NegativeCoins)
+        } else {
+            Ok(Self(coins))
+        }
+    }
+}
+
+impl CoinAmount {
+    pub const ZERO: CoinAmount = CoinAmount(Coins::ZERO);
+
+    pub fn get(self) -> Coins {
+        self.0
+    }
+}
 pub type Sequence = u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -1885,6 +1918,22 @@ mod coins_tests {
         assert!(!wallet.has_at_least(Coins { silver: 6, ..Coins::ZERO }));
         assert_eq!(wallet.sub_each(amt), Coins { silver: 3, ..Coins::ZERO });
         assert_eq!(Coins::ZERO.add_each(amt), amt);
+    }
+
+    #[test]
+    fn a_coin_amount_refuses_any_negative_tier() {
+        use super::{CoinAmount, NegativeCoins};
+        let fine = Coins { platinum: 1, gold: 0, silver: 3, copper: 0 };
+        assert_eq!(CoinAmount::try_from(fine).map(CoinAmount::get), Ok(fine));
+        assert_eq!(CoinAmount::try_from(Coins::ZERO), Ok(CoinAmount::ZERO));
+        for bad in [
+            Coins { platinum: -1, ..Coins::ZERO },
+            Coins { gold: -1, ..Coins::ZERO },
+            Coins { silver: -1, ..Coins::ZERO },
+            Coins { copper: i64::MIN, platinum: 5, ..Coins::ZERO },
+        ] {
+            assert_eq!(CoinAmount::try_from(bad), Err(NegativeCoins), "{bad:?}");
+        }
     }
 
     #[test]

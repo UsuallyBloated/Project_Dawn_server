@@ -242,17 +242,12 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                         Err(e) => handlers::send_refusal(&mut *server, cid, e),
                     }
                 }
-                TradeI::OfferCoins { owner, coins } => {
+                TradeI::OfferCoins { owner, coins: amount } => {
                     let cid = owner as ClientId;
-                    // Forged negatives would STEAL from the partner at
-                    // commit; only a modified client can send one.
-                    if coins.platinum < 0
-                        || coins.gold < 0
-                        || coins.silver < 0
-                        || coins.copper < 0
-                    {
-                        continue; // forged-only
-                    }
+                    // A forged negative would steal from the partner at
+                    // commit; `CoinAmount` cannot hold one (refused at the
+                    // message, handlers::client_coin_amount).
+                    let coins = amount.get();
                     // Ledger 4: absolute per-tier amounts, each within
                     // the live wallet (the four stacks are independent
                     // by design — no auto-breaking in a trade).
@@ -275,7 +270,7 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                         }
                         continue;
                     }
-                    match trade_manager.offer_coins(cid, coins) {
+                    match trade_manager.offer_coins(cid, amount) {
                         Ok(()) => {
                             if let Some(session) = trade_manager.session_of(cid) {
                                 fan_trade_state(&mut *server, session);

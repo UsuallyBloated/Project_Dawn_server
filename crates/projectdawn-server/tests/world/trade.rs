@@ -647,3 +647,57 @@ async fn a_trade_writes_both_sides_of_the_ledger_and_balances() {
     a.pump_for(Duration::from_millis(200)).await;
     b.pump_for(Duration::from_millis(200)).await;
 }
+
+/// A forged negative coin amount moves nothing (housekeeping F8). A negative
+/// trade offer would take coin from the partner at commit, and a negative bank
+/// deposit would mint it. Client amounts become `CoinAmount` at the message,
+/// which cannot hold a negative tier, so neither reaches the step that moves
+/// coin. An honest amount sent straight after still lands, which shows the
+/// forged one was refused, not lost in transit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forged_negative_coin_amount_moves_nothing() {
+    let h = start_both().await;
+    let (mut a, _a_char_id, mut b, b_char_id, _bread_loc, _bread_slot) =
+        trade_pair(&h, "negcoina", "Negcoina", "negcoinb", "Negcoinb").await;
+    let forged = protocol::world::Coins { platinum: 0, gold: 0, silver: 0, copper: -500 };
+    let honest = protocol::world::Coins { platinum: 0, gold: 0, silver: 0, copper: 5 };
+
+    a.send_trade_request(b_char_id as u64);
+    a.pump_for(Duration::from_millis(200)).await;
+    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { .. })
+    })
+    .await
+    .expect("B's window opens");
+
+    a.send_trade_offer_coins(forged);
+    a.pump_for(Duration::from_millis(200)).await;
+    a.send_trade_offer_coins(honest);
+    a.pump_for(Duration::from_millis(200)).await;
+    let offers: Vec<protocol::world::Coins> = b
+        .collect_for(Duration::from_millis(800))
+        .await
+        .into_iter()
+        .filter_map(|m| match m {
+            ServerWorldMsg::TradeOfferUpdate { mine: false, coins, .. } => Some(coins),
+            _ => None,
+        })
+        .collect();
+    assert!(!offers.iter().any(|c| c.has_negative()), "B saw a negative offer: {offers:?}");
+    assert_eq!(offers.last(), Some(&honest), "the honest offer reaches B");
+
+    a.send_bank_deposit_coins(forged);
+    a.pump_for(Duration::from_millis(200)).await;
+    let after_forged = a.collect_for(Duration::from_millis(600)).await;
+    assert!(
+        !after_forged.iter().any(|m| matches!(m,
+            ServerWorldMsg::CoinsUpdate { .. } | ServerWorldMsg::BankSnapshot { .. })),
+        "a negative deposit moved coin"
+    );
+    a.send_bank_deposit_coins(honest);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::BankSnapshot { coins } if coins.copper == 5)
+    })
+    .await
+    .expect("the honest deposit reaches the bank, so the banker was in reach");
+}

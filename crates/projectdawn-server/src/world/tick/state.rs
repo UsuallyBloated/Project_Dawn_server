@@ -176,7 +176,7 @@ pub(super) enum TradeI {
     Request { requester: u64, target: u64 },
     OfferItem { owner: u64, window_slot: u8, from_location: String, from_slot: u32 },
     RetrieveItem { owner: u64, window_slot: u8 },
-    OfferCoins { owner: u64, coins: protocol::world::Coins },
+    OfferCoins { owner: u64, coins: protocol::world::CoinAmount },
     Accept { owner: u64 },
     Cancel { owner: u64 },
 }
@@ -250,9 +250,9 @@ pub(super) struct SellItemI {
 }
 
 // PD_W0015 — Banker, slice 1 (coins): deposit / withdraw / exchange.
-pub(super) struct BankDepositI { pub(super) owner: u64, pub(super) coins: protocol::world::Coins }
+pub(super) struct BankDepositI { pub(super) owner: u64, pub(super) coins: protocol::world::CoinAmount }
 
-pub(super) struct BankWithdrawI { pub(super) owner: u64, pub(super) coins: protocol::world::Coins }
+pub(super) struct BankWithdrawI { pub(super) owner: u64, pub(super) coins: protocol::world::CoinAmount }
 
 pub(super) struct BankExchangeI { pub(super) owner: u64, pub(super) from_tier: u8, pub(super) to_tier: u8, pub(super) qty: u32 }
 

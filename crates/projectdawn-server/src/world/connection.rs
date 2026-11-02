@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Returns true when the server was launched with `PD_DEV_CMDS=1`.
 /// Checked once at first call; cached for the process lifetime.
@@ -123,6 +123,13 @@ impl Vec3f {
     }
 }
 
+/// How long the swing-rate limit keeps counting a Haste after it expires.
+/// The client hears of the expiry a moment after the server acts on it, so
+/// a swing it timed under the haste can arrive just after the buff is gone;
+/// a second covers any honest round trip, and a forged client gains at most
+/// a second at the old haste.
+pub const HASTE_LAPSE_GRACE: Duration = Duration::from_secs(1);
+
 #[derive(Debug)]
 #[allow(dead_code)] // account_id/charisma land in audit + chat once those paths exist
 pub struct PerConnection {
@@ -218,16 +225,20 @@ pub struct PerConnection {
     /// tick; a single combined timer would false-throttle a legit dual-wielder.
     /// Advanced only on a swing the rate gate accepts (`tick.rs`).
     pub last_swing_at: [Option<Instant>; 2],
-    /// The haste the hand's last ACCEPTED swing was judged at (0.0 before
-    /// the hand has swung). The limiter paces a swing at the greater of this
-    /// and the current haste, because the client timed THIS swing when the
-    /// LAST one fired: a Haste buff that ran out between the two must not
-    /// cost the honest swing already timed under it. Only the haste carries,
+    /// Per hand, the haste the last two ACCEPTED swings were stamped with,
+    /// newest first (0.0 before the hand has swung). The limiter paces a
+    /// swing at the greatest of these and the current haste
+    /// (`tick::carried_haste`), because the client's attack timer runs a
+    /// wait time set two swings back: a Haste buff that ran out must not cost
+    /// the honest swings already timed under it. Only the haste carries,
     /// never the weapon (a client alternating a dagger and a staff every
     /// swing would otherwise swing the staff at the dagger's pace for good;
     /// the client re-times its swing on a weapon change instead). Stamped
     /// with `last_swing_at`.
-    pub last_swing_haste: [f32; 2],
+    pub last_swing_haste: [[f32; 2]; 2],
+    /// The haste total just before a Haste buff last expired, and when.
+    /// `limiter_haste` keeps counting it for `HASTE_LAPSE_GRACE`.
+    pub haste_lapsed: Option<(f32, Instant)>,
 
     /// Wall-clock of the last Meditate skill-up tick. The regen loop advances
     /// the `meditate` casting skill roughly once per 6 s of medding (sitting with
@@ -675,7 +686,8 @@ impl PerConnection {
             last_attack_at: None,
             bind: spawn.bind,
             last_swing_at: [None, None],
-            last_swing_haste: [0.0; 2],
+            last_swing_haste: [[0.0; 2]; 2],
+            haste_lapsed: None,
             last_meditate_at: None,
             // A character loaded at 0 HP died before it left (a crash, a
             // window-X, a server restart while dead) and has paid: the death
@@ -1041,7 +1053,20 @@ impl PerConnection {
                 super::buffs::BuffEffect::Haste { amount } => Some(amount),
                 _ => None,
             })
-            .sum()
+            // A fold from 0.0, not `sum`: an empty f32 sum is -0.0, which
+            // the swing-limit log printed as `haste=-0.0`.
+            .fold(0.0, |total, amount| total + amount)
+    }
+
+    /// The haste the swing-rate limit judges a swing at now: the active
+    /// Haste buffs, or the total held before one expired if that was under
+    /// `HASTE_LAPSE_GRACE` ago and higher.
+    pub fn limiter_haste(&self, now: Instant) -> f32 {
+        let lapsed = self
+            .haste_lapsed
+            .filter(|(_, at)| now.saturating_duration_since(*at) < HASTE_LAPSE_GRACE)
+            .map_or(0.0, |(haste, _)| haste);
+        self.haste_total().max(lapsed)
     }
 
     /// Where `Respawn` should put this player: their bind point, or the starter
@@ -1085,6 +1110,22 @@ mod tests {
         assert!(c.last_damaged_at.is_some());
     }
     use std::time::Duration;
+
+    // The swing-rate limit counts an expired Haste for HASTE_LAPSE_GRACE
+    // (the client hears of the expiry a moment late), then stops; the total
+    // reads 0.0, never -0.0, with no Haste (the log printed `haste=-0.0`).
+    #[test]
+    fn the_limiter_counts_an_expired_haste_for_a_moment() {
+        let now = Instant::now();
+        let mut c = PerConnection::from_spawn(test_spawn(), now);
+        assert!(c.haste_total().is_sign_positive() && c.haste_total() == 0.0);
+        c.active_buffs.push(super::super::buffs::ActiveBuff::new_haste("Haste".into(), 0.3, 660.0, now));
+        assert!((c.limiter_haste(now) - 0.3).abs() < 1e-6);
+        c.haste_lapsed = Some((c.haste_total(), now));
+        c.active_buffs.clear();
+        assert!((c.limiter_haste(now + Duration::from_millis(900)) - 0.3).abs() < 1e-6, "inside the grace");
+        assert_eq!(c.limiter_haste(now + HASTE_LAPSE_GRACE), 0.0, "and gone after it");
+    }
 
     /// Minimal spawn for connection-state tests. Field values are arbitrary;
     /// only the lifecycle flags under test matter.

@@ -201,12 +201,6 @@ pub(super) async fn reap_connection(
         if let Err(e) = db::set_logged_out_at(pool, conn.char_id, unix_now_secs()).await {
             tracing::warn!(char_id = conn.char_id, error = %e, "set_logged_out_at failed");
         }
-        // A connection whose message handling panicked is never saved: its
-        // in-memory state may be half changed, so its last saved state stands.
-        if conn.panicked {
-            tracing::error!(char_id = conn.char_id, "panicked connection removed without saving");
-            return;
-        }
         // One last save for the road, through the same flush as the checkpoint.
         // A character whose save did not fully land is NOT dropped: it waits in
         // `pending_saves`, retried every PENDING_SAVE_RETRY, and its account's
@@ -638,19 +632,13 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
                 // not in `connections`. Outcome is ignored; we're already
                 // disconnecting.
                 if let Some(conn) = connections.get_mut(&client_id) {
-                    for &channel in &[CHANNEL_SYSTEM, CHANNEL_POSITION] {
-                        while let Some(bytes) =
-                            server.receive_message(client_id, channel)
-                        {
-                            if let Some(msg) = handlers::decode_client(&bytes, client_id) {
-                                // A panic marks the connection, which the
-                                // reap below then removes without saving.
-                                let _ = intake::handle_contained(
-                                    &mut *server, conn, client_id, msg, now,
-                                );
-                            }
-                        }
-                    }
+                    let msgs = intake::receive_batch(&mut *server, client_id);
+                    // A panic puts the connection back as it was before
+                    // these messages, which also leaves it unclean: it
+                    // lingers below like any cut connection.
+                    let _ = intake::handle_batch(conn, client_id, msgs, |conn, msg| {
+                        handlers::handle_message(&mut *server, conn, client_id, msg, now)
+                    });
                 }
 
                 // Camp + linkdead: a CLEAN leave (Quit Game, or a completed
@@ -662,11 +650,9 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
                 // The reaper sweep removes it once LINKDEAD_SECS elapse. A
                 // connection not in `connections` (e.g. a refused duplicate login
                 // that never spawned) counts as clean — the reap is then a no-op.
-                // A panicked connection is reaped at once too: it may not
-                // linger, because the reap at the end of a linger saves.
                 let clean = connections
                     .get(&client_id)
-                    .map(|c| c.clean_disconnect || c.panicked)
+                    .map(|c| c.clean_disconnect)
                     .unwrap_or(true);
                 if clean {
                     reap_connection(
@@ -682,46 +668,52 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
                     )
                     .await;
                 } else {
-                    // Despawn the pet now — a linkdead player can't command it,
-                    // and an orphaned warder still chasing mobs is worse than a
-                    // brief gap. Group membership is KEPT for the window so a
-                    // short drop doesn't double-vanish the player from the roster
-                    // (the reaper removes them from the group at the end).
-                    let owner_entity = connections
-                        .get(&client_id)
-                        .filter(|c| c.in_world)
-                        .map(|c| c.char_id as u64);
-                    if let Some(owner_entity) = owner_entity {
-                        despawn_owned_pets(
-                            &mut *server,
-                            &connections,
-                            &mut *aoi,
-                            &mut *enemies,
-                            owner_entity,
-                            client_id,
-                            now,
-                        );
-                    }
-                    if let Some(conn) = connections.get_mut(&client_id) {
-                        conn.linkdead_since = Some(now);
-                        // Linkdead governs from here: drop any in-progress
-                        // /camp so the camp sweep doesn't also try to complete
-                        // it and race the linkdead reaper.
-                        conn.camp_since = None;
-                        // Freeze the body so it doesn't keep drifting on its
-                        // last movement intent (the movement-integration step
-                        // also skips linkdead connections; this is belt-and-
-                        // suspenders).
-                        conn.latest_direction = Vec3f::ZERO;
-                        tracing::info!(
-                            char_id = conn.char_id,
-                            linger_secs = LINKDEAD_SECS.as_secs(),
-                            "client linkdead — body lingers (vulnerable) before reap"
-                        );
-                    }
+                    go_linkdead(&mut *server, &mut *connections, &mut *aoi, &mut *enemies, client_id, now);
                 }
             }
         }
+    }
+}
+
+/// Mark a connection whose transport is gone without a clean leave as
+/// linkdead: the body stays in the world (vulnerable, still seen by peers)
+/// until the reaper removes and saves it once LINKDEAD_SECS elapse.
+fn go_linkdead(
+    server: &mut RenetServer,
+    connections: &mut HashMap<ClientId, PerConnection>,
+    aoi: &mut AoiGrid,
+    enemies: &mut HashMap<EntityId, Entity>,
+    client_id: ClientId,
+    now: Instant,
+) {
+    // Despawn the pet now — a linkdead player can't command it,
+    // and an orphaned warder still chasing mobs is worse than a
+    // brief gap. Group membership is KEPT for the window so a
+    // short drop doesn't double-vanish the player from the roster
+    // (the reaper removes them from the group at the end).
+    let owner_entity = connections
+        .get(&client_id)
+        .filter(|c| c.in_world)
+        .map(|c| c.char_id as u64);
+    if let Some(owner_entity) = owner_entity {
+        despawn_owned_pets(server, connections, aoi, enemies, owner_entity, client_id, now);
+    }
+    if let Some(conn) = connections.get_mut(&client_id) {
+        conn.linkdead_since = Some(now);
+        // Linkdead governs from here: drop any in-progress
+        // /camp so the camp sweep doesn't also try to complete
+        // it and race the linkdead reaper.
+        conn.camp_since = None;
+        // Freeze the body so it doesn't keep drifting on its
+        // last movement intent (the movement-integration step
+        // also skips linkdead connections; this is belt-and-
+        // suspenders).
+        conn.latest_direction = Vec3f::ZERO;
+        tracing::info!(
+            char_id = conn.char_id,
+            linger_secs = LINKDEAD_SECS.as_secs(),
+            "client linkdead — body lingers (vulnerable) before reap"
+        );
     }
 }
 
@@ -735,29 +727,19 @@ pub(super) fn in_world_ids(connections: &HashMap<ClientId, PerConnection>) -> Ve
         .collect()
 }
 
-/// Step 3-bis: drop every client whose message handling panicked this tick
-/// (`intake::handle_contained`). The transport goes, and the character leaves
-/// the world at once through the ordinary reap (peers see it despawn, its pet
-/// and group are cleaned up) except that nothing of it is saved: its state
-/// may be half changed, and the outcomes it queued this tick were discarded
-/// with it. No linger, because the end of a linger saves. The relogin loads
-/// the last save.
-pub(super) async fn drop_panicked(world: &mut WorldState, q: &mut Intents, now: Instant) {
-    let WorldState { server, connections, aoi, enemies, group_manager, pool, pending_saves, .. } = world;
+/// Step 3-bis: drop every client whose message handling panicked this tick.
+/// `intake::handle_batch` has already put its connection back as it was
+/// before the batch and discarded what the batch asked for, so its state is
+/// whole and it leaves as a cut cable: the transport goes and the body
+/// lingers linkdead, vulnerable, and is saved at the reap like any unclean
+/// drop. A panic undoes nothing earlier (a death stays a death) and is no
+/// faster way out of a fight than pulling the cable. The transport's own
+/// disconnect event then finds the body already linkdead and ignores it.
+pub(super) fn drop_panicked(world: &mut WorldState, q: &mut Intents, now: Instant) {
+    let WorldState { server, connections, aoi, enemies, .. } = world;
     for client_id in std::mem::take(&mut q.panicked) {
         server.disconnect(client_id);
-        reap_connection(
-            &mut *server,
-            &mut *connections,
-            &mut *aoi,
-            &mut *enemies,
-            &mut *group_manager,
-            &*pool,
-            client_id,
-            now,
-            &mut *pending_saves,
-        )
-        .await;
+        go_linkdead(&mut *server, &mut *connections, &mut *aoi, &mut *enemies, client_id, now);
     }
 }
 

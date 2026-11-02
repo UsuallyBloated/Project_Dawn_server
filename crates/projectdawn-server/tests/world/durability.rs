@@ -903,44 +903,62 @@ async fn saved_xz(db_url: &str, char_id: i64) -> (f64, f64) {
 /// A panic while handling one client's message (any future bug in a handler,
 /// as the chat byte slice was on 2026-10-23) used to end the whole server: it
 /// returned through the world task, the process exited, and everyone lost
-/// what the last checkpoint had not saved. Now only the sender goes: dropped
-/// at once, nothing of it saved (its state may be half changed), and the
-/// world carries on for everyone else. The relogin loads the last save.
+/// what the last checkpoint had not saved. Now the world carries on, and the
+/// sender's tick is undone and it leaves as a cut cable: the body lingers,
+/// vulnerable, and is saved at the reap like any unclean drop. The first
+/// containment (2026-11-02) dropped the sender unsaved instead, which turned
+/// a panic into an undo: a player who died, then hit one, relogged alive at
+/// the last checkpoint, and one at low health left a fight at once. This
+/// test dies first, so it fails on that version at the dead relogin.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_panic_handling_one_message_drops_only_its_sender() {
+async fn a_panic_undoes_only_its_own_tick_and_drops_the_sender_as_cut() {
     const PROBE: &str = "the panic probe line";
     let h = start_with_panic_probe(PROBE).await;
-    let (a_session, a_char, a_token) =
+    let (a_session, a_char, _) =
         provision_client(&h.auth_url, "panica", "Panicker", "Human", "Cleric").await;
     let (b_session, b_char, b_token) =
         provision_client(&h.auth_url, "panicb", "Bystander", "Human", "Warrior").await;
-    forget_all_spells(&h.db_url, a_char).await;
+    let a_token = gm_world_token(&h.auth_url, &h.db_url, "panica", &a_session, a_char).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char).await;
     let saved_before = saved_xz(&h.db_url, a_char).await;
+    let cid = a_char as u64;
 
-    // A walks a few metres: a change only the 60 s checkpoint or a logout saves.
+    // A walks a few metres (a change only the checkpoint or the reap saves),
+    // then dies there.
     let mut seq = 1;
     walk_east(&mut a, &mut seq, 4.0).await;
-    let moved = own_position(&mut b, a_char).await.expect("B sees A walk");
+    let died_at = own_position(&mut b, a_char).await.expect("B sees A walk");
     assert!(
-        (f64::from(moved.x) - saved_before.0).abs() > 1.0,
-        "the walk must move A before the probe: {moved:?} vs {saved_before:?}"
+        (f64::from(died_at.x) - saved_before.0).abs() > 1.0,
+        "the walk must move A before the death: {died_at:?} vs {saved_before:?}"
     );
+    a.send_damage_self(1_000_000);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp <= 0.01)
+    })
+    .await
+    .expect("A dies");
 
-    // What A asked for in the same batch as the probe is discarded with it,
-    // including work that never looks the sender up again: the one-time
-    // spell bar seed is written to the database by char id alone.
-    a.send_seed_spell_gems(&["Smite"]);
+    // What A asked for in the same batch as the probe is discarded with it:
+    // a say (the dead may talk) handled cleanly just before the probe never
+    // reaches B, because its fan-out is an outcome of the undone batch.
+    const BEFORE: &str = "said in the same tick, before the probe";
+    a.send_say(BEFORE);
     a.send_say(PROBE);
     a.pump_for(Duration::from_millis(200)).await;
 
-    let seen = b.collect_for(Duration::from_secs(1)).await;
+    // The body lingers like any cut connection: no despawn yet, and the
+    // world keeps serving everyone else.
+    let seen = b.collect_for(Duration::from_secs(2)).await;
     assert!(
-        seen.iter().any(|m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == a_char as u64)),
-        "the bystander is told the panicking player left"
+        !seen.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == BEFORE)),
+        "a line from the panicking batch reached a peer"
     );
-
+    assert!(
+        !seen.iter().any(|m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == cid)),
+        "a panic took the body out of the world at once, a free exit from any fight"
+    );
     let mut b_seq = 1;
     walk_east(&mut b, &mut b_seq, 2.0).await;
     assert!(
@@ -948,23 +966,42 @@ async fn a_panic_handling_one_message_drops_only_its_sender() {
         "the world stopped serving after one client's message panicked"
     );
 
-    assert_eq!(
-        saved_xz(&h.db_url, a_char).await,
-        saved_before,
-        "the panicking player was saved, half-changed state and all"
-    );
+    // Nor is a relogin a way out: the lingering body refuses it.
+    drop(a);
+    let token = request_world_token(&h.auth_url, &a_session, a_char).await;
+    match try_connect(token, &a_session, a_char, Duration::from_secs(4)).await {
+        ConnectOutcome::Kicked { code, .. } => assert!(
+            matches!(code, protocol::world::KickCode::DuplicateLogin),
+            "a relogin during the linger is refused as a duplicate login, got {code:?}"
+        ),
+        ConnectOutcome::HandshakeTimedOut => {}
+        ConnectOutcome::Connected(_) => panic!("a relogin got in while the panicked body lingered"),
+    }
 
-    a.pump_for(Duration::from_millis(300)).await;
+    // The reap at the end of the linger removes the body and saves it.
+    let deadline = Instant::now() + world::LINKDEAD_SECS + Duration::from_secs(10);
+    let mut reaped = false;
+    while !reaped && Instant::now() < deadline {
+        reaped = b
+            .collect_for(Duration::from_secs(2))
+            .await
+            .iter()
+            .any(|m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == cid));
+    }
+    assert!(reaped, "the lingering body is reaped when its window ends");
+    b.pump_for(Duration::from_millis(500)).await;
+
     let token = request_world_token(&h.auth_url, &a_session, a_char).await;
     let mut again = WorldClient::start(token, &a_session, a_char).await;
-    let (gems, seeded) = next_spell_gems(&mut again).await.expect("the bar arrives on the relogin");
+    again
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp <= 0.01)
+        })
+        .await
+        .expect("the death stands across the panic: the relogin is dead");
+    let back = saved_xz(&h.db_url, a_char).await;
     assert!(
-        gems[0].is_empty() && !seeded,
-        "the seed sent in the panicking batch was written: {gems:?}"
-    );
-    let back = own_position(&mut again, a_char).await.expect("the relogin is in the world");
-    assert!(
-        (f64::from(back.x) - saved_before.0).abs() < 0.5,
-        "the relogin loads the last save: {back:?} vs {saved_before:?}"
+        (back.0 - f64::from(died_at.x)).abs() < 0.5,
+        "the reap saved the body where it died: {back:?} vs {died_at:?}"
     );
 }

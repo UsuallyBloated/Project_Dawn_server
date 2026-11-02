@@ -257,7 +257,7 @@ pub async fn run(
         session::handle_transport_events(&mut world, &mut q, now, &transport).await;
 
         intake::drain_messages(&mut world, &mut q, now);
-        session::drop_panicked(&mut world, &mut q, now).await;
+        session::drop_panicked(&mut world, &mut q, now);
 
         session::flush_gm_audit(&mut world, &mut q, now).await;
 

@@ -44,7 +44,7 @@ fn handle(msg: protocol::world::ClientWorldMsg) {
 
 /// A level 20 Human Cleric at the starter spawn with some coin, standing in
 /// for a loaded character.
-fn spawn() -> crate::db::CharacterSpawn {
+pub(crate) fn spawn() -> crate::db::CharacterSpawn {
     crate::db::CharacterSpawn {
         char_id: CLIENT as i64,
         account_id: CLIENT as i64,

@@ -3,6 +3,7 @@
 //! after it.
 
 use super::*;
+use protocol::world::ClientWorldMsg;
 
 pub(super) fn drain_messages(world: &mut WorldState, q: &mut Intents, now: Instant) {
     let WorldState { server, connections, .. } = world;
@@ -19,59 +20,76 @@ pub(super) fn drain_messages(world: &mut WorldState, q: &mut Intents, now: Insta
         // their outcomes queued) names who sent them.
         let _span =
             tracing::info_span!("client", char_id = conn.char_id, account_id = conn.account_id).entered();
-        // A client's outcomes wait here until its whole batch has been
-        // handled. If one of its messages panics, none of them are acted on:
-        // the client is dropped without saving (`session::drop_panicked`), so
-        // nothing it asked for this tick may move an item or reach a peer.
-        let mut outcomes: Vec<Outcome> = Vec::new();
-        let mut panicked = false;
-        'drain: for &channel in &[CHANNEL_SYSTEM, CHANNEL_POSITION] {
-            while let Some(bytes) = server.receive_message(client_id, channel) {
-                let Some(msg) = handlers::decode_client(&bytes, client_id) else {
-                    continue;
-                };
-                let conn = connections.get_mut(&client_id).expect("checked above");
-                match handle_contained(&mut *server, conn, client_id, msg, now) {
-                    Some(outcome) => outcomes.push(outcome),
-                    None => {
-                        panicked = true;
-                        break 'drain;
-                    }
-                }
-            }
-        }
-        if panicked {
+        // A client's batch is all or nothing (`handle_batch`): if any of its
+        // messages panics, the connection is put back as it was before the
+        // batch and the outcomes are discarded, then `session::drop_panicked`
+        // drops the client as a cut connection (the body lingers and is saved
+        // at the reap, as for any unclean drop).
+        let msgs = receive_batch(&mut *server, client_id);
+        let conn = connections.get_mut(&client_id).expect("checked above");
+        let Some(outcomes) = handle_batch(conn, client_id, msgs, |conn, msg| {
+            handlers::handle_message(&mut *server, conn, client_id, msg, now)
+        }) else {
             q.panicked.push(client_id);
             continue;
-        }
+        };
         for outcome in outcomes {
             route_outcome(&mut *server, connections, q, client_id, outcome);
         }
     }
 }
 
-/// Handle one client message with a panic kept to its sender. A panic here
-/// (a bug, never a rule) means this client's in-memory state may be half
-/// changed, and only this client's: `handle_message` touches the sender's
-/// own connection and nothing else, and every move of an item or coin
-/// between players happens in the steps after the drain, from outcomes.
-/// So the sender is marked `panicked` (never saved again) and dropped, and
-/// the world carries on. Returns `None` on a panic.
-pub(super) fn handle_contained(
-    server: &mut RenetServer,
-    conn: &mut PerConnection,
-    client_id: ClientId,
-    msg: protocol::world::ClientWorldMsg,
-    now: Instant,
-) -> Option<Outcome> {
-    contain_panic(conn, client_id, |conn| {
-        handlers::handle_message(server, conn, client_id, msg, now)
-    })
+/// Every message a client has waiting this tick, decoded, in the order the
+/// drain has always taken them (the system channel, then positions).
+pub(super) fn receive_batch(server: &mut RenetServer, client_id: ClientId) -> Vec<ClientWorldMsg> {
+    let mut msgs = Vec::new();
+    for &channel in &[CHANNEL_SYSTEM, CHANNEL_POSITION] {
+        while let Some(bytes) = server.receive_message(client_id, channel) {
+            if let Some(msg) = handlers::decode_client(&bytes, client_id) {
+                msgs.push(msg);
+            }
+        }
+    }
+    msgs
 }
 
-/// The containment itself, apart from the handler so the unit tests can hand
-/// it one that panics. The log line carries no message name: the panic's own
-/// report, just above it in the journal, names the file and line.
+/// Handle one client's batch of messages, all or nothing. The connection is
+/// copied before the first message; if any message panics (a bug, never a
+/// rule), the copy is put back and `None` is returned, so the tick is as if
+/// none of this client's messages had arrived. Nothing else can need undoing:
+/// `handle_message` touches the sender's own connection and sends only to the
+/// sender, and every move of an item or coin between players happens in the
+/// steps after the drain, from the outcomes the caller discards. A handler
+/// that reached any other state would break this.
+pub(super) fn handle_batch<F>(
+    conn: &mut PerConnection,
+    client_id: ClientId,
+    msgs: Vec<ClientWorldMsg>,
+    mut handle: F,
+) -> Option<Vec<Outcome>>
+where
+    F: FnMut(&mut PerConnection, ClientWorldMsg) -> Outcome,
+{
+    if msgs.is_empty() {
+        return Some(Vec::new());
+    }
+    let before = conn.clone();
+    let mut outcomes = Vec::with_capacity(msgs.len());
+    for msg in msgs {
+        match contain_panic(conn, client_id, |conn| handle(conn, msg)) {
+            Some(outcome) => outcomes.push(outcome),
+            None => {
+                *conn = before;
+                return None;
+            }
+        }
+    }
+    Some(outcomes)
+}
+
+/// Run one handler call with a panic caught. The log line carries no message
+/// name: the panic's own report, just above it in the journal, names the
+/// file and line.
 fn contain_panic<F>(conn: &mut PerConnection, client_id: ClientId, handle: F) -> Option<Outcome>
 where
     F: FnOnce(&mut PerConnection) -> Outcome,
@@ -84,12 +102,11 @@ where
                 .map(|s| (*s).to_string())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "a panic with no message".to_string());
-            conn.panicked = true;
             tracing::error!(
                 %client_id,
                 char_id = conn.char_id,
                 %reason,
-                "handling a message panicked: the player is dropped without saving, the world carries on"
+                "handling a message panicked: the player's tick is undone and they drop as if cut off, the world carries on"
             );
             None
         }
@@ -504,5 +521,54 @@ fn route_outcome(
             quest_lifecycle_intents.push((responder, QuestLifecycle::Abandon, quest_id));
         }
         Outcome::Continue => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::world::ChatChannel;
+
+    const CLIENT: ClientId = 7;
+
+    fn say(text: &str) -> ClientWorldMsg {
+        ClientWorldMsg::Chat { channel: ChatChannel::Say, text: text.into(), target_name: None }
+    }
+
+    /// A handler that changes the connection, as a real one does, and panics
+    /// on the line "boom".
+    fn handler(conn: &mut PerConnection, msg: ClientWorldMsg) -> Outcome {
+        conn.hp -= 10.0;
+        conn.gm_cmd_refused += 1;
+        if let ClientWorldMsg::Chat { text, .. } = msg {
+            if text == "boom" {
+                panic!("a planted bug");
+            }
+        }
+        Outcome::Continue
+    }
+
+    #[test]
+    fn a_batch_without_a_panic_keeps_every_change() {
+        let mut conn = PerConnection::from_spawn(crate::world::fuzzing::spawn(), Instant::now());
+        let hp = conn.hp;
+        let outcomes = handle_batch(&mut conn, CLIENT, vec![say("a"), say("b")], handler)
+            .expect("no panic, so the outcomes come back");
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(conn.hp, hp - 20.0);
+    }
+
+    /// The whole batch is undone, the messages handled before the panic
+    /// included: a dead player who panics stays dead, a GM's audit entries
+    /// for commands that never took effect go with them.
+    #[test]
+    fn a_panic_puts_the_connection_back_as_it_was_before_the_batch() {
+        let mut conn = PerConnection::from_spawn(crate::world::fuzzing::spawn(), Instant::now());
+        conn.hp = 0.0;
+        conn.death_processed = true;
+        let before = format!("{conn:?}");
+        let result = handle_batch(&mut conn, CLIENT, vec![say("a"), say("boom"), say("c")], handler);
+        assert!(result.is_none(), "a panic discards the batch");
+        assert_eq!(format!("{conn:?}"), before, "every field is as it was before the batch");
     }
 }

@@ -130,7 +130,11 @@ impl Vec3f {
 /// a second at the old haste.
 pub const HASTE_LAPSE_GRACE: Duration = Duration::from_secs(1);
 
-#[derive(Debug)]
+/// Clone is for one job: `tick::intake` copies a connection before handling
+/// its tick's messages and puts the copy back if one of them panics, so a
+/// half-changed connection never goes on. Every field must stay Clone; a
+/// field that cannot be (a channel, a handle) does not belong in here.
+#[derive(Debug, Clone)]
 #[allow(dead_code)] // account_id/charisma land in audit + chat once those paths exist
 pub struct PerConnection {
     pub char_id: i64,
@@ -381,12 +385,6 @@ pub struct PerConnection {
     /// `Config::panic_probe`, stamped at the connect site: a chat line that
     /// panics its handler. Always `None` on a running server.
     pub panic_probe: Option<String>,
-
-    /// Set when handling one of this client's messages panicked
-    /// (`tick::intake`). Its in-memory state may be half-changed, so it is
-    /// never saved again: the connection is dropped the same tick and its
-    /// last saved state stands.
-    pub panicked: bool,
 
     /// Per-account GM flag, carried from the signed connect token's `user_data`
     /// (the auth service reads it from `accounts.is_gm` at token mint). Unlike
@@ -745,7 +743,6 @@ impl PerConnection {
             is_dev: dev_cmds_enabled(),
             fizzles: true,
             panic_probe: None,
-            panicked: false,
             // Defaulted here; the real value is stamped from the connect
             // token's user_data at the connect site in tick/session.rs (from_spawn
             // only sees the character spawn, not the account's GM flag).

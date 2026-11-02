@@ -89,7 +89,7 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                     let rcid = requester as ClientId;
                     // Ledger 10: players only. Enemy / bag / pet ids live
                     // in the reserved partitions; NPCs are not entities.
-                    if target >= protocol::world::ENEMY_ID_BASE {
+                    if IdKind::of(target) != IdKind::Player {
                         handlers::send_refusal(
                             &mut *server,
                             rcid,

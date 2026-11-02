@@ -9,7 +9,7 @@ use super::{
     CHANNEL_POSITION, CHANNEL_SYSTEM,
 };
 use bincode::config::standard as bincode_cfg;
-use protocol::world::{ClientWorldMsg, Coins, KickCode, ServerWorldMsg, Vec3};
+use protocol::world::{ClientWorldMsg, Coins, IdKind, KickCode, ServerWorldMsg, Vec3};
 use renet::{ClientId, RenetServer};
 use std::time::Instant;
 
@@ -1735,7 +1735,7 @@ pub fn handle_message(
                 return Outcome::Continue;
             }
             match target_id {
-                Some(id) if id >= protocol::world::ENEMY_ID_BASE => {
+                Some(id) if IdKind::of(id) != IdKind::Player => {
                     Outcome::ConsiderIntent { requester: client_id, target_id: id }
                 }
                 _ => {

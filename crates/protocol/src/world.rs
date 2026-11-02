@@ -1719,6 +1719,36 @@ pub const LOOT_BAG_ID_BASE: EntityId = 2_000_000_000;
 /// space the client routes on.
 pub const PET_ID_BASE: EntityId = 3_000_000_000;
 
+/// What an entity id names. The id space is partitioned (the `*_ID_BASE`
+/// constants above), so an id's kind is its range and nothing else; ask this
+/// instead of comparing against the bases, so the partitions are written down
+/// once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdKind {
+    /// A player: the id is the character's row id.
+    Player,
+    /// A server-spawned mob (a charmed mob is re-keyed as a pet).
+    Enemy,
+    /// A loot bag or a corpse: corpses mint their ids from the bag range.
+    Bag,
+    /// A player-owned pet, summoned or charmed.
+    Pet,
+}
+
+impl IdKind {
+    pub fn of(id: EntityId) -> Self {
+        if id < ENEMY_ID_BASE {
+            Self::Player
+        } else if id < LOOT_BAG_ID_BASE {
+            Self::Enemy
+        } else if id < PET_ID_BASE {
+            Self::Bag
+        } else {
+            Self::Pet
+        }
+    }
+}
+
 /// Track 12 Piece A — pet command codes. Wire format: a single u8
 /// on `ClientWorldMsg::PetCommand.command`. Values reserved for
 /// future commands (Follow/Guard/Sit) are present so the server can
@@ -1729,6 +1759,23 @@ pub mod pet_command {
     pub const ATTACK: u8 = 2;
     pub const BACK: u8 = 3;
     pub const SIT: u8 = 4;
+}
+
+#[cfg(test)]
+mod id_kind_tests {
+    use super::{IdKind, ENEMY_ID_BASE, LOOT_BAG_ID_BASE, PET_ID_BASE};
+
+    #[test]
+    fn each_partition_starts_at_its_base() {
+        assert_eq!(IdKind::of(1), IdKind::Player);
+        assert_eq!(IdKind::of(ENEMY_ID_BASE - 1), IdKind::Player);
+        assert_eq!(IdKind::of(ENEMY_ID_BASE), IdKind::Enemy);
+        assert_eq!(IdKind::of(LOOT_BAG_ID_BASE - 1), IdKind::Enemy);
+        assert_eq!(IdKind::of(LOOT_BAG_ID_BASE), IdKind::Bag);
+        assert_eq!(IdKind::of(PET_ID_BASE - 1), IdKind::Bag);
+        assert_eq!(IdKind::of(PET_ID_BASE), IdKind::Pet);
+        assert_eq!(IdKind::of(u64::MAX), IdKind::Pet);
+    }
 }
 
 #[cfg(test)]

@@ -415,6 +415,7 @@ const TABLES: &[(&str, &MobLootTable)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::world::IdKind;
 
     #[test]
     fn skeleton_partial_match_resolves() {
@@ -494,7 +495,7 @@ mod tests {
     fn minted_bag_ids_partition_above_enemies() {
         let a = mint_bag_id();
         let b = mint_bag_id();
-        assert!(a >= LOOT_BAG_ID_BASE);
+        assert_eq!(IdKind::of(a), IdKind::Bag);
         assert!(b > a);
     }
 

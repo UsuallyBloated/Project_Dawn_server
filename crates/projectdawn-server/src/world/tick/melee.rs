@@ -54,7 +54,7 @@ pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: 
                 // target in reach, which is on the user's screen anyway.
                 // Pets inherit their owner's flag, as for a plain swing.
                 const NOT_HERE: &str = "That target is not here.";
-                let check: Result<(), &str> = if target_id < protocol::world::ENEMY_ID_BASE {
+                let check: Result<(), &str> = if IdKind::of(target_id) == IdKind::Player {
                     if target_id == intent.user {
                         Err("You cannot use that on yourself.")
                     } else {
@@ -371,7 +371,7 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
             // PlayerDeath flow (which fires DeathBroadcast on its
             // own) until sub-task 4 lifts death detection server-
             // authoritative.
-            if intent.target_id < protocol::world::ENEMY_ID_BASE {
+            if IdKind::of(intent.target_id) == IdKind::Player {
                 if intent.target_id == intent.attacker {
                     continue;
                 }
@@ -705,7 +705,7 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
             // `entity.owner == None` and fall through. Look up
             // owner first via an immutable borrow so the
             // mutable damage borrow below remains valid.
-            if intent.target_id >= protocol::world::PET_ID_BASE {
+            if IdKind::of(intent.target_id) == IdKind::Pet {
                 let pet_owner = enemies.get(&intent.target_id).and_then(|e| e.owner);
                 if let Some(owner_id) = pet_owner {
                     let owner_cid = owner_id as ClientId;
@@ -1029,7 +1029,7 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .map(|(&id, _)| id)
-                    .filter(|&id| id < protocol::world::ENEMY_ID_BASE)
+                    .filter(|&id| IdKind::of(id) == IdKind::Player)
                     .map(|id| id as ClientId);
                 // An owned victim (a pet, a charmed mob) drops nothing,
                 // as it pays no XP: a warder is "Wolf" with a wolf's

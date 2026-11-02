@@ -145,7 +145,6 @@ pub(super) fn cast_target_refusal(
     corpses: &HashMap<EntityId, crate::world::corpses::Corpse>,
     group_manager: &GroupManager,
 ) -> Result<ResolvedTarget, String> {
-    use protocol::world::{ENEMY_ID_BASE, LOOT_BAG_ID_BASE, PET_ID_BASE};
     let Some(caster) = connections.get(&caster_cid) else {
         return Err(TARGET_UNREACHABLE.to_string());
     };
@@ -171,7 +170,7 @@ pub(super) fn cast_target_refusal(
             let Some(target) = target_id else {
                 return Err("You need a target for that spell.".to_string());
             };
-            if target < ENEMY_ID_BASE {
+            if IdKind::of(target) == IdKind::Player {
                 // A player: the PvP path.
                 let target_cid = target as ClientId;
                 if target_cid == caster_cid {
@@ -220,7 +219,7 @@ pub(super) fn cast_target_refusal(
             if raw == 0 || raw == caster_id {
                 return Ok(ResolvedTarget::Player(caster_cid)); // self
             }
-            if raw >= PET_ID_BASE {
+            if IdKind::of(raw) == IdKind::Pet {
                 let Some(owner_id) = entity_in_reach(raw).and_then(|p| p.owner) else {
                     return unreachable();
                 };
@@ -235,11 +234,10 @@ pub(super) fn cast_target_refusal(
                 }
                 return Ok(ResolvedTarget::Pet(raw));
             }
-            if raw >= LOOT_BAG_ID_BASE {
-                return Err("Cannot heal that target.".to_string());
-            }
-            if raw >= ENEMY_ID_BASE {
-                return Err("Cannot heal enemies.".to_string());
+            match IdKind::of(raw) {
+                IdKind::Bag => return Err("Cannot heal that target.".to_string()),
+                IdKind::Enemy => return Err("Cannot heal enemies.".to_string()),
+                IdKind::Player | IdKind::Pet => {}
             }
             let target_cid = raw as ClientId;
             let Some(t) = player_in_reach(target_cid) else {
@@ -257,7 +255,7 @@ pub(super) fn cast_target_refusal(
             let Some(target) = target_id else {
                 return Err("You need a target for that spell.".to_string());
             };
-            if !(ENEMY_ID_BASE..LOOT_BAG_ID_BASE).contains(&target) {
+            if IdKind::of(target) != IdKind::Enemy {
                 return Err("You cannot charm that.".to_string());
             }
             match entity_in_reach(target) {
@@ -309,7 +307,7 @@ pub(super) fn cast_target_refusal(
             // all mean "myself". The bind written is always the target's own
             // position, never a client value.
             let raw = target_id.unwrap_or(0);
-            if raw == 0 || raw == caster_id || raw >= ENEMY_ID_BASE {
+            if raw == 0 || raw == caster_id || IdKind::of(raw) != IdKind::Player {
                 return Ok(ResolvedTarget::Player(caster_cid));
             }
             let target_cid = raw as ClientId;

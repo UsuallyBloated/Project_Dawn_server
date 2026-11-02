@@ -371,10 +371,7 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
             // damage shield reflects onto the attacker below (mirrors
             // the enemy→player reflect; a reflect-kill drops the enemy
             // with no XP/loot, same as the player path).
-            if attacker >= protocol::world::ENEMY_ID_BASE
-                && attacker < protocol::world::PET_ID_BASE
-                && hit.target >= protocol::world::PET_ID_BASE
-            {
+            if IdKind::of(attacker) == IdKind::Enemy && IdKind::of(hit.target) == IdKind::Pet {
                 let amount = hit.amount.max(0);
                 // Track 13 — Thorns reflect: captured while the pet is
                 // borrowed, applied to the attacker after the borrow drops.
@@ -524,10 +521,8 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
             // and handle death (kill credit + loot routed to the
             // pet's owner, not the pet itself, via the aggro map
             // we accumulate under the owner's id).
-            if attacker >= protocol::world::PET_ID_BASE
-                && hit.target >= protocol::world::ENEMY_ID_BASE
-                && (hit.target < protocol::world::LOOT_BAG_ID_BASE
-                    || hit.target >= protocol::world::PET_ID_BASE)
+            if IdKind::of(attacker) == IdKind::Pet
+                && matches!(IdKind::of(hit.target), IdKind::Enemy | IdKind::Pet)
             {
                 let owner_id_opt = enemies
                     .get(&attacker)
@@ -677,7 +672,7 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                                 // Pet kills credit the pet's player owner;
                                 // that player (and group) owns the corpse.
                                 let owner_cid_opt = credit_id_opt
-                                    .filter(|&id| id < protocol::world::ENEMY_ID_BASE)
+                                    .filter(|&id| IdKind::of(id) == IdKind::Player)
                                     .map(|id| id as ClientId);
                                 let bag = LootBag::new(
                                     death_pos,
@@ -732,11 +727,11 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
             // Evade (active skills, 2026-10-19): while it holds, every
             // melee swing at the player is deflected, fanned as an Evade
             // with nothing applied.
-            let evaded = hit.target < protocol::world::ENEMY_ID_BASE
+            let evaded = IdKind::of(hit.target) == IdKind::Player
                 && connections
                     .get(&(hit.target as ClientId))
                     .is_some_and(|t| t.in_world && t.hp > 0.0 && buffs::is_evading(&t.active_buffs));
-            let final_amount = if hit.target < protocol::world::ENEMY_ID_BASE {
+            let final_amount = if IdKind::of(hit.target) == IdKind::Player {
                 let target_cid = hit.target as ClientId;
                 if let Some(target_conn) = connections.get_mut(&target_cid) {
                     if target_conn.in_world && target_conn.hp > 0.0 && !evaded {

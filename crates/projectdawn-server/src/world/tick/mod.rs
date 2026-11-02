@@ -34,7 +34,7 @@ use super::{
     RANGED_ATTACK_RANGE, STALE_MOVE_THRESHOLD, TICK_DT,
 };
 use crate::{db, Config};
-use protocol::world::{DamageType, EntityId, KickCode};
+use protocol::world::{DamageType, EntityId, IdKind, KickCode};
 use rand::Rng;
 use renet::{ClientId, RenetServer, ServerEvent};
 use renet_netcode::NetcodeServerTransport;
@@ -195,7 +195,7 @@ pub async fn run(
                     ),
                 );
             }
-            if max_id >= protocol::world::LOOT_BAG_ID_BASE {
+            if IdKind::of(max_id) == IdKind::Bag {
                 super::loot::reserve_bag_ids_through(max_id);
             }
             tracing::info!(count = corpses.len(), "loaded persisted corpses");

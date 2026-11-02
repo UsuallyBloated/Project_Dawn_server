@@ -48,7 +48,7 @@ impl FactionKill {
                     .aggro
                     .keys()
                     .chain(entity.threat.keys())
-                    .filter(|&&id| id < protocol::world::ENEMY_ID_BASE)
+                    .filter(|&&id| IdKind::of(id) == IdKind::Player)
                     .map(|&id| id as ClientId)
                     .collect();
                 ids.sort_unstable();
@@ -78,7 +78,7 @@ pub(super) fn award_kill(
     victim_pos: Vec3f,
     faction_kill: FactionKill,
 ) {
-    if base_xp <= 0 || credit_id >= protocol::world::ENEMY_ID_BASE {
+    if base_xp <= 0 || IdKind::of(credit_id) != IdKind::Player {
         return; // no reward, or the top damager wasn't a player
     }
     // Owned victims (player pets, charmed mobs) award NOTHING — no XP and no
@@ -286,7 +286,7 @@ pub(super) fn kill_enemy(
         // Loot ownership: the kill-creditor owns the corpse; their group
         // shares rights, resolved at loot time.
         let owner_cid_opt = credit_id_opt
-            .filter(|&id| id < protocol::world::ENEMY_ID_BASE)
+            .filter(|&id| IdKind::of(id) == IdKind::Player)
             .map(|id| id as ClientId);
         let bag = LootBag::new(death_pos, loot_items, loot_coins, mob_name.clone(), owner_cid_opt, now);
         let bag_id = bag.id;

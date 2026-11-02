@@ -110,7 +110,7 @@ pub(super) fn run_movement(world: &mut WorldState, _q: &mut Intents, now: Instan
                         entity,
                     );
                 }
-            } else if peer_entity >= protocol::world::LOOT_BAG_ID_BASE {
+            } else if IdKind::of(peer_entity) == IdKind::Bag {
                 // Loot bag OR corpse — they share the id partition (corpses
                 // mint from mint_bag_id). Seed the mover with whichever it is.
                 if let Some(bag) = loot_bags.get(&peer_entity) {
@@ -131,7 +131,7 @@ pub(super) fn run_movement(world: &mut WorldState, _q: &mut Intents, now: Instan
                         handlers::send_corpse_contents(&mut *server, *mover_id, corpse);
                     }
                 }
-            } else if peer_entity < protocol::world::ENEMY_ID_BASE {
+            } else if IdKind::of(peer_entity) == IdKind::Player {
                 // Player — mutual EntitySpawn.
                 let peer_id = peer_entity as ClientId;
                 // Mover → peer: peer can now see the mover
@@ -175,7 +175,7 @@ pub(super) fn run_movement(world: &mut WorldState, _q: &mut Intents, now: Instan
             if peer_entity == mover_entity {
                 continue;
             }
-            if peer_entity >= protocol::world::ENEMY_ID_BASE {
+            if IdKind::of(peer_entity) != IdKind::Player {
                 // Enemy, pet or bag — just tell the mover it's gone. Not
                 // the mover's own pet: the owner always sees it
                 // (`pet_owner_cid`).

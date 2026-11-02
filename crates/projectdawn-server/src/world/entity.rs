@@ -1236,6 +1236,7 @@ pub fn mint_pet_id() -> EntityId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::world::IdKind;
     use std::time::Duration;
 
     fn template() -> MobTemplate {
@@ -1431,7 +1432,7 @@ mod tests {
     fn minted_ids_are_partitioned_above_player_range() {
         let a = mint_enemy_id();
         let b = mint_enemy_id();
-        assert!(a >= ENEMY_ID_BASE);
+        assert_eq!(IdKind::of(a), IdKind::Enemy);
         assert!(b > a);
     }
 
@@ -1615,7 +1616,7 @@ mod tests {
         pet.charm_expires_at = Some(now);
 
         let mut back = Entity::released_from_charm(&pet, now);
-        assert!(back.id >= ENEMY_ID_BASE && back.id < PET_ID_BASE, "an enemy id again");
+        assert_eq!(IdKind::of(back.id), IdKind::Enemy, "an enemy id again");
         assert_ne!(back.id, original.id, "ids are never reused");
         assert_eq!(back.spawn_point_idx, 7, "the camp slot it still occupies");
         let close = |a: Vec3f, b: Vec3f| (a.x - b.x).abs() < 1e-6 && (a.z - b.z).abs() < 1e-6;

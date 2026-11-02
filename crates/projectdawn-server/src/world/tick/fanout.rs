@@ -56,7 +56,7 @@ pub(super) fn fan_entity_cell_crossing(
     let in_world_players = |cells: &[aoi::Cell]| -> Vec<ClientId> {
         aoi.entities_in_cells(cells.iter())
             .into_iter()
-            .filter(|id| *id < protocol::world::ENEMY_ID_BASE)
+            .filter(|id| IdKind::of(*id) == IdKind::Player)
             .map(|id| id as ClientId)
             .filter(|cid| owner_cid != Some(*cid))
             .filter(|cid| connections.get(cid).is_some_and(|c| c.in_world))

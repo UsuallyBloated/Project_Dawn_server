@@ -32,7 +32,7 @@ pub(super) fn apply_pet_commands(world: &mut WorldState, q: &mut Intents, now: I
                     // ENEMY_ID_BASE are player char_ids. PvP rules
                     // mirror direct player-on-player melee (both
                     // need /pvp on, can't target self).
-                    if target_id < protocol::world::ENEMY_ID_BASE {
+                    if IdKind::of(target_id) == IdKind::Player {
                         let owner_cid = intent.owner as ClientId;
                         let target_cid = target_id as ClientId;
                         let allowed = if target_cid == owner_cid {

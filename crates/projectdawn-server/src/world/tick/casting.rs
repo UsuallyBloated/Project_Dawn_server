@@ -1145,7 +1145,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     // is in the player-target arm), so without this
                     // line a spell-on-pet hit is invisible in
                     // server.log and hard to triage.
-                    if target_id >= protocol::world::PET_ID_BASE {
+                    if IdKind::of(target_id) == IdKind::Pet {
                         tracing::info!(
                             caster = intent.caster,
                             target = target_id,
@@ -1182,10 +1182,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                         // excluded. Pets are included so AOE hits them like
                         // melee/single-target does — the owner PvP gate
                         // below decides whether each pet is actually hit.
-                        let is_enemy = id >= protocol::world::ENEMY_ID_BASE
-                            && id < protocol::world::LOOT_BAG_ID_BASE;
-                        let is_pet = id >= protocol::world::PET_ID_BASE;
-                        if !is_enemy && !is_pet {
+                        if !matches!(IdKind::of(id), IdKind::Enemy | IdKind::Pet) {
                             continue;
                         }
                         if let Some(entity) = enemies.get(&id) {

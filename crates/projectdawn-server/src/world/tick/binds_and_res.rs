@@ -1,6 +1,23 @@
-//! (phase module, doc to come)
+//! Binds and resurrection (steps 4k-bind and 4k-res): bind points written the moment
+//! they are set, and accepted resurrection offers (the owner moved to the corpse, the XP
+//! refund, the sickness).
 
 use super::*;
+
+pub(super) async fn persist_binds(world: &mut WorldState, q: &mut Intents, _now: Instant) {
+    let WorldState { pool, .. } = world;
+    let Intents { bind_intents, .. } = q;
+    // 4k-bind. Persist bind points immediately rather than waiting for the
+    //      60 s checkpoint. Binding is deliberate and rare, and losing it to
+    //      a crash (a clean stop saves everyone, but a crash does not) would
+    //      respawn the player somewhere they explicitly chose not to be —
+    //      the exact failure this feature exists to prevent.
+    for (char_id, zone, pos) in bind_intents.drain(..) {
+        if let Err(e) = db::set_bind_point(&pool, char_id, zone.as_deref(), pos).await {
+            tracing::warn!(char_id, error = %e, "set_bind_point failed; bind is live in memory but not persisted");
+        }
+    }
+}
 
 pub(super) async fn apply_res_accepts(world: &mut WorldState, q: &mut Intents, now: Instant) {
     let WorldState { pool, server, connections, corpses, .. } = world;
@@ -136,20 +153,5 @@ pub(super) async fn apply_res_accepts(world: &mut WorldState, q: &mut Intents, n
             "You are exhausted.",
         );
         tracing::info!(char_id = responder, corpse_id, xp_percent, refund, "resurrection accepted");
-    }
-}
-
-pub(super) async fn persist_binds(world: &mut WorldState, q: &mut Intents, _now: Instant) {
-    let WorldState { pool, .. } = world;
-    let Intents { bind_intents, .. } = q;
-    // 4k-bind. Persist bind points immediately rather than waiting for the
-    //      60 s checkpoint. Binding is deliberate and rare, and losing it to
-    //      a crash (a clean stop saves everyone, but a crash does not) would
-    //      respawn the player somewhere they explicitly chose not to be —
-    //      the exact failure this feature exists to prevent.
-    for (char_id, zone, pos) in bind_intents.drain(..) {
-        if let Err(e) = db::set_bind_point(&pool, char_id, zone.as_deref(), pos).await {
-            tracing::warn!(char_id, error = %e, "set_bind_point failed; bind is live in memory but not persisted");
-        }
     }
 }

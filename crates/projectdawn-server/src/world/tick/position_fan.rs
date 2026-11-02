@@ -1,4 +1,6 @@
-//! (phase module, doc to come)
+//! Position fan-out (steps 6 and 6b): each player's position to the players who can
+//! see them, then each mob's and pet's, sent only when it moved or its keepalive is due.
+//! Returns the in-world list the upkeep step reads.
 
 use super::*;
 

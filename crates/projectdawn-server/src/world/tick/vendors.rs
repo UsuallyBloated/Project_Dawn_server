@@ -1,6 +1,197 @@
-//! (phase module, doc to come)
+//! Merchants (steps 4hi and 4hj): buying from a vendor's own stock and selling to it,
+//! with the merchant in reach.
 
 use super::*;
+
+pub(super) fn apply_buys(world: &mut WorldState, q: &mut Intents, _now: Instant) {
+    let WorldState { server, connections, .. } = world;
+    let Intents { buy_item_intents, .. } = q;
+    // 4hi. Track 14 follow-up — apply vendor BuyItem intents.
+    //      Server validates: item exists, player has enough coins,
+    //      inventory has room. On success: deducts coins, grants
+    //      via add_item_locating, fans CoinsUpdate + one
+    //      InventoryDelta per touched slot. Only an item a merchant
+    //      in reach stocks is for sale (npcs.toml `stock`); the
+    //      `vendor_id` field stays informational until the client
+    //      sends real ids.
+    if !buy_item_intents.is_empty() {
+        for intent in buy_item_intents.drain(..) {
+            let owner_cid = intent.owner as ClientId;
+            let Some(conn) = connections.get_mut(&owner_cid) else {
+                continue;
+            };
+            // Proximity gate (dead-intents audit, 2026-08-24): a merchant
+            // transaction requires an actual merchant nearby. Without this,
+            // a modified client could trade from anywhere; the honest
+            // client has always had a 6 m UI gate, so only remote abuse is
+            // refused here. `vendor_id` remains informational until the
+            // client sends real ids.
+            match conn.npc_service("vendor") {
+                Err(None) => {
+                    tracing::info!(
+                        owner = intent.owner,
+                        pos = ?conn.pos,
+                        "BuyItem rejected — no vendor within range"
+                    );
+                    handlers::send_refusal(&mut *server, owner_cid, "There is no merchant near you.");
+                    continue;
+                }
+                // Factions (2026-10-23): EQ's merchants refuse at Dubious.
+                Err(Some(npc)) => {
+                    tracing::info!(owner = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "BuyItem rejected — faction");
+                    handlers::send_refusal(&mut *server, owner_cid, &format!("{} will not deal with you.", npc.name));
+                    continue;
+                }
+                Ok(_) => {}
+            }
+            // Stock gate: only what a merchant in reach who deals with
+            // this character actually sells. Without it every item with a
+            // sell-back price was buyable, named-mob drops included, by a
+            // client that asked by name.
+            let Some(seller) = crate::world::npcs::vendor_stocking_within_range(
+                &intent.item_name,
+                conn.pos,
+                |n| conn.npc_serves(n, crate::world::factions::Level::Apprehensive),
+            ) else {
+                tracing::info!(
+                    owner = intent.owner,
+                    item_name = %intent.item_name,
+                    "BuyItem rejected — no merchant in reach stocks it"
+                );
+                handlers::send_refusal(
+                    &mut *server, owner_cid, "The merchant doesn't stock that.",
+                );
+                continue;
+            };
+            let Some(item) = items::lookup_by_name(&intent.item_name) else {
+                tracing::info!(
+                    owner = intent.owner,
+                    item_name = %intent.item_name,
+                    "BuyItem rejected — unknown item name"
+                );
+                handlers::send_refusal(
+                    &mut *server, owner_cid, "The merchant doesn't stock that.",
+                );
+                continue;
+            };
+            let unit_price = item.vendor_price as i64;
+            if unit_price <= 0 {
+                tracing::info!(
+                    owner = intent.owner,
+                    item_name = %intent.item_name,
+                    "BuyItem rejected — item has no vendor_price"
+                );
+                handlers::send_refusal(
+                    &mut *server, owner_cid, "That isn't for sale.",
+                );
+                continue;
+            }
+            let total_cost = unit_price.saturating_mul(intent.qty as i64);
+            if !conn.coins.can_afford(total_cost) {
+                tracing::info!(
+                    owner = intent.owner,
+                    item_name = %intent.item_name,
+                    coins = conn.coins.total_copper(),
+                    cost = total_cost,
+                    "BuyItem rejected — insufficient coins"
+                );
+                handlers::send_refusal(
+                    &mut *server, owner_cid, "You can't afford that.",
+                );
+                continue;
+            }
+            let item_path = item.path.clone();
+            let (touched, leftover) =
+                match conn.inventory.add_item_locating(&item_path, intent.qty) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::info!(
+                            owner = intent.owner,
+                            item_name = %intent.item_name,
+                            error = %e,
+                            "BuyItem rejected — add_item_locating error"
+                        );
+                        handlers::send_refusal(
+                            &mut *server, owner_cid, "You can't carry that.",
+                        );
+                        continue;
+                    }
+                };
+            let placed = intent.qty - leftover;
+            if placed == 0 {
+                tracing::info!(
+                    owner = intent.owner,
+                    item_name = %intent.item_name,
+                    "BuyItem rejected — inventory full, no stack placed"
+                );
+                // The case a tester hit on 2026-08-21: the client had already
+                // said "Ordered", so with no reply the item looked like it
+                // vanished. Nothing was charged.
+                handlers::send_refusal(
+                    &mut *server, owner_cid, "Your bags are full.",
+                );
+                continue;
+            }
+            // Charge only for what we actually placed. The pre-flight
+            // can_afford check above used total_cost ≥ actual_cost, so this
+            // spend always succeeds; make-change handles tier breaking.
+            let actual_cost = unit_price.saturating_mul(placed as i64);
+            conn.coins.spend(actual_cost);
+            conn.coins_dirty = true;
+            conn.inventory_dirty = true;
+            let mut bought = ledger::item_event(
+                ItemAction::Buy,
+                &item_path,
+                placed,
+                i64::from(placed),
+                Some(format!("npc:{}", seller.id)),
+            );
+            bought.copper = -actual_cost;
+            conn.ledger(bought);
+            let coins_after = conn.coins;
+            let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
+                .iter()
+                .map(|(loc, slot)| (loc.clone(), *slot, conn.inventory.peek_at(loc, *slot)))
+                .collect();
+            for (loc, slot, payload) in deltas {
+                let (dp, dc) = match payload {
+                    Some((p, c)) => (Some(p), c),
+                    None => (None, 0),
+                };
+                handlers::send_inventory_delta(&mut *server, owner_cid, loc, slot, dp, dc);
+            }
+            handlers::send_coins_update(&mut *server, owner_cid, coins_after);
+            if leftover > 0 {
+                tracing::info!(
+                    owner = intent.owner,
+                    item_name = %intent.item_name,
+                    qty_requested = intent.qty,
+                    qty_placed = placed,
+                    leftover,
+                    "BuyItem partially filled — inventory ran out of room"
+                );
+                // Billing is already correct — only `placed` is charged — but
+                // asking for ten and receiving six with no word said reads as
+                // the game losing four of them.
+                handlers::send_refusal(
+                    &mut *server,
+                    owner_cid,
+                    &format!("Only {placed} fit in your bags."),
+                );
+            }
+            tracing::info!(
+                owner = intent.owner,
+                item_name = %intent.item_name,
+                qty = placed,
+                cost = actual_cost,
+                coins_after = coins_after.total_copper(),
+                seller = %seller.id,
+                vendor_type = seller.vendor_type.as_deref().unwrap_or(""),
+                "BuyItem applied"
+            );
+        }
+    }
+}
 
 pub(super) fn apply_sells(world: &mut WorldState, q: &mut Intents, _now: Instant) {
     let WorldState { server, connections, trade_manager, .. } = world;
@@ -215,196 +406,6 @@ pub(super) fn apply_sells(world: &mut WorldState, q: &mut Intents, _now: Instant
                 credit = total_credit,
                 coins_after = coins_after.total_copper(),
                 "SellItem applied"
-            );
-        }
-    }
-}
-
-pub(super) fn apply_buys(world: &mut WorldState, q: &mut Intents, _now: Instant) {
-    let WorldState { server, connections, .. } = world;
-    let Intents { buy_item_intents, .. } = q;
-    // 4hi. Track 14 follow-up — apply vendor BuyItem intents.
-    //      Server validates: item exists, player has enough coins,
-    //      inventory has room. On success: deducts coins, grants
-    //      via add_item_locating, fans CoinsUpdate + one
-    //      InventoryDelta per touched slot. Only an item a merchant
-    //      in reach stocks is for sale (npcs.toml `stock`); the
-    //      `vendor_id` field stays informational until the client
-    //      sends real ids.
-    if !buy_item_intents.is_empty() {
-        for intent in buy_item_intents.drain(..) {
-            let owner_cid = intent.owner as ClientId;
-            let Some(conn) = connections.get_mut(&owner_cid) else {
-                continue;
-            };
-            // Proximity gate (dead-intents audit, 2026-08-24): a merchant
-            // transaction requires an actual merchant nearby. Without this,
-            // a modified client could trade from anywhere; the honest
-            // client has always had a 6 m UI gate, so only remote abuse is
-            // refused here. `vendor_id` remains informational until the
-            // client sends real ids.
-            match conn.npc_service("vendor") {
-                Err(None) => {
-                    tracing::info!(
-                        owner = intent.owner,
-                        pos = ?conn.pos,
-                        "BuyItem rejected — no vendor within range"
-                    );
-                    handlers::send_refusal(&mut *server, owner_cid, "There is no merchant near you.");
-                    continue;
-                }
-                // Factions (2026-10-23): EQ's merchants refuse at Dubious.
-                Err(Some(npc)) => {
-                    tracing::info!(owner = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "BuyItem rejected — faction");
-                    handlers::send_refusal(&mut *server, owner_cid, &format!("{} will not deal with you.", npc.name));
-                    continue;
-                }
-                Ok(_) => {}
-            }
-            // Stock gate: only what a merchant in reach who deals with
-            // this character actually sells. Without it every item with a
-            // sell-back price was buyable, named-mob drops included, by a
-            // client that asked by name.
-            let Some(seller) = crate::world::npcs::vendor_stocking_within_range(
-                &intent.item_name,
-                conn.pos,
-                |n| conn.npc_serves(n, crate::world::factions::Level::Apprehensive),
-            ) else {
-                tracing::info!(
-                    owner = intent.owner,
-                    item_name = %intent.item_name,
-                    "BuyItem rejected — no merchant in reach stocks it"
-                );
-                handlers::send_refusal(
-                    &mut *server, owner_cid, "The merchant doesn't stock that.",
-                );
-                continue;
-            };
-            let Some(item) = items::lookup_by_name(&intent.item_name) else {
-                tracing::info!(
-                    owner = intent.owner,
-                    item_name = %intent.item_name,
-                    "BuyItem rejected — unknown item name"
-                );
-                handlers::send_refusal(
-                    &mut *server, owner_cid, "The merchant doesn't stock that.",
-                );
-                continue;
-            };
-            let unit_price = item.vendor_price as i64;
-            if unit_price <= 0 {
-                tracing::info!(
-                    owner = intent.owner,
-                    item_name = %intent.item_name,
-                    "BuyItem rejected — item has no vendor_price"
-                );
-                handlers::send_refusal(
-                    &mut *server, owner_cid, "That isn't for sale.",
-                );
-                continue;
-            }
-            let total_cost = unit_price.saturating_mul(intent.qty as i64);
-            if !conn.coins.can_afford(total_cost) {
-                tracing::info!(
-                    owner = intent.owner,
-                    item_name = %intent.item_name,
-                    coins = conn.coins.total_copper(),
-                    cost = total_cost,
-                    "BuyItem rejected — insufficient coins"
-                );
-                handlers::send_refusal(
-                    &mut *server, owner_cid, "You can't afford that.",
-                );
-                continue;
-            }
-            let item_path = item.path.clone();
-            let (touched, leftover) =
-                match conn.inventory.add_item_locating(&item_path, intent.qty) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::info!(
-                            owner = intent.owner,
-                            item_name = %intent.item_name,
-                            error = %e,
-                            "BuyItem rejected — add_item_locating error"
-                        );
-                        handlers::send_refusal(
-                            &mut *server, owner_cid, "You can't carry that.",
-                        );
-                        continue;
-                    }
-                };
-            let placed = intent.qty - leftover;
-            if placed == 0 {
-                tracing::info!(
-                    owner = intent.owner,
-                    item_name = %intent.item_name,
-                    "BuyItem rejected — inventory full, no stack placed"
-                );
-                // The case a tester hit on 2026-08-21: the client had already
-                // said "Ordered", so with no reply the item looked like it
-                // vanished. Nothing was charged.
-                handlers::send_refusal(
-                    &mut *server, owner_cid, "Your bags are full.",
-                );
-                continue;
-            }
-            // Charge only for what we actually placed. The pre-flight
-            // can_afford check above used total_cost ≥ actual_cost, so this
-            // spend always succeeds; make-change handles tier breaking.
-            let actual_cost = unit_price.saturating_mul(placed as i64);
-            conn.coins.spend(actual_cost);
-            conn.coins_dirty = true;
-            conn.inventory_dirty = true;
-            let mut bought = ledger::item_event(
-                ItemAction::Buy,
-                &item_path,
-                placed,
-                i64::from(placed),
-                Some(format!("npc:{}", seller.id)),
-            );
-            bought.copper = -actual_cost;
-            conn.ledger(bought);
-            let coins_after = conn.coins;
-            let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
-                .iter()
-                .map(|(loc, slot)| (loc.clone(), *slot, conn.inventory.peek_at(loc, *slot)))
-                .collect();
-            for (loc, slot, payload) in deltas {
-                let (dp, dc) = match payload {
-                    Some((p, c)) => (Some(p), c),
-                    None => (None, 0),
-                };
-                handlers::send_inventory_delta(&mut *server, owner_cid, loc, slot, dp, dc);
-            }
-            handlers::send_coins_update(&mut *server, owner_cid, coins_after);
-            if leftover > 0 {
-                tracing::info!(
-                    owner = intent.owner,
-                    item_name = %intent.item_name,
-                    qty_requested = intent.qty,
-                    qty_placed = placed,
-                    leftover,
-                    "BuyItem partially filled — inventory ran out of room"
-                );
-                // Billing is already correct — only `placed` is charged — but
-                // asking for ten and receiving six with no word said reads as
-                // the game losing four of them.
-                handlers::send_refusal(
-                    &mut *server,
-                    owner_cid,
-                    &format!("Only {placed} fit in your bags."),
-                );
-            }
-            tracing::info!(
-                owner = intent.owner,
-                item_name = %intent.item_name,
-                qty = placed,
-                cost = actual_cost,
-                coins_after = coins_after.total_copper(),
-                seller = %seller.id,
-                vendor_type = seller.vendor_type.as_deref().unwrap_or(""),
-                "BuyItem applied"
             );
         }
     }

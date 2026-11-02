@@ -1,4 +1,5 @@
-//! (phase module, doc to come)
+//! Movement (steps 5 and 5b): each player's Move integrated once, then the area-of-
+//! interest crossings that spawn and despawn what a mover can see.
 
 use super::*;
 

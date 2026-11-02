@@ -1,4 +1,6 @@
-//! (phase module, doc to come)
+//! Spell casts (step 4ha): each CastSpell judged and applied by its target type. The
+//! rules it is judged by (the target pre-flight, refusals, interrupts, songs) live in
+//! `cast_rules`.
 
 use super::*;
 

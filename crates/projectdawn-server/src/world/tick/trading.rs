@@ -1,35 +1,77 @@
-//! (phase module, doc to come)
+//! The trade window (steps 4hd2 and 4hd3): requests, offers, accepts and the
+//! one-transaction commit, then the sweep that closes sessions on range or liveness.
 
 use super::*;
 
-pub(super) fn sweep_trades(world: &mut WorldState, _q: &mut Intents, _now: Instant) {
-    let WorldState { server, connections, trade_manager, .. } = world;
-    // 4hd3. PD_W0028 — trade session sweep: range, liveness, and
-    //       presence, every tick (ledger 7). A session survives only
-    //       while both parties are connected, in-world, alive, and
-    //       within TRADE_RANGE of each other.
-    for (acid, bcid) in trade_manager.open_session_cids() {
-        let healthy = match (connections.get(&acid), connections.get(&bcid)) {
-            (Some(a), Some(b)) => {
-                a.in_world
-                    && b.in_world
-                    && !a.death_processed
-                    && !b.death_processed
-                    && a.hp > 0.0
-                    && b.hp > 0.0
-                    && a.pos.distance_to(b.pos) <= crate::world::trade::TRADE_RANGE
-            }
-            _ => false,
-        };
-        if !healthy {
-            close_trade(
-                &mut *server,
-                &mut *trade_manager,
-                acid,
-                "Trade cancelled — you are no longer together.",
-            );
+/// Project one trade side's offers into the wire payload: the item and count
+/// snapshotted at offer time, which is exactly what the commit verifies
+/// against the live slot and hands over (escrow-by-locking: the session
+/// stores references and a snapshot, never the item itself).
+pub(super) fn trade_side_payload(
+    side: &crate::world::trade::TradeSide,
+) -> (Vec<(String, u32)>, protocol::world::Coins) {
+    let mut slots = vec![(String::new(), 0u32); crate::world::trade::TRADE_SLOTS];
+    for (i, offer) in side.offers.iter().enumerate() {
+        if let Some(o) = offer {
+            slots[i] = (o.item_path.clone(), o.count);
         }
     }
+    (slots, side.coins)
+}
+
+/// Fan BOTH parties the full state of BOTH sides plus the accept flags —
+/// after any edit. Full-state per update, not deltas: a tiny payload with
+/// no desync class.
+pub(super) fn fan_trade_state(
+    server: &mut RenetServer,
+    session: &crate::world::trade::TradeSession,
+) {
+    for (me, them) in [(&session.a, &session.b), (&session.b, &session.a)] {
+        let (my_slots, my_coins) = trade_side_payload(me);
+        let (their_slots, their_coins) = trade_side_payload(them);
+        handlers::send_trade_offer_update(server, me.cid, true, my_slots, my_coins);
+        handlers::send_trade_offer_update(server, me.cid, false, their_slots, their_coins);
+        handlers::send_trade_accept_state(server, me.cid, me.accepted, them.accepted);
+    }
+}
+
+/// Close the session covering `cid` (if any) and tell both parties why.
+/// Every non-commit exit routes here: cancel, range, death, disconnect,
+/// commit failure. Unlocking is implicit — locks derive from live sessions.
+pub(super) fn close_trade(
+    server: &mut RenetServer,
+    trade_manager: &mut crate::world::trade::TradeManager,
+    cid: ClientId,
+    reason: &str,
+) {
+    if let Some(session) = trade_manager.close(cid) {
+        for c in [session.a.cid, session.b.cid] {
+            handlers::send_trade_closed(server, c, false, reason);
+        }
+        tracing::info!(
+            a = session.a.cid as u64,
+            b = session.b.cid as u64,
+            reason,
+            "trade closed"
+        );
+    }
+}
+
+/// The escrow: a slot offered in an open trade refuses every other
+/// inventory intent. Reports the refusal (the silent-refusals doctrine);
+/// callers just `continue` on `true`.
+pub(super) fn trade_locked(
+    server: &mut RenetServer,
+    trade_manager: &crate::world::trade::TradeManager,
+    cid: ClientId,
+    location: &str,
+    slot: u32,
+) -> bool {
+    if trade_manager.is_locked(cid, location, slot) {
+        handlers::send_refusal(server, cid, "That item is offered in a trade.");
+        return true;
+    }
+    false
 }
 
 pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents, _now: Instant) {
@@ -665,6 +707,36 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                     );
                 }
             }
+        }
+    }
+}
+
+pub(super) fn sweep_trades(world: &mut WorldState, _q: &mut Intents, _now: Instant) {
+    let WorldState { server, connections, trade_manager, .. } = world;
+    // 4hd3. PD_W0028 — trade session sweep: range, liveness, and
+    //       presence, every tick (ledger 7). A session survives only
+    //       while both parties are connected, in-world, alive, and
+    //       within TRADE_RANGE of each other.
+    for (acid, bcid) in trade_manager.open_session_cids() {
+        let healthy = match (connections.get(&acid), connections.get(&bcid)) {
+            (Some(a), Some(b)) => {
+                a.in_world
+                    && b.in_world
+                    && !a.death_processed
+                    && !b.death_processed
+                    && a.hp > 0.0
+                    && b.hp > 0.0
+                    && a.pos.distance_to(b.pos) <= crate::world::trade::TRADE_RANGE
+            }
+            _ => false,
+        };
+        if !healthy {
+            close_trade(
+                &mut *server,
+                &mut *trade_manager,
+                acid,
+                "Trade cancelled — you are no longer together.",
+            );
         }
     }
 }

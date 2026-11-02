@@ -1,90 +1,334 @@
-//! (phase module, doc to come)
+//! Connections coming and going: connects and disconnects (step 2), the GM audit flush
+//! (3-bis), heartbeat timeouts and the linkdead reaper (4 and 4-bis), the logout save and
+//! the graceful shutdown.
 
 use super::*;
 
-pub(super) async fn reap_linkdead(world: &mut WorldState, _q: &mut Intents, now: Instant) {
-    let WorldState { pool, server, connections, aoi, pending_saves, enemies, group_manager, .. } = world;
-    // 4-bis. Linkdead reaper. A connection marked linkdead on an unclean
-    //        disconnect lingers (vulnerable) for LINKDEAD_SECS, then we run
-    //        the full disconnect cleanup. renet already dropped its
-    //        transport, so reap_connection does NOT call server.disconnect
-    //        again — it just despawns, flushes, and removes.
-    let to_reap: Vec<ClientId> = connections
-        .iter()
-        .filter(|(_, c)| c.linkdead_expired(now, LINKDEAD_SECS))
-        .map(|(id, _)| *id)
-        .collect();
-    for client_id in to_reap {
-        tracing::info!(%client_id, "linkdead window elapsed — reaping");
-        reap_connection(
-            &mut *server,
-            &mut *connections,
-            &mut *aoi,
-            &mut *enemies,
-            &mut *group_manager,
-            &pool,
-            client_id,
-            now,
-            &mut *pending_saves,
-        )
-        .await;
+/// What a player is told when the server shuts down cleanly (a deploy or any
+/// `systemctl stop`/`restart`) and their character was saved. Rides
+/// `KickCode::Restart`, sent only after the save landed so it is true.
+pub(super) const SHUTDOWN_MESSAGE: &str =
+    "The world is being restarted. Your progress has been saved; please log in again in a minute.";
+
+/// The same, for a player whose save did not land within the shutdown budget.
+pub(super) const SHUTDOWN_UNSAVED_MESSAGE: &str =
+    "The world is being restarted. Your last few moments could not be saved; please log in again in a minute.";
+
+/// How long a clean shutdown keeps retrying saves that failed, inside
+/// systemd's 20 s `TimeoutStopSec`.
+pub(super) const SHUTDOWN_SAVE_BUDGET: Duration = Duration::from_secs(12);
+
+/// How often a logout whose save did not fully land is retried.
+pub(super) const PENDING_SAVE_RETRY: Duration = Duration::from_secs(1);
+
+/// How long a failing logout save is retried before it is given up (logged
+/// as an error) and the account may log in again, to its last saved state.
+/// That state is whole (drops, trades and loot are saved as they happen), so
+/// giving up loses progress but cannot duplicate anything; holding the
+/// account forever would lock the player out for the life of the process.
+pub(super) const PENDING_SAVE_GIVE_UP: Duration = Duration::from_secs(120);
+
+/// Move a connection's queued audit entries into `out` as `gm_actions` rows.
+/// Commands refused over budget are summarized as one `audit_overflow` row,
+/// written at most once a second per connection (`force` writes it now: the
+/// connection is leaving), so a flood is recorded as a flood without the
+/// summary itself becoming a write per tick.
+pub(super) fn collect_gm_audit(
+    conn: &mut PerConnection,
+    now: Instant,
+    force: bool,
+    out: &mut Vec<db::GmActionRow>,
+) {
+    let (actor_account, target_char) = (conn.account_id, conn.char_id);
+    for entry in conn.gm_audit.drain(..) {
+        out.push(db::GmActionRow {
+            actor_account,
+            target_char,
+            command: entry.command.to_string(),
+            args: entry.args,
+        });
+    }
+    if conn.gm_cmd_refused > 0 {
+        let due = force
+            || conn
+                .gm_overflow_row_at
+                .is_none_or(|t| now.saturating_duration_since(t).as_secs_f32() >= 1.0);
+        if due {
+            out.push(db::GmActionRow {
+                actor_account,
+                target_char,
+                command: "audit_overflow".to_string(),
+                args: format!("refused={}", conn.gm_cmd_refused),
+            });
+            conn.gm_cmd_refused = 0;
+            conn.gm_overflow_row_at = Some(now);
+        }
     }
 }
 
-pub(super) fn reap_timed_out(world: &mut WorldState, q: &mut Intents, now: Instant) {
-    let WorldState { server, connections, .. } = world;
-    let Intents { to_disconnect, .. } = q;
-    // 4. App-layer heartbeat timeout — catches frozen game windows that
-    //    transport-level keepalive doesn't notice. Skip connections that
-    //    are already lingering linkdead: their transport is gone, so
-    //    re-flagging them would just spam disconnect every tick while the
-    //    reaper below counts down their window.
+/// Write collected audit rows in one transaction. A failed write is logged
+/// with its rows and dropped; the per-command info lines in the server log
+/// remain as the fallback record.
+pub(super) async fn write_gm_audit(pool: &SqlitePool, rows: &[db::GmActionRow]) {
+    if rows.is_empty() {
+        return;
+    }
+    if let Err(e) = db::record_gm_actions(pool, rows).await {
+        tracing::error!(error = %e, rows = ?rows, "gm audit write failed — rows dropped");
+    }
+}
+
+/// Full disconnect cleanup, shared by the immediate clean-disconnect path and
+/// the linkdead reaper sweep: despawn the player body (and any surviving pet)
+/// for AOI peers, drop the player from the grid, remove them from their group,
+/// then remove the connection and flush its dirty state to the DB.
+///
+/// Safe to call for a `client_id` that isn't in `connections` (a refused
+/// duplicate login never inserted): every step degrades to a no-op. Does NOT
+/// call `server.disconnect` — the transport is already torn down by the time
+/// we get here on either path.
+#[allow(clippy::too_many_arguments)] // the tick loop's state, passed piecewise
+pub(super) async fn reap_connection(
+    server: &mut RenetServer,
+    connections: &mut HashMap<ClientId, PerConnection>,
+    aoi: &mut AoiGrid,
+    enemies: &mut HashMap<EntityId, Entity>,
+    group_manager: &mut GroupManager,
+    pool: &SqlitePool,
+    client_id: ClientId,
+    now: std::time::Instant,
+    pending_saves: &mut Vec<PendingSave>,
+) {
+    // Track 7: remove the leaver from the AOI grid BEFORE computing recipients
+    // so entities_visible_from gives the correct set of peers who could see
+    // this player. Send EntityDespawn only to that AOI-visible set.
+    let despawn_info = connections
+        .get(&client_id)
+        .filter(|c| c.in_world)
+        .map(|c| (c.char_id as u64, c.aoi_cell));
+    if let Some((entity_id, leaver_cell)) = despawn_info {
+        aoi.remove(entity_id, leaver_cell);
+        let visible_peers = aoi.entities_visible_from(leaver_cell);
+        let peer_ids: Vec<ClientId> = connections
+            .iter()
+            .filter(|(id, c)| **id != client_id && c.in_world && visible_peers.contains(*id))
+            .map(|(id, _)| *id)
+            .collect();
+        for peer_id in peer_ids {
+            handlers::send_entity_despawn(server, peer_id, entity_id);
+        }
+        // Despawn any pet still alive (no-op if linkdead already dropped it).
+        despawn_owned_pets(server, connections, aoi, enemies, entity_id, client_id, now);
+        // Their DoTs end with them (spell batch step 5): a logout pays
+        // nothing for what was left ticking. A linkdead body keeps its DoTs
+        // for the linger, since it is still in the world to be killed.
+        for entity in enemies.values_mut() {
+            entity.clear_dots_from(entity_id);
+        }
+        // And any PvP DoT they left on a player.
+        let bearers = clear_player_dots_from(connections, &[entity_id]);
+        if !bearers.is_empty() {
+            let recipients: Vec<ClientId> = connections
+                .iter()
+                .filter(|(id, c)| **id != client_id && c.in_world)
+                .map(|(id, _)| *id)
+                .collect();
+            for bearer in bearers {
+                if let Some(conn) = connections.get(&bearer) {
+                    fan_out_server_buff_snapshot(server, &recipients, conn);
+                }
+            }
+        }
+    }
+
+    // Track 6 sub-task 5 — remove the leaver from their group. If the group
+    // dissolves (one member left), notify them too. The rest of the roster
+    // gets a fresh GroupRoster.
+    if let Some((gid, remaining, dissolved)) = group_manager.leave(client_id) {
+        if dissolved {
+            // Group dissolved. Survivors (0 or 1) get an empty roster so their
+            // HUD clears. The leaver's transport is already torn down.
+            for m in &remaining {
+                handlers::fan_group_roster(
+                    server,
+                    std::slice::from_ref(m),
+                    gid,
+                    *m,
+                    Vec::new(),
+                    0,
+                );
+            }
+        } else if let Some(g) = group_manager.groups.get(&gid) {
+            // Re-fetch the group with name lookups for the survivor fan-out.
+            let members_with_names: Vec<(u64, String)> = g
+                .members
+                .iter()
+                .filter_map(|m| connections.get(m).map(|c| (*m, c.name.clone())))
+                .collect();
+            let recipients: Vec<ClientId> = g.members.clone();
+            handlers::fan_group_roster(
+                server,
+                &recipients,
+                gid,
+                g.leader,
+                members_with_names,
+                g.loot_mode.to_u8(),
+            );
+            // Same panel-row seed as the intent-path roster fan: the
+            // survivors' rosters just changed shape, so refill every row.
+            for m in &g.members {
+                if let Some(c) = connections.get(m) {
+                    handlers::fan_out_resources(server, &recipients, c);
+                }
+            }
+        }
+    }
+
+    if let Some(mut conn) = connections.remove(&client_id) {
+        // Whatever the audit queue still holds goes out with the connection.
+        // The per-tick flush runs before the reaps, so this is normally
+        // empty; it is here so a dev command handled in the same pass as a
+        // disconnect can never have run unrecorded.
+        let mut audit_rows = Vec::new();
+        collect_gm_audit(&mut conn, Instant::now(), true, &mut audit_rows);
+        write_gm_audit(pool, &audit_rows).await;
+
+        // The moment the character left, for NO RENT items (purged at the
+        // next login once thirty minutes have passed). Every departure comes
+        // through here: a clean logout, or a linkdead body at the end of its
+        // linger (the clean shutdown stamps its own). A crash writes nothing,
+        // which only ever spares the items.
+        if let Err(e) = db::set_logged_out_at(pool, conn.char_id, unix_now_secs()).await {
+            tracing::warn!(char_id = conn.char_id, error = %e, "set_logged_out_at failed");
+        }
+        // One last save for the road, through the same flush as the checkpoint.
+        // A character whose save did not fully land is NOT dropped: it waits in
+        // `pending_saves`, retried every PENDING_SAVE_RETRY, and its account's
+        // relogin is refused until it lands. Dropping it (as this used to)
+        // lost everything since the last checkpoint, and letting the player
+        // back in early would load the older saved state over it.
+        if !persistence::flush_connection(pool, &mut conn, "logout").await {
+            tracing::error!(
+                char_id = conn.char_id,
+                "logout save incomplete; queued for retry, relogin held until it lands"
+            );
+            pending_saves.push(PendingSave { conn, since: Instant::now() });
+        }
+    }
+}
+
+/// The clean end of the world loop (a stop signal). Every character in the
+/// world (linkdead bodies and the logout retry queue included) is saved first,
+/// failed saves retried until `SHUTDOWN_SAVE_BUDGET`; the queued GM audit rows
+/// are written; then each connected player is told the world is restarting,
+/// with the line that is true for them (saved or not), and every connection is
+/// closed. Returns how many characters could not be saved. systemd allows
+/// 20 s (`TimeoutStopSec`); a healthy shutdown takes well under a second.
+pub(super) async fn shut_down_world(
+    server: &mut RenetServer,
+    transport: &mut NetcodeServerTransport,
+    connections: &mut HashMap<ClientId, PerConnection>,
+    pending_saves: &mut [PendingSave],
+    pool: &SqlitePool,
+) -> u32 {
+    tracing::info!(
+        connections = connections.len(),
+        pending_saves = pending_saves.len(),
+        "stop signal: saving everyone and closing the world"
+    );
+    let mut audit_rows = Vec::new();
+    for conn in connections.values_mut() {
+        collect_gm_audit(conn, Instant::now(), true, &mut audit_rows);
+    }
+    write_gm_audit(pool, &audit_rows).await;
+
+    let deadline = Instant::now() + SHUTDOWN_SAVE_BUDGET;
+    loop {
+        let mut all_saved = true;
+        for conn in connections
+            .values_mut()
+            .chain(pending_saves.iter_mut().map(|p| &mut p.conn))
+        {
+            if persistence::has_unsaved_state(conn)
+                && !persistence::flush_connection(pool, conn, "shutdown").await
+            {
+                all_saved = false;
+            }
+        }
+        if all_saved || Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // A shutdown is a departure for everyone in the world: stamp the logout
+    // time NO RENT items are judged by, as a logout does.
+    for conn in connections.values() {
+        if let Err(e) = db::set_logged_out_at(pool, conn.char_id, unix_now_secs()).await {
+            tracing::warn!(char_id = conn.char_id, error = %e, "set_logged_out_at failed at shutdown");
+        }
+    }
+
+    let mut unsaved = 0u32;
+    for conn in connections
+        .values()
+        .chain(pending_saves.iter().map(|p| &p.conn))
+    {
+        if persistence::has_unsaved_state(conn) {
+            unsaved += 1;
+            tracing::error!(char_id = conn.char_id, "shutdown save incomplete; progress since the last save is lost");
+        }
+    }
     for (client_id, conn) in connections.iter() {
         if conn.linkdead_since.is_some() {
             continue;
         }
-        if conn.is_app_idle(now) {
-            tracing::info!(
-                char_id = conn.char_id,
-                "app-layer heartbeat timeout — disconnecting"
-            );
-            to_disconnect.push(*client_id);
-        } else if conn
-            .kicked_at
-            .is_some_and(|t| now.duration_since(t) >= KICK_FLUSH_GRACE)
-        {
-            // The ban sweep sent this connection its Kick a moment ago;
-            // the message has had time to arrive, so drop the transport
-            // whether or not the client left by itself. The next tick's
-            // disconnect event takes the character out by the ordinary
-            // unclean-exit path (linger, final save, reap).
-            tracing::info!(char_id = conn.char_id, "kicked connection dropped");
-            to_disconnect.push(*client_id);
+        let line = if persistence::has_unsaved_state(conn) {
+            SHUTDOWN_UNSAVED_MESSAGE
+        } else {
+            SHUTDOWN_MESSAGE
+        };
+        handlers::send_kick(server, *client_id, KickCode::Restart, line);
+    }
+
+    // A few ticks of transport service so the reliable kicks are delivered
+    // (and resent if one was lost), then close every connection. The clock
+    // before the transport, as in the live loop.
+    for _ in 0..5 {
+        transport.send_packets(server);
+        tokio::time::sleep(TICK_DT).await;
+        server.update(TICK_DT);
+        if let Err(e) = transport.update(TICK_DT, server) {
+            tracing::warn!(error = %e, "transport update error during shutdown");
         }
     }
-
-    for client_id in to_disconnect.iter() {
-        server.disconnect(*client_id);
-    }
+    transport.send_packets(server);
+    transport.disconnect_all(server);
+    tracing::info!(
+        saved = connections.len() + pending_saves.len() - unsaved as usize,
+        unsaved,
+        "world closed"
+    );
+    unsaved
 }
 
-pub(super) async fn flush_gm_audit(world: &mut WorldState, _q: &mut Intents, now: Instant) {
-    let WorldState { pool, connections, .. } = world;
-    // 3-bis. GM action audit flush. A dev/GM command runs only if
-    //    `authorize_dev_cmd` queued its row, and the rows are written
-    //    here, straight after the message drain (`reap_connection`
-    //    flushes its own connection too, so a command handled in the
-    //    same pass as a disconnect is still recorded). One transaction
-    //    for the tick. The write volume is bounded over TIME, not just
-    //    per tick, by the per-connection command budget: after its burst
-    //    a flooding GM client is held to GM_CMD_REFILL_PER_SEC rows a
-    //    second plus one overflow summary, and the commands it is refused
-    //    do not run.
-    let mut audit_rows: Vec<db::GmActionRow> = Vec::new();
-    for conn in connections.values_mut() {
-        collect_gm_audit(conn, now, false, &mut audit_rows);
-    }
-    write_gm_audit(&pool, &audit_rows).await;
+pub(super) fn client_id_to_char(client_id: ClientId) -> i64 {
+    // ClientId in renet 2.0 is `pub type ClientId = u64;`. We minted it as
+    // char_id (i64) cast to u64; cast back. Positive ids roundtrip cleanly.
+    client_id as i64
+}
+
+pub(super) fn parse_account_id_from_user_data(user_data: Option<[u8; 256]>) -> i64 {
+    let Some(data) = user_data else { return 0 };
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&data[..8]);
+    i64::from_le_bytes(buf)
+}
+
+/// Per-account GM flag, packed at `user_data[8]` by `mint_connect_token`.
+/// Absent user_data (shouldn't happen for a Secure token) reads as non-GM.
+pub(super) fn parse_is_gm_from_user_data(user_data: Option<[u8; 256]>) -> bool {
+    user_data.map(|d| d[8] != 0).unwrap_or(false)
 }
 
 pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Intents, now: Instant, transport: &NetcodeServerTransport) {
@@ -467,5 +711,113 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
                 }
             }
         }
+    }
+}
+
+pub(super) async fn flush_gm_audit(world: &mut WorldState, _q: &mut Intents, now: Instant) {
+    let WorldState { pool, connections, .. } = world;
+    // 3-bis. GM action audit flush. A dev/GM command runs only if
+    //    `authorize_dev_cmd` queued its row, and the rows are written
+    //    here, straight after the message drain (`reap_connection`
+    //    flushes its own connection too, so a command handled in the
+    //    same pass as a disconnect is still recorded). One transaction
+    //    for the tick. The write volume is bounded over TIME, not just
+    //    per tick, by the per-connection command budget: after its burst
+    //    a flooding GM client is held to GM_CMD_REFILL_PER_SEC rows a
+    //    second plus one overflow summary, and the commands it is refused
+    //    do not run.
+    let mut audit_rows: Vec<db::GmActionRow> = Vec::new();
+    for conn in connections.values_mut() {
+        collect_gm_audit(conn, now, false, &mut audit_rows);
+    }
+    write_gm_audit(&pool, &audit_rows).await;
+}
+
+pub(super) fn reap_timed_out(world: &mut WorldState, q: &mut Intents, now: Instant) {
+    let WorldState { server, connections, .. } = world;
+    let Intents { to_disconnect, .. } = q;
+    // 4. App-layer heartbeat timeout — catches frozen game windows that
+    //    transport-level keepalive doesn't notice. Skip connections that
+    //    are already lingering linkdead: their transport is gone, so
+    //    re-flagging them would just spam disconnect every tick while the
+    //    reaper below counts down their window.
+    for (client_id, conn) in connections.iter() {
+        if conn.linkdead_since.is_some() {
+            continue;
+        }
+        if conn.is_app_idle(now) {
+            tracing::info!(
+                char_id = conn.char_id,
+                "app-layer heartbeat timeout — disconnecting"
+            );
+            to_disconnect.push(*client_id);
+        } else if conn
+            .kicked_at
+            .is_some_and(|t| now.duration_since(t) >= KICK_FLUSH_GRACE)
+        {
+            // The ban sweep sent this connection its Kick a moment ago;
+            // the message has had time to arrive, so drop the transport
+            // whether or not the client left by itself. The next tick's
+            // disconnect event takes the character out by the ordinary
+            // unclean-exit path (linger, final save, reap).
+            tracing::info!(char_id = conn.char_id, "kicked connection dropped");
+            to_disconnect.push(*client_id);
+        }
+    }
+
+    for client_id in to_disconnect.iter() {
+        server.disconnect(*client_id);
+    }
+}
+
+pub(super) async fn reap_linkdead(world: &mut WorldState, _q: &mut Intents, now: Instant) {
+    let WorldState { pool, server, connections, aoi, pending_saves, enemies, group_manager, .. } = world;
+    // 4-bis. Linkdead reaper. A connection marked linkdead on an unclean
+    //        disconnect lingers (vulnerable) for LINKDEAD_SECS, then we run
+    //        the full disconnect cleanup. renet already dropped its
+    //        transport, so reap_connection does NOT call server.disconnect
+    //        again — it just despawns, flushes, and removes.
+    let to_reap: Vec<ClientId> = connections
+        .iter()
+        .filter(|(_, c)| c.linkdead_expired(now, LINKDEAD_SECS))
+        .map(|(id, _)| *id)
+        .collect();
+    for client_id in to_reap {
+        tracing::info!(%client_id, "linkdead window elapsed — reaping");
+        reap_connection(
+            &mut *server,
+            &mut *connections,
+            &mut *aoi,
+            &mut *enemies,
+            &mut *group_manager,
+            &pool,
+            client_id,
+            now,
+            &mut *pending_saves,
+        )
+        .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // The connect token's user_data layout is a contract between
+    // mint_connect_token (packs) and these parsers (read): account_id LE in
+    // bytes [0..8], is_gm at byte [8]. If the layout drifts, GM access breaks
+    // silently, so pin it.
+    #[test]
+    fn user_data_roundtrips_account_id_and_gm_flag() {
+        use super::{parse_account_id_from_user_data, parse_is_gm_from_user_data};
+        let mut ud = [0u8; 256];
+        ud[..8].copy_from_slice(&12345i64.to_le_bytes());
+        ud[8] = 1;
+        assert_eq!(parse_account_id_from_user_data(Some(ud)), 12345);
+        assert!(parse_is_gm_from_user_data(Some(ud)));
+        ud[8] = 0;
+        assert!(!parse_is_gm_from_user_data(Some(ud)));
+        // A Secure token always carries user_data, but be defensive: absent
+        // reads as account 0 / non-GM (never accidentally-GM).
+        assert_eq!(parse_account_id_from_user_data(None), 0);
+        assert!(!parse_is_gm_from_user_data(None));
     }
 }

@@ -1,86 +1,8 @@
-//! (phase module, doc to come)
+//! Quests (steps 4k-quest and 4k-quest-lifecycle): turn-ins checked against the
+//! server's own counts and paid in one transaction, then accepts and abandons in arrival
+//! order.
 
 use super::*;
-
-pub(super) fn apply_quest_lifecycle(world: &mut WorldState, q: &mut Intents, _now: Instant) {
-    let WorldState { server, connections, .. } = world;
-    let Intents { quest_lifecycle_intents, .. } = q;
-    // 4k-quest-lifecycle. PD_W0024 — accept / abandon, drained in ARRIVAL
-    //      order so a same-tick abandon-then-accept (or the reverse) on one
-    //      quest ends in the client's last-stated state. These only mutate
-    //      in-memory `active_quests` and mark `quests_dirty`; the single
-    //      reconciling DB write happens in the end-of-tick flush (step
-    //      6-ter: upsert if still active, delete if not). So a forged
-    //      accept/abandon storm costs at most one write per quest per tick,
-    //      never an awaited write per message.
-    for (responder, action, quest_id) in quest_lifecycle_intents.drain(..) {
-        let responder_cid = responder as ClientId;
-        match action {
-            QuestLifecycle::Accept => {
-                // Rejections here are accept-phase, so `rollback = true`:
-                // the client undoes its optimistic journal add.
-                let Some(quest) = crate::world::quests::lookup(&quest_id) else {
-                    tracing::info!(char_id = responder, quest_id = ?quest_id, "quest accept rejected — unknown quest id");
-                    handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "Unknown quest.", true);
-                    continue;
-                };
-                let Some(conn) = connections.get_mut(&responder_cid) else {
-                    continue; // disconnected mid-tick
-                };
-                if conn.level < quest.level_req {
-                    tracing::info!(char_id = responder, quest_id = %quest_id, level = conn.level, level_req = quest.level_req, "quest accept rejected — below level_req");
-                    handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "You are too low level for this quest.", true);
-                    continue;
-                }
-                if conn.completed_quests.contains(&quest_id) {
-                    tracing::info!(char_id = responder, quest_id = %quest_id, "quest accept rejected — already completed");
-                    handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "You have already completed this quest.", true);
-                    continue;
-                }
-                if conn.active_quests.contains_key(&quest_id) {
-                    // Already tracking (a duplicate send, e.g. a re-click
-                    // before the journal refreshed) — not an error, and no
-                    // rollback (the quest legitimately stays).
-                    tracing::debug!(char_id = responder, quest_id = %quest_id, "quest accept ignored — already active");
-                    continue;
-                }
-                if conn.active_quests.len() >= crate::world::quests::MAX_ACTIVE {
-                    tracing::info!(char_id = responder, quest_id = %quest_id, "quest accept rejected — journal full");
-                    handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "Your quest journal is full.", true);
-                    continue;
-                }
-                // The giver's faction (2026-10-23): the quest's NPC (its
-                // turn-in NPC gives it too) has nothing to say at
-                // Apprehensive or below, so the quest is not offered.
-                if let Some(npc) = quest.turn_in_npc.as_deref().and_then(crate::world::npcs::lookup) {
-                    if !conn.npc_serves(npc, crate::world::factions::Level::Indifferent) {
-                        tracing::info!(char_id = responder, quest_id = %quest_id, npc = %npc.id, "quest accept rejected — faction");
-                        handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, &format!("{} has nothing to say to you.", npc.name), true);
-                        continue;
-                    }
-                }
-                conn.active_quests.insert(quest_id.clone(), vec![0i32; quest.objectives.len()]);
-                conn.quests_dirty.insert(quest_id.clone());
-                tracing::info!(char_id = responder, quest_id = %quest_id, "quest accepted");
-            }
-            QuestLifecycle::Abandon => {
-                // Re-accepting later starts from zero; the completion record
-                // is a different table, so abandon can never re-open a payout.
-                let Some(conn) = connections.get_mut(&responder_cid) else {
-                    continue;
-                };
-                if conn.active_quests.remove(&quest_id).is_none() {
-                    tracing::info!(char_id = responder, quest_id = ?quest_id, "quest abandon ignored — not active");
-                    continue;
-                }
-                // Mark dirty (not clear): the flush reconciles a now-absent
-                // active quest into a row DELETE.
-                conn.quests_dirty.insert(quest_id.clone());
-                tracing::info!(char_id = responder, quest_id = %quest_id, "quest abandoned");
-            }
-        }
-    }
-}
 
 pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents, _now: Instant) {
     let WorldState { pool, server, connections, enemies, .. } = world;
@@ -290,6 +212,86 @@ pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents
                 if let Err(e) = persistence::persist_dirty_stores(&pool, conn).await {
                     tracing::warn!(char_id = responder, quest_id = %quest_id, error = %e, "quest reward store save failed (will retry on checkpoint)");
                 }
+            }
+        }
+    }
+}
+
+pub(super) fn apply_quest_lifecycle(world: &mut WorldState, q: &mut Intents, _now: Instant) {
+    let WorldState { server, connections, .. } = world;
+    let Intents { quest_lifecycle_intents, .. } = q;
+    // 4k-quest-lifecycle. PD_W0024 — accept / abandon, drained in ARRIVAL
+    //      order so a same-tick abandon-then-accept (or the reverse) on one
+    //      quest ends in the client's last-stated state. These only mutate
+    //      in-memory `active_quests` and mark `quests_dirty`; the single
+    //      reconciling DB write happens in the end-of-tick flush (step
+    //      6-ter: upsert if still active, delete if not). So a forged
+    //      accept/abandon storm costs at most one write per quest per tick,
+    //      never an awaited write per message.
+    for (responder, action, quest_id) in quest_lifecycle_intents.drain(..) {
+        let responder_cid = responder as ClientId;
+        match action {
+            QuestLifecycle::Accept => {
+                // Rejections here are accept-phase, so `rollback = true`:
+                // the client undoes its optimistic journal add.
+                let Some(quest) = crate::world::quests::lookup(&quest_id) else {
+                    tracing::info!(char_id = responder, quest_id = ?quest_id, "quest accept rejected — unknown quest id");
+                    handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "Unknown quest.", true);
+                    continue;
+                };
+                let Some(conn) = connections.get_mut(&responder_cid) else {
+                    continue; // disconnected mid-tick
+                };
+                if conn.level < quest.level_req {
+                    tracing::info!(char_id = responder, quest_id = %quest_id, level = conn.level, level_req = quest.level_req, "quest accept rejected — below level_req");
+                    handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "You are too low level for this quest.", true);
+                    continue;
+                }
+                if conn.completed_quests.contains(&quest_id) {
+                    tracing::info!(char_id = responder, quest_id = %quest_id, "quest accept rejected — already completed");
+                    handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "You have already completed this quest.", true);
+                    continue;
+                }
+                if conn.active_quests.contains_key(&quest_id) {
+                    // Already tracking (a duplicate send, e.g. a re-click
+                    // before the journal refreshed) — not an error, and no
+                    // rollback (the quest legitimately stays).
+                    tracing::debug!(char_id = responder, quest_id = %quest_id, "quest accept ignored — already active");
+                    continue;
+                }
+                if conn.active_quests.len() >= crate::world::quests::MAX_ACTIVE {
+                    tracing::info!(char_id = responder, quest_id = %quest_id, "quest accept rejected — journal full");
+                    handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "Your quest journal is full.", true);
+                    continue;
+                }
+                // The giver's faction (2026-10-23): the quest's NPC (its
+                // turn-in NPC gives it too) has nothing to say at
+                // Apprehensive or below, so the quest is not offered.
+                if let Some(npc) = quest.turn_in_npc.as_deref().and_then(crate::world::npcs::lookup) {
+                    if !conn.npc_serves(npc, crate::world::factions::Level::Indifferent) {
+                        tracing::info!(char_id = responder, quest_id = %quest_id, npc = %npc.id, "quest accept rejected — faction");
+                        handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, &format!("{} has nothing to say to you.", npc.name), true);
+                        continue;
+                    }
+                }
+                conn.active_quests.insert(quest_id.clone(), vec![0i32; quest.objectives.len()]);
+                conn.quests_dirty.insert(quest_id.clone());
+                tracing::info!(char_id = responder, quest_id = %quest_id, "quest accepted");
+            }
+            QuestLifecycle::Abandon => {
+                // Re-accepting later starts from zero; the completion record
+                // is a different table, so abandon can never re-open a payout.
+                let Some(conn) = connections.get_mut(&responder_cid) else {
+                    continue;
+                };
+                if conn.active_quests.remove(&quest_id).is_none() {
+                    tracing::info!(char_id = responder, quest_id = ?quest_id, "quest abandon ignored — not active");
+                    continue;
+                }
+                // Mark dirty (not clear): the flush reconciles a now-absent
+                // active quest into a row DELETE.
+                conn.quests_dirty.insert(quest_id.clone());
+                tracing::info!(char_id = responder, quest_id = %quest_id, "quest abandoned");
             }
         }
     }

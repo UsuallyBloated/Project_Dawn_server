@@ -1,64 +1,15 @@
-//! (phase module, doc to come)
+//! Loot (steps 4ka, 4jc, 4k and 4k-bis): taking from loot bags and corpses, ground
+//! pickups to the cursor, and bags and corpses expiring.
 
 use super::*;
 
-pub(super) async fn expire_bags_and_corpses(world: &mut WorldState, _q: &mut Intents, now: Instant, in_world_recipients_now: &[ClientId]) {
-    let WorldState { pool, server, aoi, loot_bags, corpses, .. } = world;
-    // 4k. Loot bag expiry. Bags linger LOOT_BAG_LINGER_SECS so
-    //     players have time to walk over and click; afterwards we
-    //     fan out EntityDespawn and drop the bag. Bags emptied
-    //     mid-life by the apply phase above already despawned via
-    //     EntityDespawn there — this loop only catches bags that
-    //     ran out the clock without being looted.
-    let bag_linger = Duration::from_secs_f32(LOOT_BAG_LINGER_SECS);
-    let mut expired_bags: Vec<EntityId> = Vec::new();
-    for bag in loot_bags.values() {
-        if now.duration_since(bag.spawned_at) >= bag_linger {
-            expired_bags.push(bag.id);
-        }
-    }
-    for id in expired_bags {
-        if let Some(bag) = loot_bags.remove(&id) {
-            // Track 7: remove from AOI; fan EntityDespawn only to visible players.
-            let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
-            aoi.remove(id, bag_cell);
-            let visible = aoi.entities_visible_from(bag_cell);
-            for &recipient in in_world_recipients_now.iter() {
-                if visible.contains(&recipient) {
-                    handlers::send_entity_despawn(&mut *server, recipient, id);
-                }
-            }
-        }
-    }
-
-    // 4k-bis. Corpse / resurrection Slice 1 — corpse decay. Corpses linger
-    //     much longer than loot bags (CORPSE_LINGER_SECS); on expiry the
-    //     corpse + its gear are gone for good: despawn to visible peers,
-    //     remove from AOI + map, AND delete the DB rows so a restart can't
-    //     bring it back.
-    let corpse_linger = Duration::from_secs_f32(crate::world::corpses::CORPSE_LINGER_SECS);
-    let mut expired_corpses: Vec<EntityId> = Vec::new();
-    for corpse in corpses.values() {
-        if now.duration_since(corpse.spawned_at) >= corpse_linger {
-            expired_corpses.push(corpse.id);
-        }
-    }
-    for id in expired_corpses {
-        if let Some(corpse) = corpses.remove(&id) {
-            let cell = aoi::cell_for(corpse.pos.x, corpse.pos.z);
-            aoi.remove(id, cell);
-            let visible = aoi.entities_visible_from(cell);
-            for &recipient in in_world_recipients_now.iter() {
-                if visible.contains(&recipient) {
-                    handlers::send_entity_despawn(&mut *server, recipient, id);
-                }
-            }
-            if let Err(e) = db::delete_corpse(&pool, id as i64).await {
-                tracing::error!(corpse_id = id, error = %e, "delete_corpse on decay failed");
-            }
-            tracing::info!(corpse_id = id, char_id = corpse.owner_char, "corpse decayed — gear lost");
-        }
-    }
+/// Corpse / resurrection — a corpse despawns ONLY when a loot action emptied it:
+/// it held something before and is empty now. A corpse that was ALREADY empty (a
+/// naked-death res anchor) is NOT removed by a Take-All — it lingers for a Cleric
+/// resurrection. A named predicate so this linger rule is testable and hard to
+/// flip by accident (see the corpse-loot branch above).
+pub(super) fn corpse_emptied_by_loot(had_content: bool, empty_now: bool) -> bool {
+    had_content && empty_now
 }
 
 pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, _now: Instant, in_world_recipients_now: &[ClientId]) {
@@ -873,5 +824,82 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
                 tracing::warn!(looter = looter_cid, error = %e, "post-loot store save failed; the checkpoint will retry");
             }
         }
+    }
+}
+
+pub(super) async fn expire_bags_and_corpses(world: &mut WorldState, _q: &mut Intents, now: Instant, in_world_recipients_now: &[ClientId]) {
+    let WorldState { pool, server, aoi, loot_bags, corpses, .. } = world;
+    // 4k. Loot bag expiry. Bags linger LOOT_BAG_LINGER_SECS so
+    //     players have time to walk over and click; afterwards we
+    //     fan out EntityDespawn and drop the bag. Bags emptied
+    //     mid-life by the apply phase above already despawned via
+    //     EntityDespawn there — this loop only catches bags that
+    //     ran out the clock without being looted.
+    let bag_linger = Duration::from_secs_f32(LOOT_BAG_LINGER_SECS);
+    let mut expired_bags: Vec<EntityId> = Vec::new();
+    for bag in loot_bags.values() {
+        if now.duration_since(bag.spawned_at) >= bag_linger {
+            expired_bags.push(bag.id);
+        }
+    }
+    for id in expired_bags {
+        if let Some(bag) = loot_bags.remove(&id) {
+            // Track 7: remove from AOI; fan EntityDespawn only to visible players.
+            let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
+            aoi.remove(id, bag_cell);
+            let visible = aoi.entities_visible_from(bag_cell);
+            for &recipient in in_world_recipients_now.iter() {
+                if visible.contains(&recipient) {
+                    handlers::send_entity_despawn(&mut *server, recipient, id);
+                }
+            }
+        }
+    }
+
+    // 4k-bis. Corpse / resurrection Slice 1 — corpse decay. Corpses linger
+    //     much longer than loot bags (CORPSE_LINGER_SECS); on expiry the
+    //     corpse + its gear are gone for good: despawn to visible peers,
+    //     remove from AOI + map, AND delete the DB rows so a restart can't
+    //     bring it back.
+    let corpse_linger = Duration::from_secs_f32(crate::world::corpses::CORPSE_LINGER_SECS);
+    let mut expired_corpses: Vec<EntityId> = Vec::new();
+    for corpse in corpses.values() {
+        if now.duration_since(corpse.spawned_at) >= corpse_linger {
+            expired_corpses.push(corpse.id);
+        }
+    }
+    for id in expired_corpses {
+        if let Some(corpse) = corpses.remove(&id) {
+            let cell = aoi::cell_for(corpse.pos.x, corpse.pos.z);
+            aoi.remove(id, cell);
+            let visible = aoi.entities_visible_from(cell);
+            for &recipient in in_world_recipients_now.iter() {
+                if visible.contains(&recipient) {
+                    handlers::send_entity_despawn(&mut *server, recipient, id);
+                }
+            }
+            if let Err(e) = db::delete_corpse(&pool, id as i64).await {
+                tracing::error!(corpse_id = id, error = %e, "delete_corpse on decay failed");
+            }
+            tracing::info!(corpse_id = id, char_id = corpse.owner_char, "corpse decayed — gear lost");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::corpse_emptied_by_loot;
+
+    #[test]
+    fn corpse_lingers_unless_a_loot_emptied_it() {
+        // Held gear, now empty -> looted clean -> the body despawns.
+        assert!(corpse_emptied_by_loot(true, true));
+        // Born empty (naked death), Take-All'd -> nothing was taken -> it LINGERS
+        // as a res anchor. This is the edge the 2026-06-23 playtest didn't cover.
+        assert!(!corpse_emptied_by_loot(false, true));
+        // Partial loot -> still has items -> stays.
+        assert!(!corpse_emptied_by_loot(true, false));
+        // Empty and nothing taken -> lingers.
+        assert!(!corpse_emptied_by_loot(false, false));
     }
 }

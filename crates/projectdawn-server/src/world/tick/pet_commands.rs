@@ -1,4 +1,4 @@
-//! (phase module, doc to come)
+//! Pet commands (step 4hc): the owner's `/pet` commands applied to their pet.
 
 use super::*;
 

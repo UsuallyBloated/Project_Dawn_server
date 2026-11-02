@@ -1,4 +1,6 @@
-//! (phase module, doc to come)
+//! Player deaths (step 5a-bis): anyone at 0 HP this tick dies once: hate wiped, the XP
+//! penalty, the corpse written with the owner's stores in one transaction, and the death
+//! fanned.
 
 use super::*;
 

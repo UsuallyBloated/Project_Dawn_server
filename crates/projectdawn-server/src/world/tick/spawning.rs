@@ -1,4 +1,6 @@
-//! (phase module, doc to come)
+//! Spawns (steps 4g to 4g4): camp respawn timers and the Test Panel's spawns and
+//! despawns, the warder's auto-summon and respawn, and charms running out. Returns the
+//! in-world recipient list the later steps fan to.
 
 use super::*;
 

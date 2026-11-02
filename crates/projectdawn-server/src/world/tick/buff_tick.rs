@@ -1,4 +1,6 @@
-//! (phase module, doc to come)
+//! Buffs over time (steps 4s, 5a and 5a-pet): a bard's active song pulses, then every
+//! player's and pet's heal-over-time, mana regen, damage over time and expiry, with the
+//! snapshots that tell the clients.
 
 use super::*;
 

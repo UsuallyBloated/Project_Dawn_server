@@ -1,4 +1,6 @@
-//! (phase module, doc to come)
+//! End-of-tick upkeep (steps 6-ter to 7): quest progress flushed, the 60 s checkpoint,
+//! the `world health` line, logout-save retries, the world clock, the ban sweep and the
+//! ledger's daily sweep.
 
 use super::*;
 

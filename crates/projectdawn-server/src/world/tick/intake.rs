@@ -1,4 +1,6 @@
-//! (phase module, doc to come)
+//! The message drain (step 3): every client's packets decoded and handed to
+//! `handlers::handle_message`, whose outcomes fill this tick's `Intents` for the steps
+//! after it.
 
 use super::*;
 

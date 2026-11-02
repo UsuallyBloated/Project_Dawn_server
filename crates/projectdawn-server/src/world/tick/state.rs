@@ -6,6 +6,95 @@
 
 use super::*;
 
+/// Cast lifecycle event collected during message dispatch, fanned out
+/// after the dispatch loop in a single sweep so we don't need to re-fetch
+/// `connections` for each one.
+pub(super) enum CastEvent {
+    Start { spell_name: String, duration: f32 },
+    Complete { spell_name: String },
+    Fail { reason: String },
+}
+
+/// Track 6 sub-task 2 — buffered attack intent. Decoded by the handler;
+/// the post-dispatch sweep below runs `combat::calc_swing` (server
+/// authority on damage roll) and applies the resulting damage to the
+/// target — both enemies and (sub-task 3) players.
+pub(super) struct AttackIntent {
+    pub(super) attacker: u64,
+    pub(super) target_id: protocol::world::EntityId,
+    // The wire `weapon_path` is intentionally dropped here: the resolver derives
+    // the weapon from the server's equipment map, not the client's claim (Phase 1
+    // exploit gate, finding 5). `is_offhand` is kept — it selects the equip slot
+    // (0 main / 1 off) and applies the off-hand damage penalty.
+    pub(super) is_offhand: bool,
+    pub(super) dmg_type: protocol::world::DamageType,
+    /// `Some` when this swing is an active skill's (client-authority audit
+    /// item 6): the ordinary main-hand roll times the skill's multiplier,
+    /// outside the auto-attack swing-rate limiter (the skill's own cooldown
+    /// paces it), with the skill's effect on a landed hit. The stamina and
+    /// the cooldown were charged when the intent was resolved.
+    pub(super) skill: Option<SkillSwing>,
+}
+
+/// The part of an active skill that rides a swing.
+pub(super) struct SkillSwing {
+    pub(super) mult: f32,
+    pub(super) effect: active_skills::Effect,
+    pub(super) stun_duration: f32,
+}
+
+/// A `UseSkill` the handler accepted, resolved in step 4g: the target
+/// checked, the stamina and cooldown charged, then a SELF effect applied or
+/// a skill swing queued for step 4h.
+pub(super) struct UseSkillIntent {
+    pub(super) user: u64,
+    pub(super) skill_name: String,
+    pub(super) target_id: Option<protocol::world::EntityId>,
+}
+
+/// A character whose logout save did not fully land, and when it was queued.
+pub(super) struct PendingSave {
+    pub(super) conn: PerConnection,
+    pub(super) since: Instant,
+}
+
+pub(super) struct CastSpellIntent {
+    pub(super) caster: u64,
+    pub(super) spell_name: String,
+    pub(super) target_id: Option<protocol::world::EntityId>,
+    pub(super) cast_name_at_dispatch: String,
+    pub(super) cast_set_at_at_dispatch: Option<Instant>,
+    /// Track 17.2 — caster pos at CastStart, for the movement gate.
+    pub(super) cast_start_pos_at_dispatch: Vec3f,
+}
+
+/// Track 5 sub-task 4 — buffered loot pickup intent. `Slot(None)` is
+/// the "take everything" variant; `Slot(Some(idx))` is the
+/// "take one specific slot" variant. Same buffering rationale as
+/// AttackIntent.
+pub(super) struct LootIntent {
+    pub(super) looter: u64,
+    pub(super) bag_id: protocol::world::EntityId,
+    pub(super) slot: Option<u32>,
+}
+
+/// Track 4 sub-task 4 combat event. Same shape as CastEvent — one-shot
+/// per arrival, not coalesced, ordered.
+pub(super) enum CombatEvent {
+    Hit {
+        target: u64,
+        amount: i32,
+        crit: bool,
+        dmg_type: protocol::world::DamageType,
+    },
+    Miss {
+        target: u64,
+    },
+    Evade {
+        target: u64,
+    },
+}
+
 /// Everything the world loop keeps from one tick to the next.
 pub(super) struct WorldState {
     pub(super) cfg: Arc<Config>,

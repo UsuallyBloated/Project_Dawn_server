@@ -1,4 +1,4 @@
-//! (phase module, doc to come)
+//! The /camp countdown (step 5c): each camping player's timer, and the logout at its end.
 
 use super::*;
 

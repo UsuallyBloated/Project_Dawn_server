@@ -1,4 +1,5 @@
-//! (phase module, doc to come)
+//! Group intents (steps 4hb to 4hbc): invites, accepts, leaves, kicks, the loot mode,
+//! auto-split notices and leadership, each fanned to the members.
 
 use super::*;
 

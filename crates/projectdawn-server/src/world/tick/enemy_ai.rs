@@ -1,50 +1,7 @@
-//! (phase module, doc to come)
+//! The enemies' turn (steps 4i and 4j): each mob and pet runs its state machine and
+//! swings, and dead mobs are cleared after their linger.
 
 use super::*;
-
-pub(super) async fn clean_up_enemy_corpses(world: &mut WorldState, q: &mut Intents, now: Instant, in_world_recipients_now: &[ClientId]) {
-    let WorldState { pool, server, aoi, spawner, enemies, .. } = world;
-    let Intents { spell_gem_saves, .. } = q;
-    // 4j. Corpse cleanup. Dead enemies hold at their death pos for
-    //     ENEMY_DESPAWN_LINGER_SECS so the client can play the fall-over
-    //     animation; afterwards we fan out EntityDespawn, arm the
-    //     spawn point's respawn timer, and drop the row from the
-    //     world map. Collect ids in a first pass to avoid borrowing
-    //     `enemies` mutably twice in the same loop.
-    let corpse_linger = Duration::from_secs_f32(ENEMY_DESPAWN_LINGER_SECS);
-    let mut expired_ids: Vec<EntityId> = Vec::new();
-    for entity in enemies.values() {
-        if entity.is_alive() {
-            continue;
-        }
-        if now.duration_since(entity.state_entered_at) >= corpse_linger {
-            expired_ids.push(entity.id);
-        }
-    }
-    for id in expired_ids {
-        let Some(entity) = enemies.remove(&id) else {
-            continue;
-        };
-        // Track 7: remove from AOI; fan EntityDespawn only to players
-        // who could see the enemy's cell (plus a dead pet's owner,
-        // wherever they are).
-        let enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
-        aoi.remove(entity.id, enemy_cell);
-        let visible = aoi.entities_visible_from(enemy_cell);
-        for recipient in despawn_recipients(&visible, &in_world_recipients_now, &entity) {
-            handlers::send_entity_despawn(&mut *server, recipient, entity.id);
-        }
-        spawner.on_enemy_died(entity.spawn_point_idx, now);
-    }
-
-    // The spell bar, written as soon as it changes (a memorize is
-    // deliberate and rare; the 60 s checkpoint would lose one to a crash).
-    for (char_id, gems, seeded) in spell_gem_saves.drain(..) {
-        if let Err(e) = db::save_spell_gems(&pool, char_id, &gems, seeded).await {
-            tracing::warn!(char_id, error = %e, "save_spell_gems failed; the bar is live in memory but not persisted");
-        }
-    }
-}
 
 pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instant, dt: f32, in_world_recipients_now: &[ClientId]) {
     let WorldState { server, connections, aoi, enemies, loot_bags, group_manager, .. } = world;
@@ -1027,6 +984,50 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                     );
                 }
             }
+        }
+    }
+}
+
+pub(super) async fn clean_up_enemy_corpses(world: &mut WorldState, q: &mut Intents, now: Instant, in_world_recipients_now: &[ClientId]) {
+    let WorldState { pool, server, aoi, spawner, enemies, .. } = world;
+    let Intents { spell_gem_saves, .. } = q;
+    // 4j. Corpse cleanup. Dead enemies hold at their death pos for
+    //     ENEMY_DESPAWN_LINGER_SECS so the client can play the fall-over
+    //     animation; afterwards we fan out EntityDespawn, arm the
+    //     spawn point's respawn timer, and drop the row from the
+    //     world map. Collect ids in a first pass to avoid borrowing
+    //     `enemies` mutably twice in the same loop.
+    let corpse_linger = Duration::from_secs_f32(ENEMY_DESPAWN_LINGER_SECS);
+    let mut expired_ids: Vec<EntityId> = Vec::new();
+    for entity in enemies.values() {
+        if entity.is_alive() {
+            continue;
+        }
+        if now.duration_since(entity.state_entered_at) >= corpse_linger {
+            expired_ids.push(entity.id);
+        }
+    }
+    for id in expired_ids {
+        let Some(entity) = enemies.remove(&id) else {
+            continue;
+        };
+        // Track 7: remove from AOI; fan EntityDespawn only to players
+        // who could see the enemy's cell (plus a dead pet's owner,
+        // wherever they are).
+        let enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
+        aoi.remove(entity.id, enemy_cell);
+        let visible = aoi.entities_visible_from(enemy_cell);
+        for recipient in despawn_recipients(&visible, &in_world_recipients_now, &entity) {
+            handlers::send_entity_despawn(&mut *server, recipient, entity.id);
+        }
+        spawner.on_enemy_died(entity.spawn_point_idx, now);
+    }
+
+    // The spell bar, written as soon as it changes (a memorize is
+    // deliberate and rare; the 60 s checkpoint would lose one to a crash).
+    for (char_id, gems, seeded) in spell_gem_saves.drain(..) {
+        if let Err(e) = db::save_spell_gems(&pool, char_id, &gems, seeded).await {
+            tracing::warn!(char_id, error = %e, "save_spell_gems failed; the bar is live in memory but not persisted");
         }
     }
 }

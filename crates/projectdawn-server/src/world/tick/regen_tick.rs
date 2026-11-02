@@ -1,4 +1,5 @@
-//! (phase module, doc to come)
+//! Natural regeneration (step 5b): hit points, mana and stamina, gated by food and
+//! water; hunger and thirst drain, eating by itself, and the eating emote.
 
 use super::*;
 

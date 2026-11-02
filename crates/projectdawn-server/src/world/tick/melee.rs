@@ -1,6 +1,216 @@
-//! (phase module, doc to come)
+//! Melee (steps 4g, the active skills, and 4h): skill uses and auto-attack swings, paced
+//! by the swing-rate limit (`swing`) and resolved by `combat`.
 
 use super::*;
+
+pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: Instant, in_world_recipients_now: &[ClientId]) {
+    let WorldState { server, connections, enemies, .. } = world;
+    let Intents { attack_intents, use_skill_intents, .. } = q;
+    // 4g. Active skills (client-authority audit item 6). The handler
+    //     checked the skill, the class, the crowd control, the cooldown
+    //     and the stamina; here the target is checked, the stamina and
+    //     the cooldown are charged, and then a SELF skill's effect is
+    //     applied or a damage skill becomes a swing for step 4h with the
+    //     skill's multiplier and effect riding it. A refusal costs nothing
+    //     and answers with SkillFail, so the client drops the cooldown it
+    //     started.
+    if !use_skill_intents.is_empty() {
+        for intent in use_skill_intents.drain(..) {
+            let user_cid = intent.user as ClientId;
+            let Some(skill) = active_skills::lookup(&intent.skill_name) else { continue };
+            let Some(user) = connections.get(&user_cid) else { continue };
+            // A dead user uses nothing (as a dead caster casts nothing).
+            if !user.in_world || user.hp <= 0.0 || user.death_processed {
+                continue;
+            }
+            // Checked again against this tick's state: two UseSkills in
+            // one datagram passed the handler on the same stamina.
+            if active_skills::on_cooldown(user.skill_cooldowns.get(&skill.name).copied(), now) {
+                handlers::send_skill_fail(&mut *server, user_cid, &skill.name, "You cannot use that yet.");
+                continue;
+            }
+            if user.stamina < skill.stamina_cost {
+                handlers::send_skill_fail(&mut *server, user_cid, &skill.name, "You are too tired.");
+                continue;
+            }
+            let user_pos = user.pos;
+            let user_zone = user.zone.clone();
+            let effect = skill.effect();
+
+            if skill.is_damage() {
+                // The reach of the main-hand weapon, as the swing it
+                // becomes will check again (step 4h fans a Miss for a
+                // target out of reach; the skill refuses before any cost).
+                let weapon_path = user.equipped_weapon_path(false);
+                let ranged = items::lookup(&weapon_path).is_some_and(|w| w.is_ranged);
+                let Some(target_id) = intent.target_id else {
+                    handlers::send_skill_fail(&mut *server, user_cid, &skill.name, "You have no target.");
+                    continue;
+                };
+                // Presence, liveness and reach share ONE line, so an id
+                // probed from across the world learns nothing (the
+                // 2026-10-02 rule: no refusal is an is-online or
+                // PvP-flag oracle); the PvP gate answers only for a
+                // target in reach, which is on the user's screen anyway.
+                // Pets inherit their owner's flag, as for a plain swing.
+                const NOT_HERE: &str = "That target is not here.";
+                let check: Result<(), &str> = if target_id < protocol::world::ENEMY_ID_BASE {
+                    if target_id == intent.user {
+                        Err("You cannot use that on yourself.")
+                    } else {
+                        let allowed = if ranged { RANGED_ATTACK_RANGE } else { 3.0 * ATTACK_RANGE_TOLERANCE };
+                        match connections.get(&(target_id as ClientId)) {
+                            Some(t) if t.in_world && t.hp > 0.0 && t.pos.distance_to(user_pos) <= allowed => {
+                                if combat::can_attack(user, t, user_zone.as_deref(), t.zone.as_deref()) {
+                                    Ok(())
+                                } else {
+                                    Err("Unable to attack that target.")
+                                }
+                            }
+                            _ => Err(NOT_HERE),
+                        }
+                    }
+                } else {
+                    match enemies.get(&target_id) {
+                        Some(e) if e.is_alive() => {
+                            let allowed = if ranged { RANGED_ATTACK_RANGE } else { e.melee_range() * ATTACK_RANGE_TOLERANCE };
+                            if e.pos.distance_to(user_pos) > allowed {
+                                Err(NOT_HERE)
+                            } else {
+                                match e.owner {
+                                    None => Ok(()),
+                                    Some(owner) if owner as ClientId == user_cid => Err("You cannot attack your own pet."),
+                                    Some(owner) => match connections.get(&(owner as ClientId)) {
+                                        Some(o) if combat::can_attack(user, o, user_zone.as_deref(), o.zone.as_deref()) => Ok(()),
+                                        _ => Err("Unable to attack that target."),
+                                    },
+                                }
+                            }
+                        }
+                        _ => Err(NOT_HERE),
+                    }
+                };
+                if let Err(line) = check {
+                    handlers::send_skill_fail(&mut *server, user_cid, &skill.name, line);
+                    continue;
+                }
+            }
+
+            // A SELF skill whose effect still holds is refused, not
+            // refreshed: a Holy Shield re-pressed on cooldown would refill
+            // its pool for 10 stamina (the pool lasts until spent, as the
+            // absorb spells do), and a second Hide while hidden buys
+            // nothing.
+            let holding: Option<&str> = match effect {
+                active_skills::Effect::AbsorbShield
+                    if user.active_buffs.iter().any(|b| matches!(b.effect, buffs::BuffEffect::Absorb { pool } if pool > 0.0)) =>
+                {
+                    Some("Your shield still holds.")
+                }
+                active_skills::Effect::Stealth if buffs::is_hidden(&user.active_buffs) => Some("You are already hidden."),
+                _ => None,
+            };
+            if let Some(line) = holding {
+                handlers::send_skill_fail(&mut *server, user_cid, &skill.name, line);
+                continue;
+            }
+
+            // Charged: the stamina (mark_dirty has the regen loop fan it,
+            // a spend past 5% of the bar on the next tick, so a
+            // group-mate's panel moves with it), the cooldown, and the
+            // user stands. A damage skill also marks them in combat; a
+            // Hide does not.
+            if let Some(u) = connections.get_mut(&user_cid) {
+                u.stamina = (u.stamina - skill.stamina_cost).max(0.0);
+                regen::mark_dirty(u);
+                u.skill_cooldowns.insert(skill.name.clone(), now + skill.cooldown_duration());
+                u.is_sitting = false;
+                if skill.is_damage() {
+                    u.last_attack_at = Some(now);
+                }
+            }
+            tracing::info!(user = intent.user, skill = %skill.name, cost = skill.stamina_cost, "skill used");
+
+            if skill.is_damage() {
+                attack_intents.push(AttackIntent {
+                    attacker: intent.user,
+                    target_id: intent.target_id.unwrap_or(0),
+                    is_offhand: false,
+                    dmg_type: DamageType::Physical,
+                    skill: Some(SkillSwing {
+                        mult: skill.damage_multiplier,
+                        effect,
+                        stun_duration: skill.stun_duration,
+                    }),
+                });
+                continue;
+            }
+
+            // SELF skills: a buff on the user, or a feign death.
+            let mut snapshot_changed = false;
+            match effect {
+                active_skills::Effect::EvadeBoost => {
+                    if let Some(u) = connections.get_mut(&user_cid) {
+                        u.active_buffs.retain(|b| b.name != skill.name);
+                        u.active_buffs.push(ActiveBuff::new_evade_all(skill.name.clone(), skill.effect_duration, now));
+                        snapshot_changed = true;
+                    }
+                }
+                active_skills::Effect::AbsorbShield => {
+                    if let Some(u) = connections.get_mut(&user_cid) {
+                        u.active_buffs.retain(|b| b.name != skill.name);
+                        u.active_buffs.push(ActiveBuff::new_absorb(skill.name.clone(), skill.absorb_amount, now));
+                        snapshot_changed = true;
+                    }
+                }
+                active_skills::Effect::Stealth => {
+                    if let Some(u) = connections.get_mut(&user_cid) {
+                        u.active_buffs.retain(|b| b.name != skill.name);
+                        u.active_buffs.push(ActiveBuff::new_stealth(skill.name.clone(), skill.stealth_duration, now));
+                        snapshot_changed = true;
+                    }
+                    handlers::send_system_line(&mut *server, user_cid, "You have hidden yourself from view.");
+                }
+                active_skills::Effect::FeignDeath => {
+                    let roll: f32 = rand::thread_rng().gen();
+                    if active_skills::feign_death_succeeds(roll) {
+                        // Every mob forgets the user (their DoTs end with
+                        // their hate, so a feigned player is paid nothing
+                        // by what they left ticking), and the mobs that
+                        // lost their target are fanned as such.
+                        for mob_id in wipe_hate(&mut *enemies, &[intent.user]) {
+                            handlers::fan_out_entity_target(&mut *server, &in_world_recipients_now, mob_id, None);
+                        }
+                        // And they lie unnoticed until they stand (any
+                        // movement), swing, use a skill or cast at a mob,
+                        // or two minutes pass; otherwise a mob with an
+                        // aggro radius would turn straight back on them.
+                        if let Some(u) = connections.get_mut(&user_cid) {
+                            u.active_buffs.retain(|b| !matches!(b.effect, buffs::BuffEffect::Feigned));
+                            u.active_buffs.push(ActiveBuff::new_feigned(
+                                "Feigned Death".to_string(),
+                                active_skills::FEIGN_DEATH_HOLD_SECS,
+                                now,
+                            ));
+                            snapshot_changed = true;
+                        }
+                        handlers::send_system_line(&mut *server, user_cid, "You feign death successfully.");
+                        tracing::info!(user = intent.user, "feign death succeeded");
+                    } else {
+                        handlers::send_system_line(&mut *server, user_cid, "Your feign death fails!");
+                        tracing::info!(user = intent.user, "feign death failed");
+                    }
+                }
+                _ => {}
+            }
+            if snapshot_changed {
+                if let Some(u) = connections.get(&user_cid) {
+                    fan_out_server_buff_snapshot(&mut *server, &in_world_recipients_now, u);
+                }
+            }
+        }
+    }
+}
 
 pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instant, in_world_recipients_now: &[ClientId]) {
     let WorldState { server, connections, aoi, enemies, loot_bags, group_manager, .. } = world;
@@ -872,215 +1082,6 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                         stacks = stacks_for_log,
                         "loot bag spawned"
                     );
-                }
-            }
-        }
-    }
-}
-
-pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: Instant, in_world_recipients_now: &[ClientId]) {
-    let WorldState { server, connections, enemies, .. } = world;
-    let Intents { attack_intents, use_skill_intents, .. } = q;
-    // 4g. Active skills (client-authority audit item 6). The handler
-    //     checked the skill, the class, the crowd control, the cooldown
-    //     and the stamina; here the target is checked, the stamina and
-    //     the cooldown are charged, and then a SELF skill's effect is
-    //     applied or a damage skill becomes a swing for step 4h with the
-    //     skill's multiplier and effect riding it. A refusal costs nothing
-    //     and answers with SkillFail, so the client drops the cooldown it
-    //     started.
-    if !use_skill_intents.is_empty() {
-        for intent in use_skill_intents.drain(..) {
-            let user_cid = intent.user as ClientId;
-            let Some(skill) = active_skills::lookup(&intent.skill_name) else { continue };
-            let Some(user) = connections.get(&user_cid) else { continue };
-            // A dead user uses nothing (as a dead caster casts nothing).
-            if !user.in_world || user.hp <= 0.0 || user.death_processed {
-                continue;
-            }
-            // Checked again against this tick's state: two UseSkills in
-            // one datagram passed the handler on the same stamina.
-            if active_skills::on_cooldown(user.skill_cooldowns.get(&skill.name).copied(), now) {
-                handlers::send_skill_fail(&mut *server, user_cid, &skill.name, "You cannot use that yet.");
-                continue;
-            }
-            if user.stamina < skill.stamina_cost {
-                handlers::send_skill_fail(&mut *server, user_cid, &skill.name, "You are too tired.");
-                continue;
-            }
-            let user_pos = user.pos;
-            let user_zone = user.zone.clone();
-            let effect = skill.effect();
-
-            if skill.is_damage() {
-                // The reach of the main-hand weapon, as the swing it
-                // becomes will check again (step 4h fans a Miss for a
-                // target out of reach; the skill refuses before any cost).
-                let weapon_path = user.equipped_weapon_path(false);
-                let ranged = items::lookup(&weapon_path).is_some_and(|w| w.is_ranged);
-                let Some(target_id) = intent.target_id else {
-                    handlers::send_skill_fail(&mut *server, user_cid, &skill.name, "You have no target.");
-                    continue;
-                };
-                // Presence, liveness and reach share ONE line, so an id
-                // probed from across the world learns nothing (the
-                // 2026-10-02 rule: no refusal is an is-online or
-                // PvP-flag oracle); the PvP gate answers only for a
-                // target in reach, which is on the user's screen anyway.
-                // Pets inherit their owner's flag, as for a plain swing.
-                const NOT_HERE: &str = "That target is not here.";
-                let check: Result<(), &str> = if target_id < protocol::world::ENEMY_ID_BASE {
-                    if target_id == intent.user {
-                        Err("You cannot use that on yourself.")
-                    } else {
-                        let allowed = if ranged { RANGED_ATTACK_RANGE } else { 3.0 * ATTACK_RANGE_TOLERANCE };
-                        match connections.get(&(target_id as ClientId)) {
-                            Some(t) if t.in_world && t.hp > 0.0 && t.pos.distance_to(user_pos) <= allowed => {
-                                if combat::can_attack(user, t, user_zone.as_deref(), t.zone.as_deref()) {
-                                    Ok(())
-                                } else {
-                                    Err("Unable to attack that target.")
-                                }
-                            }
-                            _ => Err(NOT_HERE),
-                        }
-                    }
-                } else {
-                    match enemies.get(&target_id) {
-                        Some(e) if e.is_alive() => {
-                            let allowed = if ranged { RANGED_ATTACK_RANGE } else { e.melee_range() * ATTACK_RANGE_TOLERANCE };
-                            if e.pos.distance_to(user_pos) > allowed {
-                                Err(NOT_HERE)
-                            } else {
-                                match e.owner {
-                                    None => Ok(()),
-                                    Some(owner) if owner as ClientId == user_cid => Err("You cannot attack your own pet."),
-                                    Some(owner) => match connections.get(&(owner as ClientId)) {
-                                        Some(o) if combat::can_attack(user, o, user_zone.as_deref(), o.zone.as_deref()) => Ok(()),
-                                        _ => Err("Unable to attack that target."),
-                                    },
-                                }
-                            }
-                        }
-                        _ => Err(NOT_HERE),
-                    }
-                };
-                if let Err(line) = check {
-                    handlers::send_skill_fail(&mut *server, user_cid, &skill.name, line);
-                    continue;
-                }
-            }
-
-            // A SELF skill whose effect still holds is refused, not
-            // refreshed: a Holy Shield re-pressed on cooldown would refill
-            // its pool for 10 stamina (the pool lasts until spent, as the
-            // absorb spells do), and a second Hide while hidden buys
-            // nothing.
-            let holding: Option<&str> = match effect {
-                active_skills::Effect::AbsorbShield
-                    if user.active_buffs.iter().any(|b| matches!(b.effect, buffs::BuffEffect::Absorb { pool } if pool > 0.0)) =>
-                {
-                    Some("Your shield still holds.")
-                }
-                active_skills::Effect::Stealth if buffs::is_hidden(&user.active_buffs) => Some("You are already hidden."),
-                _ => None,
-            };
-            if let Some(line) = holding {
-                handlers::send_skill_fail(&mut *server, user_cid, &skill.name, line);
-                continue;
-            }
-
-            // Charged: the stamina (mark_dirty has the regen loop fan it,
-            // a spend past 5% of the bar on the next tick, so a
-            // group-mate's panel moves with it), the cooldown, and the
-            // user stands. A damage skill also marks them in combat; a
-            // Hide does not.
-            if let Some(u) = connections.get_mut(&user_cid) {
-                u.stamina = (u.stamina - skill.stamina_cost).max(0.0);
-                regen::mark_dirty(u);
-                u.skill_cooldowns.insert(skill.name.clone(), now + skill.cooldown_duration());
-                u.is_sitting = false;
-                if skill.is_damage() {
-                    u.last_attack_at = Some(now);
-                }
-            }
-            tracing::info!(user = intent.user, skill = %skill.name, cost = skill.stamina_cost, "skill used");
-
-            if skill.is_damage() {
-                attack_intents.push(AttackIntent {
-                    attacker: intent.user,
-                    target_id: intent.target_id.unwrap_or(0),
-                    is_offhand: false,
-                    dmg_type: DamageType::Physical,
-                    skill: Some(SkillSwing {
-                        mult: skill.damage_multiplier,
-                        effect,
-                        stun_duration: skill.stun_duration,
-                    }),
-                });
-                continue;
-            }
-
-            // SELF skills: a buff on the user, or a feign death.
-            let mut snapshot_changed = false;
-            match effect {
-                active_skills::Effect::EvadeBoost => {
-                    if let Some(u) = connections.get_mut(&user_cid) {
-                        u.active_buffs.retain(|b| b.name != skill.name);
-                        u.active_buffs.push(ActiveBuff::new_evade_all(skill.name.clone(), skill.effect_duration, now));
-                        snapshot_changed = true;
-                    }
-                }
-                active_skills::Effect::AbsorbShield => {
-                    if let Some(u) = connections.get_mut(&user_cid) {
-                        u.active_buffs.retain(|b| b.name != skill.name);
-                        u.active_buffs.push(ActiveBuff::new_absorb(skill.name.clone(), skill.absorb_amount, now));
-                        snapshot_changed = true;
-                    }
-                }
-                active_skills::Effect::Stealth => {
-                    if let Some(u) = connections.get_mut(&user_cid) {
-                        u.active_buffs.retain(|b| b.name != skill.name);
-                        u.active_buffs.push(ActiveBuff::new_stealth(skill.name.clone(), skill.stealth_duration, now));
-                        snapshot_changed = true;
-                    }
-                    handlers::send_system_line(&mut *server, user_cid, "You have hidden yourself from view.");
-                }
-                active_skills::Effect::FeignDeath => {
-                    let roll: f32 = rand::thread_rng().gen();
-                    if active_skills::feign_death_succeeds(roll) {
-                        // Every mob forgets the user (their DoTs end with
-                        // their hate, so a feigned player is paid nothing
-                        // by what they left ticking), and the mobs that
-                        // lost their target are fanned as such.
-                        for mob_id in wipe_hate(&mut *enemies, &[intent.user]) {
-                            handlers::fan_out_entity_target(&mut *server, &in_world_recipients_now, mob_id, None);
-                        }
-                        // And they lie unnoticed until they stand (any
-                        // movement), swing, use a skill or cast at a mob,
-                        // or two minutes pass; otherwise a mob with an
-                        // aggro radius would turn straight back on them.
-                        if let Some(u) = connections.get_mut(&user_cid) {
-                            u.active_buffs.retain(|b| !matches!(b.effect, buffs::BuffEffect::Feigned));
-                            u.active_buffs.push(ActiveBuff::new_feigned(
-                                "Feigned Death".to_string(),
-                                active_skills::FEIGN_DEATH_HOLD_SECS,
-                                now,
-                            ));
-                            snapshot_changed = true;
-                        }
-                        handlers::send_system_line(&mut *server, user_cid, "You feign death successfully.");
-                        tracing::info!(user = intent.user, "feign death succeeded");
-                    } else {
-                        handlers::send_system_line(&mut *server, user_cid, "Your feign death fails!");
-                        tracing::info!(user = intent.user, "feign death failed");
-                    }
-                }
-                _ => {}
-            }
-            if snapshot_changed {
-                if let Some(u) = connections.get(&user_cid) {
-                    fan_out_server_buff_snapshot(&mut *server, &in_world_recipients_now, u);
                 }
             }
         }

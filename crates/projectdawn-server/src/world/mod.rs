@@ -28,6 +28,7 @@ mod entity;
 pub mod factions;
 mod groups;
 mod handlers;
+mod health;
 pub mod hunger;
 mod inventory;
 mod items;
@@ -109,7 +110,9 @@ pub const KICK_FLUSH_GRACE: Duration = Duration::from_secs(1);
 pub const ENEMY_POSITION_KEEPALIVE: Duration = Duration::from_millis(500);
 /// Cadence of the `enemy position fan` log line (sends in the window, alive
 /// enemies, players in world) that measures the stream above. Skipped while
-/// nobody is in world.
+/// nobody is in world. The `world health` line (tick and checkpoint times,
+/// `health.rs`) shares the cadence, and is logged with nobody in world only
+/// when a tick ran past its budget.
 pub const ENEMY_FAN_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 /// Where a character with no bind point respawns, and the position a freshly
 /// created character starts at (`create_character` leaves `pos_*` NULL, which

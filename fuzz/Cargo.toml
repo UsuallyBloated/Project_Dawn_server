@@ -1,0 +1,34 @@
+# Fuzz targets for the server (`cargo fuzz`). Builds on the nightly toolchain
+# only, so it is its own workspace and stays out of the server's build, tests
+# and CI. Run from the repository root:
+#   cargo +nightly fuzz run handle_arbitrary
+# See README.md in this folder.
+[package]
+name = "projectdawn-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+projectdawn-server = { path = "../crates/projectdawn-server", features = ["fuzzing"] }
+
+[[bin]]
+name = "decode_and_handle"
+path = "fuzz_targets/decode_and_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handle_arbitrary"
+path = "fuzz_targets/handle_arbitrary.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

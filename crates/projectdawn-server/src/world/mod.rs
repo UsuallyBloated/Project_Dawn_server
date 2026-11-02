@@ -26,6 +26,8 @@ mod corpses;
 pub mod encumbrance;
 mod entity;
 pub mod factions;
+#[cfg(any(test, feature = "fuzzing"))]
+pub mod fuzzing;
 mod groups;
 mod handlers;
 mod health;

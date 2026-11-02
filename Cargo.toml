@@ -23,6 +23,9 @@ license = "Proprietary"
 publish = false
 
 [workspace.dependencies]
+# Random structured inputs for the handler soak test and the fuzz targets only
+# (protocol's `arbitrary` feature; never in the server's own build).
+arbitrary = { version = "1.5.0", features = ["derive"] }
 # Property tests (dev-dependency only; never in a shipped binary).
 proptest = "1"
 

@@ -174,6 +174,7 @@ pub type EntityId = u64;
 /// existing stacks. Wholesale re-minting is an explicit moneychanger action,
 /// never a side effect of buying or selling.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Coins {
     pub platinum: i64,
     pub gold: i64,
@@ -434,6 +435,7 @@ impl CoinAmount {
 pub type Sequence = u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Vec3 {
     pub x: f32,
     pub y: f32,
@@ -441,6 +443,7 @@ pub struct Vec3 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(u8)]
 pub enum DamageType {
     Physical = 0,
@@ -468,6 +471,7 @@ pub enum SkillKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum ChatChannel {
     Say,
     Ooc,
@@ -483,6 +487,7 @@ pub enum ChatChannel {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum EquipSlot {
     Weapon,
     Offhand,
@@ -496,6 +501,7 @@ pub enum EquipSlot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum SlotRef {
     BaseSlot { idx: u8 },
     BagSlot { base: u8, slot: u8 },
@@ -509,6 +515,7 @@ pub enum SlotRef {
 // ─── Client → Server ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum ClientWorldMsg {
     // Connection
     Connect {

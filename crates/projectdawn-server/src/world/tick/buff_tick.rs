@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) fn run_buff_tick(world: &mut WorldState, _q: &mut Intents, now: Instant, dt: f32, in_world_recipients_now: &[ClientId]) {
-    let WorldState { pool, server, connections, enemies, .. } = world;
+    let WorldState { server, connections, enemies, .. } = world;
     // 4s. Bard song pulses (the rework of 2026-10-20): every singer whose
     //     next pulse is due gets the song's effects again, the ordinary
     //     buffs lingering SONG_LINGER_SECS, and the ENEMY song's slow on

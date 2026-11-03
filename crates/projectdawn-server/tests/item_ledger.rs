@@ -26,6 +26,18 @@ async fn account_and_character(pool: &sqlx::SqlitePool, user: &str, name: &str) 
     let char_id = db::create_character(pool, account_id, name, "Human", "Warrior")
         .await
         .expect("create character");
+    // These tests write their own holdings from nothing: take the starting
+    // kit (world/starter_kit.rs) back off, its ledger rows with it.
+    sqlx::query("DELETE FROM character_items WHERE char_id = ?1")
+        .bind(char_id)
+        .execute(pool)
+        .await
+        .expect("strip the kit");
+    sqlx::query("DELETE FROM item_events WHERE char_id = ?1")
+        .bind(char_id)
+        .execute(pool)
+        .await
+        .expect("strip the kit's rows");
     (account_id, char_id)
 }
 

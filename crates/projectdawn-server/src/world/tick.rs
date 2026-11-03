@@ -7195,6 +7195,17 @@ pub async fn run(
                         if from_location == format!("bag_{}", inventory::CURSOR_BAG_KEY) {
                             continue; // forged-only
                         }
+                        // NO DROP is bound to its holder: refused before a held
+                        // stack is parked, so a refusal moves nothing.
+                        if connections
+                            .get(&cid)
+                            .and_then(|c| c.inventory.peek_at(&from_location, from_slot))
+                            .is_some_and(|(path, _)| items::is_no_drop(&path))
+                        {
+                            tracing::info!(owner, "TradeOfferItem refused — NO DROP");
+                            handlers::send_refusal(&mut server, cid, items::NO_DROP_REFUSAL);
+                            continue;
+                        }
                         // Resolve the source. "cursor" parks the held stack
                         // into an empty inventory slot first (no merging, so
                         // the offer stays one discrete referenced stack) and
@@ -7905,6 +7916,16 @@ pub async fn run(
                     handlers::send_refusal(&mut server, owner_cid, "You can't drop that.");
                     continue;
                 };
+                // NO DROP never reaches the ground, where anyone could pick it up.
+                if conn
+                    .inventory
+                    .peek_at(&intent.location, intent.slot)
+                    .is_some_and(|(path, _)| items::is_no_drop(&path))
+                {
+                    tracing::info!(owner = intent.owner, "DropItem refused — NO DROP");
+                    handlers::send_refusal(&mut server, owner_cid, items::NO_DROP_REFUSAL);
+                    continue;
+                }
                 // An honest client drops one stack per click; anything past
                 // the cap in one tick is a flood and is ignored.
                 let seen = drops_seen.entry(owner_cid).or_insert(0);
@@ -8904,6 +8925,12 @@ pub async fn run(
                     handlers::send_refusal(&mut server, owner_cid, "The merchant won't take that.");
                     continue;
                 };
+                // NO DROP never leaves its holder, whatever it is worth.
+                if item.no_drop {
+                    tracing::info!(owner = intent.owner, item_path = %item_path, "SellItem refused — NO DROP");
+                    handlers::send_refusal(&mut server, owner_cid, items::NO_DROP_REFUSAL);
+                    continue;
+                }
                 let unit_price = (item.vendor_price as i64) / 2;
                 if unit_price <= 0 {
                     tracing::info!(
@@ -9183,6 +9210,14 @@ pub async fn run(
             };
             if items::bag_num_slots(&path).is_some() {
                 handlers::send_bank_rejected(&mut server, cid, "Bags can't go in the bank vault.".to_string());
+                continue;
+            }
+            // The shared vault is how items pass between an account's
+            // characters; NO DROP stays with its own (the character's own
+            // vault is fine).
+            if intent.shared && items::is_no_drop(&path) {
+                tracing::info!(owner = intent.owner, "BankStoreItem refused — NO DROP to the shared vault");
+                handlers::send_bank_rejected(&mut server, cid, items::NO_DROP_REFUSAL.to_string());
                 continue;
             }
             let room = if intent.shared {

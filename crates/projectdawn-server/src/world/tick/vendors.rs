@@ -4,8 +4,14 @@
 use super::*;
 
 pub(super) fn apply_buys(world: &mut WorldState, q: &mut Intents, _now: Instant) {
-    let WorldState { server, connections, .. } = world;
-    let Intents { buy_item_intents, .. } = q;
+    let WorldState {
+        server,
+        connections,
+        ..
+    } = world;
+    let Intents {
+        buy_item_intents, ..
+    } = q;
     // 4hi. Track 14 follow-up — apply vendor BuyItem intents.
     //      Server validates: item exists, player has enough coins,
     //      inventory has room. On success: deducts coins, grants
@@ -33,13 +39,21 @@ pub(super) fn apply_buys(world: &mut WorldState, q: &mut Intents, _now: Instant)
                         pos = ?conn.pos,
                         "BuyItem rejected — no vendor within range"
                     );
-                    handlers::send_refusal(&mut *server, owner_cid, "There is no merchant near you.");
+                    handlers::send_refusal(
+                        &mut *server,
+                        owner_cid,
+                        "There is no merchant near you.",
+                    );
                     continue;
                 }
                 // Factions (2026-10-23): EQ's merchants refuse at Dubious.
                 Err(Some(npc)) => {
                     tracing::info!(char_id = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "BuyItem rejected — faction");
-                    handlers::send_refusal(&mut *server, owner_cid, &format!("{} will not deal with you.", npc.name));
+                    handlers::send_refusal(
+                        &mut *server,
+                        owner_cid,
+                        &format!("{} will not deal with you.", npc.name),
+                    );
                     continue;
                 }
                 Ok(_) => {}
@@ -58,9 +72,7 @@ pub(super) fn apply_buys(world: &mut WorldState, q: &mut Intents, _now: Instant)
                     item_name = %intent.item_name,
                     "BuyItem rejected — no merchant in reach stocks it"
                 );
-                handlers::send_refusal(
-                    &mut *server, owner_cid, "The merchant doesn't stock that.",
-                );
+                handlers::send_refusal(&mut *server, owner_cid, "The merchant doesn't stock that.");
                 continue;
             };
             let Some(item) = items::lookup_by_name(&intent.item_name) else {
@@ -69,9 +81,7 @@ pub(super) fn apply_buys(world: &mut WorldState, q: &mut Intents, _now: Instant)
                     item_name = %intent.item_name,
                     "BuyItem rejected — unknown item name"
                 );
-                handlers::send_refusal(
-                    &mut *server, owner_cid, "The merchant doesn't stock that.",
-                );
+                handlers::send_refusal(&mut *server, owner_cid, "The merchant doesn't stock that.");
                 continue;
             };
             let unit_price = item.vendor_price as i64;
@@ -81,9 +91,7 @@ pub(super) fn apply_buys(world: &mut WorldState, q: &mut Intents, _now: Instant)
                     item_name = %intent.item_name,
                     "BuyItem rejected — item has no vendor_price"
                 );
-                handlers::send_refusal(
-                    &mut *server, owner_cid, "That isn't for sale.",
-                );
+                handlers::send_refusal(&mut *server, owner_cid, "That isn't for sale.");
                 continue;
             }
             let total_cost = unit_price.saturating_mul(intent.qty as i64);
@@ -95,28 +103,24 @@ pub(super) fn apply_buys(world: &mut WorldState, q: &mut Intents, _now: Instant)
                     cost = total_cost,
                     "BuyItem rejected — insufficient coins"
                 );
-                handlers::send_refusal(
-                    &mut *server, owner_cid, "You can't afford that.",
-                );
+                handlers::send_refusal(&mut *server, owner_cid, "You can't afford that.");
                 continue;
             }
             let item_path = item.path.clone();
-            let (touched, leftover) =
-                match conn.inventory.add_item_locating(&item_path, intent.qty) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::info!(
-                            char_id = intent.owner,
-                            item_name = %intent.item_name,
-                            error = %e,
-                            "BuyItem rejected — add_item_locating error"
-                        );
-                        handlers::send_refusal(
-                            &mut *server, owner_cid, "You can't carry that.",
-                        );
-                        continue;
-                    }
-                };
+            let (touched, leftover) = match conn.inventory.add_item_locating(&item_path, intent.qty)
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::info!(
+                        char_id = intent.owner,
+                        item_name = %intent.item_name,
+                        error = %e,
+                        "BuyItem rejected — add_item_locating error"
+                    );
+                    handlers::send_refusal(&mut *server, owner_cid, "You can't carry that.");
+                    continue;
+                }
+            };
             let placed = intent.qty - leftover;
             if placed == 0 {
                 tracing::info!(
@@ -127,9 +131,7 @@ pub(super) fn apply_buys(world: &mut WorldState, q: &mut Intents, _now: Instant)
                 // The case a tester hit on 2026-08-21: the client had already
                 // said "Ordered", so with no reply the item looked like it
                 // vanished. Nothing was charged.
-                handlers::send_refusal(
-                    &mut *server, owner_cid, "Your bags are full.",
-                );
+                handlers::send_refusal(&mut *server, owner_cid, "Your bags are full.");
                 continue;
             }
             // Charge only for what we actually placed. The pre-flight
@@ -190,8 +192,15 @@ pub(super) fn apply_buys(world: &mut WorldState, q: &mut Intents, _now: Instant)
 }
 
 pub(super) fn apply_sells(world: &mut WorldState, q: &mut Intents, _now: Instant) {
-    let WorldState { server, connections, trade_manager, .. } = world;
-    let Intents { sell_item_intents, .. } = q;
+    let WorldState {
+        server,
+        connections,
+        trade_manager,
+        ..
+    } = world;
+    let Intents {
+        sell_item_intents, ..
+    } = q;
     // 4hj. Track 14 follow-up — apply vendor SellItem intents.
     //      Server: looks up the slot, validates item count, computes
     //      sell price (vendor_price / 2 per unit, mirroring the
@@ -211,7 +220,13 @@ pub(super) fn apply_sells(world: &mut WorldState, q: &mut Intents, _now: Instant
                 protocol::world::SlotRef::EquipSlot(_) => (String::new(), 0),
             };
             if !lock_loc.is_empty()
-                && trade_locked(&mut *server, &trade_manager, owner_cid, &lock_loc, lock_slot)
+                && trade_locked(
+                    &mut *server,
+                    &trade_manager,
+                    owner_cid,
+                    &lock_loc,
+                    lock_slot,
+                )
             {
                 continue;
             }
@@ -227,12 +242,20 @@ pub(super) fn apply_sells(world: &mut WorldState, q: &mut Intents, _now: Instant
                         pos = ?conn.pos,
                         "SellItem rejected — no vendor within range"
                     );
-                    handlers::send_refusal(&mut *server, owner_cid, "There is no merchant near you.");
+                    handlers::send_refusal(
+                        &mut *server,
+                        owner_cid,
+                        "There is no merchant near you.",
+                    );
                     continue;
                 }
                 Err(Some(npc)) => {
                     tracing::info!(char_id = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "SellItem rejected — faction");
-                    handlers::send_refusal(&mut *server, owner_cid, &format!("{} will not deal with you.", npc.name));
+                    handlers::send_refusal(
+                        &mut *server,
+                        owner_cid,
+                        &format!("{} will not deal with you.", npc.name),
+                    );
                     continue;
                 }
                 Ok(npc) => format!("npc:{}", npc.id),
@@ -246,13 +269,16 @@ pub(super) fn apply_sells(world: &mut WorldState, q: &mut Intents, _now: Instant
                     if i >= inventory::BASE_SLOT_COUNT {
                         continue;
                     }
-                    let Some(entry) = conn.inventory.base.get(i).and_then(|s| s.as_ref())
-                    else {
+                    let Some(entry) = conn.inventory.base.get(i).and_then(|s| s.as_ref()) else {
                         tracing::info!(
                             char_id = intent.owner,
                             "SellItem rejected — base slot empty"
                         );
-                        handlers::send_refusal(&mut *server, owner_cid, "There's nothing in that slot to sell.");
+                        handlers::send_refusal(
+                            &mut *server,
+                            owner_cid,
+                            "There's nothing in that slot to sell.",
+                        );
                         continue;
                     };
                     (
@@ -273,16 +299,23 @@ pub(super) fn apply_sells(world: &mut WorldState, q: &mut Intents, _now: Instant
                             char_id = intent.owner,
                             "SellItem rejected — bag slot has no bag at base"
                         );
-                        handlers::send_refusal(&mut *server, owner_cid, "There's nothing in that slot to sell.");
+                        handlers::send_refusal(
+                            &mut *server,
+                            owner_cid,
+                            "There's nothing in that slot to sell.",
+                        );
                         continue;
                     };
-                    let Some(entry) = arr.get(slot as usize).and_then(|s| s.as_ref())
-                    else {
+                    let Some(entry) = arr.get(slot as usize).and_then(|s| s.as_ref()) else {
                         tracing::info!(
                             char_id = intent.owner,
                             "SellItem rejected — bag slot empty"
                         );
-                        handlers::send_refusal(&mut *server, owner_cid, "There's nothing in that slot to sell.");
+                        handlers::send_refusal(
+                            &mut *server,
+                            owner_cid,
+                            "There's nothing in that slot to sell.",
+                        );
                         continue;
                     };
                     (
@@ -296,18 +329,34 @@ pub(super) fn apply_sells(world: &mut WorldState, q: &mut Intents, _now: Instant
                 // which the client lists ahead of the bags at a merchant.
                 protocol::world::SlotRef::Cursor => {
                     let Some(entry) = conn.inventory.cursor.as_ref() else {
-                        tracing::info!(char_id = intent.owner, "SellItem rejected — nothing in hand");
-                        handlers::send_refusal(&mut *server, owner_cid, "There's nothing in your hand to sell.");
+                        tracing::info!(
+                            char_id = intent.owner,
+                            "SellItem rejected — nothing in hand"
+                        );
+                        handlers::send_refusal(
+                            &mut *server,
+                            owner_cid,
+                            "There's nothing in your hand to sell.",
+                        );
                         continue;
                     };
-                    ("cursor".to_string(), 0, entry.item_path.clone(), entry.count)
+                    (
+                        "cursor".to_string(),
+                        0,
+                        entry.item_path.clone(),
+                        entry.count,
+                    )
                 }
                 protocol::world::SlotRef::EquipSlot(_) => {
                     tracing::info!(
                         char_id = intent.owner,
                         "SellItem rejected — equip slot sells not supported"
                     );
-                    handlers::send_refusal(&mut *server, owner_cid, "Take it off before selling it.");
+                    handlers::send_refusal(
+                        &mut *server,
+                        owner_cid,
+                        "Take it off before selling it.",
+                    );
                     continue;
                 }
             };
@@ -362,12 +411,19 @@ pub(super) fn apply_sells(world: &mut WorldState, q: &mut Intents, _now: Instant
                         %why,
                         "SellItem rejected — could not take the item"
                     );
-                    handlers::send_refusal(&mut *server, owner_cid, "The merchant won't take that.");
+                    handlers::send_refusal(
+                        &mut *server,
+                        owner_cid,
+                        "The merchant won't take that.",
+                    );
                     continue;
                 }
             };
             let total_credit = unit_price.saturating_mul(qty as i64);
-            let new_count = conn.inventory.peek_at(&location_str, slot_u32).map_or(0, |(_, c)| c);
+            let new_count = conn
+                .inventory
+                .peek_at(&location_str, slot_u32)
+                .map_or(0, |(_, c)| c);
             conn.coins.add_payout(total_credit);
             conn.coins_dirty = true;
             conn.inventory_dirty = true;

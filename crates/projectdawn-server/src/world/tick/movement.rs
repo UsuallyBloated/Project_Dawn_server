@@ -3,8 +3,22 @@
 
 use super::*;
 
-pub(super) fn run_movement(world: &mut WorldState, _q: &mut Intents, now: Instant, dt: f32, in_world_recipients_now: &[ClientId]) {
-    let WorldState { server, connections, aoi, enemies, loot_bags, corpses, .. } = world;
+pub(super) fn run_movement(
+    world: &mut WorldState,
+    _q: &mut Intents,
+    now: Instant,
+    dt: f32,
+    in_world_recipients_now: &[ClientId],
+) {
+    let WorldState {
+        server,
+        connections,
+        aoi,
+        enemies,
+        loot_bags,
+        corpses,
+        ..
+    } = world;
     // 5. Integrate movement intent exactly once per tick. The Move
     //    handler stores the latest direction on the connection; we
     //    advance position here so the rate is bound to wall-clock
@@ -28,9 +42,7 @@ pub(super) fn run_movement(world: &mut WorldState, _q: &mut Intents, now: Instan
         .filter(|(_, c)| c.ready && c.linkdead_since.is_none())
     {
         let dir = match conn.last_move_received {
-            Some(t) if now.duration_since(t) < STALE_MOVE_THRESHOLD => {
-                conn.latest_direction
-            }
+            Some(t) if now.duration_since(t) < STALE_MOVE_THRESHOLD => conn.latest_direction,
             _ => Vec3f::ZERO,
         };
         // Track 6: any non-zero move auto-stands the connection. The

@@ -4,16 +4,16 @@
 
 mod common;
 
-mod trade;
-mod hunger;
-mod presence;
-mod pets;
 mod admin;
+mod death;
 mod durability;
+mod groups_and_quests;
+mod hunger;
+mod inventory;
+mod melee;
+mod pets;
+mod presence;
+mod smoke;
 mod songs;
 mod spells;
-mod melee;
-mod inventory;
-mod death;
-mod groups_and_quests;
-mod smoke;
+mod trade;

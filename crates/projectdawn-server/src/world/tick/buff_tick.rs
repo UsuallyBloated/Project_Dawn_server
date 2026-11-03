@@ -4,8 +4,19 @@
 
 use super::*;
 
-pub(super) fn run_buff_tick(world: &mut WorldState, _q: &mut Intents, now: Instant, dt: f32, in_world_recipients_now: &[ClientId]) {
-    let WorldState { server, connections, enemies, .. } = world;
+pub(super) fn run_buff_tick(
+    world: &mut WorldState,
+    _q: &mut Intents,
+    now: Instant,
+    dt: f32,
+    in_world_recipients_now: &[ClientId],
+) {
+    let WorldState {
+        server,
+        connections,
+        enemies,
+        ..
+    } = world;
     // 4s. Bard song pulses (the rework of 2026-10-20): every singer whose
     //     next pulse is due gets the song's effects again, the ordinary
     //     buffs lingering SONG_LINGER_SECS, and the ENEMY song's slow on
@@ -18,11 +29,22 @@ pub(super) fn run_buff_tick(world: &mut WorldState, _q: &mut Intents, now: Insta
         .filter_map(|(id, c)| c.active_song.clone().map(|s| (*id, s)))
         .collect();
     for (cid, song) in due_singers {
-        let Some(spell) = spells::lookup(&song) else { continue };
+        let Some(spell) = spells::lookup(&song) else {
+            continue;
+        };
         if let Some(c) = connections.get_mut(&cid) {
-            c.song_next_pulse_at = Some(now + Duration::from_secs_f32(crate::world::SONG_PULSE_SECS));
+            c.song_next_pulse_at =
+                Some(now + Duration::from_secs_f32(crate::world::SONG_PULSE_SECS));
         }
-        song_pulse(&mut *server, &in_world_recipients_now, &mut *connections, &mut *enemies, cid, spell, now);
+        song_pulse(
+            &mut *server,
+            &in_world_recipients_now,
+            &mut *connections,
+            &mut *enemies,
+            cid,
+            spell,
+            now,
+        );
     }
 
     // 5a. Track 6 sub-task 4a buff tick — process HoT / MP regen
@@ -66,14 +88,20 @@ pub(super) fn run_buff_tick(world: &mut WorldState, _q: &mut Intents, now: Insta
                 // Ticks are counted off the elapsed time (`tick_acc`
                 // holds the count), so the last one lands on the frame
                 // the buff expires, whichever accumulator crosses first.
-                buffs::BuffEffect::Dot { dps, caster, dmg_type, duration } => {
+                buffs::BuffEffect::Dot {
+                    dps,
+                    caster,
+                    dmg_type,
+                    duration,
+                } => {
                     if dps > 0.0 && conn.hp > 0.0 && !conn.death_processed {
                         let total = (duration / crate::world::DOT_TICK_SECS).floor();
                         let elapsed = (duration - buff.remaining.max(0.0)).max(0.0);
                         let due = (elapsed / crate::world::DOT_TICK_SECS).floor().min(total);
                         if buff.tick_acc < due {
                             buff.tick_acc += 1.0;
-                            let amount = (dps * crate::world::DOT_TICK_SECS).round().max(0.0) as i32;
+                            let amount =
+                                (dps * crate::world::DOT_TICK_SECS).round().max(0.0) as i32;
                             // The buff borrow ends here; the bearer is
                             // mutated below.
                             let name = buff.name.clone();
@@ -167,14 +195,24 @@ pub(super) fn run_buff_tick(world: &mut WorldState, _q: &mut Intents, now: Insta
                 // Other effect kinds were already accounted for
                 // by the tick body.
                 if let buffs::BuffEffect::StatBuff {
-                    strength, agility, intelligence, wisdom, constitution,
-                    max_hp_delta, max_mp_delta,
+                    strength,
+                    agility,
+                    intelligence,
+                    wisdom,
+                    constitution,
+                    max_hp_delta,
+                    max_mp_delta,
                 } = conn.active_buffs[i].effect
                 {
                     buffs::undo_stat_deltas(
                         conn,
-                        strength, agility, intelligence, wisdom, constitution,
-                        max_hp_delta, max_mp_delta,
+                        strength,
+                        agility,
+                        intelligence,
+                        wisdom,
+                        constitution,
+                        max_hp_delta,
+                        max_mp_delta,
                     );
                     regen::mark_dirty(conn);
                 }
@@ -205,7 +243,15 @@ pub(super) fn run_buff_tick(world: &mut WorldState, _q: &mut Intents, now: Insta
             .map(|(id, _)| *id)
             .collect();
         for (bearer, caster, name, amount, dmg_type, hp_after, max_hp) in pvp_dot_ticks {
-            handlers::fan_out_hit(&mut *server, &recipients, caster, bearer, amount, false, dmg_type);
+            handlers::fan_out_hit(
+                &mut *server,
+                &recipients,
+                caster,
+                bearer,
+                amount,
+                false,
+                dmg_type,
+            );
             handlers::fan_out_health_update(&mut *server, &recipients, bearer, hp_after, max_hp);
             let caster_cid = caster as ClientId;
             if connections.get(&caster_cid).is_some_and(|c| c.in_world) {
@@ -271,7 +317,11 @@ pub(super) fn run_buff_tick(world: &mut WorldState, _q: &mut Intents, now: Insta
             if let Some(pet) = enemies.get(&pet_id) {
                 if hp_changed {
                     handlers::fan_out_health_update(
-                        &mut *server, &recipients, pet_id, pet.hp, pet.max_hp,
+                        &mut *server,
+                        &recipients,
+                        pet_id,
+                        pet.hp,
+                        pet.max_hp,
                     );
                 }
                 if set_changed {

@@ -3,8 +3,22 @@
 
 use super::*;
 
-pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instant, dt: f32, in_world_recipients_now: &[ClientId]) {
-    let WorldState { server, connections, aoi, enemies, loot_bags, group_manager, .. } = world;
+pub(super) fn run_enemy_ai(
+    world: &mut WorldState,
+    _q: &mut Intents,
+    now: Instant,
+    dt: f32,
+    in_world_recipients_now: &[ClientId],
+) {
+    let WorldState {
+        server,
+        connections,
+        aoi,
+        enemies,
+        loot_bags,
+        group_manager,
+        ..
+    } = world;
     // 4i. Enemy AI tick. Each alive enemy evaluates its state machine
     //     against the snapshot of in_world player positions, advances
     //     its own pos / target / state, and yields events for the
@@ -85,9 +99,7 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
             .filter(|(_, e)| {
                 // Skip pets under an active command.
                 e.command_at
-                    .map(|t| {
-                        now.duration_since(t).as_secs_f32() > PET_COMMAND_STICKY_SECS
-                    })
+                    .map(|t| now.duration_since(t).as_secs_f32() > PET_COMMAND_STICKY_SECS)
                     .unwrap_or(true)
             })
             .map(|(pet_id, pet)| {
@@ -119,7 +131,11 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                     let alive = enemy_target_snapshots
                         .iter()
                         .any(|(id, _, alive)| *id == attacked && *alive);
-                    if alive { Some(attacked) } else { None }
+                    if alive {
+                        Some(attacked)
+                    } else {
+                        None
+                    }
                 });
                 (*pet_id, inherited)
             })
@@ -144,8 +160,12 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
         // stances *intentionally* suppress inheritance).
         const PET_BACK_HOME_DISTANCE: f32 = 4.0;
         for pet in enemies.values_mut() {
-            if !pet.is_pet() { continue; }
-            let Some(t) = pet.command_at else { continue; };
+            if !pet.is_pet() {
+                continue;
+            }
+            let Some(t) = pet.command_at else {
+                continue;
+            };
             if now.duration_since(t).as_secs_f32() > PET_COMMAND_STICKY_SECS {
                 pet.command_at = None;
                 continue;
@@ -156,12 +176,16 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
             if pet.stance != entity::PetStance::Follow {
                 continue;
             }
-            let Some(owner_id) = pet.owner else { continue; };
+            let Some(owner_id) = pet.owner else {
+                continue;
+            };
             let Some(owner_pos) = connections
                 .get(&(owner_id as ClientId))
                 .filter(|c| c.in_world)
                 .map(|c| c.pos)
-            else { continue; };
+            else {
+                continue;
+            };
             if pet.pos.distance_to(owner_pos) <= PET_BACK_HOME_DISTANCE {
                 pet.command_at = None;
             }
@@ -234,7 +258,13 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                 continue;
             }
             let old_enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
-            let events = entity.tick_ai(&targets_for_enemy_ai, &enemy_target_snapshots, &hidden_players, dt, now);
+            let events = entity.tick_ai(
+                &targets_for_enemy_ai,
+                &enemy_target_snapshots,
+                &hidden_players,
+                dt,
+                now,
+            );
             if let Some(new_target) = events.target_changed {
                 target_changes.push((entity.id, new_target));
             }
@@ -267,12 +297,7 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
             }
         }
         for (id, target) in target_changes {
-            handlers::fan_out_entity_target(
-                &mut *server,
-                &in_world_recipients_now,
-                id,
-                target,
-            );
+            handlers::fan_out_entity_target(&mut *server, &in_world_recipients_now, id, target);
         }
         // DoT ticks (spell batch step 5): everyone sees the hit and the
         // bar; the caster alone gets the named "<spell> for N" line (the
@@ -397,10 +422,7 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                     // target via the owner-inheritance pre-pass
                     // (or by being commanded); Sit ignores
                     // incoming damage on purpose.
-                    if !died
-                        && pet.stance == entity::PetStance::Guard
-                        && pet.target.is_none()
-                    {
+                    if !died && pet.stance == entity::PetStance::Guard && pet.target.is_none() {
                         pet.target = Some(attacker);
                         pet.command_at = Some(now);
                     }
@@ -430,9 +452,7 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                             enemies.get(&hit.target).and_then(|p| {
                                 if crate::world::pet_templates::is_warder_template(&p.mob.name) {
                                     let due = now
-                                        + std::time::Duration::from_secs_f32(
-                                            WARDER_RETREAT_SECS,
-                                        );
+                                        + std::time::Duration::from_secs_f32(WARDER_RETREAT_SECS);
                                     p.owner.map(|o| (o as ClientId, due))
                                 } else {
                                     None
@@ -524,9 +544,7 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
             if IdKind::of(attacker) == IdKind::Pet
                 && matches!(IdKind::of(hit.target), IdKind::Enemy | IdKind::Pet)
             {
-                let owner_id_opt = enemies
-                    .get(&attacker)
-                    .and_then(|p| p.owner);
+                let owner_id_opt = enemies.get(&attacker).and_then(|p| p.owner);
                 let amount = hit.amount.max(0);
                 if let Some(target_entity) = enemies.get_mut(&hit.target) {
                     if !target_entity.is_alive() {
@@ -537,26 +555,23 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                     // damager logic naturally routes to them
                     // (pets don't level themselves).
                     if let Some(owner) = owner_id_opt {
-                        *target_entity
-                            .aggro
-                            .entry(owner)
-                            .or_insert(0.0) += amount as f32;
+                        *target_entity.aggro.entry(owner).or_insert(0.0) += amount as f32;
                     }
                     // Track 12 Piece A2 — threat accrues under
                     // the pet's own id so the enemy can pull
                     // onto a hard-hitting pet via the AI re-eval
                     // even when the owner has been damaging it
                     // longer.
-                    *target_entity
-                        .threat
-                        .entry(attacker)
-                        .or_insert(0.0) += amount as f32;
+                    *target_entity.threat.entry(attacker).or_insert(0.0) += amount as f32;
                     let new_hp = target_entity.hp;
                     let max_hp = target_entity.max_hp;
                     let died = new_hp <= 0.0;
                     // EQ quadratic per-kill award from the mob's level (see
                     // progression::kill_xp); pet kills credit the owner below.
-                    let mob_xp = crate::world::progression::kill_xp(target_entity.mob.level as i32, crate::world::progression::ZEM_NORMAL);
+                    let mob_xp = crate::world::progression::kill_xp(
+                        target_entity.mob.level as i32,
+                        crate::world::progression::ZEM_NORMAL,
+                    );
                     let mob_level = target_entity.mob.level;
                     let mob_name_dead = if died {
                         target_entity.transition(EnemyState::Dead, now);
@@ -571,11 +586,8 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                     // warder-template kill can schedule the
                     // owner's respawn after the borrow drops. None
                     // for NPC enemies; Some for pets.
-                    let dead_pet_owner_opt: Option<EntityId> = if died {
-                        target_entity.owner
-                    } else {
-                        None
-                    };
+                    let dead_pet_owner_opt: Option<EntityId> =
+                        if died { target_entity.owner } else { None };
                     let death_pos = target_entity.pos;
                     let faction_kill = FactionKill::of(target_entity);
                     let credit_id_opt = if died {
@@ -583,8 +595,7 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                             .aggro
                             .iter()
                             .max_by(|a, b| {
-                                a.1.partial_cmp(b.1)
-                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)
                             })
                             .map(|(&id, _)| id)
                     } else {
@@ -662,12 +673,9 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                         }
                         // An owned victim drops nothing (see kill_enemy).
                         if let Some(mob_name) = mob_name_dead.as_ref().filter(|_| !victim_owned) {
-                            let loot_items =
-                                loot::roll_for_mob(mob_name).unwrap_or_default();
-                            let loot_coins =
-                                loot::roll_coin_for_mob(mob_name, mob_level);
-                            if !loot_items.is_empty()
-                                || loot_coins != protocol::world::Coins::ZERO
+                            let loot_items = loot::roll_for_mob(mob_name).unwrap_or_default();
+                            let loot_coins = loot::roll_coin_for_mob(mob_name, mob_level);
+                            if !loot_items.is_empty() || loot_coins != protocol::world::Coins::ZERO
                             {
                                 // Pet kills credit the pet's player owner;
                                 // that player (and group) owns the corpse.
@@ -728,9 +736,9 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
             // melee swing at the player is deflected, fanned as an Evade
             // with nothing applied.
             let evaded = IdKind::of(hit.target) == IdKind::Player
-                && connections
-                    .get(&(hit.target as ClientId))
-                    .is_some_and(|t| t.in_world && t.hp > 0.0 && buffs::is_evading(&t.active_buffs));
+                && connections.get(&(hit.target as ClientId)).is_some_and(|t| {
+                    t.in_world && t.hp > 0.0 && buffs::is_evading(&t.active_buffs)
+                });
             let final_amount = if IdKind::of(hit.target) == IdKind::Player {
                 let target_cid = hit.target as ClientId;
                 if let Some(target_conn) = connections.get_mut(&target_cid) {
@@ -752,9 +760,11 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                             buffs::consume_absorb(&mut target_conn.active_buffs, reduced);
                         reduced = after_absorb;
                         if absorb_exhausted {
-                            if let Some(idx) = target_conn.active_buffs.iter().position(|b| {
-                                matches!(b.effect, buffs::BuffEffect::Absorb { .. })
-                            }) {
+                            if let Some(idx) = target_conn
+                                .active_buffs
+                                .iter()
+                                .position(|b| matches!(b.effect, buffs::BuffEffect::Absorb { .. }))
+                            {
                                 absorb_buff_to_strip = Some(idx);
                             }
                         }
@@ -763,18 +773,20 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                         // Read amount before mutating HP so a
                         // killing blow still triggers thorns.
                         shield_to_attacker = buffs::damage_shield_total(&target_conn.active_buffs);
-                        shield_name_pve = buffs::first_damage_shield_name(&target_conn.active_buffs).map(|s| s.to_string());
+                        shield_name_pve =
+                            buffs::first_damage_shield_name(&target_conn.active_buffs)
+                                .map(|s| s.to_string());
                         target_conn.hp = (target_conn.hp - reduced as f32).max(0.0);
                         regen::mark_dirty(target_conn);
                         target_conn.note_damage_taken(now); // camp breaks on damage
-                        // Track 15.2 follow-up — feed the pet
-                        // inheritance pre-pass so a FOLLOW-stance
-                        // pet auto-engages whatever's hitting its
-                        // owner (matches player behaviour: pet
-                        // helps when you're being attacked, not
-                        // only when you swing). Uses the same
-                        // last_attacked_enemy/at fields the
-                        // owner-attacks path already populates.
+                                                            // Track 15.2 follow-up — feed the pet
+                                                            // inheritance pre-pass so a FOLLOW-stance
+                                                            // pet auto-engages whatever's hitting its
+                                                            // owner (matches player behaviour: pet
+                                                            // helps when you're being attacked, not
+                                                            // only when you swing). Uses the same
+                                                            // last_attacked_enemy/at fields the
+                                                            // owner-attacks path already populates.
                         target_conn.last_attacked_enemy = Some(attacker);
                         target_conn.last_attacked_at = Some(now);
                         // Track 18.1 — armor skill advance: each
@@ -799,11 +811,9 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                             }
                         }
                         for at in &armor_types {
-                            if let Some(new_score) = skills::try_advance(
-                                target_conn,
-                                skills::Skill::Armor,
-                                at,
-                            ) {
+                            if let Some(new_score) =
+                                skills::try_advance(target_conn, skills::Skill::Armor, at)
+                            {
                                 handlers::send_skill_progress_update(
                                     &mut *server,
                                     target_cid,
@@ -813,11 +823,9 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                                 );
                             }
                         }
-                        if let Some(new_score) = skills::try_advance(
-                            target_conn,
-                            skills::Skill::Weapon,
-                            "dodge",
-                        ) {
+                        if let Some(new_score) =
+                            skills::try_advance(target_conn, skills::Skill::Weapon, "dodge")
+                        {
                             handlers::send_skill_progress_update(
                                 &mut *server,
                                 target_cid,
@@ -834,14 +842,24 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                         let interrupt_outcome = roll_cast_interrupt(target_conn, now, reduced);
                         let (target_mp, target_max_mp) = (target_conn.mp, target_conn.max_mp);
                         match &interrupt_outcome {
-                            InterruptOutcome::Interrupted { spell_name, mana_charged } => {
+                            InterruptOutcome::Interrupted {
+                                spell_name,
+                                mana_charged,
+                            } => {
                                 handlers::fan_out_cast_fail(
                                     &mut *server,
                                     &in_world_recipients_now,
                                     hit.target,
                                     "interrupted (hit during cast)".to_string(),
                                 );
-                                tell_interrupt_charge(&mut *server, target_cid, hit.target, target_mp, target_max_mp, *mana_charged);
+                                tell_interrupt_charge(
+                                    &mut *server,
+                                    target_cid,
+                                    hit.target,
+                                    target_mp,
+                                    target_max_mp,
+                                    *mana_charged,
+                                );
                                 tracing::info!(
                                     caster = hit.target,
                                     spell = %spell_name,
@@ -893,11 +911,7 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                     }
                 }
                 if let Some(tc) = connections.get(&target_cid) {
-                    handlers::fan_out_buff_snapshot(
-                        &mut *server,
-                        &in_world_recipients_now,
-                        tc,
-                    );
+                    handlers::fan_out_buff_snapshot(&mut *server, &in_world_recipients_now, tc);
                 }
             }
             // Apply damage shield to attacker (the enemy entity).
@@ -923,7 +937,9 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                             att_entity.hp,
                             att_entity.max_hp,
                         );
-                        if let (Some(defender), Some(name)) = (damaged_player, shield_name_pve.as_ref()) {
+                        if let (Some(defender), Some(name)) =
+                            (damaged_player, shield_name_pve.as_ref())
+                        {
                             handlers::fan_out_damage_shield_trigger(
                                 &mut *server,
                                 &in_world_recipients_now,
@@ -952,7 +968,12 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
                 }
             }
             if evaded {
-                handlers::fan_out_evade(&mut *server, &in_world_recipients_now, attacker, hit.target);
+                handlers::fan_out_evade(
+                    &mut *server,
+                    &in_world_recipients_now,
+                    attacker,
+                    hit.target,
+                );
             } else {
                 handlers::fan_out_hit(
                     &mut *server,
@@ -983,9 +1004,23 @@ pub(super) fn run_enemy_ai(world: &mut WorldState, _q: &mut Intents, now: Instan
     }
 }
 
-pub(super) async fn clean_up_enemy_corpses(world: &mut WorldState, q: &mut Intents, now: Instant, in_world_recipients_now: &[ClientId]) {
-    let WorldState { pool, server, aoi, spawner, enemies, .. } = world;
-    let Intents { spell_gem_saves, .. } = q;
+pub(super) async fn clean_up_enemy_corpses(
+    world: &mut WorldState,
+    q: &mut Intents,
+    now: Instant,
+    in_world_recipients_now: &[ClientId],
+) {
+    let WorldState {
+        pool,
+        server,
+        aoi,
+        spawner,
+        enemies,
+        ..
+    } = world;
+    let Intents {
+        spell_gem_saves, ..
+    } = q;
     // 4j. Corpse cleanup. Dead enemies hold at their death pos for
     //     ENEMY_DESPAWN_LINGER_SECS so the client can play the fall-over
     //     animation; afterwards we fan out EntityDespawn, arm the

@@ -3,8 +3,16 @@
 use super::*;
 
 pub(super) fn apply_pet_commands(world: &mut WorldState, q: &mut Intents, now: Instant) {
-    let WorldState { server, connections, enemies, .. } = world;
-    let Intents { pet_command_intents, .. } = q;
+    let WorldState {
+        server,
+        connections,
+        enemies,
+        ..
+    } = world;
+    let Intents {
+        pet_command_intents,
+        ..
+    } = q;
     // 4hc. Track 12 Piece A — apply pet commands. Locate each
     //      caster's pet in `enemies`; for Attack validate the
     //      target enemy is alive; for Back clear the pet's
@@ -19,13 +27,20 @@ pub(super) fn apply_pet_commands(world: &mut WorldState, q: &mut Intents, now: I
                 .find(|(_, e)| e.owner == Some(intent.owner) && e.is_alive())
                 .map(|(id, _)| *id);
             let Some(pet_id) = pet_id_opt else {
-                tracing::debug!(char_id = intent.owner, command = intent.command, "PetCommand dropped — no live pet");
+                tracing::debug!(
+                    char_id = intent.owner,
+                    command = intent.command,
+                    "PetCommand dropped — no live pet"
+                );
                 continue;
             };
             match intent.command {
                 cmd::ATTACK => {
                     let Some(target_id) = intent.target_id else {
-                        tracing::debug!(char_id = intent.owner, "PetCommand ATTACK dropped — no target_id");
+                        tracing::debug!(
+                            char_id = intent.owner,
+                            "PetCommand ATTACK dropped — no target_id"
+                        );
                         continue;
                     };
                     // Pet-on-player engage: target ids below
@@ -38,15 +53,10 @@ pub(super) fn apply_pet_commands(world: &mut WorldState, q: &mut Intents, now: I
                         let allowed = if target_cid == owner_cid {
                             false
                         } else {
-                            match (
-                                connections.get(&owner_cid),
-                                connections.get(&target_cid),
-                            ) {
-                                (Some(a), Some(t)) if t.in_world && t.hp > 0.0 => combat::can_attack(
-                                    a, t,
-                                    a.zone.as_deref(),
-                                    t.zone.as_deref(),
-                                ),
+                            match (connections.get(&owner_cid), connections.get(&target_cid)) {
+                                (Some(a), Some(t)) if t.in_world && t.hp > 0.0 => {
+                                    combat::can_attack(a, t, a.zone.as_deref(), t.zone.as_deref())
+                                }
                                 _ => false,
                             }
                         };
@@ -79,7 +89,12 @@ pub(super) fn apply_pet_commands(world: &mut WorldState, q: &mut Intents, now: I
                             pet.command_at = Some(now);
                             pet.stance = entity::PetStance::Follow;
                         }
-                        tracing::info!(char_id = intent.owner, pet_id, target = target_id, "PetCommand ATTACK (player)");
+                        tracing::info!(
+                            char_id = intent.owner,
+                            pet_id,
+                            target = target_id,
+                            "PetCommand ATTACK (player)"
+                        );
                         continue;
                     }
                     // Resolve target's liveness, owner (for pet
@@ -92,7 +107,11 @@ pub(super) fn apply_pet_commands(world: &mut WorldState, q: &mut Intents, now: I
                             None => (false, None, false),
                         };
                     if !target_alive {
-                        tracing::debug!(char_id = intent.owner, target = target_id, "PetCommand ATTACK dropped — target not alive");
+                        tracing::debug!(
+                            char_id = intent.owner,
+                            target = target_id,
+                            "PetCommand ATTACK dropped — target not alive"
+                        );
                         continue;
                     }
                     // Pet-on-pet engage: owner cannot point their
@@ -119,12 +138,10 @@ pub(super) fn apply_pet_commands(world: &mut WorldState, q: &mut Intents, now: I
                         let allowed = match target_owner_opt {
                             Some(t_owner) => {
                                 let t_cid = t_owner as ClientId;
-                                match (
-                                    connections.get(&owner_cid),
-                                    connections.get(&t_cid),
-                                ) {
+                                match (connections.get(&owner_cid), connections.get(&t_cid)) {
                                     (Some(a), Some(b)) => combat::can_attack(
-                                        a, b,
+                                        a,
+                                        b,
                                         a.zone.as_deref(),
                                         b.zone.as_deref(),
                                     ),
@@ -135,7 +152,9 @@ pub(super) fn apply_pet_commands(world: &mut WorldState, q: &mut Intents, now: I
                         };
                         if !allowed {
                             let t_owner_name = target_owner_opt
-                                .and_then(|id| connections.get(&(id as ClientId)).map(|c| c.name.clone()))
+                                .and_then(|id| {
+                                    connections.get(&(id as ClientId)).map(|c| c.name.clone())
+                                })
                                 .unwrap_or_default();
                             let pet_name = enemies
                                 .get(&target_id)
@@ -171,7 +190,12 @@ pub(super) fn apply_pet_commands(world: &mut WorldState, q: &mut Intents, now: I
                         // the owner after the kill.
                         pet.stance = entity::PetStance::Follow;
                     }
-                    tracing::info!(char_id = intent.owner, pet_id, target = target_id, "PetCommand ATTACK");
+                    tracing::info!(
+                        char_id = intent.owner,
+                        pet_id,
+                        target = target_id,
+                        "PetCommand ATTACK"
+                    );
                 }
                 cmd::BACK | cmd::FOLLOW => {
                     if let Some(pet) = enemies.get_mut(&pet_id) {
@@ -205,7 +229,11 @@ pub(super) fn apply_pet_commands(world: &mut WorldState, q: &mut Intents, now: I
                     tracing::info!(char_id = intent.owner, pet_id, "PetCommand SIT");
                 }
                 _ => {
-                    tracing::debug!(char_id = intent.owner, command = intent.command, "PetCommand variant not yet implemented");
+                    tracing::debug!(
+                        char_id = intent.owner,
+                        command = intent.command,
+                        "PetCommand variant not yet implemented"
+                    );
                 }
             }
         }

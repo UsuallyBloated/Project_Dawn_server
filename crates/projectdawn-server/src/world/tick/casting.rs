@@ -4,9 +4,27 @@
 
 use super::*;
 
-pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant, in_world_recipients_now: &[ClientId]) {
-    let WorldState { server, connections, aoi, enemies, loot_bags, group_manager, corpses, .. } = world;
-    let Intents { cast_spell_intents, bind_intents, .. } = q;
+pub(super) fn apply_casts(
+    world: &mut WorldState,
+    q: &mut Intents,
+    now: Instant,
+    in_world_recipients_now: &[ClientId],
+) {
+    let WorldState {
+        server,
+        connections,
+        aoi,
+        enemies,
+        loot_bags,
+        group_manager,
+        corpses,
+        ..
+    } = world;
+    let Intents {
+        cast_spell_intents,
+        bind_intents,
+        ..
+    } = q;
     // 4ha. Apply player → server spell-cast intents. Server resolves
     //      the spell in spells.toml, validates the cast-time gate
     //      (Track 10) + mana cost + target, and applies
@@ -56,7 +74,13 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     spell = %spell.name,
                     "CastSpell rejected — caster is dead"
                 );
-                refuse_cast(&mut *server, &connections, caster_cid, intent.caster, "You are dead.");
+                refuse_cast(
+                    &mut *server,
+                    &connections,
+                    caster_cid,
+                    intent.caster,
+                    "You are dead.",
+                );
                 continue;
             }
             // Phase 1 exploit gate — class/level eligibility. Any cast that
@@ -99,23 +123,35 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                         class_ok,
                         "CastSpell rejected — class/level not eligible"
                     );
-                    refuse_cast(&mut *server, &connections, caster_cid, intent.caster, reason);
+                    refuse_cast(
+                        &mut *server,
+                        &connections,
+                        caster_cid,
+                        intent.caster,
+                        reason,
+                    );
                     continue;
                 }
             }
             // The memorized bar (client-authority audit fix 5): a spell in
             // no gem is refused before anything is spent. Until the server
             // held the bar, only the client knew what was memorized.
-            let memorized = connections
-                .get(&caster_cid)
-                .is_some_and(|c| crate::world::spell_gems::is_memorized(&c.spell_gems, &spell.name));
+            let memorized = connections.get(&caster_cid).is_some_and(|c| {
+                crate::world::spell_gems::is_memorized(&c.spell_gems, &spell.name)
+            });
             if !memorized {
                 tracing::info!(
                     char_id = intent.caster,
                     spell = %spell.name,
                     "CastSpell rejected — spell not memorized"
                 );
-                refuse_cast(&mut *server, &connections, caster_cid, intent.caster, "You have not memorized that spell.");
+                refuse_cast(
+                    &mut *server,
+                    &connections,
+                    caster_cid,
+                    intent.caster,
+                    "You have not memorized that spell.",
+                );
                 continue;
             }
             // Track 10 — cast-time gate. Instant casts (cast_time
@@ -147,7 +183,13 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                             in_flight = %intent.cast_name_at_dispatch,
                             "CastSpell rejected — cast-time gate (no matching CastStart or too early)"
                         );
-                        refuse_cast(&mut *server, &connections, caster_cid, intent.caster, "cast not ready");
+                        refuse_cast(
+                            &mut *server,
+                            &connections,
+                            caster_cid,
+                            intent.caster,
+                            "cast not ready",
+                        );
                         continue;
                     }
                     CastTiming::Held => {
@@ -166,7 +208,13 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                             cc.cast_total_duration = 0.0;
                             cc.cast_set_at = None;
                         }
-                        refuse_cast(&mut *server, &connections, caster_cid, intent.caster, "That cast has lapsed.");
+                        refuse_cast(
+                            &mut *server,
+                            &connections,
+                            caster_cid,
+                            intent.caster,
+                            "That cast has lapsed.",
+                        );
                         continue;
                     }
                 }
@@ -185,7 +233,13 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                         spell = %spell.name,
                         "CastSpell rejected — interrupted after the bar began"
                     );
-                    refuse_cast(&mut *server, &connections, caster_cid, intent.caster, "interrupted (hit during cast)");
+                    refuse_cast(
+                        &mut *server,
+                        &connections,
+                        caster_cid,
+                        intent.caster,
+                        "interrupted (hit during cast)",
+                    );
                     continue;
                 }
                 // Track 17.2 — movement-during-cast gate. Compare
@@ -232,7 +286,13 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                             cc.cast_total_duration = 0.0;
                             cc.cast_set_at = None;
                         }
-                        refuse_cast(&mut *server, &connections, caster_cid, intent.caster, "interrupted (moved)");
+                        refuse_cast(
+                            &mut *server,
+                            &connections,
+                            caster_cid,
+                            intent.caster,
+                            "interrupted (moved)",
+                        );
                         continue;
                     }
                 }
@@ -251,7 +311,13 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                             remaining_secs = remaining,
                             "CastSpell rejected — on cooldown"
                         );
-                        refuse_cast(&mut *server, &connections, caster_cid, intent.caster, "Spell is on cooldown.");
+                        refuse_cast(
+                            &mut *server,
+                            &connections,
+                            caster_cid,
+                            intent.caster,
+                            "Spell is on cooldown.",
+                        );
                         continue;
                     }
                 }
@@ -268,7 +334,13 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                                 remaining_ms = until.duration_since(now).as_millis(),
                                 "CastSpell rejected — inside the global cooldown"
                             );
-                            refuse_cast(&mut *server, &connections, caster_cid, intent.caster, "You cannot cast again yet.");
+                            refuse_cast(
+                                &mut *server,
+                                &connections,
+                                caster_cid,
+                                intent.caster,
+                                "You cannot cast again yet.",
+                            );
                             continue;
                         }
                     }
@@ -291,7 +363,13 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                 // Tell the caster so they see "Cast failed: Not enough
                 // mana." instead of a silent no-op behind the optimistic
                 // local "You cast X" line, with the mana they really have.
-                refuse_cast(&mut *server, &connections, caster_cid, intent.caster, "Not enough mana.");
+                refuse_cast(
+                    &mut *server,
+                    &connections,
+                    caster_cid,
+                    intent.caster,
+                    "Not enough mana.",
+                );
                 continue;
             }
             let caster_pos = caster_conn.pos;
@@ -308,7 +386,10 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
             // spells (alignment.rs), applied once here so every arm
             // below reads the penalised numbers.
             let caster_int = caster_conn.intelligence;
-            let side = crate::world::alignment::off_side_multiplier(&caster_conn.class, caster_conn.alignment);
+            let side = crate::world::alignment::off_side_multiplier(
+                &caster_conn.class,
+                caster_conn.alignment,
+            );
             let penalised;
             let spell = if side < 1.0 {
                 penalised = crate::world::alignment::penalise(spell, side);
@@ -371,7 +452,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                             caster_max_hp_now,
                         );
                     }
-                continue;
+                    continue;
                 }
             };
 
@@ -380,7 +461,10 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
             // spell's level, after the target checks, before the mana.
             // A fizzle burns a quarter of the mana, starts the gem's
             // refresh (the global cooldown) and trains nothing.
-            if spell.cast_time <= 0.0 && caster_conn.fizzles && crate::world::cast_gate::roll_fizzle(caster_conn, spell) {
+            if spell.cast_time <= 0.0
+                && caster_conn.fizzles
+                && crate::world::cast_gate::roll_fizzle(caster_conn, spell)
+            {
                 let (mp_after, max_mp) = {
                     let cc = connections.get_mut(&caster_cid).expect("checked");
                     let burned = crate::world::cast_gate::fizzle_mana(spell.mana_cost, cc.mp);
@@ -399,7 +483,13 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     intent.caster,
                     crate::world::cast_gate::FIZZLE_LINE.to_string(),
                 );
-                handlers::fan_out_mana_update(&mut *server, &[caster_cid], intent.caster, mp_after, max_mp);
+                handlers::fan_out_mana_update(
+                    &mut *server,
+                    &[caster_cid],
+                    intent.caster,
+                    mp_after,
+                    max_mp,
+                );
                 continue;
             }
 
@@ -419,7 +509,12 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                 // Alignment (2026-10-23): a cast leans its school's way by
                 // a hundred-thousandth of its mana, through the momentum
                 // rule (the user's equation).
-                handlers::move_alignment(&mut *server, caster_cid, cc, crate::world::alignment::spell_delta(spell));
+                handlers::move_alignment(
+                    &mut *server,
+                    caster_cid,
+                    cc,
+                    crate::world::alignment::spell_delta(spell),
+                );
                 if hp_cost > 0.0 {
                     cc.hp = (cc.hp - hp_cost).max(0.0);
                 }
@@ -509,15 +604,31 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                 } else {
                     if let Some(cc) = connections.get_mut(&caster_cid) {
                         cc.active_song = Some(spell.name.clone());
-                        cc.song_next_pulse_at = Some(now + Duration::from_secs_f32(crate::world::SONG_PULSE_SECS));
+                        cc.song_next_pulse_at =
+                            Some(now + Duration::from_secs_f32(crate::world::SONG_PULSE_SECS));
                     }
-                    handlers::send_system_line(&mut *server, caster_cid, &format!("You begin singing {}.", spell.name));
+                    handlers::send_system_line(
+                        &mut *server,
+                        caster_cid,
+                        &format!("You begin singing {}.", spell.name),
+                    );
                     tracing::info!(singer = intent.caster, song = %spell.name, "song started");
-                    song_pulse(&mut *server, &in_world_recipients_now, &mut *connections, &mut *enemies, caster_cid, spell, now);
+                    song_pulse(
+                        &mut *server,
+                        &in_world_recipients_now,
+                        &mut *connections,
+                        &mut *enemies,
+                        caster_cid,
+                        spell,
+                        now,
+                    );
                 }
                 continue;
             }
-            if connections.get(&caster_cid).is_some_and(|c| c.active_song.is_some()) {
+            if connections
+                .get(&caster_cid)
+                .is_some_and(|c| c.active_song.is_some())
+            {
                 stop_song(&mut *server, &mut *connections, caster_cid);
             }
 
@@ -543,14 +654,28 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     };
                     tracing::info!(char_id = intent.caster, spell = %spell.name, corpse_id, "resurrection cast received");
                     let xp_percent = spell.res_xp_percent.round() as u32;
-                    let caster_name = connections.get(&caster_cid).map(|c| c.name.clone()).unwrap_or_default();
+                    let caster_name = connections
+                        .get(&caster_cid)
+                        .map(|c| c.name.clone())
+                        .unwrap_or_default();
                     // Record the pending offer on the owner so the accept can't
                     // forge the refund %, then send the offer privately.
                     if let Some(owner_conn) = connections.get_mut(&owner_cid) {
                         owner_conn.pending_res_offer = Some((corpse_id, xp_percent));
                     }
-                    handlers::send_resurrect_offer(&mut *server, owner_cid, corpse_id, caster_name, xp_percent);
-                    tracing::info!(char_id = intent.caster, corpse_id, xp_percent, "resurrection offered");
+                    handlers::send_resurrect_offer(
+                        &mut *server,
+                        owner_cid,
+                        corpse_id,
+                        caster_name,
+                        xp_percent,
+                    );
+                    tracing::info!(
+                        char_id = intent.caster,
+                        corpse_id,
+                        xp_percent,
+                        "resurrection offered"
+                    );
                 }
                 "SUMMON_ITEM" => {
                     // Summon Food / Drink (food slice 2): conjure the
@@ -580,7 +705,9 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                                 }
                                 let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
                                     .iter()
-                                    .map(|(loc, slot)| (loc.clone(), *slot, conn.inventory.peek_at(loc, *slot)))
+                                    .map(|(loc, slot)| {
+                                        (loc.clone(), *slot, conn.inventory.peek_at(loc, *slot))
+                                    })
                                     .collect();
                                 Ok((placed, leftover, deltas))
                             }
@@ -590,7 +717,13 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     match placement {
                         Ok((placed, leftover, deltas)) if placed > 0 => {
                             for (loc, slot, payload) in deltas {
-                                handlers::send_slot_delta(&mut *server, caster_cid, loc, slot, payload);
+                                handlers::send_slot_delta(
+                                    &mut *server,
+                                    caster_cid,
+                                    loc,
+                                    slot,
+                                    payload,
+                                );
                             }
                             let item_name = items::lookup(&spell.summon_item)
                                 .map(|i| i.name.clone())
@@ -681,10 +814,8 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                         // Toggle semantics — second cast clears.
                         let cc = connections.get_mut(&caster_cid).expect("checked");
                         let was_active = buffs::is_lich_form_active(&cc.active_buffs);
-                        cc.active_buffs.retain(|b| !matches!(
-                            b.effect,
-                            buffs::BuffEffect::LichForm { .. }
-                        ));
+                        cc.active_buffs
+                            .retain(|b| !matches!(b.effect, buffs::BuffEffect::LichForm { .. }));
                         if !was_active {
                             cc.active_buffs.push(ActiveBuff::new_lich_form(
                                 spell.name.clone(),
@@ -796,8 +927,7 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     let heal = spell.heal_amount;
                     if heal > 0.0 {
                         let (final_hp, max_hp) = {
-                            let tc =
-                                connections.get_mut(&target_cid).expect("checked");
+                            let tc = connections.get_mut(&target_cid).expect("checked");
                             tc.hp = (tc.hp + heal).min(tc.max_hp);
                             regen::mark_dirty(tc);
                             (tc.hp, tc.max_hp)
@@ -879,7 +1009,11 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                         // shield takes its share, as on the client.
                         let flat = spell.base_damage.max(0.0) as i32;
                         let (rolled, crit) = if flat > 0 {
-                            crate::world::spell_power::roll_hit(flat, caster_int, &mut rand::thread_rng())
+                            crate::world::spell_power::roll_hit(
+                                flat,
+                                caster_int,
+                                &mut rand::thread_rng(),
+                            )
                         } else {
                             (0, false)
                         };
@@ -895,7 +1029,8 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                                 });
                             }
                             shield_back = buffs::damage_shield_total(&tc.active_buffs);
-                            shield_back_name = buffs::first_damage_shield_name(&tc.active_buffs).map(|s| s.to_string());
+                            shield_back_name = buffs::first_damage_shield_name(&tc.active_buffs)
+                                .map(|s| s.to_string());
                             tc.hp = (tc.hp - dmg as f32).max(0.0);
                             regen::mark_dirty(tc);
                             tc.note_damage_taken(now); // camp breaks on damage
@@ -945,14 +1080,24 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                             let outcome = roll_cast_interrupt(tc, now, applied);
                             let (tc_mp, tc_max_mp) = (tc.mp, tc.max_mp);
                             match &outcome {
-                                InterruptOutcome::Interrupted { spell_name, mana_charged } => {
+                                InterruptOutcome::Interrupted {
+                                    spell_name,
+                                    mana_charged,
+                                } => {
                                     handlers::fan_out_cast_fail(
                                         &mut *server,
                                         &in_world_recipients_now,
                                         target_id,
                                         "interrupted (hit during cast)".to_string(),
                                     );
-                                    tell_interrupt_charge(&mut *server, target_cid, target_id, tc_mp, tc_max_mp, *mana_charged);
+                                    tell_interrupt_charge(
+                                        &mut *server,
+                                        target_cid,
+                                        target_id,
+                                        tc_mp,
+                                        tc_max_mp,
+                                        *mana_charged,
+                                    );
                                     tracing::info!(
                                         caster = target_id,
                                         spell = %spell_name,
@@ -1015,14 +1160,25 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                                     // the cache populated.
                                     let outcome = roll_cast_interrupt(att, now, reflect_dmg);
                                     let (att_mp, att_max_mp) = (att.mp, att.max_mp);
-                                    if let InterruptOutcome::Interrupted { spell_name, mana_charged } = &outcome {
+                                    if let InterruptOutcome::Interrupted {
+                                        spell_name,
+                                        mana_charged,
+                                    } = &outcome
+                                    {
                                         handlers::fan_out_cast_fail(
                                             &mut *server,
                                             &in_world_recipients_now,
                                             intent.caster,
                                             "interrupted (hit during cast)".to_string(),
                                         );
-                                        tell_interrupt_charge(&mut *server, caster_cid, intent.caster, att_mp, att_max_mp, *mana_charged);
+                                        tell_interrupt_charge(
+                                            &mut *server,
+                                            caster_cid,
+                                            intent.caster,
+                                            att_mp,
+                                            att_max_mp,
+                                            *mana_charged,
+                                        );
                                         tracing::info!(
                                             char_id = intent.caster,
                                             spell = %spell_name,
@@ -1060,31 +1216,64 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                         }
                         if spell.cc_duration > 0.0 {
                             if let Some(tc) = connections.get_mut(&target_cid) {
-                                apply_buff(tc, ActiveBuff::new_mez(spell.name.clone(), spell.cc_duration, now));
+                                apply_buff(
+                                    tc,
+                                    ActiveBuff::new_mez(spell.name.clone(), spell.cc_duration, now),
+                                );
                                 cc_changed = true;
                             }
                         }
                         if spell.root_duration > 0.0 {
                             if let Some(tc) = connections.get_mut(&target_cid) {
-                                apply_buff(tc, ActiveBuff::new_root(spell.name.clone(), spell.root_duration, now));
+                                apply_buff(
+                                    tc,
+                                    ActiveBuff::new_root(
+                                        spell.name.clone(),
+                                        spell.root_duration,
+                                        now,
+                                    ),
+                                );
                                 cc_changed = true;
                             }
                         }
                         if spell.slow_amount > 0.0 && spell.slow_duration > 0.0 {
                             if let Some(tc) = connections.get_mut(&target_cid) {
-                                apply_buff(tc, ActiveBuff::new_snare(spell.name.clone(), spell.slow_amount, spell.slow_duration, now));
+                                apply_buff(
+                                    tc,
+                                    ActiveBuff::new_snare(
+                                        spell.name.clone(),
+                                        spell.slow_amount,
+                                        spell.slow_duration,
+                                        now,
+                                    ),
+                                );
                                 cc_changed = true;
                             }
                         }
                         if spell.attack_slow_amount > 0.0 && spell.attack_slow_duration > 0.0 {
                             if let Some(tc) = connections.get_mut(&target_cid) {
-                                apply_buff(tc, ActiveBuff::new_attack_slow(spell.name.clone(), spell.attack_slow_amount, spell.attack_slow_duration, now));
+                                apply_buff(
+                                    tc,
+                                    ActiveBuff::new_attack_slow(
+                                        spell.name.clone(),
+                                        spell.attack_slow_amount,
+                                        spell.attack_slow_duration,
+                                        now,
+                                    ),
+                                );
                                 cc_changed = true;
                             }
                         }
                         if spell.silence_duration > 0.0 {
                             if let Some(tc) = connections.get_mut(&target_cid) {
-                                apply_buff(tc, ActiveBuff::new_silence(spell.name.clone(), spell.silence_duration, now));
+                                apply_buff(
+                                    tc,
+                                    ActiveBuff::new_silence(
+                                        spell.name.clone(),
+                                        spell.silence_duration,
+                                        now,
+                                    ),
+                                );
                                 cc_changed = true;
                             }
                         }
@@ -1093,16 +1282,27 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                             // Stat buffs need their deltas undone
                             // first.
                             if let Some(tc) = connections.get_mut(&target_cid) {
-                                if let Some(idx) = buffs::first_dispellable_index(&tc.active_buffs) {
+                                if let Some(idx) = buffs::first_dispellable_index(&tc.active_buffs)
+                                {
                                     if let buffs::BuffEffect::StatBuff {
-                                        strength, agility, intelligence, wisdom, constitution,
-                                        max_hp_delta, max_mp_delta,
+                                        strength,
+                                        agility,
+                                        intelligence,
+                                        wisdom,
+                                        constitution,
+                                        max_hp_delta,
+                                        max_mp_delta,
                                     } = tc.active_buffs[idx].effect
                                     {
                                         buffs::undo_stat_deltas(
                                             tc,
-                                            strength, agility, intelligence, wisdom, constitution,
-                                            max_hp_delta, max_mp_delta,
+                                            strength,
+                                            agility,
+                                            intelligence,
+                                            wisdom,
+                                            constitution,
+                                            max_hp_delta,
+                                            max_mp_delta,
                                         );
                                         regen::mark_dirty(tc);
                                     }
@@ -1203,7 +1403,8 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                                         connections.get(&owner_cid),
                                     ) {
                                         (Some(a), Some(o)) => combat::can_attack(
-                                            a, o,
+                                            a,
+                                            o,
                                             a.zone.as_deref(),
                                             o.zone.as_deref(),
                                         ),
@@ -1347,10 +1548,28 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     let owner_id = intent.caster;
                     // Look up the target; copy out the stats we
                     // need then remove it from the map + AOI.
-                    let extracted: Option<(crate::world::zones::MobTemplate, f32, f32, Vec3f, f32, usize, Vec3f)> = enemies
+                    let extracted: Option<(
+                        crate::world::zones::MobTemplate,
+                        f32,
+                        f32,
+                        Vec3f,
+                        f32,
+                        usize,
+                        Vec3f,
+                    )> = enemies
                         .get(&target_id)
                         .filter(|e| e.is_alive() && !e.is_pet())
-                        .map(|e| (e.mob.clone(), e.hp, e.max_hp, e.pos, e.yaw, e.spawn_point_idx, e.spawn_pos));
+                        .map(|e| {
+                            (
+                                e.mob.clone(),
+                                e.hp,
+                                e.max_hp,
+                                e.pos,
+                                e.yaw,
+                                e.spawn_point_idx,
+                                e.spawn_pos,
+                            )
+                        });
                     let Some((mob, hp, max_hp, pos, yaw, slot_idx, home_pos)) = extracted else {
                         cast_resolution_lost(
                             &mut *server,
@@ -1395,7 +1614,11 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     pet.yaw = yaw;
                     pet.spawn_point_idx = slot_idx;
                     pet.spawn_pos = home_pos;
-                    let duration = if spell.duration > 0.0 { spell.duration } else { 30.0 };
+                    let duration = if spell.duration > 0.0 {
+                        spell.duration
+                    } else {
+                        30.0
+                    };
                     pet.charm_expires_at = Some(now + std::time::Duration::from_secs_f32(duration));
                     let pet_id = pet.id;
                     let pet_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
@@ -1408,7 +1631,12 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                         .collect();
                     if !pet_recipients.is_empty() {
                         // Same creature, new id: the caster keeps it targeted.
-                        handlers::fan_out_pet_spawn(&mut *server, &pet_recipients, &pet, Some(target_id));
+                        handlers::fan_out_pet_spawn(
+                            &mut *server,
+                            &pet_recipients,
+                            &pet,
+                            Some(target_id),
+                        );
                     }
                     enemies.insert(pet_id, pet);
                     tracing::info!(
@@ -1497,12 +1725,22 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     tracing::info!(
                         char_id = intent.caster,
                         bound = bound_cid as u64,
-                        x = pos.0, y = pos.1, z = pos.2,
+                        x = pos.0,
+                        y = pos.1,
+                        z = pos.2,
                         "BIND applied"
                     );
-                    handlers::send_system_line(&mut *server, bound_cid, "Your soul is bound to this place.");
+                    handlers::send_system_line(
+                        &mut *server,
+                        bound_cid,
+                        "Your soul is bound to this place.",
+                    );
                     if bound_cid != caster_cid {
-                        handlers::send_system_line(&mut *server, caster_cid, "Their soul is bound to this place.");
+                        handlers::send_system_line(
+                            &mut *server,
+                            caster_cid,
+                            "Their soul is bound to this place.",
+                        );
                     }
                 }
                 "PORT" => {
@@ -1557,7 +1795,11 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                     }
                     for bearer in clear_player_dots_from(&mut *connections, &mover_ids) {
                         if let Some(conn) = connections.get(&bearer) {
-                            handlers::fan_out_buff_snapshot(&mut *server, &in_world_recipients_now, conn);
+                            handlers::fan_out_buff_snapshot(
+                                &mut *server,
+                                &in_world_recipients_now,
+                                conn,
+                            );
                         }
                     }
                     for &m in &movers {
@@ -1588,7 +1830,10 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                             .map(|(id, _)| *id)
                             .collect();
                         for pet_id in pets {
-                            if enemies.get(&pet_id).is_some_and(|e| e.charm_expires_at.is_some()) {
+                            if enemies
+                                .get(&pet_id)
+                                .is_some_and(|e| e.charm_expires_at.is_some())
+                            {
                                 if let Some(pet) = enemies.remove(&pet_id) {
                                     let mob_id = return_charmed_mob(
                                         &mut *server,
@@ -1609,9 +1854,15 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                                 continue;
                             }
                             let (old_cell, new_cell) = {
-                                let Some(pet) = enemies.get_mut(&pet_id) else { continue };
+                                let Some(pet) = enemies.get_mut(&pet_id) else {
+                                    continue;
+                                };
                                 let old_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
-                                pet.pos = Vec3f { x: dest.x + 1.5, y: dest.y, z: dest.z };
+                                pet.pos = Vec3f {
+                                    x: dest.x + 1.5,
+                                    y: dest.y,
+                                    z: dest.z,
+                                };
                                 // last_bcast_pos is left where it was, so the
                                 // move fans on the next tick instead of
                                 // waiting for the keepalive.
@@ -1622,7 +1873,14 @@ pub(super) fn apply_casts(world: &mut WorldState, q: &mut Intents, now: Instant,
                             if new_cell != old_cell {
                                 let (gained, lost) = aoi.update(pet_id, old_cell, new_cell);
                                 if let Some(pet) = enemies.get(&pet_id) {
-                                    fan_entity_cell_crossing(&mut *server, &aoi, &connections, pet, &gained, &lost);
+                                    fan_entity_cell_crossing(
+                                        &mut *server,
+                                        &aoi,
+                                        &connections,
+                                        pet,
+                                        &gained,
+                                        &lost,
+                                    );
                                 }
                             }
                         }

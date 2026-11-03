@@ -28,10 +28,18 @@ struct Parsed {
 
 impl SafeArea {
     pub fn center(&self) -> Vec3f {
-        Vec3f { x: self.center[0], y: self.center[1], z: self.center[2] }
+        Vec3f {
+            x: self.center[0],
+            y: self.center[1],
+            z: self.center[2],
+        }
     }
     pub fn arrival(&self) -> Vec3f {
-        Vec3f { x: self.arrival[0], y: self.arrival[1], z: self.arrival[2] }
+        Vec3f {
+            x: self.arrival[0],
+            y: self.arrival[1],
+            z: self.arrival[2],
+        }
     }
     pub fn contains(&self, pos: Vec3f) -> bool {
         // Keep-only-when-inside: a non-finite position is outside.
@@ -73,14 +81,32 @@ mod tests {
     fn the_town_square_is_a_safe_area_and_the_spawn_is_inside_it() {
         assert!(!areas().is_empty(), "at least one safe area");
         let spawn = crate::world::STARTER_SPAWN;
-        assert!(containing(spawn).is_some(), "the starter spawn is in a safe area");
-        assert!(containing(Vec3f { x: 500.0, y: 0.0, z: 500.0 }).is_none());
         assert!(
-            containing(Vec3f { x: f32::NAN, y: 0.0, z: 0.0 }).is_none(),
+            containing(spawn).is_some(),
+            "the starter spawn is in a safe area"
+        );
+        assert!(containing(Vec3f {
+            x: 500.0,
+            y: 0.0,
+            z: 500.0
+        })
+        .is_none());
+        assert!(
+            containing(Vec3f {
+                x: f32::NAN,
+                y: 0.0,
+                z: 0.0
+            })
+            .is_none(),
             "a non-finite position is nowhere"
         );
         assert_eq!(
-            nearest_arrival(Vec3f { x: 300.0, y: 0.0, z: -40.0 }).map(|p| (p.x, p.z)),
+            nearest_arrival(Vec3f {
+                x: 300.0,
+                y: 0.0,
+                z: -40.0
+            })
+            .map(|p| (p.x, p.z)),
             Some((0.0, 0.0))
         );
     }
@@ -99,7 +125,11 @@ mod tests {
                     continue;
                 }
                 let s = camp.pos;
-                let spawn = Vec3f { x: s[0], y: s[1], z: s[2] };
+                let spawn = Vec3f {
+                    x: s[0],
+                    y: s[1],
+                    z: s[2],
+                };
                 let reach = camp.mob.aggro + camp.radius.max(SPAWN_JITTER);
                 let margin = spawn.distance_to(area.center()) - reach - area.radius;
                 if tightest.as_ref().map_or(true, |t| margin < t.2) {
@@ -108,7 +138,11 @@ mod tests {
                 assert!(
                     margin >= 0.0,
                     "{} at {:?} (aggro {} + jitter) reaches into {} by {:.1} m",
-                    camp.mob.name, s, camp.mob.aggro, area.name, -margin
+                    camp.mob.name,
+                    s,
+                    camp.mob.aggro,
+                    area.name,
+                    -margin
                 );
             }
         }

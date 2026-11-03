@@ -544,11 +544,20 @@ fn dev_cmd_allowed(
 /// A coin amount from a client message, refused here if any tier is negative.
 /// Only a modified client sends one, so the refusal is silent (an answer would
 /// only help it probe); the log line names the character.
-fn client_coin_amount(conn: &PerConnection, coins: Coins, message: &str) -> Option<protocol::world::CoinAmount> {
+fn client_coin_amount(
+    conn: &PerConnection,
+    coins: Coins,
+    message: &str,
+) -> Option<protocol::world::CoinAmount> {
     match protocol::world::CoinAmount::try_from(coins) {
         Ok(amount) => Some(amount),
         Err(_) => {
-            tracing::info!(char_id = conn.char_id, message, ?coins, "refused a negative coin amount (a forged client)");
+            tracing::info!(
+                char_id = conn.char_id,
+                message,
+                ?coins,
+                "refused a negative coin amount (a forged client)"
+            );
             None
         }
     }
@@ -745,7 +754,11 @@ pub fn handle_message(
             } else {
                 // Y is zeroed — server does not simulate gravity or jumping.
                 // Only XZ is authoritative; vertical position stays at spawn height.
-                let v = Vec3f { x: direction.x, y: 0.0, z: direction.z };
+                let v = Vec3f {
+                    x: direction.x,
+                    y: 0.0,
+                    z: direction.z,
+                };
                 v.clamp_length(1.0)
             };
             // Store the latest intent for the tick loop to integrate exactly
@@ -762,7 +775,8 @@ pub fn handle_message(
             // movement or combat, and a rooted player may still turn. Wrapped
             // into [-PI, PI) (an exact PI reads as -PI, the same facing), so a
             // forged huge value stays a facing and not a 1e30 in the database.
-            conn.yaw = (yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+            conn.yaw = (yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
             // The jump is cosmetic and separate from the direction: it is
             // relayed as a one-shot for peers to animate, and nothing here
             // reads it into `pos` (Y stays the server's zero).
@@ -773,7 +787,10 @@ pub fn handle_message(
             }
         }
 
-        ClientWorldMsg::CastStartBroadcast { spell_name, duration } => {
+        ClientWorldMsg::CastStartBroadcast {
+            spell_name,
+            duration,
+        } => {
             if !conn.ready {
                 return Outcome::Continue;
             }
@@ -813,7 +830,12 @@ pub fn handle_message(
                             "CastStart refused — inside the global cooldown"
                         );
                         let caster = conn.char_id as u64;
-                        fan_out_cast_fail(server, &[client_id], caster, "You cannot cast again yet.".to_string());
+                        fan_out_cast_fail(
+                            server,
+                            &[client_id],
+                            caster,
+                            "You cannot cast again yet.".to_string(),
+                        );
                         fan_out_mana_update(server, &[client_id], caster, conn.mp, conn.max_mp);
                         return Outcome::Continue;
                     }
@@ -842,7 +864,12 @@ pub fn handle_message(
                         "CastStart fizzled"
                     );
                     let caster = conn.char_id as u64;
-                    fan_out_cast_fail(server, &[client_id], caster, super::cast_gate::FIZZLE_LINE.to_string());
+                    fan_out_cast_fail(
+                        server,
+                        &[client_id],
+                        caster,
+                        super::cast_gate::FIZZLE_LINE.to_string(),
+                    );
                     fan_out_mana_update(server, &[client_id], caster, conn.mp, conn.max_mp);
                     return Outcome::Continue;
                 }
@@ -880,7 +907,10 @@ pub fn handle_message(
                     "CastStart duration differs from the server's; the server's is relayed"
                 );
             }
-            Outcome::CastStartFanOut { spell_name: spell.name.clone(), duration: spell.cast_time }
+            Outcome::CastStartFanOut {
+                spell_name: spell.name.clone(),
+                duration: spell.cast_time,
+            }
         }
 
         ClientWorldMsg::CastCompleteBroadcast { spell_name } => {
@@ -893,7 +923,9 @@ pub fn handle_message(
             // Relayed only for a spell the server knows, under its own name
             // (the CastStart rule above).
             match super::spells::lookup(&spell_name) {
-                Some(spell) => Outcome::CastCompleteFanOut { spell_name: spell.name.clone() },
+                Some(spell) => Outcome::CastCompleteFanOut {
+                    spell_name: spell.name.clone(),
+                },
                 None => Outcome::Continue,
             }
         }
@@ -931,7 +963,14 @@ pub fn handle_message(
             if !conn.ready || !conn.can_use_dev_cmds() {
                 return Outcome::Continue;
             }
-            if !dev_cmd_allowed(server, conn, client_id, now, "miss_broadcast", format!("target={target}")) {
+            if !dev_cmd_allowed(
+                server,
+                conn,
+                client_id,
+                now,
+                "miss_broadcast",
+                format!("target={target}"),
+            ) {
                 return Outcome::Continue;
             }
             Outcome::MissFanOut { target }
@@ -942,7 +981,14 @@ pub fn handle_message(
             if !conn.ready || !conn.can_use_dev_cmds() {
                 return Outcome::Continue;
             }
-            if !dev_cmd_allowed(server, conn, client_id, now, "evade_broadcast", format!("target={target}")) {
+            if !dev_cmd_allowed(
+                server,
+                conn,
+                client_id,
+                now,
+                "evade_broadcast",
+                format!("target={target}"),
+            ) {
                 return Outcome::Continue;
             }
             Outcome::EvadeFanOut { target }
@@ -1096,7 +1142,10 @@ pub fn handle_message(
             }
         }
 
-        ClientWorldMsg::AcceptQuest { quest_id, giver_id: _ } => {
+        ClientWorldMsg::AcceptQuest {
+            quest_id,
+            giver_id: _,
+        } => {
             // PD_W0024 — validated in the tick loop (needs the quest table +
             // the connection's active/completed sets + the DB pool to persist
             // the zeroed progress row). giver_id is scaffold-era: NPCs aren't
@@ -1144,11 +1193,7 @@ pub fn handle_message(
                 return Outcome::Continue;
             }
             conn.pvp_override_on = on;
-            tracing::info!(
-                char_id = conn.char_id,
-                on,
-                "dev PvP override toggled"
-            );
+            tracing::info!(char_id = conn.char_id, on, "dev PvP override toggled");
             Outcome::Continue
         }
 
@@ -1170,7 +1215,14 @@ pub fn handle_message(
             }
         }
 
-        ClientWorldMsg::DevSpawnMob { name, level, hp, dmg, speed, aggro } => {
+        ClientWorldMsg::DevSpawnMob {
+            name,
+            level,
+            hp,
+            dmg,
+            speed,
+            aggro,
+        } => {
             // Same dev gate as HealSelf/DamageSelf: silently ignored unless the
             // server runs with PD_DEV_CMDS=1. Spawns a REAL world mob ~3m in
             // front of the requester (Godot forward = -Z rotated by yaw), so
@@ -1282,10 +1334,20 @@ pub fn handle_message(
             }
             let pos = conn.pos;
             let audit_args = format!("pos={:.1},{:.1}", pos.x, pos.z);
-            if !dev_cmd_allowed(server, conn, client_id, now, "dev_despawn_enemies", audit_args) {
+            if !dev_cmd_allowed(
+                server,
+                conn,
+                client_id,
+                now,
+                "dev_despawn_enemies",
+                audit_args,
+            ) {
                 return Outcome::Continue;
             }
-            Outcome::DevDespawnEnemiesIntent { requester: client_id, pos }
+            Outcome::DevDespawnEnemiesIntent {
+                requester: client_id,
+                pos,
+            }
         }
 
         // ── The server-held spell bar (client-authority audit fix 5) ──
@@ -1324,14 +1386,17 @@ pub fn handle_message(
             let ran = now.duration_since(began).as_secs_f32();
             let refusal = if !seated_throughout {
                 Some("You stop memorizing.")
-            } else if ran < super::spell_gems::MEMORIZE_SECS - super::spell_gems::MEMORIZE_GRACE_SECS {
+            } else if ran
+                < super::spell_gems::MEMORIZE_SECS - super::spell_gems::MEMORIZE_GRACE_SECS
+            {
                 Some("You have not finished memorizing.")
             } else {
                 None
             };
-            if let (Some(line), _) | (None, Err(line)) =
-                (refusal, super::spell_gems::check_gem(conn, gem, &spell_name))
-            {
+            if let (Some(line), _) | (None, Err(line)) = (
+                refusal,
+                super::spell_gems::check_gem(conn, gem, &spell_name),
+            ) {
                 tracing::info!(char_id = conn.char_id, gem, spell = %spell_name, ran, line, "memorize refused");
                 send_refusal(server, client_id, line);
                 send_spell_gems(server, client_id, conn);
@@ -1369,7 +1434,12 @@ pub fn handle_message(
             let offered = gems.len();
             let taken = super::spell_gems::seed(conn, &gems);
             conn.spell_gems_seeded = true;
-            tracing::info!(char_id = conn.char_id, offered, taken, "spell bar seeded from the client's copy");
+            tracing::info!(
+                char_id = conn.char_id,
+                offered,
+                taken,
+                "spell bar seeded from the client's copy"
+            );
             send_spell_gems(server, client_id, conn);
             spell_gems_changed(conn)
         }
@@ -1432,7 +1502,12 @@ pub fn handle_message(
             Outcome::Continue
         }
 
-        ClientWorldMsg::GiveCoins { platinum, gold, silver, copper } => {
+        ClientWorldMsg::GiveCoins {
+            platinum,
+            gold,
+            silver,
+            copper,
+        } => {
             if !conn.in_world
                 || !dev_cmd_allowed(
                     server,
@@ -1467,7 +1542,10 @@ pub fn handle_message(
             send_coins_update(server, client_id, conn.coins);
             tracing::info!(
                 char_id = conn.char_id,
-                platinum, gold, silver, copper,
+                platinum,
+                gold,
+                silver,
+                copper,
                 total_copper = conn.coins.total_copper(),
                 "dev coin grant"
             );
@@ -1505,18 +1583,16 @@ pub fn handle_message(
                     char_id = conn.char_id,
                     "BindAtCurrentLocation refused — cannot bind while dead"
                 );
-                send_refusal(
-                    server,
-                    client_id,
-                    "You can't bind your soul while dead.",
-                );
+                send_refusal(server, client_id, "You can't bind your soul while dead.");
                 return Outcome::Continue;
             }
             let pos = conn.pos.into_tuple();
             conn.bind = Some(crate::db::BindPoint { pos });
             tracing::info!(
                 char_id = conn.char_id,
-                x = pos.0, y = pos.1, z = pos.2,
+                x = pos.0,
+                y = pos.1,
+                z = pos.2,
                 "bind point set"
             );
             // Confirm the success too. There was no bind confirmation message at
@@ -1598,7 +1674,9 @@ pub fn handle_message(
             // the bar it drew; the caster is not among the recipients), so
             // the relay carries one fixed word instead of whatever the client
             // wrote (the CastStart rule above).
-            Outcome::CastFailFanOut { reason: CAST_CANCELLED_RELAY.to_string() }
+            Outcome::CastFailFanOut {
+                reason: CAST_CANCELLED_RELAY.to_string(),
+            }
         }
 
         ClientWorldMsg::Sit => {
@@ -1677,7 +1755,10 @@ pub fn handle_message(
             }
         }
 
-        ClientWorldMsg::UseSkill { skill_name, target_id } => {
+        ClientWorldMsg::UseSkill {
+            skill_name,
+            target_id,
+        } => {
             // Active skills (client-authority audit item 6). Everything the
             // client used to decide for itself is checked here or in the
             // tick loop, and a refusal answers privately with SkillFail and
@@ -1686,7 +1767,12 @@ pub fn handle_message(
                 return Outcome::Continue;
             }
             let Some(skill) = super::active_skills::lookup(&skill_name) else {
-                send_skill_fail(server, client_id, &skill_name, "That skill isn't known here yet.");
+                send_skill_fail(
+                    server,
+                    client_id,
+                    &skill_name,
+                    "That skill isn't known here yet.",
+                );
                 return Outcome::Continue;
             };
             // The class the character acts as: a Paladin at Evil uses the
@@ -1706,7 +1792,10 @@ pub fn handle_message(
                 send_skill_fail(server, client_id, &skill.name, "Mesmerized.");
                 return Outcome::Continue;
             }
-            if super::active_skills::on_cooldown(conn.skill_cooldowns.get(&skill.name).copied(), now) {
+            if super::active_skills::on_cooldown(
+                conn.skill_cooldowns.get(&skill.name).copied(),
+                now,
+            ) {
                 send_skill_fail(server, client_id, &skill.name, "You cannot use that yet.");
                 return Outcome::Continue;
             }
@@ -1745,15 +1834,23 @@ pub fn handle_message(
             // enemies map and goes to the tick. Anything else (a player, a
             // bag, an id that is nothing) gets one line, so a Consider is no
             // oracle for what an id is.
-            if let Some(npc) = npc_id.as_deref().and_then(super::npcs::lookup_by_id_or_name) {
+            if let Some(npc) = npc_id
+                .as_deref()
+                .and_then(super::npcs::lookup_by_id_or_name)
+            {
                 let level = conn.npc_faction_level(npc);
-                send_system_line(server, client_id, &super::factions::con_line(&npc.name, level));
+                send_system_line(
+                    server,
+                    client_id,
+                    &super::factions::con_line(&npc.name, level),
+                );
                 return Outcome::Continue;
             }
             match target_id {
-                Some(id) if IdKind::of(id) != IdKind::Player => {
-                    Outcome::ConsiderIntent { requester: client_id, target_id: id }
-                }
+                Some(id) if IdKind::of(id) != IdKind::Player => Outcome::ConsiderIntent {
+                    requester: client_id,
+                    target_id: id,
+                },
                 _ => {
                     send_system_line(server, client_id, "You cannot consider that.");
                     Outcome::Continue
@@ -1761,7 +1858,10 @@ pub fn handle_message(
             }
         }
 
-        ClientWorldMsg::DevSetFaction { faction_id, standing } => {
+        ClientWorldMsg::DevSetFaction {
+            faction_id,
+            standing,
+        } => {
             // The GM faction panel's slider. Same gate and audit as
             // DevSpawnMob: a plain account's request is ignored silently and
             // writes nothing. Only the sender's OWN standing moves.
@@ -1780,8 +1880,10 @@ pub fn handle_message(
             // The slider names the standing the NPCs see; the personal part
             // is what gets stored (the start modifier stays the table's).
             let start = super::factions::start_modifier(faction, &conn.race, &conn.class) as f32;
-            let personal = (standing - start)
-                .clamp(-super::factions::STANDING_CAP, super::factions::STANDING_CAP);
+            let personal = (standing - start).clamp(
+                -super::factions::STANDING_CAP,
+                super::factions::STANDING_CAP,
+            );
             conn.factions.insert(faction.id.clone(), personal);
             conn.factions_dirty = true;
             let shown = conn.faction_shown(faction);
@@ -1790,7 +1892,12 @@ pub fn handle_message(
             send_system_line(
                 server,
                 client_id,
-                &format!("Your standing with {} is now {} ({}).", faction.name, shown as i32, level.name()),
+                &format!(
+                    "Your standing with {} is now {} ({}).",
+                    faction.name,
+                    shown as i32,
+                    level.name()
+                ),
             );
             tracing::info!(
                 char_id = conn.char_id,
@@ -1826,7 +1933,9 @@ pub fn handle_message(
             if !conn.in_world {
                 return Outcome::Continue;
             }
-            Outcome::GroupLeaveIntent { member: conn.char_id as u64 }
+            Outcome::GroupLeaveIntent {
+                member: conn.char_id as u64,
+            }
         }
 
         ClientWorldMsg::GroupKick { name } => {
@@ -1859,7 +1968,10 @@ pub fn handle_message(
             }
         }
 
-        ClientWorldMsg::CastSpell { spell_name, target_id } => {
+        ClientWorldMsg::CastSpell {
+            spell_name,
+            target_id,
+        } => {
             if !conn.in_world {
                 return Outcome::Continue;
             }
@@ -1890,7 +2002,9 @@ pub fn handle_message(
                 let caster = conn.char_id as u64;
                 fan_out_cast_fail(server, &[client_id], caster, reason.to_string());
                 fan_out_mana_update(server, &[client_id], caster, conn.mp, conn.max_mp);
-                return Outcome::CastFailFanOut { reason: reason.to_string() };
+                return Outcome::CastFailFanOut {
+                    reason: reason.to_string(),
+                };
             }
             // Track 10 — snapshot the cast cache state *now*, before
             // any CastCompleteBroadcast in the same batch wipes it.
@@ -2124,7 +2238,10 @@ pub fn handle_message(
             let Some(coins) = client_coin_amount(conn, coins, "BankDepositCoins") else {
                 return Outcome::Continue;
             };
-            Outcome::BankDepositIntent { owner: conn.char_id as u64, coins }
+            Outcome::BankDepositIntent {
+                owner: conn.char_id as u64,
+                coins,
+            }
         }
 
         ClientWorldMsg::BankWithdrawCoins { coins } => {
@@ -2134,10 +2251,17 @@ pub fn handle_message(
             let Some(coins) = client_coin_amount(conn, coins, "BankWithdrawCoins") else {
                 return Outcome::Continue;
             };
-            Outcome::BankWithdrawIntent { owner: conn.char_id as u64, coins }
+            Outcome::BankWithdrawIntent {
+                owner: conn.char_id as u64,
+                coins,
+            }
         }
 
-        ClientWorldMsg::BankExchange { from_tier, to_tier, qty } => {
+        ClientWorldMsg::BankExchange {
+            from_tier,
+            to_tier,
+            qty,
+        } => {
             if !conn.in_world {
                 return Outcome::Continue;
             }
@@ -2149,7 +2273,11 @@ pub fn handle_message(
             }
         }
 
-        ClientWorldMsg::BankStoreItem { src_location, src_slot, shared } => {
+        ClientWorldMsg::BankStoreItem {
+            src_location,
+            src_slot,
+            shared,
+        } => {
             if !conn.in_world {
                 return Outcome::Continue;
             }
@@ -2234,7 +2362,11 @@ pub fn handle_message(
             Outcome::InspectIntent { target_char_id }
         }
 
-        ClientWorldMsg::Chat { channel, text, target_name } => {
+        ClientWorldMsg::Chat {
+            channel,
+            text,
+            target_name,
+        } => {
             if !conn.in_world {
                 return Outcome::Continue;
             }
@@ -2264,8 +2396,16 @@ pub fn handle_message(
 pub fn build_position_msg(conn: &PerConnection) -> Option<Vec<u8>> {
     let msg = ServerWorldMsg::Position {
         id: conn.char_id as u64,
-        pos: Vec3 { x: conn.pos.x, y: conn.pos.y, z: conn.pos.z },
-        vel: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
+        pos: Vec3 {
+            x: conn.pos.x,
+            y: conn.pos.y,
+            z: conn.pos.z,
+        },
+        vel: Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
         yaw: conn.yaw,
         sequence: conn.last_move_seq,
     };
@@ -2282,18 +2422,18 @@ fn send_position(server: &mut RenetServer, client_id: ClientId, conn: &PerConnec
 /// "new client → existing peers" and "existing peers → new client" sides of
 /// the connection handshake fan-out, plus any future per-recipient AOI
 /// transitions.
-pub fn send_entity_spawn(
-    server: &mut RenetServer,
-    recipient_id: ClientId,
-    conn: &PerConnection,
-) {
+pub fn send_entity_spawn(server: &mut RenetServer, recipient_id: ClientId, conn: &PerConnection) {
     let msg = ServerWorldMsg::EntitySpawn {
         id: conn.char_id as u64,
         name: conn.name.clone(),
         race: conn.race.clone(),
         class: conn.class.clone(),
         level: conn.level.max(0) as u32,
-        pos: Vec3 { x: conn.pos.x, y: conn.pos.y, z: conn.pos.z },
+        pos: Vec3 {
+            x: conn.pos.x,
+            y: conn.pos.y,
+            z: conn.pos.z,
+        },
         yaw: conn.yaw,
     };
     if let Some(bytes) = encode(&msg) {
@@ -2304,11 +2444,7 @@ pub fn send_entity_spawn(
 /// Send an EntityDespawn for `entity_id` to a single recipient. Reliable
 /// system channel so the despawn is guaranteed to arrive even if the
 /// preceding Position broadcasts are dropped on the unreliable channel.
-pub fn send_entity_despawn(
-    server: &mut RenetServer,
-    recipient_id: ClientId,
-    entity_id: u64,
-) {
+pub fn send_entity_despawn(server: &mut RenetServer, recipient_id: ClientId, entity_id: u64) {
     let msg = ServerWorldMsg::EntityDespawn { id: entity_id };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
@@ -2404,7 +2540,11 @@ pub fn send_xp_gained(
     current: i32,
     to_next: i32,
 ) {
-    let msg = ServerWorldMsg::XpGained { amount, current, to_next };
+    let msg = ServerWorldMsg::XpGained {
+        amount,
+        current,
+        to_next,
+    };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
     }
@@ -2452,7 +2592,9 @@ pub fn send_quest_progress(
 /// the client flips its journal entry to COMPLETED off this (never
 /// optimistically — the server may have rejected instead).
 pub fn send_quest_completed(server: &mut RenetServer, recipient_id: ClientId, quest_id: &str) {
-    let msg = ServerWorldMsg::QuestCompleted { quest_id: quest_id.to_string() };
+    let msg = ServerWorldMsg::QuestCompleted {
+        quest_id: quest_id.to_string(),
+    };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
     }
@@ -2492,7 +2634,11 @@ pub fn send_level_up(
     xp: i32,
     xp_to_next: i32,
 ) {
-    let msg = ServerWorldMsg::LevelUp { new_level, xp, xp_to_next };
+    let msg = ServerWorldMsg::LevelUp {
+        new_level,
+        xp,
+        xp_to_next,
+    };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
     }
@@ -2502,17 +2648,17 @@ pub fn send_level_up(
 /// initial spawn fan-out on enemy death and (sub-task 4B) re-snapshots
 /// when items are removed. Bag despawn rides the generic
 /// `EntityDespawn` since the id partition lets the client route by id.
-pub fn fan_out_loot_bag_spawn(
-    server: &mut RenetServer,
-    recipients: &[ClientId],
-    bag: &LootBag,
-) {
+pub fn fan_out_loot_bag_spawn(server: &mut RenetServer, recipients: &[ClientId], bag: &LootBag) {
     if recipients.is_empty() {
         return;
     }
     let msg = ServerWorldMsg::LootBagSpawn {
         bag_id: bag.id,
-        pos: Vec3 { x: bag.pos.x, y: bag.pos.y, z: bag.pos.z },
+        pos: Vec3 {
+            x: bag.pos.x,
+            y: bag.pos.y,
+            z: bag.pos.z,
+        },
         items: bag.snapshot(),
         coins: bag.coins,
         creature_name: bag.creature_name.clone(),
@@ -2541,7 +2687,11 @@ pub fn fan_out_corpse_spawn(
         corpse_id: corpse.id,
         owner_id: corpse.owner_char as u64,
         owner_name: corpse.owner_name.clone(),
-        pos: Vec3 { x: corpse.pos.x, y: corpse.pos.y, z: corpse.pos.z },
+        pos: Vec3 {
+            x: corpse.pos.x,
+            y: corpse.pos.y,
+            z: corpse.pos.z,
+        },
     };
     let Some(bytes) = encode(&msg) else {
         return;
@@ -2585,7 +2735,11 @@ pub fn send_resurrect_offer(
     caster_name: String,
     xp_percent: u32,
 ) {
-    let msg = ServerWorldMsg::ResurrectOffer { corpse_id, caster_name, xp_percent };
+    let msg = ServerWorldMsg::ResurrectOffer {
+        corpse_id,
+        caster_name,
+        xp_percent,
+    };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient, CHANNEL_SYSTEM, bytes);
     }
@@ -2594,7 +2748,13 @@ pub fn send_resurrect_offer(
 /// Snap one client's local player to `pos` — corpse / resurrection Slice 3 summons
 /// the living player to their corpse on accept. Server-authoritative reposition.
 pub fn send_teleport(server: &mut RenetServer, recipient: ClientId, pos: super::connection::Vec3f) {
-    let msg = ServerWorldMsg::Teleport { pos: Vec3 { x: pos.x, y: pos.y, z: pos.z } };
+    let msg = ServerWorldMsg::Teleport {
+        pos: Vec3 {
+            x: pos.x,
+            y: pos.y,
+            z: pos.z,
+        },
+    };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient, CHANNEL_SYSTEM, bytes);
     }
@@ -2648,8 +2808,16 @@ pub fn fan_out_mana_update(
 pub fn build_enemy_position_msg(entity: &Entity) -> Option<Vec<u8>> {
     let msg = ServerWorldMsg::Position {
         id: entity.id,
-        pos: Vec3 { x: entity.pos.x, y: entity.pos.y, z: entity.pos.z },
-        vel: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
+        pos: Vec3 {
+            x: entity.pos.x,
+            y: entity.pos.y,
+            z: entity.pos.z,
+        },
+        vel: Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
         yaw: entity.yaw,
         sequence: entity.seq,
     };
@@ -2707,7 +2875,12 @@ pub fn send_system_line(server: &mut RenetServer, recipient: ClientId, text: &st
 /// Refuse a `UseSkill` privately (client-authority audit item 6): the reason
 /// for the chat line and the skill's name, so the client drops the cooldown
 /// it started. The server stamped nothing and charged nothing.
-pub fn send_skill_fail(server: &mut RenetServer, recipient: ClientId, skill_name: &str, reason: &str) {
+pub fn send_skill_fail(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    skill_name: &str,
+    reason: &str,
+) {
     let msg = ServerWorldMsg::SkillFail {
         skill_name: skill_name.to_string(),
         reason: reason.to_string(),
@@ -2757,7 +2930,11 @@ pub fn apply_faction_hits(
         let personal = *entry;
         conn.factions_dirty = true;
         let shown = conn.faction_shown(faction);
-        send_system_line(server, recipient, &super::factions::change_line(faction, applied, personal));
+        send_system_line(
+            server,
+            recipient,
+            &super::factions::change_line(faction, applied, personal),
+        );
         send_faction_update(server, recipient, faction, shown);
         tracing::info!(
             char_id = conn.char_id,
@@ -2787,7 +2964,12 @@ pub fn send_factions_snapshot(server: &mut RenetServer, recipient: ClientId, con
 /// Tell the owner their alignment when it is due: always when `force` (the
 /// enter-world send), otherwise once it has moved a hundredth of a point or
 /// crossed a tier since the last send (a spell's delta alone never fans one).
-pub fn send_alignment_if_due(server: &mut RenetServer, recipient: ClientId, conn: &mut PerConnection, force: bool) {
+pub fn send_alignment_if_due(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    conn: &mut PerConnection,
+    force: bool,
+) {
     let due = match conn.alignment_sent {
         None => true,
         Some(sent) => {
@@ -2800,7 +2982,9 @@ pub fn send_alignment_if_due(server: &mut RenetServer, recipient: ClientId, conn
         return;
     }
     conn.alignment_sent = Some(conn.alignment);
-    let msg = ServerWorldMsg::AlignmentUpdate { score: conn.alignment };
+    let msg = ServerWorldMsg::AlignmentUpdate {
+        score: conn.alignment,
+    };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient, CHANNEL_SYSTEM, bytes);
     }
@@ -2809,7 +2993,12 @@ pub fn send_alignment_if_due(server: &mut RenetServer, recipient: ClientId, conn
 /// Move a character's alignment by `delta` through the momentum rule and
 /// tell them if it is due. A tier change is logged (it is what swaps a
 /// Paladin's or Shadow Knight's kit).
-pub fn move_alignment(server: &mut RenetServer, recipient: ClientId, conn: &mut PerConnection, delta: f32) {
+pub fn move_alignment(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    conn: &mut PerConnection,
+    delta: f32,
+) {
     if delta == 0.0 || !delta.is_finite() {
         return;
     }
@@ -2893,7 +3082,11 @@ pub fn fan_out_enemy_spawn(
         level: entity.mob.level,
         max_hp: entity.max_hp,
         hp: entity.hp,
-        pos: Vec3 { x: entity.pos.x, y: entity.pos.y, z: entity.pos.z },
+        pos: Vec3 {
+            x: entity.pos.x,
+            y: entity.pos.y,
+            z: entity.pos.z,
+        },
         yaw: entity.yaw,
         replaces,
     };
@@ -2982,7 +3175,11 @@ pub fn fan_out_pet_spawn(
         level: entity.mob.level,
         max_hp: entity.max_hp,
         hp: entity.hp,
-        pos: Vec3 { x: entity.pos.x, y: entity.pos.y, z: entity.pos.z },
+        pos: Vec3 {
+            x: entity.pos.x,
+            y: entity.pos.y,
+            z: entity.pos.z,
+        },
         yaw: entity.yaw,
         replaces,
     };
@@ -2999,11 +3196,7 @@ pub fn fan_out_pet_spawn(
 /// id partition is the point: the partitions stack (player < enemy < bag <
 /// pet) and a partition test in the wrong order once swallowed pets into a
 /// bag arm, so a player walking into view of an existing pet never saw it.
-pub fn fan_out_entity_spawn(
-    server: &mut RenetServer,
-    recipients: &[ClientId],
-    entity: &Entity,
-) {
+pub fn fan_out_entity_spawn(server: &mut RenetServer, recipients: &[ClientId], entity: &Entity) {
     if entity.is_pet() {
         fan_out_pet_spawn(server, recipients, entity, None);
     } else {
@@ -3065,10 +3258,7 @@ pub fn fan_out_cast_complete(
     if recipients.is_empty() {
         return;
     }
-    let msg = ServerWorldMsg::CastComplete {
-        caster,
-        spell_name,
-    };
+    let msg = ServerWorldMsg::CastComplete { caster, spell_name };
     let Some(bytes) = encode(&msg) else { return };
     for recipient in recipients {
         server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
@@ -3176,12 +3366,7 @@ pub fn fan_out_damage_shield_trigger(
     }
 }
 
-pub fn fan_out_miss(
-    server: &mut RenetServer,
-    recipients: &[ClientId],
-    attacker: u64,
-    target: u64,
-) {
+pub fn fan_out_miss(server: &mut RenetServer, recipients: &[ClientId], attacker: u64, target: u64) {
     if recipients.is_empty() {
         return;
     }
@@ -3208,11 +3393,7 @@ pub fn fan_out_evade(
     }
 }
 
-pub fn fan_out_entity_died(
-    server: &mut RenetServer,
-    recipients: &[ClientId],
-    entity_id: u64,
-) {
+pub fn fan_out_entity_died(server: &mut RenetServer, recipients: &[ClientId], entity_id: u64) {
     if recipients.is_empty() {
         return;
     }
@@ -3254,7 +3435,10 @@ pub fn send_trade_opened(
     partner_id: u64,
     partner_name: String,
 ) {
-    let msg = ServerWorldMsg::TradeOpened { partner_id, partner_name };
+    let msg = ServerWorldMsg::TradeOpened {
+        partner_id,
+        partner_name,
+    };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient, CHANNEL_SYSTEM, bytes);
     }
@@ -3291,7 +3475,10 @@ pub fn send_trade_closed(
     committed: bool,
     reason: &str,
 ) {
-    let msg = ServerWorldMsg::TradeClosed { committed, reason: reason.to_string() };
+    let msg = ServerWorldMsg::TradeClosed {
+        committed,
+        reason: reason.to_string(),
+    };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient, CHANNEL_SYSTEM, bytes);
     }
@@ -3389,7 +3576,11 @@ pub fn send_spell_gems(server: &mut RenetServer, client_id: ClientId, conn: &Per
 fn spell_gems_changed(conn: &PerConnection) -> Outcome {
     Outcome::SpellGemsChanged {
         char_id: conn.char_id,
-        gems: conn.spell_gems.iter().map(|(g, s)| (*g, s.clone())).collect(),
+        gems: conn
+            .spell_gems
+            .iter()
+            .map(|(g, s)| (*g, s.clone()))
+            .collect(),
         seeded: conn.spell_gems_seeded,
     }
 }
@@ -3435,11 +3626,7 @@ pub fn send_skill_progress_snapshot(
 /// ServerWorldMsg variants. Track 6 made these server-authoritative —
 /// the values come straight from `conn.hp` / `conn.mp` / `conn.stamina`
 /// (the DB-loaded snapshot at spawn, mutated by regen + combat).
-pub fn fan_out_resources(
-    server: &mut RenetServer,
-    recipients: &[ClientId],
-    conn: &PerConnection,
-) {
+pub fn fan_out_resources(server: &mut RenetServer, recipients: &[ClientId], conn: &PerConnection) {
     if recipients.is_empty() {
         return;
     }
@@ -3501,7 +3688,10 @@ pub fn send_camp_update(
     remaining_secs: u32,
     active: bool,
 ) {
-    let msg = ServerWorldMsg::CampUpdate { remaining_secs, active };
+    let msg = ServerWorldMsg::CampUpdate {
+        remaining_secs,
+        active,
+    };
     if let Some(bytes) = encode(&msg) {
         server.send_message(client_id, CHANNEL_SYSTEM, bytes);
     }
@@ -3587,7 +3777,9 @@ fn warn_decode_failure(client_id: ClientId, error: &bincode::error::DecodeError)
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_client, message_name, truncate_to_chars, CLIENT_MSG_DECODE_LIMIT, MAX_CHAT_CHARS};
+    use super::{
+        decode_client, message_name, truncate_to_chars, CLIENT_MSG_DECODE_LIMIT, MAX_CHAT_CHARS,
+    };
     use protocol::world::{ChatChannel, ClientWorldMsg};
 
     fn encode(msg: &ClientWorldMsg) -> Vec<u8> {
@@ -3595,14 +3787,21 @@ mod tests {
     }
 
     fn say(text: String) -> ClientWorldMsg {
-        ClientWorldMsg::Chat { channel: ChatChannel::Say, text, target_name: None }
+        ClientWorldMsg::Chat {
+            channel: ChatChannel::Say,
+            text,
+            target_name: None,
+        }
     }
 
     #[test]
     fn message_name_is_the_variant_alone() {
         assert_eq!(message_name(&say("a secret".into())), "Chat");
         assert_eq!(message_name(&ClientWorldMsg::Sit), "Sit");
-        assert_eq!(message_name(&ClientWorldMsg::SetTarget { target_id: Some(7) }), "SetTarget");
+        assert_eq!(
+            message_name(&ClientWorldMsg::SetTarget { target_id: Some(7) }),
+            "SetTarget"
+        );
     }
 
     #[test]
@@ -3665,12 +3864,18 @@ mod tests {
         let cut = truncate_to_chars("\u{1F600}".repeat(300), MAX_CHAT_CHARS);
         assert_eq!(cut, "\u{1F600}".repeat(250));
         let mixed = format!("{}é{}", "a".repeat(249), "b".repeat(10));
-        assert_eq!(truncate_to_chars(mixed, MAX_CHAT_CHARS), format!("{}é", "a".repeat(249)));
+        assert_eq!(
+            truncate_to_chars(mixed, MAX_CHAT_CHARS),
+            format!("{}é", "a".repeat(249))
+        );
     }
 
     #[test]
     fn short_text_is_untouched() {
-        assert_eq!(truncate_to_chars("hello".to_string(), MAX_CHAT_CHARS), "hello");
+        assert_eq!(
+            truncate_to_chars("hello".to_string(), MAX_CHAT_CHARS),
+            "hello"
+        );
         let exactly = "x".repeat(250);
         assert_eq!(truncate_to_chars(exactly.clone(), MAX_CHAT_CHARS), exactly);
     }

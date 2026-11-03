@@ -108,7 +108,9 @@ const LEDGER_ROWS_SHOWN: i64 = 50;
 async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let db_path = args.next().unwrap_or_else(|| "world.db".to_string());
-    let out_path = args.next().unwrap_or_else(|| "world_report.html".to_string());
+    let out_path = args
+        .next()
+        .unwrap_or_else(|| "world_report.html".to_string());
 
     // Read-only (`mode=ro`): the tool only ever issues SELECTs and never creates
     // the file. Deliberately NOT `immutable=1`: the server runs the DB in WAL
@@ -181,7 +183,9 @@ async fn main() -> Result<()> {
         .await
         .context("checking the ledger against the stores")?;
 
-    let generated = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
+    let generated = chrono::Local::now()
+        .format("%Y-%m-%d %H:%M:%S %Z")
+        .to_string();
 
     print_console_summary(&db_path, &accounts, &characters, &items);
     print_gm_actions(&gm_actions, gm_total);
@@ -306,7 +310,10 @@ fn print_gm_actions(actions: &[GmAction], total: i64) {
         return;
     }
     if total > actions.len() as i64 {
-        println!("GM actions: {total} recorded (newest {} shown)", actions.len());
+        println!(
+            "GM actions: {total} recorded (newest {} shown)",
+            actions.len()
+        );
     } else {
         println!("GM actions: {total} recorded");
     }
@@ -427,7 +434,11 @@ fn render_html(
 
     for a in accounts {
         let filter_key = a.username.to_lowercase();
-        let _ = write!(h, "<section class=\"card\" data-name=\"{}\">\n", esc(&filter_key));
+        let _ = write!(
+            h,
+            "<section class=\"card\" data-name=\"{}\">\n",
+            esc(&filter_key)
+        );
         h.push_str("<div class=\"card-head\">\n");
         let _ = write!(
             h,
@@ -444,12 +455,28 @@ fn render_html(
         h.push_str("</div>\n");
 
         h.push_str("<div class=\"acc-meta\">\n");
-        let _ = write!(h, "<span>email: {}</span>\n", cell(a.email.as_deref(), "none"));
-        let _ = write!(h, "<span>created: {}</span>\n", cell(a.created_at.as_deref(), "?"));
-        let _ = write!(h, "<span>last login: {}</span>\n", cell(a.last_login.as_deref(), "never"));
+        let _ = write!(
+            h,
+            "<span>email: {}</span>\n",
+            cell(a.email.as_deref(), "none")
+        );
+        let _ = write!(
+            h,
+            "<span>created: {}</span>\n",
+            cell(a.created_at.as_deref(), "?")
+        );
+        let _ = write!(
+            h,
+            "<span>last login: {}</span>\n",
+            cell(a.last_login.as_deref(), "never")
+        );
         h.push_str("</div>\n");
         if let Some(reason) = a.ban_reason.as_deref().filter(|r| !r.is_empty()) {
-            let _ = write!(h, "<div class=\"ban-reason\">ban reason: {}</div>\n", esc(reason));
+            let _ = write!(
+                h,
+                "<div class=\"ban-reason\">ban reason: {}</div>\n",
+                esc(reason)
+            );
         }
 
         match by_account.get(&a.id) {
@@ -468,7 +495,9 @@ fn render_html(
     if !orphans.is_empty() {
         h.push_str("<section class=\"card orphan\" data-name=\"orphan\">\n");
         h.push_str("<div class=\"card-head\"><span class=\"acc-name\">Orphan characters</span><span class=\"badge ban\">NO ACCOUNT</span></div>\n");
-        h.push_str("<p class=\"acc-meta\"><span>Characters whose account row is missing.</span></p>\n");
+        h.push_str(
+            "<p class=\"acc-meta\"><span>Characters whose account row is missing.</span></p>\n",
+        );
         render_char_table(&mut h, &orphans, items);
         h.push_str("</section>\n");
     }
@@ -520,9 +549,21 @@ fn render_gm_actions(h: &mut String, actions: &[GmAction], total: i64) {
             g.char_name.as_deref().unwrap_or("")
         )
         .to_lowercase();
-        let _ = write!(h, "<tr data-name=\"{}\" data-deleted=\"false\">", esc(&filter_key));
-        let _ = write!(h, "<td class=\"muted mono\">{}</td>", cell(g.timestamp.as_deref(), "?"));
-        let _ = write!(h, "<td class=\"cname\">{}</td>", cell(g.actor.as_deref(), "(account gone)"));
+        let _ = write!(
+            h,
+            "<tr data-name=\"{}\" data-deleted=\"false\">",
+            esc(&filter_key)
+        );
+        let _ = write!(
+            h,
+            "<td class=\"muted mono\">{}</td>",
+            cell(g.timestamp.as_deref(), "?")
+        );
+        let _ = write!(
+            h,
+            "<td class=\"cname\">{}</td>",
+            cell(g.actor.as_deref(), "(account gone)")
+        );
         let _ = write!(h, "<td>{}</td>", cell(g.char_name.as_deref(), "-"));
         let _ = write!(h, "<td class=\"mono\">{}</td>", esc(&g.command));
         let _ = write!(h, "<td class=\"mono\">{}</td>", cell(g.args.as_deref(), ""));
@@ -538,12 +579,18 @@ fn print_ledger(rows: &[db::ItemEventView], total: i64, mismatches: &[db::Ledger
     if mismatches.is_empty() {
         println!("Item ledger check: the books balance (every account's rows match its stores).");
     } else {
-        println!("Item ledger check: {} MISMATCH(ES), a dupe or a loss each:", mismatches.len());
+        println!(
+            "Item ledger check: {} MISMATCH(ES), a dupe or a loss each:",
+            mismatches.len()
+        );
         for m in mismatches {
             println!(
                 "  account #{:<4} {:<34} ledger says {:>8}   stores hold {:>8}",
                 m.account_id,
-                m.item_path.as_deref().map(short_item).unwrap_or_else(|| "coin (copper)".to_string()),
+                m.item_path
+                    .as_deref()
+                    .map(short_item)
+                    .unwrap_or_else(|| "coin (copper)".to_string()),
                 m.ledger,
                 m.held
             );
@@ -582,7 +629,11 @@ fn fmt_at(at: i64) -> String {
 
 /// `res://data/loot/items/bread_loaf.tres` reads as `bread_loaf`.
 fn short_item(path: &str) -> String {
-    path.rsplit('/').next().unwrap_or(path).trim_end_matches(".tres").to_string()
+    path.rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .trim_end_matches(".tres")
+        .to_string()
 }
 
 /// The ledger as two cards: the check (red when the books do not balance),
@@ -601,7 +652,12 @@ fn render_ledger(
     } else {
         h.push_str("<section class=\"card orphan\" data-name=\"item ledger check\">\n");
         h.push_str("<div class=\"card-head\"><span class=\"acc-name\">Item ledger check</span>");
-        let _ = write!(h, "<span class=\"badge ban\">{} MISMATCH{}</span></div>\n", mismatches.len(), if mismatches.len() == 1 { "" } else { "ES" });
+        let _ = write!(
+            h,
+            "<span class=\"badge ban\">{} MISMATCH{}</span></div>\n",
+            mismatches.len(),
+            if mismatches.len() == 1 { "" } else { "ES" }
+        );
         h.push_str("<p class=\"acc-meta\"><span>An account whose ledger and stores disagree: more held than the rows account for is a dupe, less is a loss. The newest rows below say when.</span></p>\n");
         h.push_str("<div class=\"table-wrap\">\n<table class=\"chars\">\n<thead><tr>");
         for col in ["Account", "Item", "Ledger says", "Stores hold"] {
@@ -609,12 +665,20 @@ fn render_ledger(
         }
         h.push_str("</tr></thead>\n<tbody>\n");
         for m in mismatches {
-            let _ = write!(h, "<tr data-name=\"account {}\" data-deleted=\"false\">", m.account_id);
+            let _ = write!(
+                h,
+                "<tr data-name=\"account {}\" data-deleted=\"false\">",
+                m.account_id
+            );
             let _ = write!(h, "<td class=\"mono\">#{}</td>", m.account_id);
             let _ = write!(
                 h,
                 "<td class=\"mono\">{}</td>",
-                esc(&m.item_path.as_deref().map(short_item).unwrap_or_else(|| "coin (copper)".to_string()))
+                esc(&m
+                    .item_path
+                    .as_deref()
+                    .map(short_item)
+                    .unwrap_or_else(|| "coin (copper)".to_string()))
             );
             let _ = write!(h, "<td>{}</td><td>{}</td>", m.ledger, m.held);
             h.push_str("</tr>\n");
@@ -641,19 +705,48 @@ fn render_ledger(
          to the account's holdings of the item (0 for a vault move), <code>copper</code> the same for coin.</span></p>\n"
     );
     h.push_str("<div class=\"table-wrap\">\n<table class=\"chars\">\n<thead><tr>");
-    for col in ["When (UTC)", "Character", "Action", "Item", "Count", "Delta", "Copper", "Detail"] {
+    for col in [
+        "When (UTC)",
+        "Character",
+        "Action",
+        "Item",
+        "Count",
+        "Delta",
+        "Copper",
+        "Detail",
+    ] {
         let _ = write!(h, "<th>{col}</th>");
     }
     h.push_str("</tr></thead>\n<tbody>\n");
     for r in rows {
         let filter_key = r.char_name.as_deref().unwrap_or("").to_lowercase();
-        let _ = write!(h, "<tr data-name=\"{}\" data-deleted=\"false\">", esc(&filter_key));
+        let _ = write!(
+            h,
+            "<tr data-name=\"{}\" data-deleted=\"false\">",
+            esc(&filter_key)
+        );
         let _ = write!(h, "<td class=\"muted mono\">{}</td>", esc(&fmt_at(r.at)));
-        let _ = write!(h, "<td class=\"cname\">{}</td>", cell(r.char_name.as_deref(), "(character gone)"));
+        let _ = write!(
+            h,
+            "<td class=\"cname\">{}</td>",
+            cell(r.char_name.as_deref(), "(character gone)")
+        );
         let _ = write!(h, "<td class=\"mono\">{}</td>", esc(&r.action));
-        let _ = write!(h, "<td class=\"mono\">{}</td>", cell(r.item_path.as_deref().map(short_item).as_deref(), ""));
-        let _ = write!(h, "<td>{}</td><td>{:+}</td><td>{:+}</td>", r.count, r.delta, r.copper);
-        let _ = write!(h, "<td class=\"mono\">{}</td>", cell(r.detail.as_deref(), ""));
+        let _ = write!(
+            h,
+            "<td class=\"mono\">{}</td>",
+            cell(r.item_path.as_deref().map(short_item).as_deref(), "")
+        );
+        let _ = write!(
+            h,
+            "<td>{}</td><td>{:+}</td><td>{:+}</td>",
+            r.count, r.delta, r.copper
+        );
+        let _ = write!(
+            h,
+            "<td class=\"mono\">{}</td>",
+            cell(r.detail.as_deref(), "")
+        );
         h.push_str("</tr>\n");
     }
     h.push_str("</tbody>\n</table>\n</div>\n</section>\n");
@@ -669,8 +762,19 @@ fn tile(h: &mut String, label: &str, value: &str, kind: &str) {
 fn render_char_table(h: &mut String, chars: &[&Character], items: &HashMap<i64, ItemAgg>) {
     h.push_str("<div class=\"table-wrap\">\n<table class=\"chars\">\n<thead><tr>");
     for col in [
-        "Name", "ID", "Lvl", "Race", "Class", "Zone", "Coins", "Bank", "Items", "Align", "Created",
-        "Last played", "Status",
+        "Name",
+        "ID",
+        "Lvl",
+        "Race",
+        "Class",
+        "Zone",
+        "Coins",
+        "Bank",
+        "Items",
+        "Align",
+        "Created",
+        "Last played",
+        "Status",
     ] {
         let _ = write!(h, "<th>{col}</th>");
     }
@@ -679,7 +783,12 @@ fn render_char_table(h: &mut String, chars: &[&Character], items: &HashMap<i64, 
         let deleted = c.deleted_at.is_some();
         let row_class = if deleted { " class=\"deleted\"" } else { "" };
         let name_key = c.name.to_lowercase();
-        let _ = write!(h, "<tr{row_class} data-name=\"{}\" data-deleted=\"{}\">", esc(&name_key), deleted);
+        let _ = write!(
+            h,
+            "<tr{row_class} data-name=\"{}\" data-deleted=\"{}\">",
+            esc(&name_key),
+            deleted
+        );
         let _ = write!(h, "<td class=\"cname\">{}</td>", esc(&c.name));
         let _ = write!(h, "<td class=\"muted mono\">{}</td>", c.id);
         let _ = write!(h, "<td>{}</td>", c.level);
@@ -705,7 +814,12 @@ fn render_char_table(h: &mut String, chars: &[&Character], items: &HashMap<i64, 
             let _ = write!(
                 h,
                 "<td class=\"coins\" title=\"{bank_cu} copper total\">{}</td>",
-                esc(&fmt_coins(c.bank_platinum, c.bank_gold, c.bank_silver, c.bank_copper))
+                esc(&fmt_coins(
+                    c.bank_platinum,
+                    c.bank_gold,
+                    c.bank_silver,
+                    c.bank_copper
+                ))
             );
         }
         // Inventory rollup (base + bags + equipped).
@@ -720,7 +834,11 @@ fn render_char_table(h: &mut String, chars: &[&Character], items: &HashMap<i64, 
             );
         }
         let _ = write!(h, "<td>{:.2}</td>", c.alignment_score);
-        let _ = write!(h, "<td class=\"muted\">{}</td>", cell(c.created_at.as_deref(), "?"));
+        let _ = write!(
+            h,
+            "<td class=\"muted\">{}</td>",
+            cell(c.created_at.as_deref(), "?")
+        );
         let _ = write!(h, "<td>{}</td>", cell(c.last_played_at.as_deref(), "never"));
         match &c.deleted_at {
             Some(when) => {
@@ -848,7 +966,10 @@ mod tests {
     /// A migrated database in a fresh temp directory, as the db tests build one.
     async fn fresh_pool() -> (sqlx::SqlitePool, tempfile::TempDir) {
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("report.db").display());
+        let url = format!(
+            "sqlite://{}?mode=rwc",
+            tmp.path().join("report.db").display()
+        );
         let pool = db::open(&url).await.expect("open");
         db::migrate(&pool).await.expect("migrate");
         (pool, tmp)
@@ -866,11 +987,13 @@ mod tests {
         let char_id = db::create_character(&pool, account, "Fraction", "Human", "Cleric")
             .await
             .expect("character");
-        sqlx::query("UPDATE characters SET alignment_score = 0.37, alignment_seeded = 1 WHERE id = ?1")
-            .bind(char_id)
-            .execute(&pool)
-            .await
-            .expect("write a fractional score");
+        sqlx::query(
+            "UPDATE characters SET alignment_score = 0.37, alignment_seeded = 1 WHERE id = ?1",
+        )
+        .bind(char_id)
+        .execute(&pool)
+        .await
+        .expect("write a fractional score");
 
         let characters: Vec<Character> = sqlx::query_as(CHARACTER_QUERY)
             .fetch_all(&pool)

@@ -186,7 +186,12 @@ impl Coins {
     /// Copper-equivalent value of one coin of each tier, indexed copper→platinum.
     const TIER_VALUE: [i64; 4] = [1, 100, 10_000, 1_000_000];
 
-    pub const ZERO: Coins = Coins { platinum: 0, gold: 0, silver: 0, copper: 0 };
+    pub const ZERO: Coins = Coins {
+        platinum: 0,
+        gold: 0,
+        silver: 0,
+        copper: 0,
+    };
 
     /// Total wallet value expressed in copper.
     pub fn total_copper(self) -> i64 {
@@ -209,7 +214,12 @@ impl Coins {
         amount %= Self::TIER_VALUE[2];
         let silver = amount / Self::TIER_VALUE[1];
         amount %= Self::TIER_VALUE[1];
-        Coins { platinum, gold, silver, copper: amount }
+        Coins {
+            platinum,
+            gold,
+            silver,
+            copper: amount,
+        }
     }
 
     pub fn can_afford(self, cost_copper: i64) -> bool {
@@ -503,8 +513,13 @@ pub enum EquipSlot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum SlotRef {
-    BaseSlot { idx: u8 },
-    BagSlot { base: u8, slot: u8 },
+    BaseSlot {
+        idx: u8,
+    },
+    BagSlot {
+        base: u8,
+        slot: u8,
+    },
     EquipSlot(EquipSlot),
     /// PD_W0029: the cursor slot, what the player holds (the `"cursor"`
     /// location of `MoveItem`), for selling and eating from the hand.
@@ -1825,49 +1840,106 @@ mod coins_tests {
     #[test]
     fn total_and_from_copper_roundtrip() {
         let c = Coins::from_copper(1_234_567);
-        assert_eq!(c, Coins { platinum: 1, gold: 23, silver: 45, copper: 67 });
+        assert_eq!(
+            c,
+            Coins {
+                platinum: 1,
+                gold: 23,
+                silver: 45,
+                copper: 67
+            }
+        );
         assert_eq!(c.total_copper(), 1_234_567);
         assert_eq!(Coins::from_copper(-5), Coins::ZERO);
     }
 
     #[test]
     fn spend_exact_from_copper() {
-        let mut c = Coins { copper: 100, ..Coins::ZERO };
+        let mut c = Coins {
+            copper: 100,
+            ..Coins::ZERO
+        };
         assert!(c.spend(36));
-        assert_eq!(c, Coins { copper: 64, ..Coins::ZERO });
+        assert_eq!(
+            c,
+            Coins {
+                copper: 64,
+                ..Coins::ZERO
+            }
+        );
     }
 
     #[test]
     fn spend_leaves_a_copper_hoard_intact() {
         // The whole point of independent stacks: buying a 1c candle out of a
         // 5000-copper hoard must NOT silently consolidate it into silver.
-        let mut c = Coins { copper: 5000, ..Coins::ZERO };
+        let mut c = Coins {
+            copper: 5000,
+            ..Coins::ZERO
+        };
         assert!(c.spend(1));
-        assert_eq!(c, Coins { copper: 4999, ..Coins::ZERO });
+        assert_eq!(
+            c,
+            Coins {
+                copper: 4999,
+                ..Coins::ZERO
+            }
+        );
     }
 
     #[test]
     fn spend_breaks_a_higher_coin_into_change() {
         // Pay 1 copper out of a lone platinum → 0p 99g 99s 99c (= 999_999c).
-        let mut c = Coins { platinum: 1, ..Coins::ZERO };
+        let mut c = Coins {
+            platinum: 1,
+            ..Coins::ZERO
+        };
         assert!(c.spend(1));
-        assert_eq!(c, Coins { platinum: 0, gold: 99, silver: 99, copper: 99 });
+        assert_eq!(
+            c,
+            Coins {
+                platinum: 0,
+                gold: 99,
+                silver: 99,
+                copper: 99
+            }
+        );
         assert_eq!(c.total_copper(), 999_999);
     }
 
     #[test]
     fn spend_rejects_when_unaffordable_and_leaves_wallet_untouched() {
-        let mut c = Coins { silver: 1, ..Coins::ZERO };
+        let mut c = Coins {
+            silver: 1,
+            ..Coins::ZERO
+        };
         assert!(!c.spend(150));
-        assert_eq!(c, Coins { silver: 1, ..Coins::ZERO });
+        assert_eq!(
+            c,
+            Coins {
+                silver: 1,
+                ..Coins::ZERO
+            }
+        );
     }
 
     #[test]
     fn add_payout_reduces_payout_but_not_existing_stacks() {
         // Existing 99 raw copper stays raw; the 5000c payout arrives as 50s.
-        let mut c = Coins { copper: 99, ..Coins::ZERO };
+        let mut c = Coins {
+            copper: 99,
+            ..Coins::ZERO
+        };
         c.add_payout(5000);
-        assert_eq!(c, Coins { platinum: 0, gold: 0, silver: 50, copper: 99 });
+        assert_eq!(
+            c,
+            Coins {
+                platinum: 0,
+                gold: 0,
+                silver: 50,
+                copper: 99
+            }
+        );
         assert_eq!(c.total_copper(), 5099);
     }
 
@@ -1876,68 +1948,153 @@ mod coins_tests {
     #[test]
     fn exchange_up_converts_whole_multiples_and_preserves_value() {
         // 200 copper → 2 silver; the rest of the wallet is untouched.
-        let mut c = Coins { copper: 250, gold: 1, ..Coins::ZERO };
+        let mut c = Coins {
+            copper: 250,
+            gold: 1,
+            ..Coins::ZERO
+        };
         let before = c.total_copper();
         assert!(c.exchange(0, 1, 200).is_ok());
-        assert_eq!(c, Coins { copper: 50, silver: 2, gold: 1, ..Coins::ZERO });
+        assert_eq!(
+            c,
+            Coins {
+                copper: 50,
+                silver: 2,
+                gold: 1,
+                ..Coins::ZERO
+            }
+        );
         assert_eq!(c.total_copper(), before, "0% fee preserves value");
     }
 
     #[test]
     fn exchange_up_partial_converts_and_keeps_remainder() {
         // 150 copper -> 1 silver, with the unconvertible 50 copper left in place.
-        let mut c = Coins { copper: 150, ..Coins::ZERO };
+        let mut c = Coins {
+            copper: 150,
+            ..Coins::ZERO
+        };
         let before = c.total_copper();
         assert!(c.exchange(0, 1, 150).is_ok());
-        assert_eq!(c, Coins { copper: 50, silver: 1, ..Coins::ZERO });
+        assert_eq!(
+            c,
+            Coins {
+                copper: 50,
+                silver: 1,
+                ..Coins::ZERO
+            }
+        );
         assert_eq!(c.total_copper(), before, "0% fee preserves value");
     }
 
     #[test]
     fn exchange_up_rejects_below_one_target_coin() {
         // 50 copper can't make even one silver — nothing converts.
-        let mut c = Coins { copper: 50, ..Coins::ZERO };
+        let mut c = Coins {
+            copper: 50,
+            ..Coins::ZERO
+        };
         assert!(c.exchange(0, 1, 50).is_err());
-        assert_eq!(c, Coins { copper: 50, ..Coins::ZERO });
+        assert_eq!(
+            c,
+            Coins {
+                copper: 50,
+                ..Coins::ZERO
+            }
+        );
     }
 
     #[test]
     fn exchange_down_always_divides_evenly() {
-        let mut c = Coins { silver: 1, ..Coins::ZERO };
+        let mut c = Coins {
+            silver: 1,
+            ..Coins::ZERO
+        };
         assert!(c.exchange(1, 0, 1).is_ok());
-        assert_eq!(c, Coins { copper: 100, ..Coins::ZERO });
+        assert_eq!(
+            c,
+            Coins {
+                copper: 100,
+                ..Coins::ZERO
+            }
+        );
     }
 
     #[test]
     fn exchange_rejects_insufficient_same_tier_and_zero() {
-        let mut c = Coins { copper: 100, ..Coins::ZERO };
+        let mut c = Coins {
+            copper: 100,
+            ..Coins::ZERO
+        };
         assert!(c.exchange(0, 1, 200).is_err(), "not enough copper");
         assert!(c.exchange(1, 1, 1).is_err(), "same tier");
         assert!(c.exchange(0, 1, 0).is_err(), "zero qty");
-        assert_eq!(c, Coins { copper: 100, ..Coins::ZERO }, "no partial mutation");
+        assert_eq!(
+            c,
+            Coins {
+                copper: 100,
+                ..Coins::ZERO
+            },
+            "no partial mutation"
+        );
     }
 
     #[test]
     fn deposit_helpers_are_per_tier() {
-        let wallet = Coins { silver: 5, copper: 30, ..Coins::ZERO };
-        let amt = Coins { silver: 2, copper: 30, ..Coins::ZERO };
+        let wallet = Coins {
+            silver: 5,
+            copper: 30,
+            ..Coins::ZERO
+        };
+        let amt = Coins {
+            silver: 2,
+            copper: 30,
+            ..Coins::ZERO
+        };
         assert!(wallet.has_at_least(amt));
-        assert!(!wallet.has_at_least(Coins { silver: 6, ..Coins::ZERO }));
-        assert_eq!(wallet.sub_each(amt), Coins { silver: 3, ..Coins::ZERO });
+        assert!(!wallet.has_at_least(Coins {
+            silver: 6,
+            ..Coins::ZERO
+        }));
+        assert_eq!(
+            wallet.sub_each(amt),
+            Coins {
+                silver: 3,
+                ..Coins::ZERO
+            }
+        );
         assert_eq!(Coins::ZERO.add_each(amt), amt);
     }
 
     #[test]
     fn a_coin_amount_refuses_any_negative_tier() {
         use super::{CoinAmount, NegativeCoins};
-        let fine = Coins { platinum: 1, gold: 0, silver: 3, copper: 0 };
+        let fine = Coins {
+            platinum: 1,
+            gold: 0,
+            silver: 3,
+            copper: 0,
+        };
         assert_eq!(CoinAmount::try_from(fine).map(CoinAmount::get), Ok(fine));
         assert_eq!(CoinAmount::try_from(Coins::ZERO), Ok(CoinAmount::ZERO));
         for bad in [
-            Coins { platinum: -1, ..Coins::ZERO },
-            Coins { gold: -1, ..Coins::ZERO },
-            Coins { silver: -1, ..Coins::ZERO },
-            Coins { copper: i64::MIN, platinum: 5, ..Coins::ZERO },
+            Coins {
+                platinum: -1,
+                ..Coins::ZERO
+            },
+            Coins {
+                gold: -1,
+                ..Coins::ZERO
+            },
+            Coins {
+                silver: -1,
+                ..Coins::ZERO
+            },
+            Coins {
+                copper: i64::MIN,
+                platinum: 5,
+                ..Coins::ZERO
+            },
         ] {
             assert_eq!(CoinAmount::try_from(bad), Err(NegativeCoins), "{bad:?}");
         }
@@ -1945,8 +2102,16 @@ mod coins_tests {
 
     #[test]
     fn has_negative_flags_malformed_amounts() {
-        assert!(Coins { copper: -1, ..Coins::ZERO }.has_negative());
-        assert!(!Coins { copper: 1, ..Coins::ZERO }.has_negative());
+        assert!(Coins {
+            copper: -1,
+            ..Coins::ZERO
+        }
+        .has_negative());
+        assert!(!Coins {
+            copper: 1,
+            ..Coins::ZERO
+        }
+        .has_negative());
     }
 }
 
@@ -1955,7 +2120,12 @@ mod coin_breaking_tests {
     use super::Coins;
 
     fn c(p: i64, g: i64, s: i64, cu: i64) -> Coins {
-        Coins { platinum: p, gold: g, silver: s, copper: cu }
+        Coins {
+            platinum: p,
+            gold: g,
+            silver: s,
+            copper: cu,
+        }
     }
 
     /// The case the tester raised: 10 gold, pay 5 silver, expect 9g 95s.
@@ -2045,8 +2215,18 @@ mod coin_properties {
     /// platinum) is out of reach of any economy and not generated.
     fn purse() -> impl Strategy<Value = Coins> {
         let tier = |max: i64| prop_oneof![3 => 0i64..1_000_000, 1 => 0i64..max];
-        (tier(1_000_000_000_000_000), tier(1_000_000_000_000_000), tier(1_000_000_000_000), tier(1_000_000_000_000))
-            .prop_map(|(copper, silver, gold, platinum)| Coins { copper, silver, gold, platinum })
+        (
+            tier(1_000_000_000_000_000),
+            tier(1_000_000_000_000_000),
+            tier(1_000_000_000_000),
+            tier(1_000_000_000_000),
+        )
+            .prop_map(|(copper, silver, gold, platinum)| Coins {
+                copper,
+                silver,
+                gold,
+                platinum,
+            })
     }
 
     fn no_negative_tier(c: Coins) -> bool {

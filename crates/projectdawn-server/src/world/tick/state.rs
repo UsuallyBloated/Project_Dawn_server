@@ -127,19 +127,39 @@ pub(super) struct WorldState {
 // post-dispatch sweep. The sweep needs the full connections
 // map (to resolve names to ids + fan rosters to multiple
 // members), so we can't process inline in handle_message.
-pub(super) struct GroupInviteI { pub(super) inviter: u64, pub(super) target_name: String }
+pub(super) struct GroupInviteI {
+    pub(super) inviter: u64,
+    pub(super) target_name: String,
+}
 
-pub(super) struct GroupAcceptI { pub(super) invitee: u64, pub(super) from: u64 }
+pub(super) struct GroupAcceptI {
+    pub(super) invitee: u64,
+    pub(super) from: u64,
+}
 
-pub(super) struct GroupLeaveI { pub(super) member: u64 }
+pub(super) struct GroupLeaveI {
+    pub(super) member: u64,
+}
 
-pub(super) struct GroupKickI { pub(super) leader: u64, pub(super) target_name: String }
+pub(super) struct GroupKickI {
+    pub(super) leader: u64,
+    pub(super) target_name: String,
+}
 
-pub(super) struct GroupLootModeI { pub(super) leader: u64, pub(super) mode: u8 }
+pub(super) struct GroupLootModeI {
+    pub(super) leader: u64,
+    pub(super) mode: u8,
+}
 
-pub(super) struct GroupPassLeadershipI { pub(super) leader: u64, pub(super) new_leader: u64 }
+pub(super) struct GroupPassLeadershipI {
+    pub(super) leader: u64,
+    pub(super) new_leader: u64,
+}
 
-pub(super) struct AutosplitNoticeI { pub(super) char_id: u64, pub(super) on: bool }
+pub(super) struct AutosplitNoticeI {
+    pub(super) char_id: u64,
+    pub(super) on: bool,
+}
 
 // PD_W0024 — quest accept / abandon lifecycle intents in ONE
 // arrival-order queue (not bucketed per-type), so a same-tick
@@ -158,7 +178,11 @@ pub(super) enum QuestLifecycle {
 // message dispatch so we can mutate `enemies` (where pets
 // live) without overlapping the handler's mutable
 // `connections` borrow.
-pub(super) struct PetCommandI { pub(super) owner: u64, pub(super) command: u8, pub(super) target_id: Option<EntityId> }
+pub(super) struct PetCommandI {
+    pub(super) owner: u64,
+    pub(super) command: u8,
+    pub(super) target_id: Option<EntityId>,
+}
 
 // Track 13.2 — move-item intents. Buffered like pet commands;
 // dispatch runs after the message-drain so we don't overlap
@@ -173,12 +197,30 @@ pub(super) struct MoveItemI {
 
 // PD_W0028 — trade intents, buffered like everything else.
 pub(super) enum TradeI {
-    Request { requester: u64, target: u64 },
-    OfferItem { owner: u64, window_slot: u8, from_location: String, from_slot: u32 },
-    RetrieveItem { owner: u64, window_slot: u8 },
-    OfferCoins { owner: u64, coins: protocol::world::CoinAmount },
-    Accept { owner: u64 },
-    Cancel { owner: u64 },
+    Request {
+        requester: u64,
+        target: u64,
+    },
+    OfferItem {
+        owner: u64,
+        window_slot: u8,
+        from_location: String,
+        from_slot: u32,
+    },
+    RetrieveItem {
+        owner: u64,
+        window_slot: u8,
+    },
+    OfferCoins {
+        owner: u64,
+        coins: protocol::world::CoinAmount,
+    },
+    Accept {
+        owner: u64,
+    },
+    Cancel {
+        owner: u64,
+    },
 }
 
 // Track 13.2.b — split + drop intents.
@@ -250,16 +292,36 @@ pub(super) struct SellItemI {
 }
 
 // PD_W0015 — Banker, slice 1 (coins): deposit / withdraw / exchange.
-pub(super) struct BankDepositI { pub(super) owner: u64, pub(super) coins: protocol::world::CoinAmount }
+pub(super) struct BankDepositI {
+    pub(super) owner: u64,
+    pub(super) coins: protocol::world::CoinAmount,
+}
 
-pub(super) struct BankWithdrawI { pub(super) owner: u64, pub(super) coins: protocol::world::CoinAmount }
+pub(super) struct BankWithdrawI {
+    pub(super) owner: u64,
+    pub(super) coins: protocol::world::CoinAmount,
+}
 
-pub(super) struct BankExchangeI { pub(super) owner: u64, pub(super) from_tier: u8, pub(super) to_tier: u8, pub(super) qty: u32 }
+pub(super) struct BankExchangeI {
+    pub(super) owner: u64,
+    pub(super) from_tier: u8,
+    pub(super) to_tier: u8,
+    pub(super) qty: u32,
+}
 
 // PD_W0016 — Banker, slice 2 (item vaults): store / withdraw whole stacks.
-pub(super) struct BankStoreItemI { pub(super) owner: u64, pub(super) src_location: String, pub(super) src_slot: u32, pub(super) shared: bool }
+pub(super) struct BankStoreItemI {
+    pub(super) owner: u64,
+    pub(super) src_location: String,
+    pub(super) src_slot: u32,
+    pub(super) shared: bool,
+}
 
-pub(super) struct BankWithdrawItemI { pub(super) owner: u64, pub(super) shared: bool, pub(super) vault_slot: u32 }
+pub(super) struct BankWithdrawItemI {
+    pub(super) owner: u64,
+    pub(super) shared: bool,
+    pub(super) vault_slot: u32,
+}
 
 /// One tick's queues, filled by the message drain (step 3) and emptied by the
 /// steps that apply them.
@@ -296,7 +358,13 @@ pub(super) struct Intents {
     // so the drain step can exclude the sender from broadcast
     // recipients and resolve the sender's connection for Tell
     // bounce-backs when the target name doesn't match.
-    pub(super) chat_fanouts: Vec<(ClientId, protocol::world::ChatChannel, String, String, Option<String>)>,
+    pub(super) chat_fanouts: Vec<(
+        ClientId,
+        protocol::world::ChatChannel,
+        String,
+        String,
+        Option<String>,
+    )>,
     // Player-inspect requests. `(inspector_client_id, target_char_id)`.
     pub(super) inspect_intents: Vec<(ClientId, i64)>,
     // Track 5 sub-task 3 — player → server attack intents queued for
@@ -328,7 +396,10 @@ pub(super) struct Intents {
     pub(super) bind_intents: Vec<(i64, Option<String>, (f32, f32, f32))>,
     // PD_W0023 — dev-gated Test Panel spawns, applied alongside the natural
     // spawner pass where the enemies map + AOI grid are in scope.
-    pub(super) dev_spawn_intents: Vec<(crate::world::connection::Vec3f, crate::world::zones::MobTemplate)>,
+    pub(super) dev_spawn_intents: Vec<(
+        crate::world::connection::Vec3f,
+        crate::world::zones::MobTemplate,
+    )>,
     // The Test Panel's "Despawn All Enemies": the GM and their position,
     // applied with the dev spawns.
     pub(super) dev_despawn_intents: Vec<(ClientId, Vec3f)>,

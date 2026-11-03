@@ -42,45 +42,459 @@ impl Skill {
 type CapTable<'a> = &'a [(&'a str, &'a [(&'a str, i32)])];
 
 const WEAPON_CAPS: CapTable<'static> = &[
-    ("Warrior",       &[("1h_slashing", 250), ("2h_slashing", 250), ("1h_blunt", 250), ("2h_blunt", 250), ("piercing", 250), ("hand_to_hand", 100), ("archery",  75), ("defense", 250), ("dodge", 200), ("dual_wield", 200)]),
-    ("Rogue",         &[("1h_slashing", 225), ("2h_slashing",   0), ("1h_blunt",  75), ("2h_blunt",   0), ("piercing", 250), ("hand_to_hand", 200), ("archery", 100), ("defense", 200), ("dodge", 250), ("dual_wield", 250)]),
-    ("Magician",      &[("1h_slashing",   0), ("2h_slashing",   0), ("1h_blunt",  75), ("2h_blunt",   0), ("piercing",   0), ("hand_to_hand",  25), ("archery",   0), ("defense", 100), ("dodge",  75), ("dual_wield",   0)]),
-    ("Wizard",        &[("1h_slashing",   0), ("2h_slashing",   0), ("1h_blunt",  75), ("2h_blunt",   0), ("piercing",   0), ("hand_to_hand",  25), ("archery",   0), ("defense", 100), ("dodge",  75), ("dual_wield",   0)]),
-    ("Sorcerer",      &[("1h_slashing",   0), ("2h_slashing",   0), ("1h_blunt",  75), ("2h_blunt",   0), ("piercing",   0), ("hand_to_hand",  25), ("archery",   0), ("defense", 100), ("dodge",  75), ("dual_wield",   0)]),
-    ("Necromancer",   &[("1h_slashing",   0), ("2h_slashing",   0), ("1h_blunt",  75), ("2h_blunt",   0), ("piercing",   0), ("hand_to_hand",  25), ("archery",   0), ("defense", 100), ("dodge",  75), ("dual_wield",   0)]),
-    ("Enchanter",     &[("1h_slashing",   0), ("2h_slashing",   0), ("1h_blunt",  75), ("2h_blunt",   0), ("piercing",   0), ("hand_to_hand",  25), ("archery",   0), ("defense", 100), ("dodge",  75), ("dual_wield",   0)]),
-    ("Blood Mage",    &[("1h_slashing",   0), ("2h_slashing",   0), ("1h_blunt", 100), ("2h_blunt",   0), ("piercing",  50), ("hand_to_hand",  50), ("archery",   0), ("defense", 100), ("dodge",  75), ("dual_wield",   0)]),
-    ("Cleric",        &[("1h_slashing",   0), ("2h_slashing",   0), ("1h_blunt", 200), ("2h_blunt", 200), ("piercing",   0), ("hand_to_hand",  50), ("archery",   0), ("defense", 200), ("dodge", 150), ("dual_wield",   0)]),
-    ("Druid",         &[("1h_slashing",   0), ("2h_slashing",   0), ("1h_blunt", 175), ("2h_blunt", 175), ("piercing",   0), ("hand_to_hand",  50), ("archery",  75), ("defense", 175), ("dodge", 150), ("dual_wield",   0)]),
-    ("Shaman",        &[("1h_slashing", 150), ("2h_slashing",   0), ("1h_blunt", 200), ("2h_blunt", 200), ("piercing", 100), ("hand_to_hand", 100), ("archery",   0), ("defense", 200), ("dodge", 150), ("dual_wield",   0)]),
-    ("Paladin",       &[("1h_slashing", 225), ("2h_slashing", 225), ("1h_blunt", 225), ("2h_blunt", 225), ("piercing", 150), ("hand_to_hand",  75), ("archery",  75), ("defense", 225), ("dodge", 175), ("dual_wield",   0)]),
-    ("Shadow Knight", &[("1h_slashing", 225), ("2h_slashing", 225), ("1h_blunt", 225), ("2h_blunt", 225), ("piercing", 150), ("hand_to_hand",  75), ("archery",  50), ("defense", 225), ("dodge", 175), ("dual_wield", 150)]),
-    ("Bard",          &[("1h_slashing", 200), ("2h_slashing", 150), ("1h_blunt", 175), ("2h_blunt", 150), ("piercing", 200), ("hand_to_hand", 100), ("archery",  75), ("defense", 175), ("dodge", 200), ("dual_wield", 175)]),
-    ("Ranger",        &[("1h_slashing", 225), ("2h_slashing", 225), ("1h_blunt", 175), ("2h_blunt", 175), ("piercing", 225), ("hand_to_hand", 100), ("archery", 250), ("defense", 200), ("dodge", 225), ("dual_wield", 225)]),
-    ("Monk",          &[("1h_slashing",  50), ("2h_slashing",   0), ("1h_blunt", 200), ("2h_blunt", 100), ("piercing",   0), ("hand_to_hand", 250), ("archery",   0), ("defense", 250), ("dodge", 250), ("dual_wield", 250)]),
-    ("Witch Hunter",  &[("1h_slashing", 200), ("2h_slashing", 150), ("1h_blunt", 100), ("2h_blunt",   0), ("piercing", 225), ("hand_to_hand", 125), ("archery", 150), ("defense", 200), ("dodge", 200), ("dual_wield", 200)]),
-    ("Beast Master",  &[("1h_slashing", 150), ("2h_slashing", 100), ("1h_blunt", 150), ("2h_blunt", 100), ("piercing", 125), ("hand_to_hand", 200), ("archery", 100), ("defense", 200), ("dodge", 175), ("dual_wield", 150)]),
+    (
+        "Warrior",
+        &[
+            ("1h_slashing", 250),
+            ("2h_slashing", 250),
+            ("1h_blunt", 250),
+            ("2h_blunt", 250),
+            ("piercing", 250),
+            ("hand_to_hand", 100),
+            ("archery", 75),
+            ("defense", 250),
+            ("dodge", 200),
+            ("dual_wield", 200),
+        ],
+    ),
+    (
+        "Rogue",
+        &[
+            ("1h_slashing", 225),
+            ("2h_slashing", 0),
+            ("1h_blunt", 75),
+            ("2h_blunt", 0),
+            ("piercing", 250),
+            ("hand_to_hand", 200),
+            ("archery", 100),
+            ("defense", 200),
+            ("dodge", 250),
+            ("dual_wield", 250),
+        ],
+    ),
+    (
+        "Magician",
+        &[
+            ("1h_slashing", 0),
+            ("2h_slashing", 0),
+            ("1h_blunt", 75),
+            ("2h_blunt", 0),
+            ("piercing", 0),
+            ("hand_to_hand", 25),
+            ("archery", 0),
+            ("defense", 100),
+            ("dodge", 75),
+            ("dual_wield", 0),
+        ],
+    ),
+    (
+        "Wizard",
+        &[
+            ("1h_slashing", 0),
+            ("2h_slashing", 0),
+            ("1h_blunt", 75),
+            ("2h_blunt", 0),
+            ("piercing", 0),
+            ("hand_to_hand", 25),
+            ("archery", 0),
+            ("defense", 100),
+            ("dodge", 75),
+            ("dual_wield", 0),
+        ],
+    ),
+    (
+        "Sorcerer",
+        &[
+            ("1h_slashing", 0),
+            ("2h_slashing", 0),
+            ("1h_blunt", 75),
+            ("2h_blunt", 0),
+            ("piercing", 0),
+            ("hand_to_hand", 25),
+            ("archery", 0),
+            ("defense", 100),
+            ("dodge", 75),
+            ("dual_wield", 0),
+        ],
+    ),
+    (
+        "Necromancer",
+        &[
+            ("1h_slashing", 0),
+            ("2h_slashing", 0),
+            ("1h_blunt", 75),
+            ("2h_blunt", 0),
+            ("piercing", 0),
+            ("hand_to_hand", 25),
+            ("archery", 0),
+            ("defense", 100),
+            ("dodge", 75),
+            ("dual_wield", 0),
+        ],
+    ),
+    (
+        "Enchanter",
+        &[
+            ("1h_slashing", 0),
+            ("2h_slashing", 0),
+            ("1h_blunt", 75),
+            ("2h_blunt", 0),
+            ("piercing", 0),
+            ("hand_to_hand", 25),
+            ("archery", 0),
+            ("defense", 100),
+            ("dodge", 75),
+            ("dual_wield", 0),
+        ],
+    ),
+    (
+        "Blood Mage",
+        &[
+            ("1h_slashing", 0),
+            ("2h_slashing", 0),
+            ("1h_blunt", 100),
+            ("2h_blunt", 0),
+            ("piercing", 50),
+            ("hand_to_hand", 50),
+            ("archery", 0),
+            ("defense", 100),
+            ("dodge", 75),
+            ("dual_wield", 0),
+        ],
+    ),
+    (
+        "Cleric",
+        &[
+            ("1h_slashing", 0),
+            ("2h_slashing", 0),
+            ("1h_blunt", 200),
+            ("2h_blunt", 200),
+            ("piercing", 0),
+            ("hand_to_hand", 50),
+            ("archery", 0),
+            ("defense", 200),
+            ("dodge", 150),
+            ("dual_wield", 0),
+        ],
+    ),
+    (
+        "Druid",
+        &[
+            ("1h_slashing", 0),
+            ("2h_slashing", 0),
+            ("1h_blunt", 175),
+            ("2h_blunt", 175),
+            ("piercing", 0),
+            ("hand_to_hand", 50),
+            ("archery", 75),
+            ("defense", 175),
+            ("dodge", 150),
+            ("dual_wield", 0),
+        ],
+    ),
+    (
+        "Shaman",
+        &[
+            ("1h_slashing", 150),
+            ("2h_slashing", 0),
+            ("1h_blunt", 200),
+            ("2h_blunt", 200),
+            ("piercing", 100),
+            ("hand_to_hand", 100),
+            ("archery", 0),
+            ("defense", 200),
+            ("dodge", 150),
+            ("dual_wield", 0),
+        ],
+    ),
+    (
+        "Paladin",
+        &[
+            ("1h_slashing", 225),
+            ("2h_slashing", 225),
+            ("1h_blunt", 225),
+            ("2h_blunt", 225),
+            ("piercing", 150),
+            ("hand_to_hand", 75),
+            ("archery", 75),
+            ("defense", 225),
+            ("dodge", 175),
+            ("dual_wield", 0),
+        ],
+    ),
+    (
+        "Shadow Knight",
+        &[
+            ("1h_slashing", 225),
+            ("2h_slashing", 225),
+            ("1h_blunt", 225),
+            ("2h_blunt", 225),
+            ("piercing", 150),
+            ("hand_to_hand", 75),
+            ("archery", 50),
+            ("defense", 225),
+            ("dodge", 175),
+            ("dual_wield", 150),
+        ],
+    ),
+    (
+        "Bard",
+        &[
+            ("1h_slashing", 200),
+            ("2h_slashing", 150),
+            ("1h_blunt", 175),
+            ("2h_blunt", 150),
+            ("piercing", 200),
+            ("hand_to_hand", 100),
+            ("archery", 75),
+            ("defense", 175),
+            ("dodge", 200),
+            ("dual_wield", 175),
+        ],
+    ),
+    (
+        "Ranger",
+        &[
+            ("1h_slashing", 225),
+            ("2h_slashing", 225),
+            ("1h_blunt", 175),
+            ("2h_blunt", 175),
+            ("piercing", 225),
+            ("hand_to_hand", 100),
+            ("archery", 250),
+            ("defense", 200),
+            ("dodge", 225),
+            ("dual_wield", 225),
+        ],
+    ),
+    (
+        "Monk",
+        &[
+            ("1h_slashing", 50),
+            ("2h_slashing", 0),
+            ("1h_blunt", 200),
+            ("2h_blunt", 100),
+            ("piercing", 0),
+            ("hand_to_hand", 250),
+            ("archery", 0),
+            ("defense", 250),
+            ("dodge", 250),
+            ("dual_wield", 250),
+        ],
+    ),
+    (
+        "Witch Hunter",
+        &[
+            ("1h_slashing", 200),
+            ("2h_slashing", 150),
+            ("1h_blunt", 100),
+            ("2h_blunt", 0),
+            ("piercing", 225),
+            ("hand_to_hand", 125),
+            ("archery", 150),
+            ("defense", 200),
+            ("dodge", 200),
+            ("dual_wield", 200),
+        ],
+    ),
+    (
+        "Beast Master",
+        &[
+            ("1h_slashing", 150),
+            ("2h_slashing", 100),
+            ("1h_blunt", 150),
+            ("2h_blunt", 100),
+            ("piercing", 125),
+            ("hand_to_hand", 200),
+            ("archery", 100),
+            ("defense", 200),
+            ("dodge", 175),
+            ("dual_wield", 150),
+        ],
+    ),
 ];
 
 const ARMOR_CAPS: CapTable<'static> = &[
-    ("Warrior",       &[("cloth",  75), ("leather", 150), ("chain", 225), ("plate", 250), ("shield", 250)]),
-    ("Paladin",       &[("cloth",  75), ("leather", 150), ("chain", 200), ("plate", 225), ("shield", 250)]),
-    ("Shadow Knight", &[("cloth",  75), ("leather", 150), ("chain", 200), ("plate", 225), ("shield", 225)]),
-    ("Cleric",        &[("cloth", 100), ("leather", 100), ("chain", 200), ("plate", 225), ("shield", 225)]),
-    ("Druid",         &[("cloth", 100), ("leather", 200), ("chain", 175), ("plate",   0), ("shield", 125)]),
-    ("Shaman",        &[("cloth", 100), ("leather", 175), ("chain", 225), ("plate",   0), ("shield", 175)]),
-    ("Rogue",         &[("cloth", 100), ("leather", 250), ("chain", 100), ("plate",   0), ("shield", 100)]),
-    ("Monk",          &[("cloth", 150), ("leather",   0), ("chain",   0), ("plate",   0), ("shield",   0)]),
-    ("Ranger",        &[("cloth",  75), ("leather", 225), ("chain", 225), ("plate",   0), ("shield", 175)]),
-    ("Beast Master",  &[("cloth",  75), ("leather", 200), ("chain", 200), ("plate",   0), ("shield", 150)]),
-    ("Bard",          &[("cloth",  75), ("leather", 200), ("chain", 225), ("plate",   0), ("shield", 150)]),
-    ("Witch Hunter",  &[("cloth",  75), ("leather", 200), ("chain", 225), ("plate",   0), ("shield", 150)]),
-    ("Magician",      &[("cloth", 250), ("leather",  50), ("chain",   0), ("plate",   0), ("shield",   0)]),
-    ("Wizard",        &[("cloth", 250), ("leather",  50), ("chain",   0), ("plate",   0), ("shield",   0)]),
-    ("Sorcerer",      &[("cloth", 250), ("leather",  50), ("chain",   0), ("plate",   0), ("shield",   0)]),
-    ("Necromancer",   &[("cloth", 250), ("leather",  50), ("chain",   0), ("plate",   0), ("shield",   0)]),
-    ("Enchanter",     &[("cloth", 250), ("leather",  50), ("chain",   0), ("plate",   0), ("shield",   0)]),
-    ("Blood Mage",    &[("cloth", 200), ("leather", 100), ("chain",  50), ("plate",   0), ("shield",   0)]),
+    (
+        "Warrior",
+        &[
+            ("cloth", 75),
+            ("leather", 150),
+            ("chain", 225),
+            ("plate", 250),
+            ("shield", 250),
+        ],
+    ),
+    (
+        "Paladin",
+        &[
+            ("cloth", 75),
+            ("leather", 150),
+            ("chain", 200),
+            ("plate", 225),
+            ("shield", 250),
+        ],
+    ),
+    (
+        "Shadow Knight",
+        &[
+            ("cloth", 75),
+            ("leather", 150),
+            ("chain", 200),
+            ("plate", 225),
+            ("shield", 225),
+        ],
+    ),
+    (
+        "Cleric",
+        &[
+            ("cloth", 100),
+            ("leather", 100),
+            ("chain", 200),
+            ("plate", 225),
+            ("shield", 225),
+        ],
+    ),
+    (
+        "Druid",
+        &[
+            ("cloth", 100),
+            ("leather", 200),
+            ("chain", 175),
+            ("plate", 0),
+            ("shield", 125),
+        ],
+    ),
+    (
+        "Shaman",
+        &[
+            ("cloth", 100),
+            ("leather", 175),
+            ("chain", 225),
+            ("plate", 0),
+            ("shield", 175),
+        ],
+    ),
+    (
+        "Rogue",
+        &[
+            ("cloth", 100),
+            ("leather", 250),
+            ("chain", 100),
+            ("plate", 0),
+            ("shield", 100),
+        ],
+    ),
+    (
+        "Monk",
+        &[
+            ("cloth", 150),
+            ("leather", 0),
+            ("chain", 0),
+            ("plate", 0),
+            ("shield", 0),
+        ],
+    ),
+    (
+        "Ranger",
+        &[
+            ("cloth", 75),
+            ("leather", 225),
+            ("chain", 225),
+            ("plate", 0),
+            ("shield", 175),
+        ],
+    ),
+    (
+        "Beast Master",
+        &[
+            ("cloth", 75),
+            ("leather", 200),
+            ("chain", 200),
+            ("plate", 0),
+            ("shield", 150),
+        ],
+    ),
+    (
+        "Bard",
+        &[
+            ("cloth", 75),
+            ("leather", 200),
+            ("chain", 225),
+            ("plate", 0),
+            ("shield", 150),
+        ],
+    ),
+    (
+        "Witch Hunter",
+        &[
+            ("cloth", 75),
+            ("leather", 200),
+            ("chain", 225),
+            ("plate", 0),
+            ("shield", 150),
+        ],
+    ),
+    (
+        "Magician",
+        &[
+            ("cloth", 250),
+            ("leather", 50),
+            ("chain", 0),
+            ("plate", 0),
+            ("shield", 0),
+        ],
+    ),
+    (
+        "Wizard",
+        &[
+            ("cloth", 250),
+            ("leather", 50),
+            ("chain", 0),
+            ("plate", 0),
+            ("shield", 0),
+        ],
+    ),
+    (
+        "Sorcerer",
+        &[
+            ("cloth", 250),
+            ("leather", 50),
+            ("chain", 0),
+            ("plate", 0),
+            ("shield", 0),
+        ],
+    ),
+    (
+        "Necromancer",
+        &[
+            ("cloth", 250),
+            ("leather", 50),
+            ("chain", 0),
+            ("plate", 0),
+            ("shield", 0),
+        ],
+    ),
+    (
+        "Enchanter",
+        &[
+            ("cloth", 250),
+            ("leather", 50),
+            ("chain", 0),
+            ("plate", 0),
+            ("shield", 0),
+        ],
+    ),
+    (
+        "Blood Mage",
+        &[
+            ("cloth", 200),
+            ("leather", 100),
+            ("chain", 50),
+            ("plate", 0),
+            ("shield", 0),
+        ],
+    ),
 ];
 
 // `meditate` is a casting skill for regen purposes only (it never trains on a
@@ -88,38 +502,250 @@ const ARMOR_CAPS: CapTable<'static> = &[
 // for any class with a mana pool, 0 for the pure-melee classes. See regen.rs
 // (`mp_regen_per_tick`) and docs/design/regen_model.md.
 const CASTING_CAPS: CapTable<'static> = &[
-    ("Warrior",       &[("evocation",   0), ("alteration",   0), ("abjuration",   0), ("conjuration",   0), ("divination",   0), ("channeling",   0), ("meditate",   0)]),
-    ("Paladin",       &[("evocation", 125), ("alteration", 150), ("abjuration", 225), ("conjuration",   0), ("divination",  50), ("channeling", 225), ("meditate", 250)]),
-    ("Shadow Knight", &[("evocation", 125), ("alteration", 125), ("abjuration", 100), ("conjuration",   0), ("divination",  50), ("channeling", 225), ("meditate", 250)]),
-    ("Cleric",        &[("evocation", 150), ("alteration", 200), ("abjuration", 250), ("conjuration",  75), ("divination", 200), ("channeling", 175), ("meditate", 250)]),
-    ("Druid",         &[("evocation", 175), ("alteration", 225), ("abjuration", 175), ("conjuration",  75), ("divination", 175), ("channeling", 175), ("meditate", 250)]),
-    ("Shaman",        &[("evocation", 175), ("alteration", 250), ("abjuration", 125), ("conjuration",  75), ("divination", 150), ("channeling", 200), ("meditate", 250)]),
-    ("Rogue",         &[("evocation",   0), ("alteration",   0), ("abjuration",   0), ("conjuration",   0), ("divination",   0), ("channeling",   0), ("meditate",   0)]),
-    ("Monk",          &[("evocation",   0), ("alteration",   0), ("abjuration",   0), ("conjuration",   0), ("divination",   0), ("channeling",   0), ("meditate",   0)]),
-    ("Ranger",        &[("evocation", 125), ("alteration", 150), ("abjuration",  75), ("conjuration",   0), ("divination", 150), ("channeling", 200), ("meditate", 250)]),
-    ("Beast Master",  &[("evocation", 125), ("alteration", 150), ("abjuration", 100), ("conjuration",  75), ("divination",  75), ("channeling", 175), ("meditate", 250)]),
-    ("Bard",          &[("evocation", 125), ("alteration", 200), ("abjuration", 100), ("conjuration", 150), ("divination",  75), ("channeling", 200), ("meditate", 250)]),
-    ("Witch Hunter",  &[("evocation", 225), ("alteration", 125), ("abjuration", 100), ("conjuration",   0), ("divination",  75), ("channeling", 200), ("meditate", 250)]),
-    ("Magician",      &[("evocation", 225), ("alteration", 100), ("abjuration",  75), ("conjuration", 250), ("divination",  75), ("channeling", 150), ("meditate", 250)]),
-    ("Wizard",        &[("evocation", 250), ("alteration", 100), ("abjuration", 150), ("conjuration", 100), ("divination", 225), ("channeling", 150), ("meditate", 250)]),
-    ("Sorcerer",      &[("evocation", 250), ("alteration", 100), ("abjuration",  75), ("conjuration",  75), ("divination",  50), ("channeling", 150), ("meditate", 250)]),
-    ("Necromancer",   &[("evocation", 200), ("alteration", 175), ("abjuration",  50), ("conjuration", 225), ("divination", 100), ("channeling", 150), ("meditate", 250)]),
-    ("Enchanter",     &[("evocation", 150), ("alteration", 250), ("abjuration", 200), ("conjuration", 175), ("divination", 125), ("channeling", 150), ("meditate", 250)]),
-    ("Blood Mage",    &[("evocation", 200), ("alteration", 175), ("abjuration",  75), ("conjuration",   0), ("divination",  50), ("channeling", 175), ("meditate", 250)]),
+    (
+        "Warrior",
+        &[
+            ("evocation", 0),
+            ("alteration", 0),
+            ("abjuration", 0),
+            ("conjuration", 0),
+            ("divination", 0),
+            ("channeling", 0),
+            ("meditate", 0),
+        ],
+    ),
+    (
+        "Paladin",
+        &[
+            ("evocation", 125),
+            ("alteration", 150),
+            ("abjuration", 225),
+            ("conjuration", 0),
+            ("divination", 50),
+            ("channeling", 225),
+            ("meditate", 250),
+        ],
+    ),
+    (
+        "Shadow Knight",
+        &[
+            ("evocation", 125),
+            ("alteration", 125),
+            ("abjuration", 100),
+            ("conjuration", 0),
+            ("divination", 50),
+            ("channeling", 225),
+            ("meditate", 250),
+        ],
+    ),
+    (
+        "Cleric",
+        &[
+            ("evocation", 150),
+            ("alteration", 200),
+            ("abjuration", 250),
+            ("conjuration", 75),
+            ("divination", 200),
+            ("channeling", 175),
+            ("meditate", 250),
+        ],
+    ),
+    (
+        "Druid",
+        &[
+            ("evocation", 175),
+            ("alteration", 225),
+            ("abjuration", 175),
+            ("conjuration", 75),
+            ("divination", 175),
+            ("channeling", 175),
+            ("meditate", 250),
+        ],
+    ),
+    (
+        "Shaman",
+        &[
+            ("evocation", 175),
+            ("alteration", 250),
+            ("abjuration", 125),
+            ("conjuration", 75),
+            ("divination", 150),
+            ("channeling", 200),
+            ("meditate", 250),
+        ],
+    ),
+    (
+        "Rogue",
+        &[
+            ("evocation", 0),
+            ("alteration", 0),
+            ("abjuration", 0),
+            ("conjuration", 0),
+            ("divination", 0),
+            ("channeling", 0),
+            ("meditate", 0),
+        ],
+    ),
+    (
+        "Monk",
+        &[
+            ("evocation", 0),
+            ("alteration", 0),
+            ("abjuration", 0),
+            ("conjuration", 0),
+            ("divination", 0),
+            ("channeling", 0),
+            ("meditate", 0),
+        ],
+    ),
+    (
+        "Ranger",
+        &[
+            ("evocation", 125),
+            ("alteration", 150),
+            ("abjuration", 75),
+            ("conjuration", 0),
+            ("divination", 150),
+            ("channeling", 200),
+            ("meditate", 250),
+        ],
+    ),
+    (
+        "Beast Master",
+        &[
+            ("evocation", 125),
+            ("alteration", 150),
+            ("abjuration", 100),
+            ("conjuration", 75),
+            ("divination", 75),
+            ("channeling", 175),
+            ("meditate", 250),
+        ],
+    ),
+    (
+        "Bard",
+        &[
+            ("evocation", 125),
+            ("alteration", 200),
+            ("abjuration", 100),
+            ("conjuration", 150),
+            ("divination", 75),
+            ("channeling", 200),
+            ("meditate", 250),
+        ],
+    ),
+    (
+        "Witch Hunter",
+        &[
+            ("evocation", 225),
+            ("alteration", 125),
+            ("abjuration", 100),
+            ("conjuration", 0),
+            ("divination", 75),
+            ("channeling", 200),
+            ("meditate", 250),
+        ],
+    ),
+    (
+        "Magician",
+        &[
+            ("evocation", 225),
+            ("alteration", 100),
+            ("abjuration", 75),
+            ("conjuration", 250),
+            ("divination", 75),
+            ("channeling", 150),
+            ("meditate", 250),
+        ],
+    ),
+    (
+        "Wizard",
+        &[
+            ("evocation", 250),
+            ("alteration", 100),
+            ("abjuration", 150),
+            ("conjuration", 100),
+            ("divination", 225),
+            ("channeling", 150),
+            ("meditate", 250),
+        ],
+    ),
+    (
+        "Sorcerer",
+        &[
+            ("evocation", 250),
+            ("alteration", 100),
+            ("abjuration", 75),
+            ("conjuration", 75),
+            ("divination", 50),
+            ("channeling", 150),
+            ("meditate", 250),
+        ],
+    ),
+    (
+        "Necromancer",
+        &[
+            ("evocation", 200),
+            ("alteration", 175),
+            ("abjuration", 50),
+            ("conjuration", 225),
+            ("divination", 100),
+            ("channeling", 150),
+            ("meditate", 250),
+        ],
+    ),
+    (
+        "Enchanter",
+        &[
+            ("evocation", 150),
+            ("alteration", 250),
+            ("abjuration", 200),
+            ("conjuration", 175),
+            ("divination", 125),
+            ("channeling", 150),
+            ("meditate", 250),
+        ],
+    ),
+    (
+        "Blood Mage",
+        &[
+            ("evocation", 200),
+            ("alteration", 175),
+            ("abjuration", 75),
+            ("conjuration", 0),
+            ("divination", 50),
+            ("channeling", 175),
+            ("meditate", 250),
+        ],
+    ),
 ];
 
 /// All weapon keys (10). Used by load_character to seed starting
 /// values on a fresh character so the row count matches the GDScript
 /// `_skills` dict populated by `initialize()`.
 pub const WEAPON_KEYS: &[&str] = &[
-    "1h_slashing", "2h_slashing", "1h_blunt", "2h_blunt",
-    "piercing", "hand_to_hand", "archery", "defense", "dodge", "dual_wield",
+    "1h_slashing",
+    "2h_slashing",
+    "1h_blunt",
+    "2h_blunt",
+    "piercing",
+    "hand_to_hand",
+    "archery",
+    "defense",
+    "dodge",
+    "dual_wield",
 ];
 
 pub const ARMOR_KEYS: &[&str] = &["cloth", "leather", "chain", "plate", "shield"];
 
 pub const CASTING_KEYS: &[&str] = &[
-    "evocation", "alteration", "abjuration", "conjuration", "divination", "channeling", "meditate",
+    "evocation",
+    "alteration",
+    "abjuration",
+    "conjuration",
+    "divination",
+    "channeling",
+    "meditate",
 ];
 
 fn lookup_table(skill: Skill) -> CapTable<'static> {
@@ -375,81 +1001,137 @@ fn build_discipline_map() -> HashMap<&'static str, &'static str> {
     let mut m = HashMap::new();
     let entries: &[(&str, &str)] = &[
         // Magician
-        ("Fireball", "evocation"), ("Frost Bolt", "evocation"), ("Lightning Strike", "evocation"),
-        ("Heal", "alteration"), ("Arcane Missile", "evocation"), ("Inferno", "evocation"),
+        ("Fireball", "evocation"),
+        ("Frost Bolt", "evocation"),
+        ("Lightning Strike", "evocation"),
+        ("Heal", "alteration"),
+        ("Arcane Missile", "evocation"),
+        ("Inferno", "evocation"),
         // Cleric
-        ("Healing Light", "alteration"), ("Greater Heal", "alteration"),
-        ("Smite", "evocation"), ("Divine Wrath", "evocation"),
+        ("Healing Light", "alteration"),
+        ("Greater Heal", "alteration"),
+        ("Smite", "evocation"),
+        ("Divine Wrath", "evocation"),
         // Druid
-        ("Thorns", "abjuration"), ("Regrowth", "alteration"), ("Wrath", "evocation"),
-        ("Call Lightning", "evocation"), ("Entangle", "alteration"), ("Snare", "alteration"),
+        ("Thorns", "abjuration"),
+        ("Regrowth", "alteration"),
+        ("Wrath", "evocation"),
+        ("Call Lightning", "evocation"),
+        ("Entangle", "alteration"),
+        ("Snare", "alteration"),
         ("Nature's Wrath", "evocation"),
         // Shaman
-        ("Healing Wave", "alteration"), ("Mending", "alteration"),
-        ("Spirit Bolt", "evocation"), ("Ancestral Strike", "evocation"), ("Slow", "alteration"),
+        ("Healing Wave", "alteration"),
+        ("Mending", "alteration"),
+        ("Spirit Bolt", "evocation"),
+        ("Ancestral Strike", "evocation"),
+        ("Slow", "alteration"),
         // Blood Mage
-        ("Blood Bolt", "evocation"), ("Crimson Bolt", "evocation"),
-        ("Life Drain", "alteration"), ("Hemorrhage", "evocation"),
+        ("Blood Bolt", "evocation"),
+        ("Crimson Bolt", "evocation"),
+        ("Life Drain", "alteration"),
+        ("Hemorrhage", "evocation"),
         // Paladin
-        ("Lay on Hands", "alteration"), ("Crusader's Mend", "alteration"),
-        ("Righteous Fire", "evocation"), ("Judgment", "evocation"),
+        ("Lay on Hands", "alteration"),
+        ("Crusader's Mend", "alteration"),
+        ("Righteous Fire", "evocation"),
+        ("Judgment", "evocation"),
         // Shadow Knight
-        ("Lifetap", "alteration"), ("Siphon", "evocation"), ("Dark Shroud", "evocation"),
+        ("Lifetap", "alteration"),
+        ("Siphon", "evocation"),
+        ("Dark Shroud", "evocation"),
         // Necromancer
-        ("Summon Skeleton", "conjuration"), ("Bone Shards", "evocation"),
-        ("Soul Drain", "alteration"), ("Dark Decay", "alteration"), ("Enervation", "evocation"),
+        ("Summon Skeleton", "conjuration"),
+        ("Bone Shards", "evocation"),
+        ("Soul Drain", "alteration"),
+        ("Dark Decay", "alteration"),
+        ("Enervation", "evocation"),
         // Enchanter
-        ("Spellshield", "abjuration"), ("Charm", "conjuration"), ("Color Spray", "evocation"),
-        ("Mesmerize", "alteration"), ("Rune", "abjuration"), ("Cascade of Stars", "evocation"),
+        ("Spellshield", "abjuration"),
+        ("Charm", "conjuration"),
+        ("Color Spray", "evocation"),
+        ("Mesmerize", "alteration"),
+        ("Rune", "abjuration"),
+        ("Cascade of Stars", "evocation"),
         // Bard
-        ("Siren's Song", "conjuration"), ("Dissonance", "evocation"),
-        ("Battle Hymn", "alteration"), ("Chorus of Misery", "evocation"),
+        ("Siren's Song", "conjuration"),
+        ("Dissonance", "evocation"),
+        ("Battle Hymn", "alteration"),
+        ("Chorus of Misery", "evocation"),
         // Ranger
-        ("Hunter's Mark", "evocation"), ("Nature's Cure", "alteration"),
+        ("Hunter's Mark", "evocation"),
+        ("Nature's Cure", "alteration"),
         // Witch Hunter
-        ("Witchfire", "evocation"), ("Expose", "alteration"),
-        ("Rite of Warding", "alteration"), ("Banishment", "evocation"),
+        ("Witchfire", "evocation"),
+        ("Expose", "alteration"),
+        ("Rite of Warding", "alteration"),
+        ("Banishment", "evocation"),
         // Fallen Paladin
-        ("Death's Embrace", "evocation"), ("Blood Price", "alteration"),
-        ("Shadow Flame", "evocation"), ("Condemnation", "evocation"),
+        ("Death's Embrace", "evocation"),
+        ("Blood Price", "alteration"),
+        ("Shadow Flame", "evocation"),
+        ("Condemnation", "evocation"),
         // Redeemed SK
-        ("Sacrificial Mend", "alteration"), ("Radiant Bolt", "evocation"),
+        ("Sacrificial Mend", "alteration"),
+        ("Radiant Bolt", "evocation"),
         ("Holy Mantle", "evocation"),
         // Wizard
-        ("Ice Spear", "evocation"), ("Flame Wave", "evocation"),
-        ("Thunder Clap", "evocation"), ("Blizzard", "evocation"),
-        ("Meteor", "evocation"), ("Ice Storm", "evocation"),
+        ("Ice Spear", "evocation"),
+        ("Flame Wave", "evocation"),
+        ("Thunder Clap", "evocation"),
+        ("Blizzard", "evocation"),
+        ("Meteor", "evocation"),
+        ("Ice Storm", "evocation"),
         // Sorcerer
-        ("Arcane Burst", "evocation"), ("Void Lance", "evocation"),
-        ("Bloodfire", "evocation"), ("Tempest Bolt", "evocation"),
-        ("Soul Surge", "evocation"), ("Arcane Nova", "evocation"),
+        ("Arcane Burst", "evocation"),
+        ("Void Lance", "evocation"),
+        ("Bloodfire", "evocation"),
+        ("Tempest Bolt", "evocation"),
+        ("Soul Surge", "evocation"),
+        ("Arcane Nova", "evocation"),
         ("Bind Affinity", "alteration"),
         // Druid / Wizard ports
-        ("Gate", "alteration"), ("Succor", "alteration"), ("Evacuate", "alteration"),
-        ("Circle of Ardenmoor", "alteration"), ("Circle of the Savannahs", "alteration"),
+        ("Gate", "alteration"),
+        ("Succor", "alteration"),
+        ("Evacuate", "alteration"),
+        ("Circle of Ardenmoor", "alteration"),
+        ("Circle of the Savannahs", "alteration"),
         ("Circle of Fae Mere", "alteration"),
-        ("Teleport: Aelindra", "alteration"), ("Teleport: Greyveil", "alteration"),
-        ("Teleport: Harrowmere", "alteration"), ("Teleport: Varek's Spire", "alteration"),
+        ("Teleport: Aelindra", "alteration"),
+        ("Teleport: Greyveil", "alteration"),
+        ("Teleport: Harrowmere", "alteration"),
+        ("Teleport: Varek's Spire", "alteration"),
         // Beast Master
-        ("Spirit Mend", "alteration"), ("Feral Shriek", "evocation"),
-        ("Warder's Mend", "alteration"), ("Primal Bond", "abjuration"),
+        ("Spirit Mend", "alteration"),
+        ("Feral Shriek", "evocation"),
+        ("Warder's Mend", "alteration"),
+        ("Primal Bond", "abjuration"),
         ("Spirit Strike", "evocation"),
         // Cleric (new)
-        ("Bless", "alteration"), ("Valor", "alteration"),
-        ("Complete Heal", "alteration"), ("Resurrection", "alteration"),
+        ("Bless", "alteration"),
+        ("Valor", "alteration"),
+        ("Complete Heal", "alteration"),
+        ("Resurrection", "alteration"),
         // Shaman (new)
-        ("Spirit of the Bear", "alteration"), ("Gift of Insight", "alteration"),
+        ("Spirit of the Bear", "alteration"),
+        ("Gift of Insight", "alteration"),
         ("Torpor", "alteration"),
         // Enchanter (new)
-        ("Strength", "alteration"), ("Brilliance", "alteration"),
-        ("Immobilize", "alteration"), ("Clarity", "alteration"),
-        ("Breeze", "alteration"), ("Haste", "alteration"),
+        ("Strength", "alteration"),
+        ("Brilliance", "alteration"),
+        ("Immobilize", "alteration"),
+        ("Clarity", "alteration"),
+        ("Breeze", "alteration"),
+        ("Haste", "alteration"),
         // Druid / Shaman (new)
         ("Spirit of Wolf", "alteration"),
         // Bard (new)
-        ("Selos' Melody", "alteration"), ("Anthem of the Hunt", "alteration"),
-        ("Poet's Mending", "alteration"), ("Wanderer's Chord", "alteration"),
-        ("Mana Weave", "conjuration"), ("Aria of Dismay", "evocation"),
+        ("Selos' Melody", "alteration"),
+        ("Anthem of the Hunt", "alteration"),
+        ("Poet's Mending", "alteration"),
+        ("Wanderer's Chord", "alteration"),
+        ("Mana Weave", "conjuration"),
+        ("Aria of Dismay", "evocation"),
         // Necromancer (new)
         ("Lich Form", "alteration"),
         // Blood Mage (new)
@@ -457,16 +1139,21 @@ fn build_discipline_map() -> HashMap<&'static str, &'static str> {
         // Druid (new)
         ("Ensnare", "alteration"),
         // Ranger (new)
-        ("Ensnaring Roots", "alteration"), ("Camouflage", "alteration"),
+        ("Ensnaring Roots", "alteration"),
+        ("Camouflage", "alteration"),
         ("Hunter's Eye", "alteration"),
         // Witch Hunter (new)
-        ("Spellbreak", "alteration"), ("Antimagic Ward", "abjuration"),
+        ("Spellbreak", "alteration"),
+        ("Antimagic Ward", "abjuration"),
         // Missing until 2026-10-19 (found comparing this map with the
         // client's DISCIPLINE for every spells.toml entry): they fell back to
         // evocation, so casting them trained the wrong skill.
-        ("Resurrection (Minor)", "alteration"), ("Resurrection", "alteration"),
-        ("Resurrection II", "alteration"), ("Reclaim Soul", "alteration"),
-        ("Summon Food", "conjuration"), ("Summon Drink", "conjuration"),
+        ("Resurrection (Minor)", "alteration"),
+        ("Resurrection", "alteration"),
+        ("Resurrection II", "alteration"),
+        ("Reclaim Soul", "alteration"),
+        ("Summon Food", "conjuration"),
+        ("Summon Drink", "conjuration"),
     ];
     for (k, v) in entries {
         m.insert(*k, *v);
@@ -496,7 +1183,9 @@ pub fn channeling_interrupt_chance(score: i32, cap: i32) -> f32 {
 /// Snapshot a connection's score maps for fan-out to the client on
 /// enter-world. Returns three parallel vectors (key, score) sorted by
 /// key for deterministic ordering.
-pub fn snapshot(conn: &PerConnection) -> (Vec<(String, u32)>, Vec<(String, u32)>, Vec<(String, u32)>) {
+pub fn snapshot(
+    conn: &PerConnection,
+) -> (Vec<(String, u32)>, Vec<(String, u32)>, Vec<(String, u32)>) {
     let snap_map = |m: &HashMap<String, i32>| -> Vec<(String, u32)> {
         let mut v: Vec<(String, u32)> = m
             .iter()
@@ -597,11 +1286,27 @@ mod tests {
         assert!(can_dual_wield("Monk", 1));
         assert!(!can_dual_wield("Cleric", 60));
         // Every class that dual wields can train the skill, and no other can.
-        for class in ["Monk", "Ranger", "Rogue", "Warrior", "Witch Hunter", "Bard", "Shadow Knight", "Beast Master"] {
-            assert!(cap_for(Skill::Weapon, class, 60, "dual_wield") > 0, "{class} trains dual wield");
+        for class in [
+            "Monk",
+            "Ranger",
+            "Rogue",
+            "Warrior",
+            "Witch Hunter",
+            "Bard",
+            "Shadow Knight",
+            "Beast Master",
+        ] {
+            assert!(
+                cap_for(Skill::Weapon, class, 60, "dual_wield") > 0,
+                "{class} trains dual wield"
+            );
         }
         for class in ["Paladin", "Wizard", "Cleric", "Druid"] {
-            assert_eq!(cap_for(Skill::Weapon, class, 60, "dual_wield"), 0, "{class} does not");
+            assert_eq!(
+                cap_for(Skill::Weapon, class, 60, "dual_wield"),
+                0,
+                "{class} does not"
+            );
         }
     }
 
@@ -613,7 +1318,11 @@ mod tests {
         const SWORD: &str = "res://data/loot/items/iron_short_sword.tres";
         const VEST: &str = "res://data/loot/items/cracked_leather_vest.tres";
         const BOOTS: &str = "res://data/loot/items/copper_chain_boots.tres";
-        assert_eq!(equip_refusal("Cleric", 1, CLUB, 0, ""), None, "a Cleric wields a club");
+        assert_eq!(
+            equip_refusal("Cleric", 1, CLUB, 0, ""),
+            None,
+            "a Cleric wields a club"
+        );
         assert_eq!(
             equip_refusal("Cleric", 60, CLUB, 1, "").as_deref(),
             Some("Your class cannot dual wield."),
@@ -625,7 +1334,11 @@ mod tests {
             "a Warrior's off hand waits for 15"
         );
         assert_eq!(equip_refusal("Warrior", 15, CLUB, 1, ""), None);
-        assert_eq!(equip_refusal("Monk", 1, CLUB, 1, ""), None, "a Monk is born with it");
+        assert_eq!(
+            equip_refusal("Monk", 1, CLUB, 1, ""),
+            None,
+            "a Monk is born with it"
+        );
         assert_eq!(
             equip_refusal("Cleric", 60, SWORD, 0, "").as_deref(),
             Some("Your class cannot wield that."),
@@ -638,18 +1351,30 @@ mod tests {
             "Monks train cloth alone"
         );
         assert_eq!(equip_refusal("Rogue", 1, VEST, 3, ""), None);
-        assert_eq!(equip_refusal("Cleric", 1, BOOTS, 5, ""), None, "Clerics train chain");
+        assert_eq!(
+            equip_refusal("Cleric", 1, BOOTS, 5, ""),
+            None,
+            "Clerics train chain"
+        );
         assert_eq!(
             equip_refusal("Wizard", 60, BOOTS, 5, "").as_deref(),
             Some("Your class cannot wear that."),
             "Wizards never train chain"
         );
-        assert_eq!(equip_refusal("Cleric", 1, "res://no/such/item.tres", 0, ""), None, "an unknown item is the next gate's problem");
+        assert_eq!(
+            equip_refusal("Cleric", 1, "res://no/such/item.tres", 0, ""),
+            None,
+            "an unknown item is the next gate's problem"
+        );
         // The two-hander rule (2026-10-29): the main hand only, and only
         // while the off hand is empty; nothing joins one; a one-hander swaps
         // in beside an off-hand weapon as before.
         const STAFF: &str = "res://data/loot/items/carved_staff.tres";
-        assert_eq!(equip_refusal("Warrior", 15, STAFF, 0, ""), None, "a staff goes in an empty-off-hand main hand");
+        assert_eq!(
+            equip_refusal("Warrior", 15, STAFF, 0, ""),
+            None,
+            "a staff goes in an empty-off-hand main hand"
+        );
         assert_eq!(
             equip_refusal("Warrior", 15, STAFF, 0, CLUB).as_deref(),
             Some("Empty your off hand first."),
@@ -670,7 +1395,11 @@ mod tests {
             Some("Your class cannot dual wield."),
             "the class rule answers first"
         );
-        assert_eq!(equip_refusal("Warrior", 15, SWORD, 0, CLUB), None, "a one-hander swaps in beside an off-hand weapon");
+        assert_eq!(
+            equip_refusal("Warrior", 15, SWORD, 0, CLUB),
+            None,
+            "a one-hander swaps in beside an off-hand weapon"
+        );
     }
 
     // The off-hand swing rule has one home (2026-10-29), the Attack path's
@@ -680,10 +1409,23 @@ mod tests {
     fn the_off_hand_swing_rule_has_one_home() {
         const CLUB: &str = "res://data/loot/items/cracked_wooden_club.tres";
         const STAFF: &str = "res://data/loot/items/carved_staff.tres";
-        assert_eq!(offhand_swing_refusal("Warrior", 14, CLUB, CLUB), Some("before the class can dual wield"));
-        assert_eq!(offhand_swing_refusal("Cleric", 60, CLUB, CLUB), Some("before the class can dual wield"));
-        assert_eq!(offhand_swing_refusal("Warrior", 15, CLUB, ""), Some("with no off-hand weapon equipped"));
-        assert_eq!(offhand_swing_refusal("Monk", 1, "", ""), None, "a bare-handed Monk punches with both");
+        assert_eq!(
+            offhand_swing_refusal("Warrior", 14, CLUB, CLUB),
+            Some("before the class can dual wield")
+        );
+        assert_eq!(
+            offhand_swing_refusal("Cleric", 60, CLUB, CLUB),
+            Some("before the class can dual wield")
+        );
+        assert_eq!(
+            offhand_swing_refusal("Warrior", 15, CLUB, ""),
+            Some("with no off-hand weapon equipped")
+        );
+        assert_eq!(
+            offhand_swing_refusal("Monk", 1, "", ""),
+            None,
+            "a bare-handed Monk punches with both"
+        );
         assert_eq!(
             offhand_swing_refusal("Monk", 1, CLUB, ""),
             Some("with no off-hand weapon equipped"),
@@ -697,4 +1439,3 @@ mod tests {
         assert_eq!(offhand_swing_refusal("Warrior", 15, CLUB, CLUB), None);
     }
 }
-

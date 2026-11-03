@@ -29,7 +29,15 @@ async fn account_and_character(pool: &sqlx::SqlitePool, user: &str, name: &str) 
     (account_id, char_id)
 }
 
-fn row(char_id: i64, at: i64, action: &'static str, item: Option<&str>, count: i64, delta: i64, copper: i64) -> ItemEventRow {
+fn row(
+    char_id: i64,
+    at: i64,
+    action: &'static str,
+    item: Option<&str>,
+    count: i64,
+    delta: i64,
+    copper: i64,
+) -> ItemEventRow {
     ItemEventRow {
         at,
         char_id,
@@ -43,7 +51,12 @@ fn row(char_id: i64, at: i64, action: &'static str, item: Option<&str>, count: i
 }
 
 fn bread(count: i32) -> Vec<InventoryRow> {
-    vec![InventoryRow { location: "base".into(), slot: 0, item_path: BREAD.into(), count }]
+    vec![InventoryRow {
+        location: "base".into(),
+        slot: 0,
+        item_path: BREAD.into(),
+        count,
+    }]
 }
 
 async fn sums(pool: &sqlx::SqlitePool, char_id: i64) -> (i64, i64, i64) {
@@ -84,8 +97,18 @@ async fn rows_ride_the_store_transaction_and_the_check_names_a_dupe_and_a_loss()
     )
     .await
     .expect("save with rows");
-    assert_eq!(sums(&pool, char_id).await, (2, 3, 100), "both rows committed with the stores");
-    assert!(db::ledger_mismatches(&pool).await.expect("check").is_empty(), "the books balance");
+    assert_eq!(
+        sums(&pool, char_id).await,
+        (2, 3, 100),
+        "both rows committed with the stores"
+    );
+    assert!(
+        db::ledger_mismatches(&pool)
+            .await
+            .expect("check")
+            .is_empty(),
+        "the books balance"
+    );
 
     // One loaf destroyed: the store shrinks and the row says why.
     db::save_stores_atomic(
@@ -101,7 +124,10 @@ async fn rows_ride_the_store_transaction_and_the_check_names_a_dupe_and_a_loss()
     )
     .await
     .expect("save the destroy");
-    assert!(db::ledger_mismatches(&pool).await.expect("check").is_empty());
+    assert!(db::ledger_mismatches(&pool)
+        .await
+        .expect("check")
+        .is_empty());
 
     // A dupe: a stack the ledger never saw.
     sqlx::query("INSERT INTO character_items (char_id, location, slot, item_path, count) VALUES (?1, 'base', 5, ?2, 5)")
@@ -113,7 +139,12 @@ async fn rows_ride_the_store_transaction_and_the_check_names_a_dupe_and_a_loss()
     let found = db::ledger_mismatches(&pool).await.expect("check");
     assert_eq!(
         found,
-        vec![db::LedgerMismatch { account_id, item_path: Some(BREAD.into()), ledger: 2, held: 7 }],
+        vec![db::LedgerMismatch {
+            account_id,
+            item_path: Some(BREAD.into()),
+            ledger: 2,
+            held: 7
+        }],
         "the planted stack is the one mismatch"
     );
     sqlx::query("DELETE FROM character_items WHERE char_id = ?1 AND slot = 5")
@@ -124,15 +155,22 @@ async fn rows_ride_the_store_transaction_and_the_check_names_a_dupe_and_a_loss()
 
     // A loss: coin gone from the wallet with no row (every tier: 100 copper
     // was saved as one silver).
-    sqlx::query("UPDATE characters SET platinum = 0, gold = 0, silver = 0, copper = 0 WHERE id = ?1")
-        .bind(char_id)
-        .execute(&pool)
-        .await
-        .expect("drain");
+    sqlx::query(
+        "UPDATE characters SET platinum = 0, gold = 0, silver = 0, copper = 0 WHERE id = ?1",
+    )
+    .bind(char_id)
+    .execute(&pool)
+    .await
+    .expect("drain");
     let found = db::ledger_mismatches(&pool).await.expect("check");
     assert_eq!(
         found,
-        vec![db::LedgerMismatch { account_id, item_path: None, ledger: 100, held: 0 }],
+        vec![db::LedgerMismatch {
+            account_id,
+            item_path: None,
+            ledger: 100,
+            held: 0
+        }],
         "the drained wallet is the one mismatch"
     );
 }
@@ -163,13 +201,35 @@ async fn the_fold_keeps_the_sums_and_drops_the_old_rows() {
     )
     .await
     .expect("seed");
-    assert!(db::ledger_mismatches(&pool).await.expect("check").is_empty(), "balanced before the fold");
+    assert!(
+        db::ledger_mismatches(&pool)
+            .await
+            .expect("check")
+            .is_empty(),
+        "balanced before the fold"
+    );
 
-    let (carried, deleted) = db::fold_item_events_before(&pool, cutoff).await.expect("fold");
-    assert_eq!((carried, deleted), (2, 3), "one carry row for the bread, one for the coin; three old rows gone");
+    let (carried, deleted) = db::fold_item_events_before(&pool, cutoff)
+        .await
+        .expect("fold");
+    assert_eq!(
+        (carried, deleted),
+        (2, 3),
+        "one carry row for the bread, one for the coin; three old rows gone"
+    );
 
-    assert_eq!(sums(&pool, char_id).await, (3, 1, 50), "the sums survive the fold");
-    assert!(db::ledger_mismatches(&pool).await.expect("check").is_empty(), "balanced after the fold");
+    assert_eq!(
+        sums(&pool, char_id).await,
+        (3, 1, 50),
+        "the sums survive the fold"
+    );
+    assert!(
+        db::ledger_mismatches(&pool)
+            .await
+            .expect("check")
+            .is_empty(),
+        "balanced after the fold"
+    );
     let carries: Vec<(String, Option<String>, i64, i64, i64)> = sqlx::query_as(
         "SELECT action, item_path, at, delta, copper FROM item_events WHERE action = 'carry' ORDER BY item_path",
     )
@@ -186,7 +246,12 @@ async fn the_fold_keeps_the_sums_and_drops_the_old_rows() {
     );
 
     // A second fold at the same cutoff finds nothing older and changes nothing.
-    assert_eq!(db::fold_item_events_before(&pool, cutoff).await.expect("fold again"), (0, 0));
+    assert_eq!(
+        db::fold_item_events_before(&pool, cutoff)
+            .await
+            .expect("fold again"),
+        (0, 0)
+    );
     assert_eq!(sums(&pool, char_id).await, (3, 1, 50));
 }
 
@@ -215,6 +280,17 @@ async fn recent_rows_come_newest_first_with_the_characters_name() {
     .expect("rows");
     let recent = db::recent_item_events(&pool, 2).await.expect("recent");
     assert_eq!(recent.len(), 2);
-    assert_eq!((recent[0].at, recent[0].char_name.as_deref()), (30, None), "a row outlives its character");
-    assert_eq!((recent[1].at, recent[1].char_name.as_deref(), recent[1].action.as_str()), (20, Some("Reader"), "destroy"));
+    assert_eq!(
+        (recent[0].at, recent[0].char_name.as_deref()),
+        (30, None),
+        "a row outlives its character"
+    );
+    assert_eq!(
+        (
+            recent[1].at,
+            recent[1].char_name.as_deref(),
+            recent[1].action.as_str()
+        ),
+        (20, Some("Reader"), "destroy")
+    );
 }

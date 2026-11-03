@@ -18,22 +18,37 @@ async fn the_dead_are_told_once_per_death() {
 
     let die = |a: &mut WorldClient| a.send_damage_self(1_000_000);
     die(&mut a);
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == me && *hp <= 0.01)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == me && *hp <= 0.01),
+    )
     .await
     .expect("the dev damage kills");
     a.collect_for(Duration::from_millis(500)).await;
 
-    send_msg(&mut a.client, CHANNEL_SYSTEM, &ClientWorldMsg::SetTarget { target_id: None });
+    send_msg(
+        &mut a.client,
+        CHANNEL_SYSTEM,
+        &ClientWorldMsg::SetTarget { target_id: None },
+    );
     let msgs = a.collect_for(Duration::from_millis(800)).await;
-    assert_eq!(dead_lines(&msgs), 0, "a target change is allowed while dead");
+    assert_eq!(
+        dead_lines(&msgs),
+        0,
+        "a target change is allowed while dead"
+    );
 
     for _ in 0..3 {
         a.send_sit();
     }
     let msgs = a.collect_for(Duration::from_millis(1200)).await;
-    assert_eq!(dead_lines(&msgs), 1, "three refused messages, one line; got {:?}", system_lines(&msgs));
+    assert_eq!(
+        dead_lines(&msgs),
+        1,
+        "three refused messages, one line; got {:?}",
+        system_lines(&msgs)
+    );
 
     a.send_sit();
     let msgs = a.collect_for(Duration::from_millis(800)).await;
@@ -41,15 +56,19 @@ async fn the_dead_are_told_once_per_death() {
 
     // Alive again, then a new death: told once more.
     a.send_respawn();
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == me && *hp > 0.01)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == me && *hp > 0.01),
+    )
     .await
     .expect("the respawn restores some HP");
     die(&mut a);
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == me && *hp <= 0.01)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == me && *hp <= 0.01),
+    )
     .await
     .expect("the second death");
     a.collect_for(Duration::from_millis(500)).await;
@@ -94,7 +113,10 @@ async fn respawn_requires_being_dead() {
             matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp <= 0.01)
         })
         .await;
-    assert!(dead.is_some(), "DeathBroadcast should kill the player (hp -> 0)");
+    assert!(
+        dead.is_some(),
+        "DeathBroadcast should kill the player (hp -> 0)"
+    );
 
     // ... then Respawn now restores HP to ~25%.
     c.send_respawn();
@@ -127,7 +149,9 @@ async fn dead_group_member_gets_no_xp_share() {
     let (a_session, a_char_id, _stale_token) =
         provision_client(&h.auth_url, "xpsolo", "Xpsolo", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "xpsolo", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "xpsolo", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let (b_session, b_char_id, _b_stale) =
         provision_client(&h.auth_url, "xpdead", "Xpdead", "Elf", "Cleric").await;
@@ -157,9 +181,11 @@ async fn dead_group_member_gets_no_xp_share() {
         tick_one(&mut b.client, &mut b.transport);
         tokio::time::sleep(TICK_DT).await;
     }
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::GroupRoster { members, .. } if members.len() == 2)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::GroupRoster { members, .. } if members.len() == 2),
+    )
     .await
     .expect("A sees the two-member roster");
 
@@ -200,12 +226,10 @@ async fn dead_group_member_gets_no_xp_share() {
         tick_one(&mut a.client, &mut a.transport);
         tick_one(&mut b.client, &mut b.transport);
         while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
-            if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(
-                &bytes,
-                bincode_cfg(),
-            ) {
-                if matches!(msg, ServerWorldMsg::Hit { attacker, .. } if attacker == enemy_id)
-                {
+            if let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
+                if matches!(msg, ServerWorldMsg::Hit { attacker, .. } if attacker == enemy_id) {
                     adjacent = true;
                     break 'adjacency;
                 }
@@ -229,9 +253,11 @@ async fn dead_group_member_gets_no_xp_share() {
     // A collects the FULL solo amount: the dead member neither shares nor
     // dilutes (263 = kill_xp(1); a leaked two-way split would pay 157).
     let xp_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0),
+        )
         .await
         .expect("the living killer still collects");
     if let ServerWorldMsg::XpGained { amount, .. } = xp_evt {
@@ -244,11 +270,16 @@ async fn dead_group_member_gets_no_xp_share() {
     // B (dead, still connected under the death lock) gets nothing. The
     // connect-time bar seed is amount 0, so filter on positive amounts.
     let leak = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0),
+        )
         .await;
-    assert!(leak.is_none(), "a dead group member must receive no XP share");
+    assert!(
+        leak.is_none(),
+        "a dead group member must receive no XP share"
+    );
 }
 
 /// Corpse auto-re-equip (the cursor epic's slice 2). A Warrior wearing a
@@ -269,7 +300,9 @@ async fn looting_your_own_corpse_puts_your_gear_back_on() {
     give_char_item(&h.db_url, char_id, "equip", 3, ROBE, 1).await;
     give_char_item(&h.db_url, char_id, "base", 0, BREAD, 2).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "rewear", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "rewear", true)
+        .await
+        .expect("set is_gm");
     let token = request_world_token(&h.auth_url, &session, char_id).await;
     let mut a = WorldClient::start(token, &session, char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -281,17 +314,29 @@ async fn looting_your_own_corpse_puts_your_gear_back_on() {
         })
         .await
         .expect("dying leaves a corpse and its owner is told what is on it");
-    let ServerWorldMsg::CorpseContents { corpse_id, items, .. } = contents else {
+    let ServerWorldMsg::CorpseContents {
+        corpse_id, items, ..
+    } = contents
+    else {
         unreachable!()
     };
-    assert_eq!(items.len(), 3, "cap, robe and bread are on the corpse: {items:?}");
-    assert_eq!(items[0].0, CAP, "worn gear first on the corpse, in paperdoll order");
+    assert_eq!(
+        items.len(),
+        3,
+        "cap, robe and bread are on the corpse: {items:?}"
+    );
+    assert_eq!(
+        items[0].0, CAP,
+        "worn gear first on the corpse, in paperdoll order"
+    );
     assert_eq!(items[1].0, ROBE);
 
     a.send_respawn();
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| matches!(m, ServerWorldMsg::Teleport { .. }))
-        .await
-        .expect("respawned at the bind, beside the corpse");
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::Teleport { .. })
+    })
+    .await
+    .expect("respawned at the bind, beside the corpse");
 
     a.send_loot_all(corpse_id);
     let mut msgs = Vec::new();
@@ -308,19 +353,25 @@ async fn looting_your_own_corpse_puts_your_gear_back_on() {
         tokio::time::sleep(TICK_DT).await;
     }
     let equip_delta = |slot: u32, path: &str| {
-        msgs.iter().any(|m| matches!(m, ServerWorldMsg::InventoryDelta { location, slot: s, item_path: Some(p), .. }
-            if location == "equip" && *s == slot && p == path))
+        msgs.iter().any(|m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { location, slot: s, item_path: Some(p), .. }
+            if location == "equip" && *s == slot && p == path)
+        })
     };
     assert!(equip_delta(2, CAP), "the cap goes back on the head");
     assert!(equip_delta(3, ROBE), "the robe goes back on the chest");
     assert!(
-        msgs.iter().any(|m| matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), .. }
-            if location == "base" && p == BREAD)),
+        msgs.iter().any(
+            |m| matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), .. }
+            if location == "base" && p == BREAD)
+        ),
         "the carried bread goes to the bags"
     );
     assert!(
-        !msgs.iter().any(|m| matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), .. }
-            if location != "equip" && (p == CAP || p == ROBE))),
+        !msgs.iter().any(
+            |m| matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), .. }
+            if location != "equip" && (p == CAP || p == ROBE))
+        ),
         "the worn gear does not also land in the bags"
     );
 
@@ -332,7 +383,11 @@ async fn looting_your_own_corpse_puts_your_gear_back_on() {
     .fetch_all(&pool)
     .await
     .expect("read worn rows");
-    assert_eq!(worn, vec![(2, CAP.to_string()), (3, ROBE.to_string())], "the database holds the gear as worn");
+    assert_eq!(
+        worn,
+        vec![(2, CAP.to_string()), (3, ROBE.to_string())],
+        "the database holds the gear as worn"
+    );
     a.send_disconnect();
     a.pump_for(Duration::from_millis(200)).await;
 }
@@ -350,7 +405,9 @@ async fn an_accepted_resurrection_leaves_its_sickness() {
     let (b_session, b_char_id, _) =
         provision_client(&h.auth_url, "ressick_b", "Ressb", "Human", "Cleric").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "ressick_a", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "ressick_a", true)
+        .await
+        .expect("set is_gm");
     set_char_level(&h.db_url, b_char_id, 20).await;
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
@@ -367,11 +424,15 @@ async fn an_accepted_resurrection_leaves_its_sickness() {
         })
         .await
         .expect("dying leaves a corpse");
-    let ServerWorldMsg::CorpseContents { corpse_id, .. } = contents else { unreachable!() };
+    let ServerWorldMsg::CorpseContents { corpse_id, .. } = contents else {
+        unreachable!()
+    };
     a.send_respawn();
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| matches!(m, ServerWorldMsg::Teleport { .. }))
-        .await
-        .expect("respawned");
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::Teleport { .. })
+    })
+    .await
+    .expect("respawned");
     pump_both_for(&mut a, &mut b, Duration::from_millis(200)).await;
 
     // B casts the six-second resurrection on the corpse.
@@ -380,12 +441,16 @@ async fn an_accepted_resurrection_leaves_its_sickness() {
     b.send_cast_spell("Resurrection (Minor)", Some(corpse_id));
     pump_both_for(&mut a, &mut b, Duration::from_millis(100)).await;
     let offer = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::ResurrectOffer { corpse_id: c, .. } if *c == corpse_id)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::ResurrectOffer { corpse_id: c, .. } if *c == corpse_id),
+        )
         .await
         .expect("the owner is offered the resurrection");
-    let ServerWorldMsg::ResurrectOffer { xp_percent, .. } = offer else { unreachable!() };
+    let ServerWorldMsg::ResurrectOffer { xp_percent, .. } = offer else {
+        unreachable!()
+    };
     assert_eq!(xp_percent, 25);
 
     // A accepts: summoned, told, and sick for five minutes.
@@ -406,7 +471,8 @@ async fn an_accepted_resurrection_leaves_its_sickness() {
         tokio::time::sleep(TICK_DT).await;
     }
     assert!(
-        msgs.iter().any(|m| matches!(m, ServerWorldMsg::Teleport { .. })),
+        msgs.iter()
+            .any(|m| matches!(m, ServerWorldMsg::Teleport { .. })),
         "the accept summons the player to the corpse"
     );
     let sickness = msgs.iter().find_map(|m| match m {
@@ -428,19 +494,32 @@ async fn an_accepted_resurrection_leaves_its_sickness() {
     // The landing: a quarter of max HP, no mana, both told at once. Regen
     // fans its own updates through the window, so look for the landing
     // values rather than the last word.
-    let hp_updates: Vec<(f32, f32)> = msgs.iter().filter_map(|m| match m {
-        ServerWorldMsg::HealthUpdate { id, hp, max_hp } if *id == a_char_id as u64 => Some((*hp, *max_hp)),
-        _ => None,
-    }).collect();
+    let hp_updates: Vec<(f32, f32)> = msgs
+        .iter()
+        .filter_map(|m| match m {
+            ServerWorldMsg::HealthUpdate { id, hp, max_hp } if *id == a_char_id as u64 => {
+                Some((*hp, *max_hp))
+            }
+            _ => None,
+        })
+        .collect();
     assert!(
-        hp_updates.iter().any(|(hp, max_hp)| (hp - max_hp * 0.25).abs() < 1.0),
+        hp_updates
+            .iter()
+            .any(|(hp, max_hp)| (hp - max_hp * 0.25).abs() < 1.0),
         "lands at a quarter of max HP; saw {hp_updates:?}"
     );
-    let mp_updates: Vec<f32> = msgs.iter().filter_map(|m| match m {
-        ServerWorldMsg::ManaUpdate { id, mp, .. } if *id == a_char_id as u64 => Some(*mp),
-        _ => None,
-    }).collect();
-    assert!(mp_updates.contains(&0.0), "lands with no mana; saw {mp_updates:?}");
+    let mp_updates: Vec<f32> = msgs
+        .iter()
+        .filter_map(|m| match m {
+            ServerWorldMsg::ManaUpdate { id, mp, .. } if *id == a_char_id as u64 => Some(*mp),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        mp_updates.contains(&0.0),
+        "lands with no mana; saw {mp_updates:?}"
+    );
     a.send_disconnect();
     b.send_disconnect();
     a.pump_for(Duration::from_millis(200)).await;

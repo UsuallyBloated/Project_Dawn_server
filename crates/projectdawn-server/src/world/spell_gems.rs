@@ -35,7 +35,11 @@ pub fn unlocked_gems(level: i32) -> i32 {
 /// Whether `conn` may put `spell_name` in `gem` now: the gem unlocked at its
 /// level, the spell known to the server and castable by its class at its
 /// level. The refusal line otherwise.
-pub fn check_gem(conn: &PerConnection, gem: i32, spell_name: &str) -> Result<&'static spells::Spell, &'static str> {
+pub fn check_gem(
+    conn: &PerConnection,
+    gem: i32,
+    spell_name: &str,
+) -> Result<&'static spells::Spell, &'static str> {
     if gem < 0 || gem >= unlocked_gems(conn.level) {
         return Err("That gem is not open to you yet.");
     }
@@ -53,7 +57,9 @@ pub fn check_gem(conn: &PerConnection, gem: i32, spell_name: &str) -> Result<&'s
 
 /// The bar as the client shows it: one entry per gem, "" for an empty one.
 pub fn snapshot(gems: &BTreeMap<i32, String>) -> Vec<String> {
-    (0..GEM_COUNT).map(|g| gems.get(&g).cloned().unwrap_or_default()).collect()
+    (0..GEM_COUNT)
+        .map(|g| gems.get(&g).cloned().unwrap_or_default())
+        .collect()
 }
 
 /// Whether a spell sits in any gem.
@@ -87,15 +93,32 @@ mod tests {
             thirst: 14400.0,
             alignment: None,
             factions: Vec::new(),
-            char_id: 1, account_id: 1,
-            name: "Gemmer".into(), race: "Human".into(), class: class.into(),
-            level, xp: 0, xp_to_next: 100,
-            strength: 10, dexterity: 10, agility: 10, intelligence: 10,
-            wisdom: 10, charisma: 10, constitution: 10,
-            max_hp: 100.0, max_mp: 100.0, max_stamina: 100.0,
-            hp: 100.0, mp: 100.0, stamina: 100.0,
-            coins: protocol::world::Coins::ZERO, bank_coins: protocol::world::Coins::ZERO, zone: None,
-            pos: (0.0, 0.0, 0.0), yaw: 0.0,
+            char_id: 1,
+            account_id: 1,
+            name: "Gemmer".into(),
+            race: "Human".into(),
+            class: class.into(),
+            level,
+            xp: 0,
+            xp_to_next: 100,
+            strength: 10,
+            dexterity: 10,
+            agility: 10,
+            intelligence: 10,
+            wisdom: 10,
+            charisma: 10,
+            constitution: 10,
+            max_hp: 100.0,
+            max_mp: 100.0,
+            max_stamina: 100.0,
+            hp: 100.0,
+            mp: 100.0,
+            stamina: 100.0,
+            coins: protocol::world::Coins::ZERO,
+            bank_coins: protocol::world::Coins::ZERO,
+            zone: None,
+            pos: (0.0, 0.0, 0.0),
+            yaw: 0.0,
             completed_quests: Vec::new(),
             active_quests: Vec::new(),
             bind: None,
@@ -117,9 +140,18 @@ mod tests {
     fn a_gem_takes_only_a_spell_the_class_can_cast_in_an_open_gem() {
         let cleric = caster("Cleric", 1);
         assert!(check_gem(&cleric, 0, "Smite").is_ok());
-        assert_eq!(check_gem(&cleric, 3, "Smite").err(), Some("That gem is not open to you yet."));
-        assert_eq!(check_gem(&cleric, 0, "Fireball").err(), Some("You cannot memorize that spell."));
-        assert_eq!(check_gem(&cleric, 0, "No Such Spell").err(), Some("That spell isn't known here yet."));
+        assert_eq!(
+            check_gem(&cleric, 3, "Smite").err(),
+            Some("That gem is not open to you yet.")
+        );
+        assert_eq!(
+            check_gem(&cleric, 0, "Fireball").err(),
+            Some("You cannot memorize that spell.")
+        );
+        assert_eq!(
+            check_gem(&cleric, 0, "No Such Spell").err(),
+            Some("That spell isn't known here yet.")
+        );
     }
 
     #[test]

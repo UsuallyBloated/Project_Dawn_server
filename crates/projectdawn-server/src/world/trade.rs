@@ -202,11 +202,7 @@ impl TradeManager {
         Ok(())
     }
 
-    pub fn retrieve_item(
-        &mut self,
-        cid: ClientId,
-        window_slot: usize,
-    ) -> Result<(), TradeError> {
+    pub fn retrieve_item(&mut self, cid: ClientId, window_slot: usize) -> Result<(), TradeError> {
         let session = self
             .sessions
             .get_mut(self.by_cid.get(&cid).ok_or(TradeError::NotTrading)?)
@@ -346,8 +342,17 @@ mod tests {
         tm.offer_item(1, 0, offer("base", 0, 1)).unwrap();
         assert_cleared(&tm, "offer_item");
         both_accepted_then(&mut tm);
-        tm.offer_coins(2, CoinAmount::try_from(Coins { platinum: 0, gold: 1, silver: 0, copper: 0 }).unwrap())
-            .unwrap();
+        tm.offer_coins(
+            2,
+            CoinAmount::try_from(Coins {
+                platinum: 0,
+                gold: 1,
+                silver: 0,
+                copper: 0,
+            })
+            .unwrap(),
+        )
+        .unwrap();
         assert_cleared(&tm, "offer_coins");
         both_accepted_then(&mut tm);
         tm.retrieve_item(1, 0).unwrap();
@@ -378,11 +383,13 @@ mod tests {
         tm.offer_item(1, 0, offer("bag_2", 4, 2)).unwrap();
         let closed = tm.close(2).expect("close by either party");
         assert!(
-            (closed.a.cid == 1 && closed.b.cid == 2)
-                || (closed.a.cid == 2 && closed.b.cid == 1),
+            (closed.a.cid == 1 && closed.b.cid == 2) || (closed.a.cid == 2 && closed.b.cid == 1),
             "the closed session names both parties"
         );
-        assert!(!tm.is_locked(1, "bag_2", 4), "a closed session holds nothing");
+        assert!(
+            !tm.is_locked(1, "bag_2", 4),
+            "a closed session holds nothing"
+        );
         assert!(tm.session_of(1).is_none() && tm.session_of(2).is_none());
     }
 
@@ -394,10 +401,16 @@ mod tests {
         tm.offer_item(1, 0, offer("bag_2", 0, 1)).unwrap();
         assert!(tm.is_locked(1, "base", 2), "the parent bag is locked");
         assert!(!tm.is_locked(1, "base", 3), "other base slots are free");
-        assert!(!tm.is_locked(1, "bag_2", 1), "the bag's other slots are free");
+        assert!(
+            !tm.is_locked(1, "bag_2", 1),
+            "the bag's other slots are free"
+        );
         // An empty bag at base 5: nothing may be put into it.
         tm.offer_item(1, 1, offer("base", 5, 1)).unwrap();
-        assert!(tm.is_locked(1, "bag_5", 0), "an offered bag's slots are locked");
+        assert!(
+            tm.is_locked(1, "bag_5", 0),
+            "an offered bag's slots are locked"
+        );
         assert!(tm.is_locked(1, "bag_5", 3));
         assert!(!tm.is_locked(1, "bag_6", 0));
         assert!(!tm.is_locked(2, "base", 2), "locks are per-owner");
@@ -408,6 +421,9 @@ mod tests {
         let mut tm = TradeManager::new();
         tm.open(1, 2).unwrap();
         assert!(!tm.accept(1).unwrap(), "one accept is not a commit");
-        assert!(tm.accept(2).unwrap(), "the second accept completes the pair");
+        assert!(
+            tm.accept(2).unwrap(),
+            "the second accept completes the pair"
+        );
     }
 }

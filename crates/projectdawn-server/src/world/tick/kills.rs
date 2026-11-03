@@ -103,7 +103,10 @@ pub(super) fn award_kill(
     // Alignment: the kill is the creditor's act (events.md's table by the
     // victim's tier; a named mob counts as its tier's named row).
     if let Some(conn) = connections.get_mut(&credit_cid) {
-        let delta = crate::world::alignment::kill_delta(faction_kill.alignment.as_deref(), faction_kill.named);
+        let delta = crate::world::alignment::kill_delta(
+            faction_kill.alignment.as_deref(),
+            faction_kill.named,
+        );
         crate::world::handlers::move_alignment(server, credit_cid, conn, delta);
     }
     // Alive = neither flagged dead NOR at 0 hp — the flag alone misses a
@@ -112,9 +115,7 @@ pub(super) fn award_kill(
     let alive = |c: &PerConnection| !c.death_processed && c.hp > 0.0;
     // XP share: alive + in range (creditor exempt from the range half only).
     let xp_eligible = |cid: ClientId, c: &PerConnection| -> bool {
-        alive(c)
-            && (cid == credit_cid
-                || c.pos.distance_to(victim_pos) <= GROUP_SHARE_RANGE)
+        alive(c) && (cid == credit_cid || c.pos.distance_to(victim_pos) <= GROUP_SHARE_RANGE)
     };
     // The candidate set: the group, or the solo creditor. Liveness check on
     // the solo killer too — they may have disconnected (or died to a last
@@ -125,7 +126,12 @@ pub(super) fn award_kill(
     };
     let xp_members: Vec<ClientId> = group_members
         .iter()
-        .filter(|&&m| connections.get(&m).map(|c| xp_eligible(m, c)).unwrap_or(false))
+        .filter(|&&m| {
+            connections
+                .get(&m)
+                .map(|c| xp_eligible(m, c))
+                .unwrap_or(false)
+        })
         .copied()
         .collect();
     // Quest kill-credit: the same alive-and-in-range test (see doc comment).
@@ -163,7 +169,9 @@ pub(super) fn award_kill(
                     continue; // normalized at login; stay defensive anyway
                 };
                 for (i, obj) in quest.objectives.iter().enumerate() {
-                    let Some(p) = progress.get_mut(i) else { continue };
+                    let Some(p) = progress.get_mut(i) else {
+                        continue;
+                    };
                     if *p < obj.count && crate::world::quests::kill_matches(&obj.target, mob_name) {
                         *p += 1;
                         updates.push((quest_id.clone(), i as u32, *p));
@@ -210,7 +218,16 @@ pub(super) fn kill_enemy(
     source: &str,
     now: Instant,
 ) {
-    let (credit_id_opt, mob_xp, mob_level, death_pos, mob_name, warder_owner_opt, victim_owned, faction_kill) = {
+    let (
+        credit_id_opt,
+        mob_xp,
+        mob_level,
+        death_pos,
+        mob_name,
+        warder_owner_opt,
+        victim_owned,
+        faction_kill,
+    ) = {
         let Some(entity) = enemies.get_mut(&entity_id) else {
             return;
         };
@@ -226,7 +243,10 @@ pub(super) fn kill_enemy(
             .map(|(&id, _)| id);
         // EQ quadratic per-kill award, derived from the mob's level (not the
         // legacy flat mob.xp constant). See progression::kill_xp.
-        let mob_xp = crate::world::progression::kill_xp(entity.mob.level as i32, crate::world::progression::ZEM_NORMAL);
+        let mob_xp = crate::world::progression::kill_xp(
+            entity.mob.level as i32,
+            crate::world::progression::ZEM_NORMAL,
+        );
         let warder_owner_opt: Option<EntityId> =
             if crate::world::pet_templates::is_warder_template(&entity.mob.name) {
                 entity.owner
@@ -238,7 +258,16 @@ pub(super) fn kill_enemy(
         // PvP warder would farm the wolf quest otherwise.
         let victim_owned = entity.owner.is_some();
         let faction_kill = FactionKill::of(entity);
-        (credit_id_opt, mob_xp, entity.mob.level, entity.pos, entity.mob.name.clone(), warder_owner_opt, victim_owned, faction_kill)
+        (
+            credit_id_opt,
+            mob_xp,
+            entity.mob.level,
+            entity.pos,
+            entity.mob.name.clone(),
+            warder_owner_opt,
+            victim_owned,
+            faction_kill,
+        )
     };
 
     // Warder respawn — mirrors the melee path. If the dying entity is a
@@ -288,7 +317,14 @@ pub(super) fn kill_enemy(
         let owner_cid_opt = credit_id_opt
             .filter(|&id| IdKind::of(id) == IdKind::Player)
             .map(|id| id as ClientId);
-        let bag = LootBag::new(death_pos, loot_items, loot_coins, mob_name.clone(), owner_cid_opt, now);
+        let bag = LootBag::new(
+            death_pos,
+            loot_items,
+            loot_coins,
+            mob_name.clone(),
+            owner_cid_opt,
+            now,
+        );
         let bag_id = bag.id;
         let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
         aoi.insert(bag_id, bag_cell);
@@ -463,7 +499,10 @@ pub(super) fn apply_spell_damage_to_enemy(
 /// for a flagged player's bar too, or a caster could DoT someone and log
 /// out with no counterplay. Returns the bearers whose buff set changed, for
 /// the caller to re-fan.
-pub(super) fn clear_player_dots_from(connections: &mut HashMap<ClientId, PerConnection>, casters: &[EntityId]) -> Vec<ClientId> {
+pub(super) fn clear_player_dots_from(
+    connections: &mut HashMap<ClientId, PerConnection>,
+    casters: &[EntityId],
+) -> Vec<ClientId> {
     let mut changed = Vec::new();
     for (cid, conn) in connections.iter_mut() {
         let before = conn.active_buffs.len();
@@ -486,7 +525,10 @@ pub(super) fn clear_player_dots_from(connections: &mut HashMap<ClientId, PerConn
 /// `EntityTarget`: the AI pass only reports a change it made itself
 /// (`tick_ai` compares against the target it started with), so a wipe
 /// here is invisible to clients unless the caller says so.
-pub(super) fn wipe_hate(enemies: &mut HashMap<EntityId, Entity>, players: &[EntityId]) -> Vec<EntityId> {
+pub(super) fn wipe_hate(
+    enemies: &mut HashMap<EntityId, Entity>,
+    players: &[EntityId],
+) -> Vec<EntityId> {
     let mut dropped = Vec::new();
     for entity in enemies.values_mut() {
         for id in players {

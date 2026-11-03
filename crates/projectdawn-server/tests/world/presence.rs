@@ -21,12 +21,21 @@ async fn two_clients_see_each_other() {
     // A also gets EntitySpawn for itself? No â€” fan-out skips the subject;
     // A's own ConnectOk is the own-self signal. So only spawn(B) at A.
     let spawn_b_at_a = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == b_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == b_char_id as u64),
+        )
         .await
         .expect("A receives EntitySpawn for B");
-    if let ServerWorldMsg::EntitySpawn { name, race, class, level, .. } = &spawn_b_at_a {
+    if let ServerWorldMsg::EntitySpawn {
+        name,
+        race,
+        class,
+        level,
+        ..
+    } = &spawn_b_at_a
+    {
         assert_eq!(name, "Betacha", "B's name in spawn");
         assert_eq!(race, "Elf", "B's race in spawn");
         assert_eq!(class, "Cleric", "B's class in spawn");
@@ -34,12 +43,17 @@ async fn two_clients_see_each_other() {
     }
 
     let spawn_a_at_b = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == a_char_id as u64),
+        )
         .await
         .expect("B receives EntitySpawn for A");
-    if let ServerWorldMsg::EntitySpawn { name, race, class, .. } = &spawn_a_at_b {
+    if let ServerWorldMsg::EntitySpawn {
+        name, race, class, ..
+    } = &spawn_a_at_b
+    {
         assert_eq!(name, "Alphacha");
         assert_eq!(race, "Human");
         assert_eq!(class, "Warrior");
@@ -47,20 +61,38 @@ async fn two_clients_see_each_other() {
 
     // â”€â”€ 2. Position fan-out â”€â”€
     // Each client moves; both should see Positions for both ids.
-    a.send_move(1, Vec3 { x: 1.0, y: 0.0, z: 0.0 });
-    b.send_move(1, Vec3 { x: 0.0, y: 0.0, z: 1.0 });
+    a.send_move(
+        1,
+        Vec3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+    );
+    b.send_move(
+        1,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 1.0,
+        },
+    );
 
     let _pos_b_at_a = a
-        .wait_for(CHANNEL_POSITION, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::Position { id, .. } if *id == b_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_POSITION,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::Position { id, .. } if *id == b_char_id as u64),
+        )
         .await
         .expect("A sees a Position broadcast for B");
 
     let _pos_a_at_b = b
-        .wait_for(CHANNEL_POSITION, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::Position { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_POSITION,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::Position { id, .. } if *id == a_char_id as u64),
+        )
         .await
         .expect("B sees a Position broadcast for A");
 
@@ -80,9 +112,11 @@ async fn two_clients_see_each_other() {
         tokio::time::sleep(TICK_DT).await;
     }
 
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == b_char_id as u64)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == b_char_id as u64),
+    )
     .await
     .expect("A receives EntityDespawn for B");
 }
@@ -122,9 +156,11 @@ async fn two_clients_server_authoritative_resources() {
     // 3000), max_mp the token 20 (no mana stat), max_stamina 120 (BASE_ST
     // 100 + Warrior 20). `create_character` seeds current = max.
     let h_at_b = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_char_id as u64),
+        )
         .await
         .expect("B receives HealthUpdate for A via DB-seeded fan-out");
     if let ServerWorldMsg::HealthUpdate { hp, max_hp, .. } = h_at_b {
@@ -133,9 +169,11 @@ async fn two_clients_server_authoritative_resources() {
     }
 
     let m_at_b = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == a_char_id as u64),
+        )
         .await
         .expect("B receives ManaUpdate for A via DB-seeded fan-out");
     if let ServerWorldMsg::ManaUpdate { mp, max_mp, .. } = m_at_b {
@@ -144,9 +182,11 @@ async fn two_clients_server_authoritative_resources() {
     }
 
     let s_at_b = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::StaminaUpdate { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::StaminaUpdate { id, .. } if *id == a_char_id as u64),
+        )
         .await
         .expect("B receives StaminaUpdate for A via DB-seeded fan-out");
     if let ServerWorldMsg::StaminaUpdate { stamina, max, .. } = s_at_b {
@@ -195,7 +235,10 @@ async fn two_clients_cast_fanout() {
     } = cast_at_b
     {
         assert_eq!(spell_name, "Ice Spear");
-        assert!((duration - 1.0).abs() < 0.01, "the server's cast time, not the client's 2.5: {duration}");
+        assert!(
+            (duration - 1.0).abs() < 0.01,
+            "the server's cast time, not the client's 2.5: {duration}"
+        );
     }
 
     a.send_cast_complete("Ice Spear");
@@ -237,7 +280,9 @@ async fn two_clients_cast_fanout() {
                 if spell_name.contains("Made Up"))),
         "the made-up spell reaches nobody: {seen:?}"
     );
-    let fail = seen.iter().find(|m| matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64));
+    let fail = seen.iter().find(
+        |m| matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64),
+    );
     assert!(
         matches!(fail, Some(ServerWorldMsg::CastFail { reason, .. }) if reason == "cancelled"),
         "the cancel carries the fixed word, not the client's: {fail:?}"
@@ -272,8 +317,16 @@ async fn a_late_joiner_sees_a_cast_already_under_way() {
         .await
         .expect("B, entering mid-cast, is sent A's bar");
     let since_cast = cast_began.elapsed().as_secs_f32();
-    assert!(since_cast < 4.5, "the setup took too long to test the seed: {since_cast} s");
-    if let ServerWorldMsg::CastStart { spell_name, duration, .. } = seed {
+    assert!(
+        since_cast < 4.5,
+        "the setup took too long to test the seed: {since_cast} s"
+    );
+    if let ServerWorldMsg::CastStart {
+        spell_name,
+        duration,
+        ..
+    } = seed
+    {
         assert_eq!(spell_name, "Gate");
         assert!(
             duration > 0.0 && duration <= 5.0 - 1.2 + 0.05,
@@ -300,7 +353,9 @@ async fn two_clients_hit_fanout() {
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "kappa", "Kap", "Elf", "Wizard").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "iota", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "iota", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
@@ -316,7 +371,10 @@ async fn two_clients_hit_fanout() {
                 matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == b_char_id as u64)
             })
             .await;
-        assert!(forged.is_none(), "a plain account's made-up hit reaches nobody");
+        assert!(
+            forged.is_none(),
+            "a plain account's made-up hit reaches nobody"
+        );
     }
 
     a.send_hit(b_char_id as u64, 42, true, DamageType::Fire);
@@ -345,9 +403,11 @@ async fn two_clients_hit_fanout() {
     }
 
     let echoed = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
-            matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_millis(500),
+            |m| matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == a_char_id as u64),
+        )
         .await;
     assert!(echoed.is_none(), "A should not receive own Hit echo");
 }
@@ -375,17 +435,21 @@ async fn two_clients_death_fanout() {
     }
 
     let died_at_b = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::EntityDied { id } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::EntityDied { id } if *id == a_char_id as u64),
+        )
         .await
         .expect("B receives EntityDied for A");
     assert!(matches!(died_at_b, ServerWorldMsg::EntityDied { .. }));
 
     let echoed = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
-            matches!(m, ServerWorldMsg::EntityDied { id } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_millis(500),
+            |m| matches!(m, ServerWorldMsg::EntityDied { id } if *id == a_char_id as u64),
+        )
         .await;
     assert!(echoed.is_none(), "A should not receive own EntityDied echo");
     let _ = b_char_id; // silence unused if test order changes
@@ -464,7 +528,15 @@ async fn enemies_visible_after_enter_world() {
         .await
         .expect("A receives at least one EnemySpawn after EnterWorld");
 
-    if let ServerWorldMsg::EnemySpawn { id, mob_name, level, max_hp, hp, .. } = spawn {
+    if let ServerWorldMsg::EnemySpawn {
+        id,
+        mob_name,
+        level,
+        max_hp,
+        hp,
+        ..
+    } = spawn
+    {
         assert!(
             id >= ENEMY_ID_BASE,
             "enemy id must be in the reserved partition (got {id}, base {ENEMY_ID_BASE})"
@@ -505,9 +577,11 @@ async fn aoi_far_apart_clients_dont_see_each_other() {
     // 2 s is far beyond the 1-tick fanout window; if EntitySpawn were
     // going to arrive it would do so within ~100 ms.
     let spawn_b_at_a = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == b_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == b_char_id as u64),
+        )
         .await;
     assert!(
         spawn_b_at_a.is_none(),
@@ -515,9 +589,11 @@ async fn aoi_far_apart_clients_dont_see_each_other() {
     );
 
     let spawn_a_at_b = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == a_char_id as u64),
+        )
         .await;
     assert!(
         spawn_a_at_b.is_none(),
@@ -558,7 +634,14 @@ async fn aoi_approaching_client_triggers_entity_spawn() {
     let mut seq: u32 = 1;
     let mut heartbeat_tick: u32 = 0;
     while Instant::now() < walk_end {
-        b.send_move(seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 });
+        b.send_move(
+            seq,
+            Vec3 {
+                x: -1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        );
         seq += 1;
         // A sends a Heartbeat every ~4 s (80 ticks) to satisfy the
         // server's 10 s app-layer idle timeout while B walks.
@@ -573,15 +656,19 @@ async fn aoi_approaching_client_triggers_entity_spawn() {
 
     // At this point B is at ~x = 210 (cell 1). EntitySpawn messages
     // arrived at both clients during the walk; wait_for drains the queue.
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == b_char_id as u64)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == b_char_id as u64),
+    )
     .await
     .expect("A receives EntitySpawn for B once B enters A's 3Ã—3 neighbourhood");
 
-    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == a_char_id as u64)
-    })
+    b.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == a_char_id as u64),
+    )
     .await
     .expect("B receives EntitySpawn for A when it crosses into A's neighbourhood");
 }
@@ -604,11 +691,20 @@ async fn nan_move_direction_is_dropped() {
     let _ = b_char_id;
 
     // Baseline: an honest move fans a finite Position for A at B.
-    a.send_move(1, Vec3 { x: 1.0, y: 0.0, z: 0.0 });
+    a.send_move(
+        1,
+        Vec3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+    );
     let baseline = b
-        .wait_for(CHANNEL_POSITION, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::Position { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_POSITION,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::Position { id, .. } if *id == a_char_id as u64),
+        )
         .await
         .expect("B sees A's baseline Position");
     if let ServerWorldMsg::Position { pos, .. } = &baseline {
@@ -621,8 +717,22 @@ async fn nan_move_direction_is_dropped() {
     // Stop, then send the forgery: NaN x, Infinity z. If the guard is
     // missing, the tick integrates this into conn.pos and every Position
     // broadcast for A goes NaN from here on.
-    a.send_move(2, Vec3 { x: 0.0, y: 0.0, z: 0.0 });
-    a.send_move(3, Vec3 { x: f32::NAN, y: 0.0, z: f32::INFINITY });
+    a.send_move(
+        2,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+    );
+    a.send_move(
+        3,
+        Vec3 {
+            x: f32::NAN,
+            y: 0.0,
+            z: f32::INFINITY,
+        },
+    );
     for _ in 0..8 {
         tick_one(&mut a.client, &mut a.transport);
         tick_one(&mut b.client, &mut b.transport);
@@ -632,11 +742,20 @@ async fn nan_move_direction_is_dropped() {
     // The forged packet must not have consumed its sequence number (it was
     // dropped before bookkeeping), so an honest move re-using seq 3 applies â€”
     // and the Position it produces is still finite.
-    a.send_move(3, Vec3 { x: 0.0, y: 0.0, z: 1.0 });
+    a.send_move(
+        3,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 1.0,
+        },
+    );
     let after = b
-        .wait_for(CHANNEL_POSITION, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::Position { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_POSITION,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::Position { id, .. } if *id == a_char_id as u64),
+        )
         .await
         .expect("A still moves after the forged packet");
     if let ServerWorldMsg::Position { pos, .. } = &after {
@@ -676,7 +795,11 @@ async fn a_player_target_reaches_only_those_who_can_see_them_once_per_tick() {
 
     // A burst of five retargets in one go; the last names B.
     for t in [9001u64, 9002, 9003, 9004, b_char_id as u64] {
-        send_msg(&mut a.client, CHANNEL_SYSTEM, &ClientWorldMsg::SetTarget { target_id: Some(t) });
+        send_msg(
+            &mut a.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::SetTarget { target_id: Some(t) },
+        );
     }
     for _ in 0..4 {
         tick_one(&mut a.client, &mut a.transport);
@@ -688,23 +811,34 @@ async fn a_player_target_reaches_only_those_who_can_see_them_once_per_tick() {
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         if let Some(ServerWorldMsg::EntityTarget { target, .. }) = b
-            .wait_for(CHANNEL_SYSTEM, Duration::from_millis(300), |m| {
-                matches!(m, ServerWorldMsg::EntityTarget { id, .. } if *id == a_char_id as u64)
-            })
+            .wait_for(
+                CHANNEL_SYSTEM,
+                Duration::from_millis(300),
+                |m| matches!(m, ServerWorldMsg::EntityTarget { id, .. } if *id == a_char_id as u64),
+            )
             .await
         {
             seen.push(target);
         }
     }
-    assert_eq!(seen, vec![Some(b_char_id as u64)], "B gets the latest target, once");
+    assert_eq!(
+        seen,
+        vec![Some(b_char_id as u64)],
+        "B gets the latest target, once"
+    );
 
     // C (two cells away) hears nothing about A.
     let far = c
-        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(800), |m| {
-            matches!(m, ServerWorldMsg::EntityTarget { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_millis(800),
+            |m| matches!(m, ServerWorldMsg::EntityTarget { id, .. } if *id == a_char_id as u64),
+        )
         .await;
-    assert!(far.is_none(), "a player who cannot see A must not learn A's target");
+    assert!(
+        far.is_none(),
+        "a player who cannot see A must not learn A's target"
+    );
 }
 
 /// Scale readiness: an idle enemy's Position must not fan at 20 Hz. The
@@ -718,7 +852,9 @@ async fn idle_enemy_position_fan_is_gated() {
     let (a_session, a_char_id, _stale_token) =
         provision_client(&h.auth_url, "idlefan", "Idlefan", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "idlefan", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "idlefan", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
@@ -742,10 +878,9 @@ async fn idle_enemy_position_fan_is_gated() {
     while Instant::now() < end {
         tick_one(&mut a.client, &mut a.transport);
         while let Some(bytes) = a.client.receive_message(CHANNEL_POSITION) {
-            if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(
-                &bytes,
-                bincode_cfg(),
-            ) {
+            if let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
                 if let ServerWorldMsg::Position { id, sequence, .. } = msg {
                     if id == statue_id {
                         count += 1;
@@ -782,7 +917,9 @@ async fn enemy_crossing_a_cell_boundary_spawns_and_despawns_for_players() {
     let (b_session, b_char_id, _stale_token) =
         provision_client(&h.auth_url, "aoipull", "Aoipull", "Elf", "Cleric").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "aoipull", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "aoipull", true)
+        .await
+        .expect("set is_gm");
     set_char_pos(&h.db_url, b_char_id, 248.0, 60.0).await;
     let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
 
@@ -806,27 +943,61 @@ async fn enemy_crossing_a_cell_boundary_spawns_and_despawns_for_players() {
         ServerWorldMsg::EnemySpawn { id, .. } => id,
         _ => unreachable!(),
     };
-    let early = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_millis(300), |m| {
-        matches!(m, ServerWorldMsg::EnemySpawn { id, .. } if *id == runner_id)
-    })
+    let early = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_millis(300),
+        |m| matches!(m, ServerWorldMsg::EnemySpawn { id, .. } if *id == runner_id),
+    )
     .await;
-    assert!(early.is_none(), "a mob two cells away must not be seeded to A");
+    assert!(
+        early.is_none(),
+        "a mob two cells away must not be seeded to A"
+    );
 
     let mut seq: u32 = 1;
-    walk_pumping(&mut b, &mut a, &mut seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 }, 40).await;
-    let spawned = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(15), |m| {
-        matches!(m, ServerWorldMsg::EnemySpawn { id, .. } if *id == runner_id)
-    })
+    walk_pumping(
+        &mut b,
+        &mut a,
+        &mut seq,
+        Vec3 {
+            x: -1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        40,
+    )
+    .await;
+    let spawned = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(15),
+        |m| matches!(m, ServerWorldMsg::EnemySpawn { id, .. } if *id == runner_id),
+    )
     .await;
     assert!(
         spawned.is_some(),
         "A must get an EnemySpawn when the chasing mob crosses into a cell adjacent to A's"
     );
 
-    walk_pumping(&mut b, &mut a, &mut seq, Vec3 { x: 1.0, y: 0.0, z: 0.0 }, 50).await;
-    let despawned = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(15), |m| {
-        matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == runner_id)
-    })
+    walk_pumping(
+        &mut b,
+        &mut a,
+        &mut seq,
+        Vec3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        50,
+    )
+    .await;
+    let despawned = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(15),
+        |m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == runner_id),
+    )
     .await;
     assert!(
         despawned.is_some(),
@@ -852,14 +1023,31 @@ async fn player_crossing_into_view_of_an_existing_pet_gets_pet_spawn() {
     pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
 
     let pet_id = summon_skeleton(&mut b, &mut a, b_char_id).await;
-    let early = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_millis(300), |m| {
-        matches!(m, ServerWorldMsg::PetSpawn { id, .. } if *id == pet_id)
-    })
+    let early = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_millis(300),
+        |m| matches!(m, ServerWorldMsg::PetSpawn { id, .. } if *id == pet_id),
+    )
     .await;
-    assert!(early.is_none(), "A starts two cells from the pet and must not have it yet");
+    assert!(
+        early.is_none(),
+        "A starts two cells from the pet and must not have it yet"
+    );
 
     let mut seq: u32 = 1;
-    walk_pumping(&mut a, &mut b, &mut seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 }, 40).await;
+    walk_pumping(
+        &mut a,
+        &mut b,
+        &mut seq,
+        Vec3 {
+            x: -1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        40,
+    )
+    .await;
     let spawned = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(10), |m| {
         matches!(m, ServerWorldMsg::PetSpawn { id, owner, .. }
             if *id == pet_id && *owner == b_char_id as u64)
@@ -911,8 +1099,15 @@ async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
     let mut b_x: f32 = 119.0;
     let mut pet_despawned = false;
     let mut last_pet_pos: Option<Vec3> = None;
-    let west = Vec3 { x: -1.0, y: 0.0, z: 0.0 };
-    let drain_b = |b: &mut WorldClient, b_x: &mut f32, pet_despawned: &mut bool, last_pet_pos: &mut Option<Vec3>| {
+    let west = Vec3 {
+        x: -1.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    let drain_b = |b: &mut WorldClient,
+                   b_x: &mut f32,
+                   pet_despawned: &mut bool,
+                   last_pet_pos: &mut Option<Vec3>| {
         while let Some(bytes) = b.client.receive_message(CHANNEL_POSITION) {
             if let Ok((msg, _)) =
                 bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
@@ -938,7 +1133,10 @@ async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
     };
     let mut ticks: u32 = 0;
     while b_x > -2.0 {
-        assert!(ticks < 800, "B never reached cell (-1,0): x = {b_x} after {ticks} moves");
+        assert!(
+            ticks < 800,
+            "B never reached cell (-1,0): x = {b_x} after {ticks} moves"
+        );
         b.send_move(seq, west);
         seq += 1;
         ticks += 1;
@@ -951,7 +1149,10 @@ async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
         drain_b(&mut b, &mut b_x, &mut pet_despawned, &mut last_pet_pos);
         tokio::time::sleep(TICK_DT).await;
     }
-    assert!(!pet_despawned, "B was sent an EntityDespawn for its own pet on walking out of view");
+    assert!(
+        !pet_despawned,
+        "B was sent an EntityDespawn for its own pet on walking out of view"
+    );
 
     // Out here only the owner rule delivers the parked pet's keepalives:
     // the pet's cell (1,0) is not adjacent to B's (-1,0). Wait for the next
@@ -968,13 +1169,17 @@ async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
         drain_b(&mut b, &mut b_x, &mut pet_despawned, &mut last_pet_pos);
         tokio::time::sleep(TICK_DT).await;
     }
-    let parked = last_pet_pos.expect("the parked pet's Position must keep reaching its owner two cells away");
+    let parked = last_pet_pos
+        .expect("the parked pet's Position must keep reaching its owner two cells away");
     assert!(
         (parked.x - 120.5).abs() < 1.0,
         "a guarding pet should still be where it was parked, got x = {}",
         parked.x
     );
-    assert!(!pet_despawned, "B was sent an EntityDespawn for its own pet while parked out of view");
+    assert!(
+        !pet_despawned,
+        "B was sent an EntityDespawn for its own pet while parked out of view"
+    );
 
     // The point of the rule: the pet can be called back from out of view.
     // The proof is that the owner SEES it set off (a few metres west of
@@ -1006,7 +1211,10 @@ async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
         "after /pet follow the owner must watch the pet set off toward them (last pet x = {:?})",
         last_pet_pos.map(|p| p.x)
     );
-    assert!(!pet_despawned, "B was sent an EntityDespawn for its own pet during the walk back");
+    assert!(
+        !pet_despawned,
+        "B was sent an EntityDespawn for its own pet during the walk back"
+    );
 }
 
 /// Every player is told the hour as they enter the world, and two players
@@ -1048,7 +1256,10 @@ async fn every_player_is_told_the_same_hour_on_entering_the_world() {
     );
 
     for (who, hour) in [("A", a_hour), ("B", b_hour)] {
-        assert!((0.0..24.0).contains(&hour), "{who} was told hour {hour}, outside the day");
+        assert!(
+            (0.0..24.0).contains(&hour),
+            "{who} was told hour {hour}, outside the day"
+        );
     }
     // B entered a second or two after A; a game hour is 50 real seconds, so
     // the two differ by a few hundredths of an hour at most. Compare around
@@ -1102,7 +1313,10 @@ async fn inspect_player_refuses_beyond_range() {
         })
         .await
         .unwrap_or_else(|| panic!("a {label} inspect still closes the client's waiting state"));
-        if let ServerWorldMsg::InspectResult { target_name, slots, .. } = result {
+        if let ServerWorldMsg::InspectResult {
+            target_name, slots, ..
+        } = result
+        {
             assert!(target_name.is_empty(), "a {label} inspect names nobody");
             assert!(slots.is_empty(), "a {label} inspect discloses no slots");
         }
@@ -1161,12 +1375,26 @@ async fn the_server_decides_run_speed() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
     let mut seq = 1u32;
-    let east = Vec3 { x: 1.0, y: 0.0, z: 0.0 };
+    let east = Vec3 {
+        x: 1.0,
+        y: 0.0,
+        z: 0.0,
+    };
     let run = median_step(&mut a, a_char_id, &mut seq, east, 30).await;
-    assert!((run - 0.25).abs() < 0.02, "a full-length Move runs 5 m/s, 0.25 m a tick: {run}");
-    let forged = Vec3 { x: 3.0, y: 0.0, z: 0.0 };
+    assert!(
+        (run - 0.25).abs() < 0.02,
+        "a full-length Move runs 5 m/s, 0.25 m a tick: {run}"
+    );
+    let forged = Vec3 {
+        x: 3.0,
+        y: 0.0,
+        z: 0.0,
+    };
     let forged_run = median_step(&mut a, a_char_id, &mut seq, forged, 30).await;
-    assert!((forged_run - 0.25).abs() < 0.02, "an over-long direction is no faster: {forged_run}");
+    assert!(
+        (forged_run - 0.25).abs() < 0.02,
+        "an over-long direction is no faster: {forged_run}"
+    );
     a.send_disconnect();
     a.pump_for(Duration::from_millis(200)).await;
 
@@ -1175,7 +1403,10 @@ async fn the_server_decides_run_speed() {
     let mut seq = 1u32;
     let crawl = median_step(&mut b, b_char_id, &mut seq, east, 30).await;
     let floor = 0.25 * projectdawn_server::world::encumbrance::MIN_SPEED_MULT;
-    assert!((crawl - floor).abs() < 0.01, "an overloaded character crawls at the floor: {crawl}");
+    assert!(
+        (crawl - floor).abs() < 0.01,
+        "an overloaded character crawls at the floor: {crawl}"
+    );
     b.send_disconnect();
     b.pump_for(Duration::from_millis(200)).await;
 }
@@ -1221,7 +1452,11 @@ async fn a_jump_reaches_the_players_nearby_once_and_moves_nobody() {
     let _ = collect_system(&mut j, Duration::from_millis(200)).await;
     let _ = collect_system(&mut f, Duration::from_millis(200)).await;
     let _ = collect_system(&mut o, Duration::from_millis(200)).await;
-    let still = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    let still = Vec3 {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
     let jumps_in = |msgs: &[ServerWorldMsg]| {
         msgs.iter()
             .filter(|m| matches!(m, ServerWorldMsg::PlayerJumped { id } if *id == j_char_id as u64))
@@ -1242,10 +1477,26 @@ async fn a_jump_reaches_the_players_nearby_once_and_moves_nobody() {
         collect_system(&mut f, Duration::from_millis(600)),
         collect_system(&mut o, Duration::from_millis(600)),
     );
-    assert_eq!(jumps_in(&w_msgs), 1, "the watcher sees one jump; the burst inside the interval adds none");
-    assert_eq!(jumps_in(&j_msgs), 0, "the jumper is not told about their own jump");
-    assert_eq!(jumps_in(&f_msgs), 1, "a watcher in view past the say range sees the jump: the jump check");
-    assert_eq!(jumps_in(&o_msgs), 0, "a watcher two cells away, out of view, sees nothing");
+    assert_eq!(
+        jumps_in(&w_msgs),
+        1,
+        "the watcher sees one jump; the burst inside the interval adds none"
+    );
+    assert_eq!(
+        jumps_in(&j_msgs),
+        0,
+        "the jumper is not told about their own jump"
+    );
+    assert_eq!(
+        jumps_in(&f_msgs),
+        1,
+        "a watcher in view past the say range sees the jump: the jump check"
+    );
+    assert_eq!(
+        jumps_in(&o_msgs),
+        0,
+        "a watcher two cells away, out of view, sees nothing"
+    );
 
     // Past the interval, the next edge relays again.
     pump_both_for(&mut j, &mut w, Duration::from_millis(400)).await;
@@ -1257,12 +1508,22 @@ async fn a_jump_reaches_the_players_nearby_once_and_moves_nobody() {
         collect_system(&mut w, Duration::from_millis(600)),
         collect_system(&mut j, Duration::from_millis(600)),
     );
-    assert_eq!(jumps_in(&w_msgs), 1, "a jump after the interval relays once more");
+    assert_eq!(
+        jumps_in(&w_msgs),
+        1,
+        "a jump after the interval relays once more"
+    );
 
     // Nobody moved for any of it: the jumper's own Position keeps y at zero.
     j.send_move(30, still);
-    let pos = own_position(&mut j, j_char_id).await.expect("the jumper's own Position");
-    assert!(pos.y.abs() < 1e-3, "the server never lifts anyone for a jump: y = {}", pos.y);
+    let pos = own_position(&mut j, j_char_id)
+        .await
+        .expect("the jumper's own Position");
+    assert!(
+        pos.y.abs() < 1e-3,
+        "the server never lifts anyone for a jump: y = {}",
+        pos.y
+    );
 
     j.send_disconnect();
     w.send_disconnect();
@@ -1294,9 +1555,12 @@ async fn a_say_carries_fifty_metres_and_no_further() {
     pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
 
     a.send_say("near");
-    let heard = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "near")
-    })
+    let heard = wait_on_a_pumping_b(
+        &mut b,
+        &mut a,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "near"),
+    )
     .await;
     assert!(heard.is_some(), "a say reaches a listener 40 m away");
 
@@ -1305,16 +1569,31 @@ async fn a_say_carries_fifty_metres_and_no_further() {
         &mut b,
         &mut seq,
         b_char_id,
-        Vec3 { x: 40.0, y: 0.0, z: 80.0 },
-        Vec3 { x: 60.0, y: 0.0, z: 80.0 },
+        Vec3 {
+            x: 40.0,
+            y: 0.0,
+            z: 80.0,
+        },
+        Vec3 {
+            x: 60.0,
+            y: 0.0,
+            z: 80.0,
+        },
         0.3,
     )
     .await;
-    assert!(stood.x > 55.0, "test setup: the listener stands past 55 m, is at x={:.1}", stood.x);
+    assert!(
+        stood.x > 55.0,
+        "test setup: the listener stands past 55 m, is at x={:.1}",
+        stood.x
+    );
     a.send_say("far");
-    let heard = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_millis(1_500), |m| {
-        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "far")
-    })
+    let heard = wait_on_a_pumping_b(
+        &mut b,
+        &mut a,
+        Duration::from_millis(1_500),
+        |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "far"),
+    )
     .await;
     assert!(heard.is_none(), "a say does not reach a listener 60 m away");
 
@@ -1327,11 +1606,17 @@ async fn a_say_carries_fifty_metres_and_no_further() {
             target_name: None,
         },
     );
-    let heard = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "still here")
-    })
+    let heard = wait_on_a_pumping_b(
+        &mut b,
+        &mut a,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "still here"),
+    )
     .await;
-    assert!(heard.is_some(), "a shout still reaches the 60 m listener: the silence was the range");
+    assert!(
+        heard.is_some(),
+        "a shout still reaches the 60 m listener: the silence was the range"
+    );
 }
 
 /// The facing (PD_W0029; user, 2026-10-27, option a): a Move carries the
@@ -1354,12 +1639,19 @@ async fn a_players_facing_reaches_the_watcher() {
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
     pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
     let a_id = a_char_id as u64;
-    let still = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    let still = Vec3 {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
 
     a.send_move_facing(1, still, 1.25);
     let seen = yaws_seen(&mut b, &mut a, a_id, Duration::from_millis(600)).await;
     let last = *seen.last().expect("B receives A's Positions");
-    assert!((last - 1.25).abs() < 1e-4, "B sees A facing 1.25, sees {last}");
+    assert!(
+        (last - 1.25).abs() < 1e-4,
+        "B sees A facing 1.25, sees {last}"
+    );
 
     a.send_move_facing(2, still, f32::NAN);
     let seen = yaws_seen(&mut b, &mut a, a_id, Duration::from_millis(400)).await;
@@ -1372,7 +1664,10 @@ async fn a_players_facing_reaches_the_watcher() {
     a.send_move_facing(3, still, 4.0);
     let seen = yaws_seen(&mut b, &mut a, a_id, Duration::from_millis(600)).await;
     let last = *seen.last().expect("B receives A's Positions");
-    assert!((last - (4.0 - TAU)).abs() < 1e-4, "a yaw past PI is wrapped into (-PI, PI]: {last}");
+    assert!(
+        (last - (4.0 - TAU)).abs() < 1e-4,
+        "a yaw past PI is wrapped into (-PI, PI]: {last}"
+    );
 }
 
 /// A chat line with a two-byte character straddling byte 512 used to panic
@@ -1391,24 +1686,40 @@ async fn a_chat_line_cut_inside_a_multibyte_char_does_not_crash_the_server() {
     let mut b = WorldClient::start(b_token, &b_session, b_char).await;
 
     let poison = format!("{}é and more", "a".repeat(511));
-    assert!(!poison.is_char_boundary(512), "the test line must straddle byte 512");
+    assert!(
+        !poison.is_char_boundary(512),
+        "the test line must straddle byte 512"
+    );
     a.send_say(&poison);
     a.pump_for(Duration::from_millis(300)).await;
     a.send_say("still here");
     a.pump_for(Duration::from_millis(100)).await;
 
     let cut = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("aaa"))
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("aaa")),
+        )
         .await;
-    let Some(ServerWorldMsg::ChatMessage { text, .. }) = cut else { panic!("the long line reaches the listener") };
-    assert_eq!(text, "a".repeat(250), "cut to 250 characters, as the client stops typing");
+    let Some(ServerWorldMsg::ChatMessage { text, .. }) = cut else {
+        panic!("the long line reaches the listener")
+    };
+    assert_eq!(
+        text,
+        "a".repeat(250),
+        "cut to 250 characters, as the client stops typing"
+    );
 
     let probe = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "still here")
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "still here"),
+        )
         .await;
-    assert!(probe.is_some(), "the server stopped serving after the long chat line");
+    assert!(
+        probe.is_some(),
+        "the server stopped serving after the long chat line"
+    );
 }

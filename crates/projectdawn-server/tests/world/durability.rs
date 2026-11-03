@@ -15,7 +15,9 @@ async fn bag_contents_persist_across_reconnect() {
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "bag1", "Bagholder", "Human", "Warrior").await;
     let db_url = h.db_url.clone();
-    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&db_url)
+        .await
+        .expect("open pool");
     projectdawn_server::db::save_inventory(
         &pool,
         a_char_id,
@@ -66,7 +68,9 @@ async fn snapshot_includes_persisted_equipment() {
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "eq3", "Equipsnap", "Human", "Warrior").await;
     let db_url = h.db_url.clone();
-    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&db_url)
+        .await
+        .expect("open pool");
     projectdawn_server::db::save_inventory(
         &pool,
         a_char_id,
@@ -96,14 +100,12 @@ async fn snapshot_includes_persisted_equipment() {
         .await
         .expect("snapshot");
     if let ServerWorldMsg::InventorySnapshot { entries } = snap {
-        let has_base = entries
-            .iter()
-            .any(|(loc, _, path, count)| loc == "base" && path == "res://items/cloth.tres" && *count == 5);
-        let has_equip = entries
-            .iter()
-            .any(|(loc, slot, path, count)| {
-                loc == "equip" && *slot == 0 && path == "res://items/sword.tres" && *count == 1
-            });
+        let has_base = entries.iter().any(|(loc, _, path, count)| {
+            loc == "base" && path == "res://items/cloth.tres" && *count == 5
+        });
+        let has_equip = entries.iter().any(|(loc, slot, path, count)| {
+            loc == "equip" && *slot == 0 && path == "res://items/sword.tres" && *count == 1
+        });
         assert!(has_base, "snapshot must include the base cloth row");
         assert!(has_equip, "snapshot must include the equipped sword row");
     }
@@ -127,7 +129,12 @@ async fn skill_progress_snapshot_seeded_on_enter_world() {
         .await
         .expect("SkillProgressSnapshot arrives on EnterWorld");
 
-    if let ServerWorldMsg::SkillProgressSnapshot { weapon, armor, casting } = snap {
+    if let ServerWorldMsg::SkillProgressSnapshot {
+        weapon,
+        armor,
+        casting,
+    } = snap
+    {
         // Shape: 10 weapon keys, 5 armor keys, 7 casting keys (one per
         // GDScript definition entry, regardless of whether the class
         // can train it). Casting went 6 -> 7 on 2026-07-20 when the
@@ -145,8 +152,20 @@ async fn skill_progress_snapshot_seeded_on_enter_world() {
         assert_eq!(armor_map.get("plate").copied(), Some(1));
         // Warrior has no casting; all six rows present at 0.
         let casting_map: std::collections::HashMap<String, u32> = casting.into_iter().collect();
-        for key in &["evocation", "alteration", "abjuration", "conjuration", "divination", "channeling"] {
-            assert_eq!(casting_map.get(*key).copied(), Some(0), "warrior casting {} is 0", key);
+        for key in &[
+            "evocation",
+            "alteration",
+            "abjuration",
+            "conjuration",
+            "divination",
+            "channeling",
+        ] {
+            assert_eq!(
+                casting_map.get(*key).copied(),
+                Some(0),
+                "warrior casting {} is 0",
+                key
+            );
         }
     }
 }
@@ -167,7 +186,9 @@ async fn skill_progress_persists_load_path() {
     // the server's save path would write at checkpoint / disconnect
     // after an in-flight advance â€” proves the load + snapshot path
     // independently of the rng-driven try_advance roll.
-    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&h.db_url)
+        .await
+        .expect("open pool");
     sqlx::query(
         "INSERT INTO character_skills (char_id, kind, key, score)
          VALUES (?1, 'casting', 'alteration', 17)",
@@ -245,7 +266,10 @@ async fn a_dead_character_stays_dead_on_relogin_and_pays_once() {
             matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp <= 0.01)
         })
         .await;
-    assert!(seeded_dead.is_some(), "the client is told it is dead by the HP seed");
+    assert!(
+        seeded_dead.is_some(),
+        "the client is told it is dead by the HP seed"
+    );
     b.pump_for(Duration::from_millis(600)).await;
     b.send_disconnect();
     b.pump_for(Duration::from_millis(500)).await;
@@ -294,14 +318,19 @@ async fn a_dead_character_with_full_pools_is_told_it_is_dead() {
             matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp <= 0.01)
         })
         .await;
-    assert!(told_dead.is_some(), "a dead joiner is told its HP even when nothing regenerates");
+    assert!(
+        told_dead.is_some(),
+        "a dead joiner is told its HP even when nothing regenerates"
+    );
 
     // Told it is dead, the client respawns, and the server stands it back up.
     a.send_respawn();
     let alive = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp > 0.0)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp > 0.0),
+        )
         .await;
     assert!(alive.is_some(), "the respawn lands");
 }
@@ -357,7 +386,10 @@ async fn an_unclean_drop_refuses_relogin_until_the_body_is_reaped() {
             ConnectOutcome::HandshakeTimedOut => {
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
-            ConnectOutcome::Kicked { code, reconnect_after_secs } => {
+            ConnectOutcome::Kicked {
+                code,
+                reconnect_after_secs,
+            } => {
                 assert!(
                     matches!(code, protocol::world::KickCode::DuplicateLogin),
                     "a relogin during the linger is refused as a duplicate login, got {code:?}"
@@ -375,8 +407,9 @@ async fn an_unclean_drop_refuses_relogin_until_the_body_is_reaped() {
             }
         }
     }
-    let (secs, told_at) = countdown
-        .expect("within 25 s of the drop the body is linkdead and a relogin is refused with a countdown");
+    let (secs, told_at) = countdown.expect(
+        "within 25 s of the drop the body is linkdead and a relogin is refused with a countdown",
+    );
 
     // Phase 3: the window is the body's clock, not the relogin's. Knock every
     // few seconds through the countdown the server itself announced (each a
@@ -405,7 +438,12 @@ async fn an_unclean_drop_refuses_relogin_until_the_body_is_reaped() {
     );
     assert!(
         b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::HealthUpdate { .. } | ServerWorldMsg::Position { .. } | ServerWorldMsg::TimeOfDay { .. })
+            matches!(
+                m,
+                ServerWorldMsg::HealthUpdate { .. }
+                    | ServerWorldMsg::Position { .. }
+                    | ServerWorldMsg::TimeOfDay { .. }
+            )
         })
         .await
         .is_some(),
@@ -428,16 +466,23 @@ async fn the_bar_seeds_once_and_survives_a_relog() {
         provision_client(&h.auth_url, "seeder", "Seeda", "Human", "Cleric").await;
     forget_all_spells(&h.db_url, char_id).await;
     let mut a = WorldClient::start(token, &session, char_id).await;
-    next_spell_gems(&mut a).await.expect("the bar arrives on entry");
+    next_spell_gems(&mut a)
+        .await
+        .expect("the bar arrives on entry");
 
     a.send_seed_spell_gems(&["Smite", "Fireball", "", "Healing Light"]);
     let (gems, seeded) = next_spell_gems(&mut a).await.expect("the seeded bar");
     assert_eq!(gems[0], "Smite");
-    assert!(gems[1].is_empty() && gems[3].is_empty(), "another class's spell and a closed gem are dropped");
+    assert!(
+        gems[1].is_empty() && gems[3].is_empty(),
+        "another class's spell and a closed gem are dropped"
+    );
     assert!(seeded);
 
     a.send_seed_spell_gems(&["Healing Light"]);
-    let (gems, _) = next_spell_gems(&mut a).await.expect("a second seed answers with the bar");
+    let (gems, _) = next_spell_gems(&mut a)
+        .await
+        .expect("a second seed answers with the bar");
     assert_eq!(gems[0], "Smite", "a second seed changes nothing");
 
     a.send_disconnect();
@@ -446,7 +491,9 @@ async fn the_bar_seeds_once_and_survives_a_relog() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let token = request_world_token(&h.auth_url, &session, char_id).await;
     let mut b = WorldClient::start(token, &session, char_id).await;
-    let (gems, seeded) = next_spell_gems(&mut b).await.expect("the bar arrives again");
+    let (gems, seeded) = next_spell_gems(&mut b)
+        .await
+        .expect("the bar arrives again");
     assert_eq!(gems[0], "Smite");
     assert!(seeded, "and is still the server's");
 }
@@ -458,7 +505,10 @@ async fn the_bar_seeds_once_and_survives_a_relog() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_rent_items_go_after_thirty_minutes_logged_out() {
     const CONJURED: &str = "res://data/loot/items/conjured_bread.tres";
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
     let h = start_both().await;
     let pool = db::open(&h.db_url).await.expect("open pool");
 
@@ -478,27 +528,47 @@ async fn no_rent_items_go_after_thirty_minutes_logged_out() {
     }
 
     let mut paths_of = Vec::new();
-    for (session, id, token) in [(a_session, a_char_id, a_token), (b_session, b_char_id, b_token)] {
+    for (session, id, token) in [
+        (a_session, a_char_id, a_token),
+        (b_session, b_char_id, b_token),
+    ] {
         let mut c = WorldClient::start(token, &session, id).await;
         let snap = c
-            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| matches!(m, ServerWorldMsg::InventorySnapshot { .. }))
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+                matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+            })
             .await;
-        let Some(ServerWorldMsg::InventorySnapshot { entries }) = snap else { panic!("an inventory on entry") };
+        let Some(ServerWorldMsg::InventorySnapshot { entries }) = snap else {
+            panic!("an inventory on entry")
+        };
         paths_of.push(entries.into_iter().map(|e| e.2).collect::<Vec<String>>());
         c.send_disconnect();
         c.pump_for(Duration::from_millis(500)).await;
     }
-    assert!(!paths_of[0].iter().any(|p| p == CONJURED), "thirty minutes away: the conjured bread is gone");
-    assert!(paths_of[0].iter().any(|p| p == BREAD), "an ordinary loaf stays");
-    assert!(paths_of[1].iter().any(|p| p == CONJURED), "ten minutes away: the conjured bread stays");
+    assert!(
+        !paths_of[0].iter().any(|p| p == CONJURED),
+        "thirty minutes away: the conjured bread is gone"
+    );
+    assert!(
+        paths_of[0].iter().any(|p| p == BREAD),
+        "an ordinary loaf stays"
+    );
+    assert!(
+        paths_of[1].iter().any(|p| p == CONJURED),
+        "ten minutes away: the conjured bread stays"
+    );
 
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let stamped: Option<i64> = sqlx::query_scalar("SELECT logged_out_at FROM characters WHERE id = ?1")
-        .bind(b_char_id)
-        .fetch_one(&pool)
-        .await
-        .expect("read the stamp");
-    assert!(stamped.is_some_and(|t| (t - now).abs() < 30), "logging out stamped the time: {stamped:?}");
+    let stamped: Option<i64> =
+        sqlx::query_scalar("SELECT logged_out_at FROM characters WHERE id = ?1")
+            .bind(b_char_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read the stamp");
+    assert!(
+        stamped.is_some_and(|t| (t - now).abs() < 30),
+        "logging out stamped the time: {stamped:?}"
+    );
 }
 
 /// A drop is durable at once. The bag lives only in memory and its picker is
@@ -534,7 +604,10 @@ async fn a_dropped_item_leaves_the_droppers_saved_inventory_at_once() {
         BREAD,
     )
     .await;
-    assert_eq!(saved, 0, "the dropped stack is still in the dropper's saved inventory");
+    assert_eq!(
+        saved, 0,
+        "the dropped stack is still in the dropper's saved inventory"
+    );
 }
 
 /// The other half of a drop: whoever picks the stack up is saved in the same
@@ -565,9 +638,11 @@ async fn a_picked_up_drop_is_saved_on_the_picker_at_once() {
         _ => unreachable!(),
     };
     b.send_loot_all(bag_id);
-    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD)
-    })
+    b.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD),
+    )
     .await
     .expect("the loaves reach the picker");
 
@@ -578,7 +653,10 @@ async fn a_picked_up_drop_is_saved_on_the_picker_at_once() {
         BREAD,
     )
     .await;
-    assert_eq!(picker_saved, 1, "the picked-up stack is not in the picker's saved inventory");
+    assert_eq!(
+        picker_saved, 1,
+        "the picked-up stack is not in the picker's saved inventory"
+    );
 }
 
 /// A burst of drops in one tick is capped (MAX_DROPS_PER_TICK, 4): each
@@ -612,7 +690,10 @@ async fn a_burst_of_drops_in_one_tick_is_capped() {
         BREAD,
     )
     .await;
-    assert_eq!(left, 2, "four drops apply per tick and are saved; the rest of the burst is ignored");
+    assert_eq!(
+        left, 2,
+        "four drops apply per tick and are saved; the rest of the burst is ignored"
+    );
 }
 
 /// An immediate save writes every dirty store, never one alone. Withdraw a
@@ -626,13 +707,17 @@ async fn a_death_after_an_unsaved_bank_withdrawal_leaves_the_item_in_one_place()
     let (session, char_id, _stale) =
         provision_client(&h.auth_url, "bankdeath", "Withdrawer", "Human", "Warrior").await;
     {
-        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
-        sqlx::query("INSERT INTO bank_items (char_id, slot, item_path, count) VALUES (?1, 0, ?2, 1)")
-            .bind(char_id)
-            .bind(BREAD)
-            .execute(&pool)
+        let pool = projectdawn_server::db::open(&h.db_url)
             .await
-            .expect("seed the vault");
+            .expect("open pool");
+        sqlx::query(
+            "INSERT INTO bank_items (char_id, slot, item_path, count) VALUES (?1, 0, ?2, 1)",
+        )
+        .bind(char_id)
+        .bind(BREAD)
+        .execute(&pool)
+        .await
+        .expect("seed the vault");
     }
     let token = gm_world_token(&h.auth_url, &h.db_url, "bankdeath", &session, char_id).await;
     let mut a = WorldClient::start(token, &session, char_id).await;
@@ -644,16 +729,20 @@ async fn a_death_after_an_unsaved_bank_withdrawal_leaves_the_item_in_one_place()
 
     // The starter spawn is within reach of the banker (npcs.rs pins it).
     a.send_bank_withdraw_item(0);
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD),
+    )
     .await
     .expect("the loaf arrives in the bags");
 
     a.send_death();
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::InventorySnapshot { entries } if entries.is_empty())
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::InventorySnapshot { entries } if entries.is_empty()),
+    )
     .await
     .expect("the death strip empties the bags");
 
@@ -673,7 +762,10 @@ async fn a_death_after_an_unsaved_bank_withdrawal_leaves_the_item_in_one_place()
     )
     .await;
     assert_eq!(on_corpse, 1, "the loaf went onto the corpse");
-    assert_eq!(in_vault, 0, "the loaf is ALSO still in the saved vault: a dupe");
+    assert_eq!(
+        in_vault, 0,
+        "the loaf is ALSO still in the saved vault: a dupe"
+    );
 }
 
 /// A store that fails to load refuses the login. Playing on with an empty
@@ -686,7 +778,9 @@ async fn a_store_that_fails_to_load_refuses_the_login() {
     let (session, char_id, token) =
         provision_client(&h.auth_url, "badload", "Unlucky", "Human", "Warrior").await;
     {
-        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        let pool = projectdawn_server::db::open(&h.db_url)
+            .await
+            .expect("open pool");
         sqlx::query(
             "INSERT INTO character_items (char_id, location, slot, item_path, count)
              VALUES (?1, 'base', 0, ?2, 'not a number')",
@@ -730,9 +824,11 @@ async fn a_stop_signal_saves_everyone_and_tells_them() {
     let mut b = WorldClient::start(b_token, &b_session, b_char).await;
 
     a.send_buy_item(0, "Bread Loaf", 1);
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD),
+    )
     .await
     .expect("the loaf is bought");
     let mut seq = 0;
@@ -740,8 +836,16 @@ async fn a_stop_signal_saves_everyone_and_tells_them() {
 
     h.shutdown.send(true).expect("send the stop signal");
     let (ka, kb) = kicks_for_both(&mut a, &mut b).await;
-    assert_eq!(ka, Some(protocol::world::KickCode::Restart), "the walker was told the world is restarting");
-    assert_eq!(kb, Some(protocol::world::KickCode::Restart), "the bystander was told too");
+    assert_eq!(
+        ka,
+        Some(protocol::world::KickCode::Restart),
+        "the walker was told the world is restarting"
+    );
+    assert_eq!(
+        kb,
+        Some(protocol::world::KickCode::Restart),
+        "the bystander was told too"
+    );
     let world = h.world.take().expect("world handle");
     let ended = tokio::time::timeout(Duration::from_secs(5), world)
         .await
@@ -749,13 +853,18 @@ async fn a_stop_signal_saves_everyone_and_tells_them() {
         .expect("the world task did not panic");
     assert!(ended.is_ok(), "a stop signal is a clean end: {ended:?}");
 
-    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&h.db_url)
+        .await
+        .expect("open pool");
     let (pos_x,): (Option<f32>,) = sqlx::query_as("SELECT pos_x FROM characters WHERE id = ?1")
         .bind(a_char)
         .fetch_one(&pool)
         .await
         .expect("position row");
-    assert!(pos_x.unwrap_or(0.0) > 3.0, "the walk was not saved: pos_x = {pos_x:?}");
+    assert!(
+        pos_x.unwrap_or(0.0) > 3.0,
+        "the walk was not saved: pos_x = {pos_x:?}"
+    );
     let loaves = count_item_rows(
         &h.db_url,
         "SELECT COUNT(*) FROM character_items WHERE char_id = ?1 AND item_path = ?2",
@@ -779,13 +888,17 @@ async fn a_failed_logout_save_holds_the_relogin_until_it_lands() {
     fund_char(&h.db_url, char_id).await;
     let mut a = WorldClient::start(token, &session, char_id).await;
     a.send_buy_item(0, "Bread Loaf", 1);
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD),
+    )
     .await
     .expect("the loaf is bought");
 
-    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&h.db_url)
+        .await
+        .expect("open pool");
     sqlx::query(
         "CREATE TRIGGER fail_inventory_writes BEFORE INSERT ON character_items
          BEGIN SELECT RAISE(ABORT, 'test: inventory writes fail'); END",
@@ -867,7 +980,9 @@ async fn a_quest_turn_in_saves_its_reward_xp_with_the_completion() {
     let (session, char_id, token) =
         provision_client(&h.auth_url, "questxp", "Rewarded", "Human", "Warrior").await;
     {
-        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        let pool = projectdawn_server::db::open(&h.db_url)
+            .await
+            .expect("open pool");
         projectdawn_server::db::save_quest_progress(&pool, char_id, "rat_infestation", &[8])
             .await
             .expect("seed a finished quest");
@@ -878,7 +993,9 @@ async fn a_quest_turn_in_saves_its_reward_xp_with_the_completion() {
     send_msg(
         &mut a.client,
         CHANNEL_SYSTEM,
-        &ClientWorldMsg::CompleteQuest { quest_id: "rat_infestation".into() },
+        &ClientWorldMsg::CompleteQuest {
+            quest_id: "rat_infestation".into(),
+        },
     );
     a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
         matches!(m, ServerWorldMsg::QuestCompleted { quest_id } if quest_id == "rat_infestation")
@@ -887,12 +1004,17 @@ async fn a_quest_turn_in_saves_its_reward_xp_with_the_completion() {
     .expect("the quest is completed");
 
     let after = char_xp_level(&h.db_url, char_id).await;
-    assert_ne!(after, before, "the reward XP must be saved with the completion");
+    assert_ne!(
+        after, before,
+        "the reward XP must be saved with the completion"
+    );
 }
 
 /// A character's saved position, straight from the database.
 async fn saved_xz(db_url: &str, char_id: i64) -> (f64, f64) {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
     sqlx::query_as("SELECT pos_x, pos_z FROM characters WHERE id = ?1")
         .bind(char_id)
         .fetch_one(&pool)
@@ -934,9 +1056,11 @@ async fn a_panic_undoes_only_its_own_tick_and_drops_the_sender_as_cut() {
         "the walk must move A before the death: {died_at:?} vs {saved_before:?}"
     );
     a.send_damage_self(1_000_000);
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp <= 0.01)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp <= 0.01),
+    )
     .await
     .expect("A dies");
 
@@ -952,11 +1076,15 @@ async fn a_panic_undoes_only_its_own_tick_and_drops_the_sender_as_cut() {
     // world keeps serving everyone else.
     let seen = b.collect_for(Duration::from_secs(2)).await;
     assert!(
-        !seen.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == BEFORE)),
+        !seen
+            .iter()
+            .any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == BEFORE)),
         "a line from the panicking batch reached a peer"
     );
     assert!(
-        !seen.iter().any(|m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == cid)),
+        !seen
+            .iter()
+            .any(|m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == cid)),
         "a panic took the body out of the world at once, a free exit from any fight"
     );
     let mut b_seq = 1;

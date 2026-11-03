@@ -43,7 +43,19 @@ async fn enemy_aggros_chases_and_attacks_player() {
     // thread used to come up short): to 2 m from the spawn point, well
     // inside its aggro whatever the spawn jitter.
     let mut seq: u32 = 1;
-    walk_until_within(&mut a, &mut seq, a_char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, BONEPILE_SPAWN, 2.0).await;
+    walk_until_within(
+        &mut a,
+        &mut seq,
+        a_char_id,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        BONEPILE_SPAWN,
+        2.0,
+    )
+    .await;
     // Stop. The server's STALE_MOVE_THRESHOLD (500 ms) will park the
     // player at its current pos within ~10 ticks.
 
@@ -70,17 +82,28 @@ async fn enemy_aggros_chases_and_attacks_player() {
     }
 
     let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
-            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(35),
+            |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64),
+        )
         .await
         .expect("enemy fires a melee swing on the player");
-    if let ServerWorldMsg::Hit { attacker, amount, dmg_type, .. } = hit_evt {
+    if let ServerWorldMsg::Hit {
+        attacker,
+        amount,
+        dmg_type,
+        ..
+    } = hit_evt
+    {
         assert!(
             attacker >= ENEMY_ID_BASE,
             "Hit attacker must be an enemy id (got {attacker}, base {ENEMY_ID_BASE})"
         );
-        assert!(amount > 0, "enemy hit amount must be positive (got {amount})");
+        assert!(
+            amount > 0,
+            "enemy hit amount must be positive (got {amount})"
+        );
         assert!(
             matches!(dmg_type, DamageType::Physical),
             "enemy melee broadcasts as Physical damage (got {dmg_type:?})"
@@ -131,16 +154,30 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     // thread used to come up short): to 2 m from the spawn point, well
     // inside its aggro whatever the spawn jitter.
     let mut seq: u32 = 1;
-    walk_until_within(&mut a, &mut seq, a_char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, BONEPILE_SPAWN, 2.0).await;
+    walk_until_within(
+        &mut a,
+        &mut seq,
+        a_char_id,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        BONEPILE_SPAWN,
+        2.0,
+    )
+    .await;
 
     // Wait for an enemy hit on the player â€” proves the AI walked an
     // enemy into melee with us. The Hit carries the attacker id (in
     // the enemy partition). Generous timeout because parallel tests
     // in this file contend for CPU; isolated runtime is ~5 s.
     let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
-            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(35),
+            |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64),
+        )
         .await
         .expect("an enemy locks on and swings");
     let enemy_id: u64 = match hit_evt {
@@ -196,9 +233,11 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
         assert!(hp <= 0.0, "killed enemy must broadcast hp <= 0 (got {hp})");
     }
 
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::EntityDied { id } if *id == enemy_id)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::EntityDied { id } if *id == enemy_id),
+    )
     .await
     .expect("EntityDied arrives for the killed enemy");
 
@@ -218,9 +257,11 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
 
     // ENEMY_DESPAWN_LINGER_SECS is 5 s; budget extra for tick jitter and
     // parallel contention.
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(15), |m| {
-        matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(15),
+        |m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id),
+    )
     .await
     .expect("EntityDespawn arrives after the corpse linger window");
 }
@@ -264,14 +305,19 @@ async fn a_seated_player_is_hit_for_the_max_and_stood_up() {
         })
         .await
         .expect("B is hit");
-    let ServerWorldMsg::Hit { amount, crit, .. } = hit else { unreachable!() };
+    let ServerWorldMsg::Hit { amount, crit, .. } = hit else {
+        unreachable!()
+    };
     if crit {
         assert!(
             amount >= seated_max,
             "a crit on a seated target lands at least the max ({seated_max}), got {amount}"
         );
     } else {
-        assert_eq!(amount, seated_max, "a seated target takes the top of the band");
+        assert_eq!(
+            amount, seated_max,
+            "a seated target takes the top of the band"
+        );
     }
 
     // The hit stood B: a /camp, which needs the server's seated flag, is
@@ -316,7 +362,9 @@ async fn the_server_rolls_the_melee_miss() {
     let (a_session, a_char_id, _stale) =
         provision_client(&h.auth_url, "misser", "Missa", "Human", "Rogue").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "misser", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "misser", true)
+        .await
+        .expect("set is_gm");
     give_char_item(&h.db_url, a_char_id, "equip", 0, STAFF, 1).await;
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
@@ -334,7 +382,19 @@ async fn the_server_rolls_the_melee_miss() {
         _ => unreachable!(),
     };
     let mut seq: u32 = 1;
-    walk_until_within(&mut a, &mut seq, a_char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, dummy_pos, 1.0).await;
+    walk_until_within(
+        &mut a,
+        &mut seq,
+        a_char_id,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        dummy_pos,
+        1.0,
+    )
+    .await;
 
     // Six swings at the staff's own 2.0 s delay (the limiter holds an
     // unhasted hand to 1.65 s): six straight landings at an 80% miss would be
@@ -346,19 +406,34 @@ async fn the_server_rolls_the_melee_miss() {
         while Instant::now() < until {
             tick_one(&mut a.client, &mut a.transport);
             while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
-                match bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) {
+                match bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+                {
                     Ok((ServerWorldMsg::Miss { attacker, target }, _))
-                        if attacker == a_char_id as u64 && target == dummy => misses += 1,
-                    Ok((ServerWorldMsg::Hit { attacker, target, .. }, _))
-                        if attacker == a_char_id as u64 && target == dummy => hits += 1,
+                        if attacker == a_char_id as u64 && target == dummy =>
+                    {
+                        misses += 1
+                    }
+                    Ok((
+                        ServerWorldMsg::Hit {
+                            attacker, target, ..
+                        },
+                        _,
+                    )) if attacker == a_char_id as u64 && target == dummy => hits += 1,
                     _ => {}
                 }
             }
             tokio::time::sleep(TICK_DT).await;
         }
     }
-    assert_eq!(misses + hits, 6, "every swing was answered: {misses} misses, {hits} hits");
-    assert!(misses >= 1, "the server rolled at least one miss ({hits} hits)");
+    assert_eq!(
+        misses + hits,
+        6,
+        "every swing was answered: {misses} misses, {hits} hits"
+    );
+    assert!(
+        misses >= 1,
+        "the server rolled at least one miss ({hits} hits)"
+    );
 }
 
 /// The swing-rate limit reads the player's real haste (the client-authority
@@ -380,23 +455,32 @@ async fn the_swing_rate_limit_reads_the_players_haste() {
         provision_client(&h.auth_url, "hastewar", "Hasteb", "Human", "Warrior").await;
     set_char_level(&h.db_url, e_char_id, 16).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "hasteench", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "hasteench", true)
+        .await
+        .expect("set is_gm");
     let e_token = request_world_token(&h.auth_url, &e_session, e_char_id).await;
     let mut e = WorldClient::start(e_token, &e_session, e_char_id).await;
     let mut w = WorldClient::start(w_token, &w_session, w_char_id).await;
     pump_both_for(&mut e, &mut w, Duration::from_millis(300)).await;
 
     e.send_dev_spawn("Haste Dummy", 1, 100_000.0, 0, 0.0, 0.0);
-    let spawn = wait_on_a_pumping_b(&mut e, &mut w, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Haste Dummy")
-    })
+    let spawn = wait_on_a_pumping_b(
+        &mut e,
+        &mut w,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Haste Dummy"),
+    )
     .await
     .expect("the dummy spawns");
     let (dummy, dummy_pos) = match spawn {
         ServerWorldMsg::EnemySpawn { id, pos, .. } => (id, pos),
         _ => unreachable!(),
     };
-    let origin = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    let origin = Vec3 {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
     let (mut se, mut sw) = (1u32, 1u32);
     walk_until_within(&mut e, &mut se, e_char_id, origin, dummy_pos, 1.0).await;
     walk_until_within(&mut w, &mut sw, w_char_id, origin, dummy_pos, 1.0).await;
@@ -430,7 +514,10 @@ async fn the_swing_rate_limit_reads_the_players_haste() {
                 tick_one(&mut c.client, &mut c.transport);
                 tick_one(&mut other.client, &mut other.transport);
                 while let Some(bytes) = c.client.receive_message(CHANNEL_SYSTEM) {
-                    if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) {
+                    if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(
+                        &bytes,
+                        bincode_cfg(),
+                    ) {
                         if matches!(msg, ServerWorldMsg::Hit { attacker: a, target: t, .. }
                             | ServerWorldMsg::Miss { attacker: a, target: t }
                             if a == attacker as u64 && t == target)
@@ -445,10 +532,32 @@ async fn the_swing_rate_limit_reads_the_players_haste() {
         answered
     }
 
-    let hasted = paced_swings(&mut e, &mut w, e_char_id, dummy, 4, Duration::from_millis(1_300)).await;
-    assert_eq!(hasted, 4, "the hasted Enchanter's four swings at 1.3 s are all answered");
-    let unhasted = paced_swings(&mut w, &mut e, w_char_id, dummy, 4, Duration::from_millis(900)).await;
-    assert_eq!(unhasted, 2, "the unhasted Warrior at 0.9 s: every second swing is dropped");
+    let hasted = paced_swings(
+        &mut e,
+        &mut w,
+        e_char_id,
+        dummy,
+        4,
+        Duration::from_millis(1_300),
+    )
+    .await;
+    assert_eq!(
+        hasted, 4,
+        "the hasted Enchanter's four swings at 1.3 s are all answered"
+    );
+    let unhasted = paced_swings(
+        &mut w,
+        &mut e,
+        w_char_id,
+        dummy,
+        4,
+        Duration::from_millis(900),
+    )
+    .await;
+    assert_eq!(
+        unhasted, 2,
+        "the unhasted Warrior at 0.9 s: every second swing is dropped"
+    );
 }
 
 /// Dual wield is earned (user, 2026-10-19): Monks are born with it (bare
@@ -466,7 +575,9 @@ async fn dual_wield_is_earned_by_class_and_level() {
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "dwmonk", "Dualb", "Human", "Monk").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "dwwarrior", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "dwwarrior", true)
+        .await
+        .expect("set is_gm");
     give_char_item(&h.db_url, a_char_id, "equip", 0, SWORD, 1).await;
     give_char_item(&h.db_url, a_char_id, "equip", 1, SWORD, 1).await;
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
@@ -475,34 +586,58 @@ async fn dual_wield_is_earned_by_class_and_level() {
     pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
 
     a.send_dev_spawn("Dual Dummy", 1, 100_000.0, 0, 0.0, 0.0);
-    let spawn = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Dual Dummy")
-    })
+    let spawn = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Dual Dummy"),
+    )
     .await
     .expect("the dummy spawns");
     let (dummy, dummy_pos) = match spawn {
         ServerWorldMsg::EnemySpawn { id, pos, .. } => (id, pos),
         _ => unreachable!(),
     };
-    let origin = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    let origin = Vec3 {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
     let (mut sa, mut sb) = (1u32, 1u32);
     walk_until_within(&mut a, &mut sa, a_char_id, origin, dummy_pos, 1.0).await;
     walk_until_within(&mut b, &mut sb, b_char_id, origin, dummy_pos, 1.0).await;
     b.send_heartbeat();
 
-    assert!(swing_answered(&mut a, a_char_id, dummy, false).await, "the Warrior's main hand swings");
-    assert!(!swing_answered(&mut a, a_char_id, dummy, true).await, "a Warrior 1's off hand does not");
-    assert!(swing_answered(&mut b, b_char_id, dummy, true).await, "a bare-handed Monk 1's off hand punches");
+    assert!(
+        swing_answered(&mut a, a_char_id, dummy, false).await,
+        "the Warrior's main hand swings"
+    );
+    assert!(
+        !swing_answered(&mut a, a_char_id, dummy, true).await,
+        "a Warrior 1's off hand does not"
+    );
+    assert!(
+        swing_answered(&mut b, b_char_id, dummy, true).await,
+        "a bare-handed Monk 1's off hand punches"
+    );
 
     a.send_grant_quest_xp(20_000_000);
     let leveled = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::LevelUp { new_level, .. } if *new_level >= 15)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::LevelUp { new_level, .. } if *new_level >= 15),
+        )
         .await;
-    assert!(leveled.is_some(), "the GM XP grant takes the Warrior past 15");
+    assert!(
+        leveled.is_some(),
+        "the GM XP grant takes the Warrior past 15"
+    );
     a.pump_for(Duration::from_millis(1_100)).await;
-    assert!(swing_answered(&mut a, a_char_id, dummy, true).await, "past 15, the Warrior's off hand swings");
+    assert!(
+        swing_answered(&mut a, a_char_id, dummy, true).await,
+        "past 15, the Warrior's off hand swings"
+    );
 }
 
 /// EQ's equip rule (2026-10-27, after a Cleric wore two clubs on the R720):
@@ -539,16 +674,25 @@ async fn equipping_is_refused_by_class_and_dual_wield() {
             matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("cannot dual wield"))
         })
         .await;
-    assert!(line.is_some(), "a Cleric's off-hand weapon is refused with the dual wield line");
     assert!(
-        next_equip_delta(&mut a, 1, Duration::from_millis(500)).await.is_none(),
+        line.is_some(),
+        "a Cleric's off-hand weapon is refused with the dual wield line"
+    );
+    assert!(
+        next_equip_delta(&mut a, 1, Duration::from_millis(500))
+            .await
+            .is_none(),
         "the refused club never reaches the off hand"
     );
 
     // The same club into the main hand: worn (Clerics train 1h_blunt).
     a.send_equip_item("base", 0, 0);
     let worn = next_equip_delta(&mut a, 0, Duration::from_secs(3)).await;
-    assert_eq!(worn, Some(Some(CLUB.to_string())), "the Cleric's club goes into the main hand");
+    assert_eq!(
+        worn,
+        Some(Some(CLUB.to_string())),
+        "the Cleric's club goes into the main hand"
+    );
 
     // The sword: a skill the class never trains, refused at the equip.
     a.send_equip_item("base", 1, 0);
@@ -559,23 +703,34 @@ async fn equipping_is_refused_by_class_and_dual_wield() {
         .await;
     assert!(line.is_some(), "a Cleric's sword is refused as unwieldable");
     assert!(
-        next_equip_delta(&mut a, 0, Duration::from_millis(500)).await.is_none(),
+        next_equip_delta(&mut a, 0, Duration::from_millis(500))
+            .await
+            .is_none(),
         "the sword never replaces the club"
     );
 
     // The Monk: the club into the off hand goes on; the leather vest does not.
     b.send_equip_item("base", 0, 1);
     let worn = next_equip_delta(&mut b, 1, Duration::from_secs(3)).await;
-    assert_eq!(worn, Some(Some(CLUB.to_string())), "a Monk 1's club goes into the off hand");
+    assert_eq!(
+        worn,
+        Some(Some(CLUB.to_string())),
+        "a Monk 1's club goes into the off hand"
+    );
     b.send_equip_item("base", 1, 3);
     let line = b
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("cannot wear"))
         })
         .await;
-    assert!(line.is_some(), "a Monk's leather vest is refused as unwearable");
     assert!(
-        next_equip_delta(&mut b, 3, Duration::from_millis(500)).await.is_none(),
+        line.is_some(),
+        "a Monk's leather vest is refused as unwearable"
+    );
+    assert!(
+        next_equip_delta(&mut b, 3, Duration::from_millis(500))
+            .await
+            .is_none(),
         "the vest never reaches the chest slot"
     );
 }
@@ -600,7 +755,9 @@ async fn a_two_hander_needs_an_empty_off_hand() {
     let (b_session, b_char_id, _stale_b) =
         provision_client(&h.auth_url, "twohand_b", "Staffb", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "twohand_a", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "twohand_a", true)
+        .await
+        .expect("set is_gm");
     set_char_level(&h.db_url, a_char_id, 15).await;
     set_char_level(&h.db_url, b_char_id, 15).await;
     give_char_item(&h.db_url, a_char_id, "base", 0, STAFF, 1).await;
@@ -628,14 +785,23 @@ async fn a_two_hander_needs_an_empty_off_hand() {
             matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "Empty your off hand first.")
         })
         .await;
-    assert!(line.is_some(), "a two-hander is refused beside an off-hand weapon");
     assert!(
-        next_equip_delta(&mut a, 0, Duration::from_millis(500)).await.is_none(),
+        line.is_some(),
+        "a two-hander is refused beside an off-hand weapon"
+    );
+    assert!(
+        next_equip_delta(&mut a, 0, Duration::from_millis(500))
+            .await
+            .is_none(),
         "the staff never reaches the main hand"
     );
     // Off hand emptied, the staff goes on; then the club is refused beside it.
     a.send_unequip_item(1, "base", 1);
-    assert_eq!(next_equip_delta(&mut a, 1, Duration::from_secs(3)).await, Some(None), "the off hand empties");
+    assert_eq!(
+        next_equip_delta(&mut a, 1, Duration::from_secs(3)).await,
+        Some(None),
+        "the off hand empties"
+    );
     a.send_equip_item("base", 0, 0);
     assert_eq!(
         next_equip_delta(&mut a, 0, Duration::from_secs(3)).await,
@@ -650,27 +816,42 @@ async fn a_two_hander_needs_an_empty_off_hand() {
         .await;
     assert!(line.is_some(), "nothing joins a two-hander");
     assert!(
-        next_equip_delta(&mut a, 1, Duration::from_millis(500)).await.is_none(),
+        next_equip_delta(&mut a, 1, Duration::from_millis(500))
+            .await
+            .is_none(),
         "the club never reaches the off hand"
     );
 
     // The swing backstop for gear worn before the rule.
     a.send_dev_spawn("Staff Dummy", 1, 100_000.0, 0, 0.0, 0.0);
-    let spawn = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Staff Dummy")
-    })
+    let spawn = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Staff Dummy"),
+    )
     .await
     .expect("the dummy spawns");
     let (dummy, dummy_pos) = match spawn {
         ServerWorldMsg::EnemySpawn { id, pos, .. } => (id, pos),
         _ => unreachable!(),
     };
-    let origin = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    let origin = Vec3 {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
     let mut sb = 1u32;
     walk_until_within(&mut b, &mut sb, b_char_id, origin, dummy_pos, 1.0).await;
     a.send_heartbeat();
-    assert!(swing_answered(&mut b, b_char_id, dummy, false).await, "the staff swings");
-    assert!(!swing_answered(&mut b, b_char_id, dummy, true).await, "the off hand beside it is unanswered");
+    assert!(
+        swing_answered(&mut b, b_char_id, dummy, false).await,
+        "the staff swings"
+    );
+    assert!(
+        !swing_answered(&mut b, b_char_id, dummy, true).await,
+        "the off hand beside it is unanswered"
+    );
 }
 
 /// Shield Bash: the mob's frame says Stunned and it swings at nobody for the
@@ -695,16 +876,29 @@ async fn shield_bash_holds_the_mob_for_three_seconds() {
             landed_at = Some(i);
             break;
         }
-        if let Some(ServerWorldMsg::SkillFail { reason, .. }) = window.iter().find(|m| matches!(m, ServerWorldMsg::SkillFail { .. })) {
+        if let Some(ServerWorldMsg::SkillFail { reason, .. }) = window
+            .iter()
+            .find(|m| matches!(m, ServerWorldMsg::SkillFail { .. }))
+        {
             panic!("Shield Bash refused: {reason}");
         }
         a.pump_alive_for(Duration::from_millis(6_000)).await;
     }
     let landed_at = landed_at.expect("three Shield Bashes in a row cannot all miss at 5%");
-    assert!(snapshot_names(&window[landed_at..], dummy, "Stunned"), "the mob's frame says Stunned");
-    assert_eq!(mob_hits_on(&window[landed_at..], dummy, a_id), 0, "no swing while stunned");
+    assert!(
+        snapshot_names(&window[landed_at..], dummy, "Stunned"),
+        "the mob's frame says Stunned"
+    );
+    assert_eq!(
+        mob_hits_on(&window[landed_at..], dummy, a_id),
+        0,
+        "no swing while stunned"
+    );
     let after = a.collect_for(Duration::from_millis(4_000)).await;
-    assert!(mob_hits_on(&after, dummy, a_id) >= 1, "it swings again once the stun runs out");
+    assert!(
+        mob_hits_on(&after, dummy, a_id) >= 1,
+        "it swings again once the stun runs out"
+    );
 }
 
 /// Feign Death: the roll runs on the server and its outcome is told, and the
@@ -727,7 +921,9 @@ async fn feign_death_is_rolled_told_and_held_until_a_move() {
         a.send_use_skill("Feign Death", None);
         let msgs = a.collect_for(Duration::from_millis(1_500)).await;
         let line = msgs.iter().find_map(|m| match m {
-            ServerWorldMsg::ChatMessage { text, .. } if text.contains("feign death") => Some(text.clone()),
+            ServerWorldMsg::ChatMessage { text, .. } if text.contains("feign death") => {
+                Some(text.clone())
+            }
             _ => None,
         });
         let line = line.expect("the outcome is told");
@@ -737,8 +933,19 @@ async fn feign_death_is_rolled_told_and_held_until_a_move() {
             assert!(msgs.iter().any(|m| matches!(m, ServerWorldMsg::EntityTarget { id, target: None } if *id == dummy)), "the mob drops the monk");
             assert!(snapshot_names(&msgs, a_id as u64, "Feigned Death"));
             let quiet = a.collect_for(Duration::from_millis(3_000)).await;
-            assert_eq!(mob_hits_on(&quiet, dummy, a_id), 0, "lying still beside it, unnoticed");
-            a.send_move(10_000, Vec3 { x: 1.0, y: 0.0, z: 0.0 });
+            assert_eq!(
+                mob_hits_on(&quiet, dummy, a_id),
+                0,
+                "lying still beside it, unnoticed"
+            );
+            a.send_move(
+                10_000,
+                Vec3 {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+            );
             let noticed = a
                 .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(t) } if *id == dummy && *t == a_id as u64))
                 .await;
@@ -747,7 +954,10 @@ async fn feign_death_is_rolled_told_and_held_until_a_move() {
         } else {
             assert_eq!(line, "Your feign death fails!");
             let after = a.collect_for(Duration::from_millis(4_000)).await;
-            assert!(mob_hits_on(&after, dummy, a_id) >= 1, "a failed feign changes nothing");
+            assert!(
+                mob_hits_on(&after, dummy, a_id) >= 1,
+                "a failed feign changes nothing"
+            );
         }
         a.send_disconnect();
         a.pump_for(Duration::from_millis(300)).await;
@@ -755,7 +965,10 @@ async fn feign_death_is_rolled_told_and_held_until_a_move() {
             break;
         }
     }
-    assert!(succeeded, "six feigns in a row failed at 80%: the roll is wrong");
+    assert!(
+        succeeded,
+        "six feigns in a row failed at 80%: the roll is wrong"
+    );
 }
 
 /// Hide: an idle mob spawned with the hidden rogue inside its aggro radius
@@ -765,9 +978,12 @@ async fn feign_death_is_rolled_told_and_held_until_a_move() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hide_keeps_an_idle_mob_from_noticing_until_a_swing_or_a_step() {
     let h = start_both().await;
-    let (session, a_id, _stale) = provision_client(&h.auth_url, "sneak", "Sneaka", "Human", "Rogue").await;
+    let (session, a_id, _stale) =
+        provision_client(&h.auth_url, "sneak", "Sneaka", "Human", "Rogue").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "sneak", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "sneak", true)
+        .await
+        .expect("set is_gm");
     let token = request_world_token(&h.auth_url, &session, a_id).await;
     let mut a = WorldClient::start(token, &session, a_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -778,12 +994,19 @@ async fn hide_keeps_an_idle_mob_from_noticing_until_a_swing_or_a_step() {
         .await;
     assert!(told.is_some());
     // The cooldown (10 s) answers first for a second Hide straight after.
-    assert_eq!(skill_answer(&mut a, a_id, "Hide", 0).await, Err("You cannot use that yet.".into()));
+    assert_eq!(
+        skill_answer(&mut a, a_id, "Hide", 0).await,
+        Err("You cannot use that yet.".into())
+    );
     // Aggro 5 m, spawned 3 m ahead of a hidden rogue: idle, unnoticing.
     let (dummy, _) = spawn_dummy(&mut a, "Watch Dummy", 0, 5.0).await;
     let quiet = a.collect_for(Duration::from_millis(1_500)).await;
-    assert!(!quiet.iter().any(|m| matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(_) } if *id == dummy)),
-        "inside its radius, hidden: unnoticed");
+    assert!(
+        !quiet.iter().any(
+            |m| matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(_) } if *id == dummy)
+        ),
+        "inside its radius, hidden: unnoticed"
+    );
     a.send_attack(dummy, "", false, DamageType::Physical);
     let msgs = a.collect_for(Duration::from_millis(2_000)).await;
     assert!(msgs.iter().any(|m| matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(t) } if *id == dummy && *t == a_id as u64)),
@@ -801,16 +1024,33 @@ async fn hide_keeps_an_idle_mob_from_noticing_until_a_swing_or_a_step() {
         .await;
     assert!(told.is_some(), "hidden again after the cooldown");
     a.pump_alive_for(Duration::from_millis(10_300)).await;
-    assert_eq!(skill_answer(&mut a, a_id, "Hide", 0).await, Err("You are already hidden.".into()));
+    assert_eq!(
+        skill_answer(&mut a, a_id, "Hide", 0).await,
+        Err("You are already hidden.".into())
+    );
     let (watcher, _) = spawn_dummy(&mut a, "Second Watcher", 0, 5.0).await;
     let quiet = a.collect_for(Duration::from_millis(1_000)).await;
-    assert!(!quiet.iter().any(|m| matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(_) } if *id == watcher)),
-        "still unnoticed while standing still");
-    a.send_move(10_000, Vec3 { x: 1.0, y: 0.0, z: 0.0 });
+    assert!(
+        !quiet.iter().any(
+            |m| matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(_) } if *id == watcher)
+        ),
+        "still unnoticed while standing still"
+    );
+    a.send_move(
+        10_000,
+        Vec3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+    );
     let noticed = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(t) } if *id == watcher && *t == a_id as u64))
         .await;
-    assert!(noticed.is_some(), "a step ends the hide and the watcher notices");
+    assert!(
+        noticed.is_some(),
+        "a step ends the hide and the watcher notices"
+    );
 }
 
 /// Evade: for its 5 s every swing at the rogue fans as an Evade and lands
@@ -827,11 +1067,18 @@ async fn evade_deflects_every_swing_while_it_holds() {
     let window = a.collect_for(Duration::from_millis(4_500)).await;
     let evades = window.iter().filter(|m| matches!(m, ServerWorldMsg::Evade { attacker, target } if *attacker == dummy && *target == a_id as u64)).count();
     assert!(evades >= 1, "a 2.5 s swing inside 4.5 s was deflected");
-    assert_eq!(mob_hits_on(&window, dummy, a_id), 0, "nothing lands while Evade holds");
+    assert_eq!(
+        mob_hits_on(&window, dummy, a_id),
+        0,
+        "nothing lands while Evade holds"
+    );
     assert!(snapshot_names(&window, a_id as u64, "Evade"));
     a.pump_for(Duration::from_millis(1_000)).await;
     let after = a.collect_for(Duration::from_millis(4_000)).await;
-    assert!(mob_hits_on(&after, dummy, a_id) >= 1, "once it runs out the swings land again");
+    assert!(
+        mob_hits_on(&after, dummy, a_id) >= 1,
+        "once it runs out the swings land again"
+    );
 }
 
 /// Holy Shield: a pool of 60 takes the next swings (fanned as hits of 0) and
@@ -841,18 +1088,30 @@ async fn holy_shield_absorbs_the_next_swings() {
     let h = start_both().await;
     let (mut a, a_id, dummy) = gm_beside_dummy(&h, "warded", "Paladin", "Ward Dummy", 1, 5.0).await;
     let first = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(6), |m| matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_id as u64))
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(6),
+            |m| matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_id as u64),
+        )
         .await;
-    let Some(ServerWorldMsg::HealthUpdate { hp: hp_before, .. }) = first else { panic!("the first swing lands") };
+    let Some(ServerWorldMsg::HealthUpdate { hp: hp_before, .. }) = first else {
+        panic!("the first swing lands")
+    };
     a.send_use_skill("Holy Shield", None);
     let window = a.collect_for(Duration::from_millis(6_000)).await;
     assert!(snapshot_names(&window, a_id as u64, "Holy Shield"));
     let zero_hits = window.iter().filter(|m| matches!(m, ServerWorldMsg::Hit { attacker, target, amount, .. } if *attacker == dummy && *target == a_id as u64 && *amount == 0)).count();
-    assert!(zero_hits >= 2, "two swings in 6 s, both absorbed: {zero_hits}");
+    assert!(
+        zero_hits >= 2,
+        "two swings in 6 s, both absorbed: {zero_hits}"
+    );
     for m in &window {
         if let ServerWorldMsg::HealthUpdate { id, hp, .. } = m {
             if *id == a_id as u64 {
-                assert!(*hp >= hp_before, "HP never drops behind the shield: {hp} < {hp_before}");
+                assert!(
+                    *hp >= hp_before,
+                    "HP never drops behind the shield: {hp} < {hp_before}"
+                );
             }
         }
     }

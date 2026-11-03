@@ -54,7 +54,13 @@ async fn trade_commits_atomically_and_pays_both_sides() {
     a.send_trade_accept();
     pump_a!();
     b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::TradeAcceptState { you: false, them: true })
+        matches!(
+            m,
+            ServerWorldMsg::TradeAcceptState {
+                you: false,
+                them: true
+            }
+        )
     })
     .await
     .expect("B sees A standing accepted");
@@ -68,13 +74,21 @@ async fn trade_commits_atomically_and_pays_both_sides() {
     })
     .await
     .expect("B receives the bread stack");
-    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.copper >= 25)
-    })
+    b.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.copper >= 25),
+    )
     .await
     .expect("B receives the copper");
     b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::TradeClosed { committed: true, .. })
+        matches!(
+            m,
+            ServerWorldMsg::TradeClosed {
+                committed: true,
+                ..
+            }
+        )
     })
     .await
     .expect("B's close says committed");
@@ -87,7 +101,13 @@ async fn trade_commits_atomically_and_pays_both_sides() {
     .await
     .expect("A's offered slot empties");
     a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::TradeClosed { committed: true, .. })
+        matches!(
+            m,
+            ServerWorldMsg::TradeClosed {
+                committed: true,
+                ..
+            }
+        )
     })
     .await
     .expect("A's close says committed");
@@ -140,14 +160,26 @@ async fn trade_edits_clear_accepts_and_locks_hold() {
         tokio::time::sleep(TICK_DT).await;
     }
     a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::TradeAcceptState { you: false, them: false })
+        matches!(
+            m,
+            ServerWorldMsg::TradeAcceptState {
+                you: false,
+                them: false
+            }
+        )
     })
     .await
     .expect("the edit cleared BOTH accepts on A's display");
     b.send_trade_accept();
     let premature = b
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::TradeClosed { committed: true, .. })
+            matches!(
+                m,
+                ServerWorldMsg::TradeClosed {
+                    committed: true,
+                    ..
+                }
+            )
         })
         .await;
     assert!(
@@ -260,16 +292,26 @@ async fn trade_locks_the_bag_holding_an_offered_item() {
     while Instant::now() < deadline {
         let Some(m) = b
             .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
-                matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(_), .. }
-                    | ServerWorldMsg::TradeClosed { .. })
+                matches!(
+                    m,
+                    ServerWorldMsg::InventoryDelta {
+                        item_path: Some(_),
+                        ..
+                    } | ServerWorldMsg::TradeClosed { .. }
+                )
             })
             .await
         else {
             continue;
         };
         match m {
-            ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } => {
-                assert!(!p.contains("iron_short_sword"), "B must never receive the good sword");
+            ServerWorldMsg::InventoryDelta {
+                item_path: Some(p), ..
+            } => {
+                assert!(
+                    !p.contains("iron_short_sword"),
+                    "B must never receive the good sword"
+                );
                 if p.contains("rusty_short_sword") {
                     got_junk = true;
                 }
@@ -331,9 +373,11 @@ async fn trade_drops_an_offer_that_changed_so_the_trade_can_go_on() {
     b.send_trade_accept();
     pump!(b);
     a.send_trade_accept();
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("changed"))
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("changed")),
+    )
     .await
     .expect("the commit refuses the changed offer, with a line");
     a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
@@ -363,7 +407,13 @@ async fn trade_drops_an_offer_that_changed_so_the_trade_can_go_on() {
     .await
     .expect("B receives all 4");
     b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::TradeClosed { committed: true, .. })
+        matches!(
+            m,
+            ServerWorldMsg::TradeClosed {
+                committed: true,
+                ..
+            }
+        )
     })
     .await
     .expect("the trade commits");
@@ -423,7 +473,11 @@ async fn auto_eat_skips_food_offered_in_a_trade() {
             eaten = Some(slot);
         }
     }
-    assert_eq!(eaten, Some(5), "the auto-eat takes the loaf that is not offered");
+    assert_eq!(
+        eaten,
+        Some(5),
+        "the auto-eat takes the loaf that is not offered"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -478,13 +532,17 @@ async fn a_traded_bank_withdrawal_leaves_the_givers_saved_vault() {
     let (b_session, b_char, b_token) =
         provision_client(&h.auth_url, "vaulttradeb", "Receiver", "Elf", "Cleric").await;
     {
-        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
-        sqlx::query("INSERT INTO bank_items (char_id, slot, item_path, count) VALUES (?1, 0, ?2, 1)")
-            .bind(a_char)
-            .bind(BREAD)
-            .execute(&pool)
+        let pool = projectdawn_server::db::open(&h.db_url)
             .await
-            .expect("seed the vault");
+            .expect("open pool");
+        sqlx::query(
+            "INSERT INTO bank_items (char_id, slot, item_path, count) VALUES (?1, 0, ?2, 1)",
+        )
+        .bind(a_char)
+        .bind(BREAD)
+        .execute(&pool)
+        .await
+        .expect("seed the vault");
     }
     let mut a = WorldClient::start(a_token, &a_session, a_char).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char).await;
@@ -523,7 +581,13 @@ async fn a_traded_bank_withdrawal_leaves_the_givers_saved_vault() {
     .expect("B sees A accept");
     b.send_trade_accept();
     b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::TradeClosed { committed: true, .. })
+        matches!(
+            m,
+            ServerWorldMsg::TradeClosed {
+                committed: true,
+                ..
+            }
+        )
     })
     .await
     .expect("the trade commits");
@@ -543,7 +607,10 @@ async fn a_traded_bank_withdrawal_leaves_the_givers_saved_vault() {
     )
     .await;
     assert_eq!(b_has, 1, "the loaf is in the receiver's saved inventory");
-    assert_eq!(a_vault, 0, "the loaf is ALSO still in the giver's saved vault: a dupe");
+    assert_eq!(
+        a_vault, 0,
+        "the loaf is ALSO still in the giver's saved vault: a dupe"
+    );
 }
 
 /// A trade in the ledger: the giver's queued GM rows and the trade rows (one
@@ -585,18 +652,35 @@ async fn a_trade_writes_both_sides_of_the_ledger_and_balances() {
     })
     .await
     .expect("B sees the offer");
-    a.send_trade_offer_coins(protocol::world::Coins { platinum: 0, gold: 0, silver: 0, copper: 25 });
+    a.send_trade_offer_coins(protocol::world::Coins {
+        platinum: 0,
+        gold: 0,
+        silver: 0,
+        copper: 25,
+    });
     pump_a!();
     a.send_trade_accept();
     pump_a!();
     b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::TradeAcceptState { you: false, them: true })
+        matches!(
+            m,
+            ServerWorldMsg::TradeAcceptState {
+                you: false,
+                them: true
+            }
+        )
     })
     .await
     .expect("B sees A accepted");
     b.send_trade_accept();
     b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::TradeClosed { committed: true, .. })
+        matches!(
+            m,
+            ServerWorldMsg::TradeClosed {
+                committed: true,
+                ..
+            }
+        )
     })
     .await
     .expect("the trade commits");
@@ -628,20 +712,30 @@ async fn a_trade_writes_both_sides_of_the_ledger_and_balances() {
         "the receiver's rows"
     );
     {
-        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
-        let details: Vec<(Option<String>,)> = sqlx::query_as(
-            "SELECT detail FROM item_events WHERE action LIKE 'trade%' ORDER BY id",
-        )
-        .fetch_all(&pool)
-        .await
-        .expect("details");
+        let pool = projectdawn_server::db::open(&h.db_url)
+            .await
+            .expect("open pool");
+        let details: Vec<(Option<String>,)> =
+            sqlx::query_as("SELECT detail FROM item_events WHERE action LIKE 'trade%' ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .expect("details");
         assert!(
-            details.iter().take(2).all(|(d,)| d.as_deref() == Some(&format!("char:{b_char_id}")))
-                && details.iter().skip(2).all(|(d,)| d.as_deref() == Some(&format!("char:{a_char_id}"))),
+            details
+                .iter()
+                .take(2)
+                .all(|(d,)| d.as_deref() == Some(&format!("char:{b_char_id}")))
+                && details
+                    .iter()
+                    .skip(2)
+                    .all(|(d,)| d.as_deref() == Some(&format!("char:{a_char_id}"))),
             "each side's rows name the partner: {details:?}"
         );
     }
-    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "the books balance after the trade");
+    assert!(
+        ledger_mismatches(&h.db_url).await.is_empty(),
+        "the books balance after the trade"
+    );
     a.send_disconnect();
     b.send_disconnect();
     a.pump_for(Duration::from_millis(200)).await;
@@ -659,8 +753,18 @@ async fn a_forged_negative_coin_amount_moves_nothing() {
     let h = start_both().await;
     let (mut a, _a_char_id, mut b, b_char_id, _bread_loc, _bread_slot) =
         trade_pair(&h, "negcoina", "Negcoina", "negcoinb", "Negcoinb").await;
-    let forged = protocol::world::Coins { platinum: 0, gold: 0, silver: 0, copper: -500 };
-    let honest = protocol::world::Coins { platinum: 0, gold: 0, silver: 0, copper: 5 };
+    let forged = protocol::world::Coins {
+        platinum: 0,
+        gold: 0,
+        silver: 0,
+        copper: -500,
+    };
+    let honest = protocol::world::Coins {
+        platinum: 0,
+        gold: 0,
+        silver: 0,
+        copper: 5,
+    };
 
     a.send_trade_request(b_char_id as u64);
     a.pump_for(Duration::from_millis(200)).await;
@@ -679,25 +783,34 @@ async fn a_forged_negative_coin_amount_moves_nothing() {
         .await
         .into_iter()
         .filter_map(|m| match m {
-            ServerWorldMsg::TradeOfferUpdate { mine: false, coins, .. } => Some(coins),
+            ServerWorldMsg::TradeOfferUpdate {
+                mine: false, coins, ..
+            } => Some(coins),
             _ => None,
         })
         .collect();
-    assert!(!offers.iter().any(|c| c.has_negative()), "B saw a negative offer: {offers:?}");
+    assert!(
+        !offers.iter().any(|c| c.has_negative()),
+        "B saw a negative offer: {offers:?}"
+    );
     assert_eq!(offers.last(), Some(&honest), "the honest offer reaches B");
 
     a.send_bank_deposit_coins(forged);
     a.pump_for(Duration::from_millis(200)).await;
     let after_forged = a.collect_for(Duration::from_millis(600)).await;
     assert!(
-        !after_forged.iter().any(|m| matches!(m,
-            ServerWorldMsg::CoinsUpdate { .. } | ServerWorldMsg::BankSnapshot { .. })),
+        !after_forged.iter().any(|m| matches!(
+            m,
+            ServerWorldMsg::CoinsUpdate { .. } | ServerWorldMsg::BankSnapshot { .. }
+        )),
         "a negative deposit moved coin"
     );
     a.send_bank_deposit_coins(honest);
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::BankSnapshot { coins } if coins.copper == 5)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::BankSnapshot { coins } if coins.copper == 5),
+    )
     .await
     .expect("the honest deposit reaches the bank, so the banker was in reach");
 }

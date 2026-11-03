@@ -4,8 +4,22 @@
 use super::*;
 
 pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now: Instant) {
-    let WorldState { server, connections, group_manager, .. } = world;
-    let Intents { group_invite_intents, group_accept_intents, group_leave_intents, group_kick_intents, group_loot_mode_intents, group_pass_leadership_intents, autosplit_notice_intents, .. } = q;
+    let WorldState {
+        server,
+        connections,
+        group_manager,
+        ..
+    } = world;
+    let Intents {
+        group_invite_intents,
+        group_accept_intents,
+        group_leave_intents,
+        group_kick_intents,
+        group_loot_mode_intents,
+        group_pass_leadership_intents,
+        autosplit_notice_intents,
+        ..
+    } = q;
     // 4hb. Track 6 sub-task 5 — group-intent processing.
     //      Invite: resolve target_name → char_id, record pending
     //      invite, forward GroupInvited to invitee.
@@ -17,50 +31,44 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
     // Helper to fan the current roster of a group with names
     // looked up from the connections map. Empty members = group
     // dissolved (last-member signal).
-    let fan_roster =
-        |srv: &mut renet::RenetServer,
-         conns: &HashMap<ClientId, PerConnection>,
-         gm: &GroupManager,
-         gid: groups::GroupId,
-         also_notify_dissolved: Option<ClientId>| {
-            if let Some(g) = gm.groups.get(&gid) {
-                let members_with_names: Vec<(u64, String)> = g.members.iter()
-                    .filter_map(|m| conns.get(m).map(|c| (*m, c.name.clone())))
-                    .collect();
-                let recipients: Vec<ClientId> = g.members.clone();
-                handlers::fan_group_roster(
-                    srv,
-                    &recipients,
-                    gid,
-                    g.leader,
-                    members_with_names,
-                    g.loot_mode.to_u8(),
-                );
-                // Seed the group panel rows (playtest 2026-08-27: rows
-                // build zeroed client-side and resources otherwise fan
-                // only on CHANGE, so a full-HP idle member showed blank
-                // bars until something moved). One shot of the ordinary
-                // resource updates per member, sent to the group, fills
-                // every row the moment the roster lands. Existing
-                // message types; no protocol change.
-                for m in &g.members {
-                    if let Some(c) = conns.get(m) {
-                        handlers::fan_out_resources(srv, &recipients, c);
-                    }
+    let fan_roster = |srv: &mut renet::RenetServer,
+                      conns: &HashMap<ClientId, PerConnection>,
+                      gm: &GroupManager,
+                      gid: groups::GroupId,
+                      also_notify_dissolved: Option<ClientId>| {
+        if let Some(g) = gm.groups.get(&gid) {
+            let members_with_names: Vec<(u64, String)> = g
+                .members
+                .iter()
+                .filter_map(|m| conns.get(m).map(|c| (*m, c.name.clone())))
+                .collect();
+            let recipients: Vec<ClientId> = g.members.clone();
+            handlers::fan_group_roster(
+                srv,
+                &recipients,
+                gid,
+                g.leader,
+                members_with_names,
+                g.loot_mode.to_u8(),
+            );
+            // Seed the group panel rows (playtest 2026-08-27: rows
+            // build zeroed client-side and resources otherwise fan
+            // only on CHANGE, so a full-HP idle member showed blank
+            // bars until something moved). One shot of the ordinary
+            // resource updates per member, sent to the group, fills
+            // every row the moment the roster lands. Existing
+            // message types; no protocol change.
+            for m in &g.members {
+                if let Some(c) = conns.get(m) {
+                    handlers::fan_out_resources(srv, &recipients, c);
                 }
-            } else if let Some(last) = also_notify_dissolved {
-                // Group dissolved — send an empty roster to the
-                // last member as a "your group dissolved" signal.
-                handlers::fan_group_roster(
-                    srv,
-                    std::slice::from_ref(&last),
-                    gid,
-                    last,
-                    Vec::new(),
-                    0,
-                );
             }
-        };
+        } else if let Some(last) = also_notify_dissolved {
+            // Group dissolved — send an empty roster to the
+            // last member as a "your group dissolved" signal.
+            handlers::fan_group_roster(srv, std::slice::from_ref(&last), gid, last, Vec::new(), 0);
+        }
+    };
 
     for intent in group_invite_intents.drain(..) {
         // Resolve target by name (case-insensitive). The
@@ -88,16 +96,12 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
         if target_cid as u64 == intent.inviter {
             continue; // can't invite self
         }
-        let from_name = connections.get(&(intent.inviter as ClientId))
+        let from_name = connections
+            .get(&(intent.inviter as ClientId))
             .map(|c| c.name.clone())
             .unwrap_or_default();
         let _gid = group_manager.record_invite(intent.inviter as ClientId, target_cid);
-        handlers::send_group_invited(
-            &mut *server,
-            target_cid,
-            intent.inviter,
-            from_name,
-        );
+        handlers::send_group_invited(&mut *server, target_cid, intent.inviter, from_name);
         tracing::info!(
             inviter = intent.inviter,
             invitee = target_cid as u64,
@@ -181,12 +185,12 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
         }
         let gid = group.id;
         // Resolve target name within the group's roster.
-        let target_cid: Option<ClientId> = group.members.iter().copied()
-            .find(|m| {
-                connections.get(m)
-                    .map(|c| c.name.eq_ignore_ascii_case(&intent.target_name))
-                    .unwrap_or(false)
-            });
+        let target_cid: Option<ClientId> = group.members.iter().copied().find(|m| {
+            connections
+                .get(m)
+                .map(|c| c.name.eq_ignore_ascii_case(&intent.target_name))
+                .unwrap_or(false)
+        });
         let Some(target_cid) = target_cid else {
             // Had neither log nor reply: a misspelled /kick simply did
             // nothing, visibly or in server.log.
@@ -206,7 +210,9 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
             // Reachable from the UI by typing your own name, unlike the
             // non-leader case, so it earns a reply.
             handlers::send_refusal(
-                &mut *server, leader_cid, "Use /leave to leave your own group.",
+                &mut *server,
+                leader_cid,
+                "Use /leave to leave your own group.",
             );
             continue;
         }
@@ -306,8 +312,8 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
     //       so both old and new leader see the change. Fixes the
     //       launcher-mode gap where pass-leadership was local-only.
     for intent in group_pass_leadership_intents.drain(..) {
-        if let Some(gid) = group_manager
-            .pass_leadership(intent.leader as ClientId, intent.new_leader as ClientId)
+        if let Some(gid) =
+            group_manager.pass_leadership(intent.leader as ClientId, intent.new_leader as ClientId)
         {
             tracing::info!(
                 from = intent.leader,

@@ -103,7 +103,12 @@ pub fn natural_regen_allowed(hunger_secs: f32, thirst_secs: f32) -> (bool, bool,
 /// regens at the standing rate even while seated. Closes the free-in-combat-regen
 /// exploit (a seated auto-attacker keeping the sit rate mid-fight).
 pub(super) fn sitting_bonus_applies(conn: &PerConnection, now: Instant) -> bool {
-    sitting_bonus_from(conn.is_sitting, conn.last_damaged_at, conn.last_attack_at, now)
+    sitting_bonus_from(
+        conn.is_sitting,
+        conn.last_damaged_at,
+        conn.last_attack_at,
+        now,
+    )
 }
 
 /// The pure decision behind `sitting_bonus_applies`, split out so it can be unit

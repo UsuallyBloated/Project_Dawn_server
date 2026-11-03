@@ -48,7 +48,11 @@ pub struct Npc {
 
 impl Npc {
     pub fn position(&self) -> Vec3f {
-        Vec3f { x: self.pos[0], y: self.pos[1], z: self.pos[2] }
+        Vec3f {
+            x: self.pos[0],
+            y: self.pos[1],
+            z: self.pos[2],
+        }
     }
 
     pub fn has_kind(&self, kind: &str) -> bool {
@@ -151,9 +155,14 @@ mod tests {
     #[test]
     fn the_four_town_npcs_exist_with_their_roles() {
         assert!(lookup("brom").expect("brom").has_kind("vendor"));
-        assert!(lookup("brom").expect("brom").has_kind("quest"), "Brom also gives quests");
+        assert!(
+            lookup("brom").expect("brom").has_kind("quest"),
+            "Brom also gives quests"
+        );
         assert!(lookup("aldric").expect("aldric").has_kind("quest"));
-        assert!(lookup("sister_maelis").expect("maelis").has_kind("soul_binder"));
+        assert!(lookup("sister_maelis")
+            .expect("maelis")
+            .has_kind("soul_binder"));
         assert!(lookup("thalia").expect("thalia").has_kind("banker"));
     }
 
@@ -164,7 +173,14 @@ mod tests {
     #[test]
     fn starter_spawn_reaches_every_town_npc() {
         let spawn = Vec3f::ZERO;
-        for id in ["brom", "aldric", "sister_maelis", "thalia", "elara", "hadrik"] {
+        for id in [
+            "brom",
+            "aldric",
+            "sister_maelis",
+            "thalia",
+            "elara",
+            "hadrik",
+        ] {
             let n = lookup(id).unwrap();
             assert!(
                 n.position().distance_to(spawn) <= NPC_SERVICE_RANGE,
@@ -175,11 +191,22 @@ mod tests {
 
     #[test]
     fn range_gate_accepts_near_and_refuses_far() {
-        let at_banker = Vec3f { x: 11.0, y: 0.0, z: 5.0 };
+        let at_banker = Vec3f {
+            x: 11.0,
+            y: 0.0,
+            z: 5.0,
+        };
         assert!(any_within_range("banker", at_banker).is_some());
 
-        let dungeon = Vec3f { x: 200.0, y: -10.0, z: 200.0 };
-        assert!(any_within_range("banker", dungeon).is_none(), "the exploit case");
+        let dungeon = Vec3f {
+            x: 200.0,
+            y: -10.0,
+            z: 200.0,
+        };
+        assert!(
+            any_within_range("banker", dungeon).is_none(),
+            "the exploit case"
+        );
         assert!(any_within_range("vendor", dungeon).is_none());
         assert!(!id_within_range("aldric", dungeon));
     }
@@ -190,28 +217,52 @@ mod tests {
     fn every_vendor_stocks_only_real_priced_items() {
         for n in table().iter().filter(|n| n.has_kind("vendor")) {
             assert!(!n.stock.is_empty(), "vendor {} has no stock", n.id);
-            assert!(n.vendor_type.is_some(), "vendor {} names no vendor_type", n.id);
+            assert!(
+                n.vendor_type.is_some(),
+                "vendor {} names no vendor_type",
+                n.id
+            );
             for name in &n.stock {
-                let item = crate::world::items::lookup_by_name(name)
-                    .unwrap_or_else(|| panic!("{}: stocked item '{name}' is not in items.toml", n.id));
-                assert!(item.vendor_price > 0, "{}: '{name}' has no vendor_price", n.id);
+                let item = crate::world::items::lookup_by_name(name).unwrap_or_else(|| {
+                    panic!("{}: stocked item '{name}' is not in items.toml", n.id)
+                });
+                assert!(
+                    item.vendor_price > 0,
+                    "{}: '{name}' has no vendor_price",
+                    n.id
+                );
             }
         }
     }
 
     #[test]
     fn a_priced_item_nobody_stocks_is_sold_nowhere() {
-        let at_brom = Vec3f { x: 8.0, y: 0.0, z: 5.0 };
-        assert_eq!(vendor_stocking_within_range("Bread Loaf", at_brom, |_| true).map(|n| n.id.as_str()), Some("brom"));
+        let at_brom = Vec3f {
+            x: 8.0,
+            y: 0.0,
+            z: 5.0,
+        };
+        assert_eq!(
+            vendor_stocking_within_range("Bread Loaf", at_brom, |_| true).map(|n| n.id.as_str()),
+            Some("brom")
+        );
         // Hadrik (x = -5) is within service range of the spawn, Brom is not
         // the one who sells swords.
         assert!(vendor_stocking_within_range("Iron Short Sword", Vec3f::ZERO, |_| true).is_some());
         // The only vendor who stocks it refuses the buyer (faction): not for sale.
-        assert!(vendor_stocking_within_range("Iron Short Sword", Vec3f::ZERO, |n| n.id != "hadrik").is_none());
+        assert!(
+            vendor_stocking_within_range("Iron Short Sword", Vec3f::ZERO, |n| n.id != "hadrik")
+                .is_none()
+        );
         // A named drop with a sell-back price.
-        assert!(crate::world::items::lookup_by_name("Predator's Collar").is_some_and(|i| i.vendor_price > 0));
+        assert!(crate::world::items::lookup_by_name("Predator's Collar")
+            .is_some_and(|i| i.vendor_price > 0));
         assert!(vendor_stocking_within_range("Predator's Collar", at_brom, |_| true).is_none());
-        let dungeon = Vec3f { x: 200.0, y: 0.0, z: 200.0 };
+        let dungeon = Vec3f {
+            x: 200.0,
+            y: 0.0,
+            z: 200.0,
+        };
         assert!(vendor_stocking_within_range("Bread Loaf", dungeon, |_| true).is_none());
     }
 

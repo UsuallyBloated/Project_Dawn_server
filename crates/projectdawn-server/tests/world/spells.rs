@@ -29,7 +29,9 @@ async fn aoe_spell_damages_nearby_enemies() {
     // Inferno requires level 12; provisioned characters start at 1.
     set_char_level(&h.db_url, a_char_id, 12).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "ino", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "ino", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
@@ -146,9 +148,11 @@ async fn cast_spell_rejected_before_cast_time() {
     // application. (Target id was a stub anyway; we want to confirm
     // no side effects, not target resolution.)
     let stray = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
-            matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_millis(500),
+            |m| matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == a_char_id as u64),
+        )
         .await;
     assert!(stray.is_none(), "rejected cast must not fan a Hit");
 }
@@ -212,11 +216,16 @@ async fn cast_spell_accepted_after_cast_time() {
 
     // No CastFail should have fired.
     let fail = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(300), |m| {
-            matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_millis(300),
+            |m| matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64),
+        )
         .await;
-    assert!(fail.is_none(), "well-timed cast must not produce a CastFail");
+    assert!(
+        fail.is_none(),
+        "well-timed cast must not produce a CastFail"
+    );
 }
 
 /// Seen in play 2026-10-06: a Wild Boar (aggro 10, so a 20 m leash) nuked
@@ -234,7 +243,9 @@ async fn a_mob_nuked_from_beyond_its_old_leash_turns_on_the_caster() {
     let (a_session, a_char_id, _stale_token) =
         provision_client(&h.auth_url, "leashnuke", "Leashnuke", "Human", "Cleric").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "leashnuke", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "leashnuke", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
@@ -259,7 +270,14 @@ async fn a_mob_nuked_from_beyond_its_old_leash_turns_on_the_caster() {
     let moves = (14.5 / (world::RUN_SPEED * 0.05)).ceil() as u32;
     let mut seq: u32 = 1;
     for _ in 0..moves {
-        a.send_move(seq, Vec3 { x: 0.0, y: 0.0, z: 1.0 });
+        a.send_move(
+            seq,
+            Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0,
+            },
+        );
         seq += 1;
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
@@ -289,10 +307,18 @@ async fn a_mob_nuked_from_beyond_its_old_leash_turns_on_the_caster() {
     // from the setup would answer for the nuke (the first cut of this test
     // passed on the old code for exactly that reason).
     while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
-        if let Ok((ServerWorldMsg::EntityTarget { id, target: Some(_) }, _)) =
-            bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+        if let Ok((
+            ServerWorldMsg::EntityTarget {
+                id,
+                target: Some(_),
+            },
+            _,
+        )) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
         {
-            assert_ne!(id, mob, "test setup: the mob targeted someone before the nuke");
+            assert_ne!(
+                id, mob,
+                "test setup: the mob targeted someone before the nuke"
+            );
         }
     }
 
@@ -323,7 +349,9 @@ async fn a_dead_caster_casts_nothing() {
     let (a_session, a_char_id, _stale) =
         provision_client(&h.auth_url, "deadcaster", "Morbid", "Human", "Cleric").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "deadcaster", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "deadcaster", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
@@ -380,7 +408,10 @@ async fn a_finished_cast_cannot_be_held() {
                 if *caster == a_char_id as u64 && reason.contains("lapsed"))
         })
         .await;
-    assert!(lapsed.is_some(), "a bar held 4 s past a 1.2 s cast is refused");
+    assert!(
+        lapsed.is_some(),
+        "a bar held 4 s past a 1.2 s cast is refused"
+    );
 
     // Released on time, the same cast lands: a ManaUpdate carrying the spend.
     a.send_cast_start("Healing Light", 1.2);
@@ -392,7 +423,10 @@ async fn a_finished_cast_cannot_be_held() {
                 if *id == a_char_id as u64 && *mp < *max_mp)
         })
         .await;
-    assert!(charged.is_some(), "released in time, the cast lands and costs mana");
+    assert!(
+        charged.is_some(),
+        "released in time, the cast lands and costs mana"
+    );
 }
 
 /// Spell batch step 0: a refusal reaches only the caster and carries the
@@ -407,7 +441,9 @@ async fn a_refusal_reaches_only_the_caster_with_the_true_mana() {
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "bystander", "Bystan", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "private", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "private", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
@@ -441,20 +477,33 @@ async fn a_refusal_reaches_only_the_caster_with_the_true_mana() {
                 if *caster == a_char_id as u64 && reason.contains("cooldown"))
         })
         .await;
-    assert!(refused.is_some(), "the second, inside the cooldown, is refused to the caster");
+    assert!(
+        refused.is_some(),
+        "the second, inside the cooldown, is refused to the caster"
+    );
     let settled = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == a_char_id as u64),
+        )
         .await;
-    assert!(settled.is_some(), "and the refusal carries the caster's true mana");
+    assert!(
+        settled.is_some(),
+        "and the refusal carries the caster's true mana"
+    );
 
     let leaked = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(1), |m| {
-            matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(1),
+            |m| matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64),
+        )
         .await;
-    assert!(leaked.is_none(), "a bystander hears nothing of another player's refusal");
+    assert!(
+        leaked.is_none(),
+        "a bystander hears nothing of another player's refusal"
+    );
 }
 
 /// Spell batch step 1: friendly spells reach 30 m. A Cleric heals a player
@@ -470,7 +519,9 @@ async fn heals_reach_30_m_and_not_past_it() {
         provision_client(&h.auth_url, "patient30", "Patient", "Human", "Warrior").await;
     set_char_pos(&h.db_url, b_char_id, 28.0, 0.0).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "healer30", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "healer30", true)
+        .await
+        .expect("set is_gm");
     // The GM flag rides the connect token: mint it after the grant.
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
@@ -493,7 +544,14 @@ async fn heals_reach_30_m_and_not_past_it() {
     // 5 s, so the second cast waits it out.
     let mut seq: u32 = 1;
     for _ in 0..16 {
-        b.send_move(seq, Vec3 { x: 1.0, y: 0.0, z: 0.0 });
+        b.send_move(
+            seq,
+            Vec3 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        );
         seq += 1;
         tick_one(&mut b.client, &mut b.transport);
         tokio::time::sleep(TICK_DT).await;
@@ -513,7 +571,10 @@ async fn heals_reach_30_m_and_not_past_it() {
                 if *caster == a_char_id as u64 && reason.contains("too far"))
         })
         .await;
-    assert!(refused.is_some(), "a heal at about 34 m is refused as too far");
+    assert!(
+        refused.is_some(),
+        "a heal at about 34 m is refused as too far"
+    );
 }
 
 /// Spell batch step 1: one attack slow at a time, strongest wins. A Shaman
@@ -526,7 +587,9 @@ async fn a_weaker_slow_is_refused_while_a_stronger_one_holds() {
         provision_client(&h.auth_url, "slower", "Torpid", "Human", "Shaman").await;
     set_char_level(&h.db_url, a_char_id, 20).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "slower", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "slower", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
@@ -564,7 +627,10 @@ async fn a_weaker_slow_is_refused_while_a_stronger_one_holds() {
                 if *caster == a_char_id as u64 && reason.contains("stronger"))
         })
         .await;
-    assert!(refused.is_some(), "Slow is refused while Torpor holds the target");
+    assert!(
+        refused.is_some(),
+        "Slow is refused while Torpor holds the target"
+    );
 }
 
 /// Spell batch step 2, the exploit ledger's items 1, 3 and 6: the destination
@@ -580,7 +646,9 @@ async fn gate_returns_the_caster_to_their_bind_and_wipes_hate() {
         provision_client(&h.auth_url, "gater", "Gatrix", "Human", "Cleric").await;
     set_char_level(&h.db_url, a_char_id, 8).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "gater", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "gater", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -591,26 +659,36 @@ async fn gate_returns_the_caster_to_their_bind_and_wipes_hate() {
     // aggro reaches z = 0, and four gnolls on the caster interrupt a 5 s bar
     // every time (the channeling roll is real).
     walk_east(&mut a, &mut seq, 10.0).await;
-    let bind_pos = own_position(&mut a, a_char_id).await.expect("the caster's own Position");
+    let bind_pos = own_position(&mut a, a_char_id)
+        .await
+        .expect("the caster's own Position");
     a.send_cast_start("Bind Affinity", 3.0);
     a.pump_for(Duration::from_millis(3_200)).await;
     a.send_cast_spell("Bind Affinity", None);
     let bound = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("bound"))
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("bound")),
+        )
         .await;
-    assert!(bound.is_some(), "Bind Affinity binds the caster where they stand");
+    assert!(
+        bound.is_some(),
+        "Bind Affinity binds the caster where they stand"
+    );
 
     // Walk on, and provoke a mob so it holds the caster as its target. The
     // dummy cannot move or hit (speed 0, dmg 0), so the bar is never
     // interrupted; its hate is the only thing being tested.
     walk_east(&mut a, &mut seq, 10.0).await;
-    let far_pos = own_position(&mut a, a_char_id).await.expect("the caster's own Position");
+    let far_pos = own_position(&mut a, a_char_id)
+        .await
+        .expect("the caster's own Position");
     assert!(
         far_pos.x - bind_pos.x > 7.0,
         "the caster walked on from the bind ({} to {})",
-        bind_pos.x, far_pos.x
+        bind_pos.x,
+        far_pos.x
     );
     a.send_dev_spawn("Charm Dummy", 1, 500.0, 0, 0.0, 1.0);
     let spawn = a
@@ -661,7 +739,10 @@ async fn gate_returns_the_caster_to_their_bind_and_wipes_hate() {
     assert!(
         (pos.x - bind_pos.x).abs() < 1.0 && (pos.z - bind_pos.z).abs() < 1.0,
         "Gate lands at the bind ({}, {}), got ({}, {})",
-        bind_pos.x, bind_pos.z, pos.x, pos.z
+        bind_pos.x,
+        bind_pos.z,
+        pos.x,
+        pos.z
     );
     assert!(dropped, "the mob drops the caster as its target: no train");
 
@@ -677,7 +758,10 @@ async fn gate_returns_the_caster_to_their_bind_and_wipes_hate() {
                 if *caster == a_char_id as u64 && reason.contains("cooldown"))
         })
         .await;
-    assert!(refused.is_some(), "a second Gate inside the cooldown is refused");
+    assert!(
+        refused.is_some(),
+        "a second Gate inside the cooldown is refused"
+    );
 }
 
 /// Ledger item 2: the class gate. A Warrior naming Gate is refused.
@@ -745,7 +829,11 @@ async fn evacuate_moves_the_group_in_reach_and_nobody_else() {
     }
 
     a.send_cast_start("Evacuate", 5.0);
-    pump_all_for(&mut [&mut a, &mut b, &mut c, &mut d], Duration::from_millis(5_200)).await;
+    pump_all_for(
+        &mut [&mut a, &mut b, &mut c, &mut d],
+        Duration::from_millis(5_200),
+    )
+    .await;
     a.send_cast_spell("Evacuate", None);
     let a_tp = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
@@ -755,7 +843,12 @@ async fn evacuate_moves_the_group_in_reach_and_nobody_else() {
     let Some(ServerWorldMsg::Teleport { pos }) = a_tp else {
         panic!("Evacuate moves the caster");
     };
-    assert!(pos.x.abs() < 1.0 && pos.z.abs() < 1.0, "to the town square, got ({}, {})", pos.x, pos.z);
+    assert!(
+        pos.x.abs() < 1.0 && pos.z.abs() < 1.0,
+        "to the town square, got ({}, {})",
+        pos.x,
+        pos.z
+    );
     let b_tp = b
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(m, ServerWorldMsg::Teleport { .. })
@@ -773,7 +866,10 @@ async fn evacuate_moves_the_group_in_reach_and_nobody_else() {
             matches!(m, ServerWorldMsg::Teleport { .. })
         })
         .await;
-    assert!(d_tp.is_none(), "a grouped member 40 m out, past friendly reach, stays");
+    assert!(
+        d_tp.is_none(),
+        "a grouped member 40 m out, past friendly reach, stays"
+    );
 }
 
 /// Track 14 follow-up â€” lifesteal on an ENEMY-target spell heals
@@ -791,7 +887,9 @@ async fn lifesteal_spell_heals_caster() {
     let h = start_both().await;
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "lsk", "Lifedrinker", "Human", "Shadow Knight").await;
-    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&h.db_url)
+        .await
+        .expect("open pool");
     sqlx::query("UPDATE characters SET level = 10, hp = 40.0, mp = 99999.0 WHERE id = ?1")
         .bind(a_char_id)
         .execute(&pool)
@@ -815,14 +913,28 @@ async fn lifesteal_spell_heals_caster() {
     // thread used to come up short): to 2 m from the spawn point, well
     // inside its aggro whatever the spawn jitter.
     let mut seq: u32 = 1;
-    walk_until_within(&mut a, &mut seq, a_char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, BONEPILE_SPAWN, 2.0).await;
+    walk_until_within(
+        &mut a,
+        &mut seq,
+        a_char_id,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        BONEPILE_SPAWN,
+        2.0,
+    )
+    .await;
 
     // Wait for an enemy hit to confirm an enemy is in range. The
     // attacker id is the spell target.
     let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
-            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(35),
+            |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64),
+        )
         .await
         .expect("enemy hits player");
     let enemy_id: u64 = match hit_evt {
@@ -836,9 +948,11 @@ async fn lifesteal_spell_heals_caster() {
     // is the baseline we need to compare against post-cast.
     let mut baseline_hp: f32 = 0.0;
     while let Some(msg) = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(200), |m| {
-            matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_millis(200),
+            |m| matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_char_id as u64),
+        )
         .await
     {
         if let ServerWorldMsg::HealthUpdate { hp, .. } = msg {
@@ -985,7 +1099,14 @@ async fn cast_spell_rejected_when_caster_moved_during_cast() {
     // Walk forward for the full cast duration. RUN_SPEED x 1.1 s
     // = 5.5 m on the server, well past the 1 m gate.
     for seq in 1..=22u32 {
-        a.send_move(seq, Vec3 { x: 0.0, y: 0.0, z: 1.0 });
+        a.send_move(
+            seq,
+            Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0,
+            },
+        );
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -1015,7 +1136,10 @@ async fn cast_spell_rejected_when_caster_moved_during_cast() {
                     && buffs.iter().any(|(n, _)| n == "Healing Wave"))
         })
         .await;
-    assert!(snap.is_none(), "movement-interrupted cast must not apply the buff");
+    assert!(
+        snap.is_none(),
+        "movement-interrupted cast must not apply the buff"
+    );
 }
 
 /// Track 19A â€” a hit on a casting player rolls the channeling-based
@@ -1088,7 +1212,8 @@ async fn cast_interrupted_by_incoming_pvp_hit() {
             break;
         }
     }
-    let fail = fail.expect("Warrior with no channeling skill is always interrupted on incoming hit");
+    let fail =
+        fail.expect("Warrior with no channeling skill is always interrupted on incoming hit");
     if let ServerWorldMsg::CastFail { reason, .. } = fail {
         assert_eq!(reason, "interrupted (hit during cast)");
     }
@@ -1169,7 +1294,9 @@ async fn ally_heal_refuses_out_of_range_and_costs_nothing() {
     let (b_session, b_char_id, _stale_token) =
         provision_client(&h.auth_url, "farhurt", "Farhurt", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "farhurt", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "farhurt", true)
+        .await
+        .expect("set is_gm");
     // (248, 60): two cells from spawn and clear of every camp. Not (200, 0),
     // which sits inside the Ancient Wraith's aggro circle.
     set_char_pos(&h.db_url, b_char_id, 248.0, 60.0).await;
@@ -1196,9 +1323,12 @@ async fn ally_heal_refuses_out_of_range_and_costs_nothing() {
     pump_both_for(&mut a, &mut b, Duration::from_millis(1150)).await;
     a.send_cast_spell("Healing Wave", Some(b_char_id as u64));
 
-    wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::CastFail { reason, .. } if reason.contains("too far away"))
-    })
+    wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::CastFail { reason, .. } if reason.contains("too far away")),
+    )
     .await
     .expect("an out-of-range heal is refused with the line");
     // "Costs no mana" means the mana never DIPS: not deducted and handed back,
@@ -1209,14 +1339,20 @@ async fn ally_heal_refuses_out_of_range_and_costs_nothing() {
             if *id == a_char_id as u64 && *mp < *max_mp - 1.0)
     })
     .await;
-    assert!(dipped.is_none(), "a refused heal never takes the mana (saw {dipped:?})");
+    assert!(
+        dipped.is_none(),
+        "a refused heal never takes the mana (saw {dipped:?})"
+    );
     // B was not healed (Healing Wave lands 15 at once; regen is 1 or 2 a tick).
     let healed = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_millis(700), |m| {
         matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. }
             if *id == b_char_id as u64 && *hp >= hurt_hp + 10.0)
     })
     .await;
-    assert!(healed.is_none(), "a target two cells away must not be healed");
+    assert!(
+        healed.is_none(),
+        "a target two cells away must not be healed"
+    );
 
     // And no cooldown was burned: A heals ITSELF straight away, inside what
     // would have been Healing Wave's 6 s cooldown.
@@ -1255,17 +1391,26 @@ async fn pvp_nuke_refuses_out_of_range() {
     pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
 
     a.send_cast_spell("Smite", Some(b_char_id as u64));
-    let line = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::CastFail { reason, .. } if reason.contains("too far away"))
-    })
+    let line = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::CastFail { reason, .. } if reason.contains("too far away")),
+    )
     .await
     .expect("an out-of-range PvP nuke is refused with the line");
     if let ServerWorldMsg::CastFail { reason, .. } = line {
-        assert!(!reason.contains("Farmark"), "a target out of reach is not named (got {reason:?})");
+        assert!(
+            !reason.contains("Farmark"),
+            "a target out of reach is not named (got {reason:?})"
+        );
     }
-    let hit = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_millis(700), |m| {
-        matches!(m, ServerWorldMsg::Hit { target, .. } if *target == b_char_id as u64)
-    })
+    let hit = wait_on_a_pumping_b(
+        &mut b,
+        &mut a,
+        Duration::from_millis(700),
+        |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == b_char_id as u64),
+    )
     .await;
     assert!(hit.is_none(), "a player two cells away must not be hit");
 }
@@ -1341,7 +1486,9 @@ async fn an_interrupted_cast_costs_mana_in_proportion() {
         provision_client(&h.auth_url, "channel", "Channa", "Human", "Cleric").await;
     set_char_level(&h.db_url, a_char_id, 10).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "channel", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "channel", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -1361,7 +1508,9 @@ async fn an_interrupted_cast_costs_mana_in_proportion() {
         while Instant::now() < end {
             tick_one(&mut a.client, &mut a.transport);
             while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
-                let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) else {
+                let Ok((msg, _)) =
+                    bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+                else {
                     continue;
                 };
                 match msg {
@@ -1370,7 +1519,9 @@ async fn an_interrupted_cast_costs_mana_in_proportion() {
                     {
                         interrupted = true;
                     }
-                    ServerWorldMsg::ChatMessage { text, .. } if text.contains("concentration breaks") => {
+                    ServerWorldMsg::ChatMessage { text, .. }
+                        if text.contains("concentration breaks") =>
+                    {
                         let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
                         charged = digits.parse().ok();
                     }
@@ -1393,7 +1544,10 @@ async fn an_interrupted_cast_costs_mana_in_proportion() {
     }
     assert!(interrupted, "a hit during the bar interrupts the cast");
     let n = charged.expect("the caster is told what the interrupt cost");
-    assert!((1..=10).contains(&n), "the charge is a fraction of Bind Affinity's 10 mana, got {n}");
+    assert!(
+        (1..=10).contains(&n),
+        "the charge is a fraction of Bind Affinity's 10 mana, got {n}"
+    );
     let (mp, max_mp) = settled.expect("the true mana follows the CastFail");
     assert!(
         ((max_mp - mp) - n as f32).abs() < 1.5,
@@ -1415,7 +1569,9 @@ async fn a_cast_inside_the_global_cooldown_is_refused_at_its_start() {
         provision_client(&h.auth_url, "gcd", "Hasty", "Human", "Cleric").await;
     set_char_level(&h.db_url, a_char_id, 8).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "gcd", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "gcd", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -1434,9 +1590,11 @@ async fn a_cast_inside_the_global_cooldown_is_refused_at_its_start() {
     };
     a.send_cast_spell("Smite", Some(dummy));
     let hit = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == dummy)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == dummy),
+        )
         .await;
     assert!(hit.is_some(), "the first Smite lands");
 
@@ -1449,7 +1607,10 @@ async fn a_cast_inside_the_global_cooldown_is_refused_at_its_start() {
                 if *caster == a_char_id as u64 && reason.contains("cannot cast again yet"))
         })
         .await;
-    assert!(refused.is_some(), "a cast started inside the global cooldown is refused at its start");
+    assert!(
+        refused.is_some(),
+        "a cast started inside the global cooldown is refused at its start"
+    );
     // The client that sends the CastSpell anyway finds no bar on file.
     a.pump_for(Duration::from_millis(3_200)).await;
     a.send_cast_spell("Bind Affinity", None);
@@ -1459,16 +1620,21 @@ async fn a_cast_inside_the_global_cooldown_is_refused_at_its_start() {
                 if *caster == a_char_id as u64 && reason.contains("not ready"))
         })
         .await;
-    assert!(no_bar.is_some(), "with nothing cached the release fails the cast-time gate");
+    assert!(
+        no_bar.is_some(),
+        "with nothing cached the release fails the cast-time gate"
+    );
 
     // Past the cooldown (the Smite was over 3.5 s ago) the same cast lands.
     a.send_cast_start("Bind Affinity", 3.0);
     a.pump_for(Duration::from_millis(3_200)).await;
     a.send_cast_spell("Bind Affinity", None);
     let bound = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("bound"))
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("bound")),
+        )
         .await;
     assert!(bound.is_some(), "after the cooldown the cast goes through");
 
@@ -1483,7 +1649,10 @@ async fn a_cast_inside_the_global_cooldown_is_refused_at_its_start() {
                 if *caster == a_char_id as u64 && reason.contains("cannot cast again yet"))
         })
         .await;
-    assert!(instant_refused.is_some(), "an instant cast inside the global cooldown is refused");
+    assert!(
+        instant_refused.is_some(),
+        "an instant cast inside the global cooldown is refused"
+    );
 }
 
 /// Spell batch step 5: a DoT ticks on the server every three seconds, the
@@ -1500,7 +1669,9 @@ async fn a_dot_kills_with_the_same_rewards_as_a_hit() {
         provision_client(&h.auth_url, "dotter", "Vinessa", "Human", "Druid").await;
     set_char_level(&h.db_url, a_char_id, 6).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "dotter", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "dotter", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -1525,13 +1696,18 @@ async fn a_dot_kills_with_the_same_rewards_as_a_hit() {
     while Instant::now() < end && !(died && xp > 0) {
         tick_one(&mut a.client, &mut a.transport);
         while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
-            let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) else {
+            let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            else {
                 continue;
             };
             match msg {
-                ServerWorldMsg::ProcTriggered { target, proc_name, amount, .. }
-                    if target == dummy && proc_name == "Entangle" =>
-                {
+                ServerWorldMsg::ProcTriggered {
+                    target,
+                    proc_name,
+                    amount,
+                    ..
+                } if target == dummy && proc_name == "Entangle" => {
                     assert_eq!(amount, 3, "a tick is dps x 3");
                     ticks_seen += 1;
                 }
@@ -1542,7 +1718,10 @@ async fn a_dot_kills_with_the_same_rewards_as_a_hit() {
         }
         tokio::time::sleep(TICK_DT).await;
     }
-    assert!(ticks_seen >= 1, "the caster saw the ticks as named lines (saw {ticks_seen})");
+    assert!(
+        ticks_seen >= 1,
+        "the caster saw the ticks as named lines (saw {ticks_seen})"
+    );
     assert!(died, "a tick kills the dummy");
     assert!(xp > 0, "a DoT kill pays XP like a direct hit");
 }
@@ -1558,7 +1737,9 @@ async fn a_dot_ends_when_its_caster_gates() {
     set_char_level(&h.db_url, a_char_id, 8).await;
     set_char_pos(&h.db_url, a_char_id, 15.0, 0.0).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "dotgate", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "dotgate", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -1587,7 +1768,9 @@ async fn a_dot_ends_when_its_caster_gates() {
     a.pump_for(Duration::from_millis(5_200)).await;
     a.send_cast_spell("Gate", None);
     let tp = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| matches!(m, ServerWorldMsg::Teleport { .. }))
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::Teleport { .. })
+        })
         .await;
     assert!(tp.is_some(), "Gate teleports the caster");
     // Entangle runs 18 s; eight more seconds would hold two more ticks.
@@ -1611,7 +1794,9 @@ async fn a_dot_ends_when_the_mob_leashes() {
         provision_client(&h.auth_url, "dotleash", "Fern", "Human", "Druid").await;
     set_char_level(&h.db_url, a_char_id, 6).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "dotleash", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "dotleash", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -1635,15 +1820,29 @@ async fn a_dot_ends_when_the_mob_leashes() {
     // camps; east past x = 28 is the gnoll camp): about 10 s. The first tick,
     // at three seconds, lands on the way out and is queued; drain it before
     // watching, so only ticks after the leash count.
-    walk_dir(&mut a, &mut seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 }, 50.0).await;
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_millis(200), |_| false).await;
+    walk_dir(
+        &mut a,
+        &mut seq,
+        Vec3 {
+            x: -1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        50.0,
+    )
+    .await;
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_millis(200), |_| false)
+        .await;
     let late = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(8), |m| {
             matches!(m, ServerWorldMsg::ProcTriggered { target, proc_name, .. }
                 if *target == dummy && proc_name == "Entangle")
         })
         .await;
-    assert!(late.is_none(), "a mob walking home carries no DoT: no tick after the leash");
+    assert!(
+        late.is_none(),
+        "a mob walking home carries no DoT: no tick after the leash"
+    );
 }
 
 /// Design review item (f): a mob finished off by a damage shield paid
@@ -1658,7 +1857,9 @@ async fn a_damage_shield_kill_pays_like_any_other() {
         provision_client(&h.auth_url, "thorny", "Bramble", "Human", "Druid").await;
     set_char_level(&h.db_url, a_char_id, 10).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "thorny", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "thorny", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -1693,7 +1894,9 @@ async fn a_damage_shield_kill_pays_like_any_other() {
         while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
             match bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) {
                 Ok((ServerWorldMsg::EntityDied { id }, _)) if id == dummy => died = true,
-                Ok((ServerWorldMsg::XpGained { amount, .. }, _)) if amount > 0 => xp += amount as i64,
+                Ok((ServerWorldMsg::XpGained { amount, .. }, _)) if amount > 0 => {
+                    xp += amount as i64
+                }
                 _ => {}
             }
         }
@@ -1714,7 +1917,9 @@ async fn a_ported_spell_lands_on_its_target() {
         provision_client(&h.auth_url, "bloodfire", "Bloodfire", "Human", "Sorcerer").await;
     set_char_level(&h.db_url, a_char_id, 4).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "bloodfire", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "bloodfire", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
@@ -1737,7 +1942,10 @@ async fn a_ported_spell_lands_on_its_target() {
                 if *attacker == a_char_id as u64 && *target == dummy)
         })
         .await;
-    assert!(hit.is_some(), "Bloodfire must land on the dummy now that the server knows it");
+    assert!(
+        hit.is_some(),
+        "Bloodfire must land on the dummy now that the server knows it"
+    );
 }
 
 /// One cast bar authorises ONE cast. Every CastSpell in a batch used to read
@@ -1751,7 +1959,9 @@ async fn one_cast_per_caster_per_tick() {
     let (a_session, a_char_id, _stale_token) =
         provision_client(&h.auth_url, "twocast", "Twocast", "Human", "Cleric").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "twocast", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "twocast", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
@@ -1776,9 +1986,12 @@ async fn one_cast_per_caster_per_tick() {
         tick_one(&mut a.client, &mut a.transport);
         while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
             match bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) {
-                Ok((ServerWorldMsg::Hit { attacker, target, .. }, _))
-                    if attacker == a_char_id as u64 && target == dummy =>
-                {
+                Ok((
+                    ServerWorldMsg::Hit {
+                        attacker, target, ..
+                    },
+                    _,
+                )) if attacker == a_char_id as u64 && target == dummy => {
                     hits += 1;
                 }
                 Ok((ServerWorldMsg::CastFail { reason, .. }, _))
@@ -1792,7 +2005,10 @@ async fn one_cast_per_caster_per_tick() {
         tokio::time::sleep(TICK_DT).await;
     }
     assert_eq!(hits, 1, "exactly one of the two casts resolves");
-    assert!(told, "the extra cast in the same tick is answered, not silently dropped");
+    assert!(
+        told,
+        "the extra cast in the same tick is answered, not silently dropped"
+    );
 }
 
 /// Summon Food and Summon Drink (food slice 2, user call 2026-10-15). A level
@@ -1828,8 +2044,17 @@ async fn summon_food_conjures_bread_that_scales_with_level() {
         })
         .await
         .expect("the level 1 Magician's bread lands in its bags");
-    let ServerWorldMsg::InventoryDelta { location, count, .. } = bread else { unreachable!() };
-    assert_eq!((location.as_str(), count), ("base", 1), "one loaf at level 1");
+    let ServerWorldMsg::InventoryDelta {
+        location, count, ..
+    } = bread
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        (location.as_str(), count),
+        ("base", 1),
+        "one loaf at level 1"
+    );
     a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
         matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "You conjure Conjured Bread x1.")
     })
@@ -1842,8 +2067,13 @@ async fn summon_food_conjures_bread_that_scales_with_level() {
         })
         .await
         .expect("the level 35 Magician's water lands in its bags");
-    let ServerWorldMsg::InventoryDelta { count, .. } = water else { unreachable!() };
-    assert_eq!(count, 10, "ten flasks at level 35 (one, plus one per level past 1, capped at ten)");
+    let ServerWorldMsg::InventoryDelta { count, .. } = water else {
+        unreachable!()
+    };
+    assert_eq!(
+        count, 10,
+        "ten flasks at level 35 (one, plus one per level past 1, capped at ten)"
+    );
     a.send_disconnect();
     b.send_disconnect();
     a.pump_for(Duration::from_millis(200)).await;
@@ -1865,7 +2095,9 @@ async fn a_heal_is_its_listed_number() {
     let (b_session, b_char_id, _stale) =
         provision_client(&h.auth_url, "wishurt", "Hurta", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "wishurt", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "wishurt", true)
+        .await
+        .expect("set is_gm");
     let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
@@ -1877,7 +2109,9 @@ async fn a_heal_is_its_listed_number() {
     })
     .await
     .expect("B is hurt");
-    let ServerWorldMsg::HealthUpdate { hp: hurt_hp, .. } = hurt else { unreachable!() };
+    let ServerWorldMsg::HealthUpdate { hp: hurt_hp, .. } = hurt else {
+        unreachable!()
+    };
 
     a.send_cast_start("Healing Light", 1.2);
     pump_both_for(&mut a, &mut b, Duration::from_millis(1_400)).await;
@@ -1887,7 +2121,9 @@ async fn a_heal_is_its_listed_number() {
     })
     .await
     .expect("the heal lands");
-    let ServerWorldMsg::HealthUpdate { hp: healed_hp, .. } = healed else { unreachable!() };
+    let ServerWorldMsg::HealthUpdate { hp: healed_hp, .. } = healed else {
+        unreachable!()
+    };
     // B's own regen may add a point or two in the 1.4 s before the heal; the
     // old server's 10 + WIS x 0.3 (WIS 24: 17) sits above the window.
     let gained = healed_hp - hurt_hp;
@@ -1909,7 +2145,9 @@ async fn a_nuke_reaches_thirty_metres() {
     let (a_session, a_char_id, _stale) =
         provision_client(&h.auth_url, "reacher", "Reacha", "Human", "Cleric").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "reacher", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "reacher", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -1925,13 +2163,24 @@ async fn a_nuke_reaches_thirty_metres() {
         ServerWorldMsg::EnemySpawn { id, pos, .. } => (id, pos),
         _ => unreachable!(),
     };
-    let origin = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    let origin = Vec3 {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
     let mut seq = 1u32;
-    let at = |d: f32| Vec3 { x: dummy_pos.x, y: 0.0, z: dummy_pos.z + d };
+    let at = |d: f32| Vec3 {
+        x: dummy_pos.x,
+        y: 0.0,
+        z: dummy_pos.z + d,
+    };
 
     let stood = walk_until_within(&mut a, &mut seq, a_char_id, origin, at(28.0), 0.3).await;
     let dist = ((stood.x - dummy_pos.x).powi(2) + (stood.z - dummy_pos.z).powi(2)).sqrt();
-    assert!((27.0..29.5).contains(&dist), "test setup: the caster stands at about 28 m, is at {dist:.1}");
+    assert!(
+        (27.0..29.5).contains(&dist),
+        "test setup: the caster stands at about 28 m, is at {dist:.1}"
+    );
     a.send_cast_spell("Smite", Some(dummy));
     let landed = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
@@ -1939,7 +2188,10 @@ async fn a_nuke_reaches_thirty_metres() {
                 if *attacker == a_char_id as u64 && *target == dummy)
         })
         .await;
-    assert!(landed.is_some(), "a Smite at about 28 m lands (the old 25 m reach refused it)");
+    assert!(
+        landed.is_some(),
+        "a Smite at about 28 m lands (the old 25 m reach refused it)"
+    );
 
     // Just past 30 m: refused, the reach being exact (user, 2026-10-27: a
     // 30 m spell is out of range at 30.1). Smite's own 3 s cooldown runs out
@@ -1947,7 +2199,10 @@ async fn a_nuke_reaches_thirty_metres() {
     a.pump_for(Duration::from_millis(3_100)).await;
     let stood = walk_until_within(&mut a, &mut seq, a_char_id, stood, at(30.6), 0.2).await;
     let dist = ((stood.x - dummy_pos.x).powi(2) + (stood.z - dummy_pos.z).powi(2)).sqrt();
-    assert!((30.05..31.0).contains(&dist), "test setup: the caster stands just past 30 m, is at {dist:.2}");
+    assert!(
+        (30.05..31.0).contains(&dist),
+        "test setup: the caster stands just past 30 m, is at {dist:.2}"
+    );
     // A level 1 pool (about 16) does not hold two Smites (12 each), and the
     // mana gate runs before the reach gate: top it off first.
     a.send_heal_self();
@@ -1959,7 +2214,10 @@ async fn a_nuke_reaches_thirty_metres() {
                 if *caster == a_char_id as u64 && reason.contains("too far away"))
         })
         .await;
-    assert!(refused.is_some(), "at {dist:.2} m, just past 30, the Smite is refused");
+    assert!(
+        refused.is_some(),
+        "at {dist:.2} m, just past 30, the Smite is refused"
+    );
 }
 
 /// Client-authority audit fix 5: the server refuses a cast of a spell in no
@@ -1974,8 +2232,13 @@ async fn a_spell_not_memorized_is_refused() {
         provision_client(&h.auth_url, "unmem", "Unmema", "Human", "Cleric").await;
     forget_all_spells(&h.db_url, char_id).await;
     let mut a = WorldClient::start(token, &session, char_id).await;
-    let (gems, seeded) = next_spell_gems(&mut a).await.expect("the bar arrives on entry");
-    assert!(gems.iter().all(|g| g.is_empty()) && !seeded, "an empty bar the server never held");
+    let (gems, seeded) = next_spell_gems(&mut a)
+        .await
+        .expect("the bar arrives on entry");
+    assert!(
+        gems.iter().all(|g| g.is_empty()) && !seeded,
+        "an empty bar the server never held"
+    );
 
     a.send_cast_spell("Smite", None);
     let refused = a
@@ -1986,9 +2249,11 @@ async fn a_spell_not_memorized_is_refused() {
         .await;
     assert!(refused.is_some(), "a spell in no gem is refused");
     let mana = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == char_id as u64),
+        )
         .await;
     assert!(
         matches!(mana, Some(ServerWorldMsg::ManaUpdate { mp, max_mp, .. }) if mp == max_mp),
@@ -2009,20 +2274,26 @@ async fn memorizing_takes_two_seated_seconds_and_no_mana() {
         provision_client(&h.auth_url, "memer", "Memera", "Human", "Cleric").await;
     forget_all_spells(&h.db_url, char_id).await;
     let mut a = WorldClient::start(token, &session, char_id).await;
-    next_spell_gems(&mut a).await.expect("the bar arrives on entry");
+    next_spell_gems(&mut a)
+        .await
+        .expect("the bar arrives on entry");
     a.send_sit();
     a.pump_for(Duration::from_millis(200)).await;
 
     // A gem not open at level 1 (three are).
     a.send_memorize_start(3, "Smite");
-    let (gems, _) = next_spell_gems(&mut a).await.expect("a refusal answers with the bar");
+    let (gems, _) = next_spell_gems(&mut a)
+        .await
+        .expect("a refusal answers with the bar");
     assert!(gems[3].is_empty(), "gem 3 is not open at level 1");
 
     // Finished too early.
     a.send_memorize_start(0, "Smite");
     a.pump_for(Duration::from_millis(300)).await;
     a.send_memorize_finish();
-    let (gems, _) = next_spell_gems(&mut a).await.expect("a refusal answers with the bar");
+    let (gems, _) = next_spell_gems(&mut a)
+        .await
+        .expect("a refusal answers with the bar");
     assert!(gems[0].is_empty(), "a third of a second is not a memorize");
 
     // Stood up and sat down again in between.
@@ -2033,7 +2304,9 @@ async fn memorizing_takes_two_seated_seconds_and_no_mana() {
     a.send_sit();
     a.pump_for(Duration::from_millis(1_800)).await;
     a.send_memorize_finish();
-    let (gems, _) = next_spell_gems(&mut a).await.expect("a refusal answers with the bar");
+    let (gems, _) = next_spell_gems(&mut a)
+        .await
+        .expect("a refusal answers with the bar");
     assert!(gems[0].is_empty(), "standing up voids the memorize");
 
     // The real thing.
@@ -2053,19 +2326,29 @@ async fn memorizing_takes_two_seated_seconds_and_no_mana() {
     for m in &said {
         if let ServerWorldMsg::ManaUpdate { id, mp, max_mp } = m {
             if *id == char_id as u64 {
-                assert!((max_mp - mp).abs() < 0.01, "memorizing takes no mana: {mp} of {max_mp}");
+                assert!(
+                    (max_mp - mp).abs() < 0.01,
+                    "memorizing takes no mana: {mp} of {max_mp}"
+                );
             }
         }
     }
 
     a.send_cast_spell("Smite", None);
     let fail = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == char_id as u64),
+        )
         .await;
-    let Some(ServerWorldMsg::CastFail { reason, .. }) = fail else { panic!("an untargeted Smite still fails") };
-    assert_ne!(reason, "You have not memorized that spell.", "the memorize gate lets it through ({reason})");
+    let Some(ServerWorldMsg::CastFail { reason, .. }) = fail else {
+        panic!("an untargeted Smite still fails")
+    };
+    assert_ne!(
+        reason, "You have not memorized that spell.",
+        "the memorize gate lets it through ({reason})"
+    );
 }
 
 /// Backstab: three times a swing, 20 stamina fanned at once, refused inside
@@ -2079,7 +2362,13 @@ async fn backstab_is_tripled_charged_and_gated() {
     let mut answered = false;
     for m in &msgs {
         match m {
-            ServerWorldMsg::Hit { attacker, target, amount, crit, .. } if *attacker == a_id as u64 && *target == dummy => {
+            ServerWorldMsg::Hit {
+                attacker,
+                target,
+                amount,
+                crit,
+                ..
+            } if *attacker == a_id as u64 && *target == dummy => {
                 // A plain non-crit fist swing tops out at 6 (1-4 plus STR/5,
                 // times the skill's 1.15), so 9 pins the multiplier; a crit
                 // (1.5 to 2x) could reach it on its own and proves nothing.
@@ -2088,31 +2377,53 @@ async fn backstab_is_tripled_charged_and_gated() {
                 }
                 answered = true;
             }
-            ServerWorldMsg::Miss { attacker, target } if *attacker == a_id as u64 && *target == dummy => answered = true, // the 5% floor
-            ServerWorldMsg::SkillFail { reason, .. } => panic!("a Rogue's Backstab beside the dummy was refused: {reason}"),
+            ServerWorldMsg::Miss { attacker, target }
+                if *attacker == a_id as u64 && *target == dummy =>
+            {
+                answered = true
+            } // the 5% floor
+            ServerWorldMsg::SkillFail { reason, .. } => {
+                panic!("a Rogue's Backstab beside the dummy was refused: {reason}")
+            }
             _ => {}
         }
     }
     assert!(answered, "the swing was answered");
     let st = msgs.iter().find_map(|m| match m {
-        ServerWorldMsg::StaminaUpdate { id, stamina, max } if *id == a_id as u64 => Some((*stamina, *max)),
+        ServerWorldMsg::StaminaUpdate { id, stamina, max } if *id == a_id as u64 => {
+            Some((*stamina, *max))
+        }
         _ => None,
     });
     let (stamina, max) = st.expect("the stamina spend fans at once");
-    assert!((max - stamina - 20.0).abs() < 0.5, "20 of {max} stamina: {stamina}");
-    assert_eq!(skill_answer(&mut a, a_id, "Backstab", dummy).await, Err("You cannot use that yet.".into()));
+    assert!(
+        (max - stamina - 20.0).abs() < 0.5,
+        "20 of {max} stamina: {stamina}"
+    );
+    assert_eq!(
+        skill_answer(&mut a, a_id, "Backstab", dummy).await,
+        Err("You cannot use that yet.".into())
+    );
 
-    let (b_session, b_id, b_token) = provision_client(&h.auth_url, "notarogue", "Notaroguea", "Human", "Cleric").await;
+    let (b_session, b_id, b_token) =
+        provision_client(&h.auth_url, "notarogue", "Notaroguea", "Human", "Cleric").await;
     let mut b = WorldClient::start(b_token, &b_session, b_id).await;
     b.pump_for(Duration::from_millis(300)).await;
-    assert_eq!(skill_answer(&mut b, b_id, "Backstab", dummy).await, Err("You cannot use that skill.".into()));
+    assert_eq!(
+        skill_answer(&mut b, b_id, "Backstab", dummy).await,
+        Err("You cannot use that skill.".into())
+    );
 
-    let (c_session, c_id, _stale) = provision_client(&h.auth_url, "winded", "Windeda", "Human", "Rogue").await;
+    let (c_session, c_id, _stale) =
+        provision_client(&h.auth_url, "winded", "Windeda", "Human", "Rogue").await;
     set_char_stamina(&h.db_url, c_id, 10.0).await;
     let c_token = request_world_token(&h.auth_url, &c_session, c_id).await;
     let mut c = WorldClient::start(c_token, &c_session, c_id).await;
     c.pump_for(Duration::from_millis(300)).await;
-    assert_eq!(skill_answer(&mut c, c_id, "Backstab", dummy).await, Err("You are too tired.".into()));
+    assert_eq!(
+        skill_answer(&mut c, c_id, "Backstab", dummy).await,
+        Err("You are too tired.".into())
+    );
 }
 
 /// The EQ parity audit (2026-10-20): a cast can FIZZLE, rolled by the server
@@ -2133,15 +2444,15 @@ async fn a_cast_can_fizzle_on_a_low_casting_skill() {
     set_char_level(&h.db_url, a_char_id, 16).await;
     set_casting_skill(&h.db_url, a_char_id, "evocation", 0).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "fizzler", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "fizzler", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
     let full_mp = char_data::compute("Human", "Magician", 16).max_mp;
     let me = a_char_id as u64;
-    let is_fizzle = |m: &ServerWorldMsg| {
-        matches!(m, ServerWorldMsg::CastFail { caster, reason } if *caster == me && reason == "Your spell fizzles!")
-    };
+    let is_fizzle = |m: &ServerWorldMsg| matches!(m, ServerWorldMsg::CastFail { caster, reason } if *caster == me && reason == "Your spell fizzles!");
 
     // Timed: a start that does not fizzle only caches a bar the next start
     // replaces, so nothing is spent until one does.
@@ -2158,12 +2469,18 @@ async fn a_cast_can_fizzle_on_a_low_casting_skill() {
                 ServerWorldMsg::ManaUpdate { id, mp, .. } if *id == me => Some(*mp),
                 _ => None,
             });
-            assert!(mp_after_fizzle.is_some(), "the fizzle comes with the true mana");
+            assert!(
+                mp_after_fizzle.is_some(),
+                "the fizzle comes with the true mana"
+            );
             break;
         }
     }
     let mp = mp_after_fizzle.expect("forty starts with no evocation at all and not one fizzle");
-    assert!((full_mp - mp - 10.5).abs() < 0.01, "a quarter of 42 burned: {full_mp} -> {mp}");
+    assert!(
+        (full_mp - mp - 10.5).abs() < 0.01,
+        "a quarter of 42 burned: {full_mp} -> {mp}"
+    );
     a.send_cast_start("Fireball Rk. III", 1.5);
     let again = a.collect_for(Duration::from_millis(200)).await;
     assert!(
@@ -2199,7 +2516,10 @@ async fn a_cast_can_fizzle_on_a_low_casting_skill() {
             break;
         }
     }
-    assert!(fizzled, "forty instant casts with no evocation at all and not one fizzle");
+    assert!(
+        fizzled,
+        "forty instant casts with no evocation at all and not one fizzle"
+    );
 }
 
 /// The prestige gate is the server's: a Paladin driven to Evil casts as a
@@ -2214,20 +2534,26 @@ async fn a_paladin_at_evil_casts_the_fallen_kit_and_not_the_paladins() {
     let (session, char_id, _stale) =
         provision_client(&h.auth_url, "fallen", "Fallen", "Human", "Paladin").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "fallen", true).await.expect("set is_gm");
-    set_char_level(&h.db_url, char_id, 20).await;
-    sqlx::query("UPDATE characters SET alignment_score = -1600.0, alignment_seeded = 1 WHERE id = ?1")
-        .bind(char_id)
-        .execute(&pool)
+    db::set_account_gm(&pool, "fallen", true)
         .await
-        .expect("seed the fall");
+        .expect("set is_gm");
+    set_char_level(&h.db_url, char_id, 20).await;
+    sqlx::query(
+        "UPDATE characters SET alignment_score = -1600.0, alignment_seeded = 1 WHERE id = ?1",
+    )
+    .bind(char_id)
+    .execute(&pool)
+    .await
+    .expect("seed the fall");
     let gems: Vec<(i32, String)> = world::class_spell_names("Paladin")
         .into_iter()
         .chain(world::class_spell_names("Paladin_Fallen"))
         .enumerate()
         .map(|(i, n)| (i as i32, n))
         .collect();
-    db::save_spell_gems(&pool, char_id, &gems, true).await.expect("both kits on the bar");
+    db::save_spell_gems(&pool, char_id, &gems, true)
+        .await
+        .expect("both kits on the bar");
     let token = request_world_token(&h.auth_url, &session, char_id).await;
     let mut a = WorldClient::start(token, &session, char_id).await;
     let seed = a
@@ -2252,24 +2578,33 @@ async fn a_paladin_at_evil_casts_the_fallen_kit_and_not_the_paladins() {
     };
     a.send_cast_spell("Death's Embrace", Some(mob));
     let hit = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == mob)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == mob),
+        )
         .await;
     match hit {
-        Some(ServerWorldMsg::Hit { amount, .. }) => assert!(amount >= 80, "the Fallen nuke's 80: {amount}"),
+        Some(ServerWorldMsg::Hit { amount, .. }) => {
+            assert!(amount >= 80, "the Fallen nuke's 80: {amount}")
+        }
         other => panic!("a Fallen Paladin casts Death's Embrace: {other:?}"),
     }
     a.pump_alive_for(Duration::from_millis(2200)).await; // the global cooldown
     a.send_cast_spell("Righteous Fire", Some(mob));
     let fail = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == char_id as u64),
+        )
         .await;
     match fail {
         Some(ServerWorldMsg::CastFail { reason, .. }) => {
-            assert_eq!(reason, "Your class cannot cast that.", "the Paladin's own kit is lost to the Fallen")
+            assert_eq!(
+                reason, "Your class cannot cast that.",
+                "the Paladin's own kit is lost to the Fallen"
+            )
         }
         other => panic!("Righteous Fire is refused: {other:?}"),
     }
@@ -2285,7 +2620,9 @@ async fn a_neutral_paladin_casts_at_seventy_percent() {
     let (session, char_id, _stale) =
         provision_client(&h.auth_url, "lukewarm", "Lukewarm", "Human", "Paladin").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "lukewarm", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "lukewarm", true)
+        .await
+        .expect("set is_gm");
     set_char_level(&h.db_url, char_id, 20).await;
     sqlx::query("UPDATE characters SET alignment_score = 0.0, alignment_seeded = 1 WHERE id = ?1")
         .bind(char_id)
@@ -2308,12 +2645,18 @@ async fn a_neutral_paladin_casts_at_seventy_percent() {
     for _ in 0..6 {
         a.send_cast_spell("Righteous Fire", Some(mob));
         let hit = a
-            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-                matches!(m, ServerWorldMsg::Hit { target, .. } if *target == mob)
-            })
+            .wait_for(
+                CHANNEL_SYSTEM,
+                Duration::from_secs(3),
+                |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == mob),
+            )
             .await;
         match hit {
-            Some(ServerWorldMsg::Hit { amount, crit: false, .. }) => {
+            Some(ServerWorldMsg::Hit {
+                amount,
+                crit: false,
+                ..
+            }) => {
                 landed = Some(amount);
                 break;
             }

@@ -147,16 +147,29 @@ pub(super) fn despawn_owned_pets(
         };
         if pet.charm_expires_at.is_some() {
             let mob_id = return_charmed_mob(server, aoi, enemies, &in_world, pet, None, now);
-            tracing::info!(owner = owner_entity, pet_id, mob_id, "charm broken by owner leaving — mob returned");
+            tracing::info!(
+                owner = owner_entity,
+                pet_id,
+                mob_id,
+                "charm broken by owner leaving — mob returned"
+            );
             continue;
         }
         let pet_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
         aoi.remove(pet_id, pet_cell);
         let pet_visible = aoi.entities_visible_from(pet_cell);
-        for peer_id in in_world.iter().copied().filter(|id| pet_visible.contains(id)) {
+        for peer_id in in_world
+            .iter()
+            .copied()
+            .filter(|id| pet_visible.contains(id))
+        {
             handlers::send_entity_despawn(server, peer_id, pet_id);
         }
-        tracing::info!(owner = owner_entity, pet_id, "pet despawned on owner disconnect");
+        tracing::info!(
+            owner = owner_entity,
+            pet_id,
+            "pet despawned on owner disconnect"
+        );
     }
 }
 

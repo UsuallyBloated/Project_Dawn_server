@@ -9,29 +9,20 @@ use super::{
     active_skills,
     aoi::{self, AoiGrid},
     buffs::{self, ActiveBuff},
-    clock,
-    combat,
+    clock, combat,
     connection::{PerConnection, Vec3f},
-    entity::{self, ActiveCc, Entity, EnemyState, HitIntent},
+    entity::{self, ActiveCc, EnemyState, Entity, HitIntent},
     groups::{self, GroupManager},
     handlers::{self, Outcome},
-    inventory,
-    items,
+    hunger, inventory, items,
     ledger::{self, ItemAction},
     loot::{self, LootBag},
-    persistence,
-    pet_templates,
-    hunger, regen,
-    skills,
+    persistence, pet_templates, regen, skills,
     spawn_points::Spawner,
-    spells,
-    ATTACK_RANGE_TOLERANCE, BAN_SWEEP_INTERVAL, CAMP_SECS, CHANNEL_POSITION, CHANNEL_SYSTEM,
-    CHECKPOINT_INTERVAL, ENEMY_FAN_REPORT_INTERVAL,
-    ENEMY_DESPAWN_LINGER_SECS, GROUP_SHARE_RANGE, INSPECT_RANGE, KICK_FLUSH_GRACE,
-    LINKDEAD_SECS,
-    LOOT_BAG_LINGER_SECS,
-    LOOT_PICKUP_RANGE, RUN_SPEED,
-    RANGED_ATTACK_RANGE, STALE_MOVE_THRESHOLD, TICK_DT,
+    spells, ATTACK_RANGE_TOLERANCE, BAN_SWEEP_INTERVAL, CAMP_SECS, CHANNEL_POSITION,
+    CHANNEL_SYSTEM, CHECKPOINT_INTERVAL, ENEMY_DESPAWN_LINGER_SECS, ENEMY_FAN_REPORT_INTERVAL,
+    GROUP_SHARE_RANGE, INSPECT_RANGE, KICK_FLUSH_GRACE, LINKDEAD_SECS, LOOT_BAG_LINGER_SECS,
+    LOOT_PICKUP_RANGE, RANGED_ATTACK_RANGE, RUN_SPEED, STALE_MOVE_THRESHOLD, TICK_DT,
 };
 use crate::{db, Config};
 use protocol::world::{DamageType, EntityId, IdKind, KickCode};
@@ -50,29 +41,29 @@ mod state;
 use state::*;
 
 // The steps, in the order `run` calls them.
-mod session;
-mod intake;
-mod fanout;
-mod spawning;
-mod melee;
-mod casting;
-mod grouping;
-mod pet_commands;
-mod inventory_ops;
-mod trading;
-mod vendors;
 mod banking;
-mod enemy_ai;
 mod binds_and_res;
-mod quest_steps;
-mod looting;
-mod movement;
 mod buff_tick;
 mod camp;
+mod casting;
 mod death_sweep;
-mod regen_tick;
+mod enemy_ai;
+mod fanout;
+mod grouping;
+mod intake;
+mod inventory_ops;
+mod looting;
+mod melee;
+mod movement;
+mod pet_commands;
 mod position_fan;
+mod quest_steps;
+mod regen_tick;
+mod session;
+mod spawning;
+mod trading;
 mod upkeep;
+mod vendors;
 
 // The rules several steps share.
 mod cast_rules;
@@ -82,13 +73,25 @@ mod spell_buffs;
 mod swing;
 
 // The shared rules by their bare names: every step does `use super::*`.
-use cast_rules::{InterruptOutcome, roll_cast_interrupt, ResolvedTarget, cast_target_refusal, cast_resolution_lost, tell_interrupt_charge, refuse_cast, refund_spell_cost, stop_song, song_pulse};
-use fanout::{say_recipients, despawn_recipients, fan_entity_cell_crossing};
-use kills::{FactionKill, award_kill, kill_enemy, apply_spell_damage_to_enemy, wipe_hate, clear_player_dots_from};
-use pet_life::{summon_scaled_pet, pet_owner_cid, despawn_owned_pets, return_charmed_mob};
-use session::{PENDING_SAVE_RETRY, PENDING_SAVE_GIVE_UP, shut_down_world};
-use spell_buffs::{apply_buff, apply_stat_buff, apply_mp_regen_exclusive, apply_player_spell_buffs, apply_pet_spell_buffs, fan_out_pet_buff_snapshot};
-use swing::{FIST_WEAPON_DELAY, honest_swing_pace, min_swing_interval_secs, carried_haste, stamp_swing_haste, swing_too_fast, train_swing_skills, skill_swing};
+use cast_rules::{
+    cast_resolution_lost, cast_target_refusal, refund_spell_cost, refuse_cast, roll_cast_interrupt,
+    song_pulse, stop_song, tell_interrupt_charge, InterruptOutcome, ResolvedTarget,
+};
+use fanout::{despawn_recipients, fan_entity_cell_crossing, say_recipients};
+use kills::{
+    apply_spell_damage_to_enemy, award_kill, clear_player_dots_from, kill_enemy, wipe_hate,
+    FactionKill,
+};
+use pet_life::{despawn_owned_pets, pet_owner_cid, return_charmed_mob, summon_scaled_pet};
+use session::{shut_down_world, PENDING_SAVE_GIVE_UP, PENDING_SAVE_RETRY};
+use spell_buffs::{
+    apply_buff, apply_mp_regen_exclusive, apply_pet_spell_buffs, apply_player_spell_buffs,
+    apply_stat_buff, fan_out_pet_buff_snapshot,
+};
+use swing::{
+    carried_haste, honest_swing_pace, min_swing_interval_secs, skill_swing, stamp_swing_haste,
+    swing_too_fast, train_swing_skills, FIST_WEAPON_DELAY,
+};
 use trading::trade_locked;
 
 /// Wall-clock unix seconds (the logout stamp for NO RENT items; the ledger's
@@ -104,7 +107,6 @@ pub async fn run(
     mut transport: NetcodeServerTransport,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-
     // Track 18.1 — build the spell discipline lookup once at startup
     // so casting-skill advance dispatch is a HashMap hit per cast.
     skills::init_discipline_map();
@@ -179,19 +181,29 @@ pub async fn run(
                 let items: Vec<super::loot::LootItemStack> = r
                     .items
                     .into_iter()
-                    .map(|(item_path, count, equip_slot)| super::loot::LootItemStack {
-                        item_path,
-                        count,
-                        equip_slot,
-                    })
+                    .map(
+                        |(item_path, count, equip_slot)| super::loot::LootItemStack {
+                            item_path,
+                            count,
+                            equip_slot,
+                        },
+                    )
                     .collect();
                 aoi.insert(id, aoi::cell_for(pos.x, pos.z));
                 max_id = max_id.max(id);
                 corpses.insert(
                     id,
                     super::corpses::Corpse::new(
-                        id, r.char_id, r.owner_name, r.zone, pos, items, r.coins,
-                        r.lost_xp, r.resurrected, boot,
+                        id,
+                        r.char_id,
+                        r.owner_name,
+                        r.zone,
+                        pos,
+                        items,
+                        r.coins,
+                        r.lost_xp,
+                        r.resurrected,
+                        boot,
                     ),
                 );
             }
@@ -204,7 +216,30 @@ pub async fn run(
     }
 
     let mut world = WorldState {
-        cfg, pool, server, connections, aoi, last_checkpoint, pending_saves, last_pending_retry, enemy_pos_sent, last_fan_report, tick_health, last_health_report, last_ban_sweep, last_ledger_sweep, last_time_broadcast, ban_tx, ban_rx, ban_sweep_in_flight, spawner, enemies, loot_bags, group_manager, trade_manager, corpses,
+        cfg,
+        pool,
+        server,
+        connections,
+        aoi,
+        last_checkpoint,
+        pending_saves,
+        last_pending_retry,
+        enemy_pos_sent,
+        last_fan_report,
+        tick_health,
+        last_health_report,
+        last_ban_sweep,
+        last_ledger_sweep,
+        last_time_broadcast,
+        ban_tx,
+        ban_rx,
+        ban_sweep_in_flight,
+        spawner,
+        enemies,
+        loot_bags,
+        group_manager,
+        trade_manager,
+        corpses,
     };
 
     loop {
@@ -225,9 +260,14 @@ pub async fn run(
         //    returns. Checked at the top of a tick, so the state saved is
         //    whole, never half a tick.
         if *shutdown.borrow() {
-            let unsaved =
-                shut_down_world(&mut world.server, &mut transport, &mut world.connections, &mut world.pending_saves, &world.pool)
-                    .await;
+            let unsaved = shut_down_world(
+                &mut world.server,
+                &mut transport,
+                &mut world.connections,
+                &mut world.pending_saves,
+                &world.pool,
+            )
+            .await;
             if unsaved > 0 {
                 // A non-zero exit, so the journal and systemd both show it.
                 anyhow::bail!("{unsaved} character(s) could not be saved at shutdown");

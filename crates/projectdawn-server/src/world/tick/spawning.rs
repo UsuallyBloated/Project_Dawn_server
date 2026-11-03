@@ -4,9 +4,26 @@
 
 use super::*;
 
-pub(super) fn run_spawning(world: &mut WorldState, q: &mut Intents, now: Instant, in_world_recipients_now: &[ClientId]) {
-    let WorldState { server, connections, aoi, spawner, enemies, .. } = world;
-    let Intents { newly_in_world, dev_spawn_intents, dev_despawn_intents, .. } = q;
+pub(super) fn run_spawning(
+    world: &mut WorldState,
+    q: &mut Intents,
+    now: Instant,
+    in_world_recipients_now: &[ClientId],
+) {
+    let WorldState {
+        server,
+        connections,
+        aoi,
+        spawner,
+        enemies,
+        ..
+    } = world;
+    let Intents {
+        newly_in_world,
+        dev_spawn_intents,
+        dev_despawn_intents,
+        ..
+    } = q;
     // 4g. Enemy spawner phase. Tick the respawn timers; for any spawn
     //     point that fires this frame, instantiate the entity, register
     //     it in the world map, and fan EnemySpawn out to every in_world
@@ -37,12 +54,7 @@ pub(super) fn run_spawning(world: &mut WorldState, q: &mut Intents, now: Instant
                         .filter(|id| visible.contains(id))
                         .collect();
                     if !aoi_recipients.is_empty() {
-                        handlers::fan_out_enemy_spawn(
-                            &mut *server,
-                            &aoi_recipients,
-                            &entity,
-                            None,
-                        );
+                        handlers::fan_out_enemy_spawn(&mut *server, &aoi_recipients, &entity, None);
                     }
                 }
                 enemies.insert(entity.id, entity);
@@ -180,7 +192,9 @@ pub(super) fn run_spawning(world: &mut WorldState, q: &mut Intents, now: Instant
     let due_warder_respawns: Vec<(EntityId, Vec3f, u32)> = connections
         .iter()
         .filter_map(|(_, c)| {
-            if !c.in_world { return None; }
+            if !c.in_world {
+                return None;
+            }
             let due = c.warder_respawn_at?;
             // `Instant::duration_since` saturates to zero when the
             // argument is in the future, so the previous

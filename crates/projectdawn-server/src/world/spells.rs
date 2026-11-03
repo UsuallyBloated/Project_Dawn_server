@@ -206,13 +206,16 @@ pub struct Spell {
 /// `MIN_LEASH_RANGE`, or a mob could be hit from beyond its own leash.
 pub const DEFAULT_SPELL_RANGE: f32 = 30.0;
 
-fn default_min_level() -> i32 { 1 }
+fn default_min_level() -> i32 {
+    1
+}
 
 fn spells() -> &'static HashMap<String, Spell> {
     static SPELLS: OnceLock<HashMap<String, Spell>> = OnceLock::new();
     SPELLS.get_or_init(|| {
-        let parsed: SpellsFile = toml::from_str(SPELLS_TOML)
-            .expect("spells.toml must parse — fix the embedded file or re-run tools/export_spells.gd");
+        let parsed: SpellsFile = toml::from_str(SPELLS_TOML).expect(
+            "spells.toml must parse — fix the embedded file or re-run tools/export_spells.gd",
+        );
         parsed
             .spells
             .into_iter()
@@ -308,7 +311,11 @@ mod tests {
             assert_eq!(s.target_type, "ENEMY", "{name}");
             assert_eq!(s.damage_type, dtype, "{name}");
             assert_eq!(s.min_level, level, "{name}");
-            assert!((s.base_damage - damage).abs() < 0.01, "{name} damage {}", s.base_damage);
+            assert!(
+                (s.base_damage - damage).abs() < 0.01,
+                "{name} damage {}",
+                s.base_damage
+            );
             assert_eq!(s.classes, vec![class.to_string()], "{name}");
             assert!(s.mana_cost > 0.0, "{name} must cost mana");
         }
@@ -337,7 +344,10 @@ mod tests {
         assert_eq!(torpor.classes, vec!["Shaman".to_string()]);
         let aria = lookup("Aria of Dismay").expect("Aria");
         assert!((aria.attack_slow_amount - 0.08).abs() < 1e-6);
-        assert!(aria.attack_slow_duration > 0.0, "the server applies it for a while");
+        assert!(
+            aria.attack_slow_duration > 0.0,
+            "the server applies it for a while"
+        );
     }
 
     /// Warder's Mend, the one client-only pet spell, resolves (2026-10-07).
@@ -345,7 +355,10 @@ mod tests {
     fn warders_mend_resolves_as_a_pet_heal() {
         let s = lookup("Warder's Mend").expect("Warder's Mend in spells.toml");
         assert_eq!(s.target_type, "PET_HEAL");
-        assert!((s.heal_amount - 12.0).abs() < 0.01, "the parity audit's number");
+        assert!(
+            (s.heal_amount - 12.0).abs() < 0.01,
+            "the parity audit's number"
+        );
         assert_eq!(s.classes, vec!["Beast Master".to_string()]);
         assert_eq!(s.min_level, 1);
     }
@@ -373,7 +386,10 @@ mod tests {
                 "Wanderer's Chord",
             ]
         );
-        assert!(!lookup("Chorus of Misery").unwrap().is_song, "a Bard nuke is not a song");
+        assert!(
+            !lookup("Chorus of Misery").unwrap().is_song,
+            "a Bard nuke is not a song"
+        );
     }
 
     #[test]
@@ -381,15 +397,24 @@ mod tests {
         let s = lookup("Fireball").expect("Fireball in table");
         assert_eq!(s.target_type, "ENEMY");
         assert_eq!(s.damage_type, "FIRE");
-        assert!((s.base_damage - 12.0).abs() < 0.01, "the parity audit's number");
-        assert!((s.mana_cost - 10.0).abs() < 0.01, "EQ's Frost Bolt-sized cost");
+        assert!(
+            (s.base_damage - 12.0).abs() < 0.01,
+            "the parity audit's number"
+        );
+        assert!(
+            (s.mana_cost - 10.0).abs() < 0.01,
+            "EQ's Frost Bolt-sized cost"
+        );
     }
 
     #[test]
     fn healing_light_is_ally_heal() {
         let s = lookup("Healing Light").expect("Healing Light in table");
         assert_eq!(s.target_type, "ALLY");
-        assert!((s.heal_amount - 10.0).abs() < 0.01, "EQ's Minor Healing at level 1");
+        assert!(
+            (s.heal_amount - 10.0).abs() < 0.01,
+            "EQ's Minor Healing at level 1"
+        );
     }
 
     #[test]
@@ -416,7 +441,10 @@ mod tests {
         // HEALING(4) / NONE(9) / unknown -> Physical (no elemental flash).
         assert!(matches!(proc_damage_type_to_wire(4), DamageType::Physical));
         assert!(matches!(proc_damage_type_to_wire(9), DamageType::Physical));
-        assert!(matches!(proc_damage_type_to_wire(200), DamageType::Physical));
+        assert!(matches!(
+            proc_damage_type_to_wire(200),
+            DamageType::Physical
+        ));
     }
 
     #[test]
@@ -431,8 +459,14 @@ mod tests {
         ] {
             let s = lookup(name).unwrap_or_else(|| panic!("{name} missing from spells.toml"));
             assert_eq!(s.target_type, "CORPSE", "{name} must target a corpse");
-            assert!((s.res_xp_percent - pct).abs() < 0.01, "{name} refund percent");
-            assert!(s.classes.iter().any(|c| c == class), "{name} castable by {class}");
+            assert!(
+                (s.res_xp_percent - pct).abs() < 0.01,
+                "{name} refund percent"
+            );
+            assert!(
+                s.classes.iter().any(|c| c == class),
+                "{name} castable by {class}"
+            );
         }
     }
 
@@ -449,7 +483,12 @@ mod tests {
                 "{} has no classes — cast gate would reject all casters",
                 s.name
             );
-            assert!(s.min_level >= 1, "{} has min_level {} (< 1)", s.name, s.min_level);
+            assert!(
+                s.min_level >= 1,
+                "{} has min_level {} (< 1)",
+                s.name,
+                s.min_level
+            );
         }
     }
 
@@ -468,7 +507,10 @@ mod tests {
         // Wrong class: a max-level Cleric still can't cast the Magician's Fireball.
         assert!(!eligible("Fireball", "Cleric", 60));
         // Level gate: Meteor is Wizard, min_level 18.
-        assert!(!eligible("Meteor", "Wizard", 17), "below min_level must fail");
+        assert!(
+            !eligible("Meteor", "Wizard", 17),
+            "below min_level must fail"
+        );
         assert!(eligible("Meteor", "Wizard", 18), "at min_level must pass");
         // Wrong class trumps level entirely.
         assert!(!eligible("Meteor", "Cleric", 60));
@@ -495,7 +537,11 @@ impl Spell {
     /// How far this spell reaches its target: its own `range`, else the
     /// default. The one reach every targeted cast is checked against.
     pub fn reach(&self) -> f32 {
-        if self.range > 0.0 { self.range } else { DEFAULT_SPELL_RANGE }
+        if self.range > 0.0 {
+            self.range
+        } else {
+            DEFAULT_SPELL_RANGE
+        }
     }
 
     /// The level `class` needs for this spell: its own entry in
@@ -534,7 +580,11 @@ mod summon_tests {
         let food = lookup("Summon Food").expect("Summon Food in spells.toml");
         assert_eq!(food.required_level("Magician"), 1);
         assert_eq!(food.required_level("Druid"), 14);
-        assert_eq!(food.required_level("Warrior"), food.min_level, "a class with no entry uses min_level");
+        assert_eq!(
+            food.required_level("Warrior"),
+            food.min_level,
+            "a class with no entry uses min_level"
+        );
         assert_eq!(summon_count(food, "Magician", 1), 1);
         assert_eq!(summon_count(food, "Magician", 2), 2);
         assert_eq!(summon_count(food, "Magician", 9), 9);
@@ -542,7 +592,11 @@ mod summon_tests {
         assert_eq!(summon_count(food, "Magician", 60), 10);
         assert_eq!(summon_count(food, "Druid", 14), 1);
         assert_eq!(summon_count(food, "Druid", 18), 5);
-        assert_eq!(summon_count(food, "Druid", 5), 1, "below the level the gate refuses; the count itself never drops under one");
+        assert_eq!(
+            summon_count(food, "Druid", 5),
+            1,
+            "below the level the gate refuses; the count itself never drops under one"
+        );
         let drink = lookup("Summon Drink").expect("Summon Drink in spells.toml");
         assert_eq!(drink.required_level("Shaman"), 2);
         assert_eq!(drink.required_level("Cleric"), 3);
@@ -562,4 +616,3 @@ mod summon_tests {
         assert_eq!(far.reach(), 12.0);
     }
 }
-

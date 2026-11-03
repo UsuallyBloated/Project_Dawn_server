@@ -14,15 +14,19 @@ async fn an_xp_share_reaches_a_group_mate_150_m_away() {
     // `amount > 0`: the server also seeds each client's xp state on entering
     // the world as an XpGained of 0, which is not a share.
     let a_gain = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0),
+        )
         .await;
     assert!(a_gain.is_some(), "the killer is paid");
     let b_gain = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0),
+        )
         .await;
     assert!(b_gain.is_some(), "a group-mate 150 m away shares the kill");
 }
@@ -36,15 +40,19 @@ async fn an_xp_share_stops_past_200_m() {
         grouped_pair_with_dummy(&h, "sharer250", "mate250", 250.0).await;
     a.send_cast_spell("Smite", Some(dummy));
     let a_gain = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0),
+        )
         .await;
     assert!(a_gain.is_some(), "the killer is paid");
     let b_gain = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0),
+        )
         .await;
     assert!(b_gain.is_none(), "a group-mate 250 m away shares nothing");
 }
@@ -94,7 +102,10 @@ async fn a_group_member_is_bound_only_in_a_safe_area() {
                 if *caster == a_char_id as u64 && reason.contains("safe place"))
         })
         .await;
-    assert!(refused.is_some(), "a group member outside the safe area cannot be bound");
+    assert!(
+        refused.is_some(),
+        "a group member outside the safe area cannot be bound"
+    );
 
     a.send_cast_start("Bind Affinity", 3.0);
     pump_all_for(&mut [&mut a, &mut b, &mut c], Duration::from_millis(3_200)).await;
@@ -103,11 +114,16 @@ async fn a_group_member_is_bound_only_in_a_safe_area() {
     // message to leave before another seat is watched for the answer.
     a.pump_for(Duration::from_millis(300)).await;
     let bound = c
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("bound"))
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("bound")),
+        )
         .await;
-    assert!(bound.is_some(), "a group member in the town square is bound where they stand");
+    assert!(
+        bound.is_some(),
+        "a group member in the town square is bound where they stand"
+    );
 
     // The bind written is C's OWN position, persisted; B's was never touched.
     pump_all_for(&mut [&mut a, &mut b, &mut c], Duration::from_millis(600)).await;
@@ -150,7 +166,9 @@ async fn a_kill_pays_faction_hits_to_the_hate_list_and_moves_alignment() {
     let (gm_session, gm_char, _stale) =
         provision_client(&h.auth_url, "factgm", "Factgm", "Human", "Cleric").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "factgm", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "factgm", true)
+        .await
+        .expect("set is_gm");
     // Level 20 for the mana of several Smites; the class seed is still 400.
     set_char_level(&h.db_url, gm_char, 20).await;
     let gm_token = request_world_token(&h.auth_url, &gm_session, gm_char).await;
@@ -185,9 +203,11 @@ async fn a_kill_pays_faction_hits_to_the_hate_list_and_moves_alignment() {
         other => panic!("the gnoll spawns: {other:?}"),
     };
     let seen = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::EnemySpawn { id, .. } if *id == mob)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::EnemySpawn { id, .. } if *id == mob),
+        )
         .await;
     assert!(seen.is_some(), "the bystander sees the gnoll");
     for i in 0..3 {
@@ -208,14 +228,19 @@ async fn a_kill_pays_faction_hits_to_the_hate_list_and_moves_alignment() {
                 if *target == mob && *attacker == b_char as u64)
         })
         .await;
-    assert!(hit.is_some(), "the bystander's Smite lands, which puts them on the hate list");
+    assert!(
+        hit.is_some(),
+        "the bystander's Smite lands, which puts them on the hate list"
+    );
     let mut died = None;
     for _ in 0..4 {
         gm.send_cast_spell("Smite", Some(mob));
         died = gm
-            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-                matches!(m, ServerWorldMsg::EntityDied { id } if *id == mob)
-            })
+            .wait_for(
+                CHANNEL_SYSTEM,
+                Duration::from_secs(3),
+                |m| matches!(m, ServerWorldMsg::EntityDied { id } if *id == mob),
+            )
             .await;
         if died.is_some() {
             break;
@@ -233,15 +258,26 @@ async fn a_kill_pays_faction_hits_to_the_hate_list_and_moves_alignment() {
             "{who}: 4 + level 3 off the gnolls; got {:?}",
             faction_updates(msgs)
         );
-        assert_eq!(last_standing(msgs, "greyveil_town"), Some((3.5, INDIFFERENT)), "{who}: half to the town");
-        assert_eq!(last_standing(msgs, "greyveil_watch"), Some((3.5, INDIFFERENT)), "{who}: half to the Watch");
+        assert_eq!(
+            last_standing(msgs, "greyveil_town"),
+            Some((3.5, INDIFFERENT)),
+            "{who}: half to the town"
+        );
+        assert_eq!(
+            last_standing(msgs, "greyveil_watch"),
+            Some((3.5, INDIFFERENT)),
+            "{who}: half to the Watch"
+        );
         let lines = system_lines(msgs);
         for want in [
             "Your faction standing with The Gnoll Raiders has gotten worse.",
             "Your faction standing with The Folk of Greyveil has gotten better.",
             "Your faction standing with The Greyveil Watch has gotten better.",
         ] {
-            assert!(lines.iter().any(|l| l == want), "{who}: missing {want:?} in {lines:?}");
+            assert!(
+                lines.iter().any(|l| l == want),
+                "{who}: missing {want:?} in {lines:?}"
+            );
         }
     }
     let gm_scores = alignment_scores(&gm_msgs);
@@ -272,7 +308,9 @@ async fn a_quest_turn_in_pays_its_hits_and_a_shunned_npc_refuses() {
     let (session, char_id, _stale) =
         provision_client(&h.auth_url, "questfac", "Questfac", "Human", "Cleric").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "questfac", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "questfac", true)
+        .await
+        .expect("set is_gm");
     // Level 20 for the mana of five Smites; a purse for the merchant.
     set_char_level(&h.db_url, char_id, 20).await;
     sqlx::query("UPDATE characters SET copper = 100000 WHERE id = ?1")
@@ -303,9 +341,11 @@ async fn a_quest_turn_in_pays_its_hits_and_a_shunned_npc_refuses() {
         };
         a.send_cast_spell("Smite", Some(mob));
         let died = a
-            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-                matches!(m, ServerWorldMsg::EntityDied { id } if *id == mob)
-            })
+            .wait_for(
+                CHANNEL_SYSTEM,
+                Duration::from_secs(3),
+                |m| matches!(m, ServerWorldMsg::EntityDied { id } if *id == mob),
+            )
             .await;
         assert!(died.is_some(), "wolf {i} dies to one Smite");
         a_breath(&mut a).await;
@@ -319,7 +359,9 @@ async fn a_quest_turn_in_pays_its_hits_and_a_shunned_npc_refuses() {
         faction_updates(&after_kills)
     );
     assert!(
-        faction_updates(&after_kills).iter().all(|(id, _, _)| id == "wildlife"),
+        faction_updates(&after_kills)
+            .iter()
+            .all(|(id, _, _)| id == "wildlife"),
         "wildlife has no enemies, so nobody else moves: {:?}",
         faction_updates(&after_kills)
     );
@@ -330,8 +372,16 @@ async fn a_quest_turn_in_pays_its_hits_and_a_shunned_npc_refuses() {
         msgs.iter().any(|m| matches!(m, ServerWorldMsg::QuestCompleted { quest_id } if quest_id == "wolf_threat")),
         "the turn-in lands: {msgs:?}"
     );
-    assert_eq!(last_standing(&msgs, "greyveil_watch"), Some((25.0, INDIFFERENT)), "{:?}", faction_updates(&msgs));
-    assert_eq!(last_standing(&msgs, "greyveil_town"), Some((10.0, INDIFFERENT)));
+    assert_eq!(
+        last_standing(&msgs, "greyveil_watch"),
+        Some((25.0, INDIFFERENT)),
+        "{:?}",
+        faction_updates(&msgs)
+    );
+    assert_eq!(
+        last_standing(&msgs, "greyveil_town"),
+        Some((10.0, INDIFFERENT))
+    );
     let scores = alignment_scores(&msgs);
     assert!(
         scores.iter().any(|s| (s - 416.0).abs() < 1e-3),
@@ -356,7 +406,9 @@ async fn a_quest_turn_in_pays_its_hits_and_a_shunned_npc_refuses() {
         })
         .await;
     match rejected {
-        Some(ServerWorldMsg::QuestRejected { reason, rollback, .. }) => {
+        Some(ServerWorldMsg::QuestRejected {
+            reason, rollback, ..
+        }) => {
             assert_eq!(reason, "Brom has nothing to say to you.");
             assert!(rollback, "an accept-phase refusal rolls the journal back");
         }
@@ -378,11 +430,16 @@ async fn a_quest_turn_in_pays_its_hits_and_a_shunned_npc_refuses() {
                 if faction_id == "greyveil_town" && *standing == -200.0)
         })
         .await;
-    assert!(matches!(set, Some(ServerWorldMsg::FactionUpdate { level, .. }) if level == DUBIOUS), "{set:?}");
+    assert!(
+        matches!(set, Some(ServerWorldMsg::FactionUpdate { level, .. }) if level == DUBIOUS),
+        "{set:?}"
+    );
     a.send_buy_item(0, POTION_NAME, 1);
     let msgs = a.collect_for(Duration::from_millis(1500)).await;
     assert!(
-        !msgs.iter().any(|m| matches!(m, ServerWorldMsg::InventoryDelta { .. })),
+        !msgs
+            .iter()
+            .any(|m| matches!(m, ServerWorldMsg::InventoryDelta { .. })),
         "at Dubious no sale: {msgs:?}"
     );
     let lines = system_lines(&msgs);
@@ -441,7 +498,9 @@ async fn a_plain_account_cannot_set_faction_and_a_consider_names_no_standing() {
     let (gm_session, gm_char, _stale) =
         provision_client(&h.auth_url, "congm", "Congm", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "congm", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "congm", true)
+        .await
+        .expect("set is_gm");
     let gm_token = request_world_token(&h.auth_url, &gm_session, gm_char).await;
     let mut gm = WorldClient::start(gm_token, &gm_session, gm_char).await;
     let (p_session, p_char, p_token) =
@@ -456,7 +515,10 @@ async fn a_plain_account_cannot_set_faction_and_a_consider_names_no_standing() {
 
     plain.send_dev_set_faction("greyveil_town", 2000.0);
     let msgs = plain.collect_for(Duration::from_secs(1)).await;
-    assert!(faction_updates(&msgs).is_empty(), "a plain account's slider moves nothing: {msgs:?}");
+    assert!(
+        faction_updates(&msgs).is_empty(),
+        "a plain account's slider moves nothing: {msgs:?}"
+    );
     assert!(
         !system_lines(&msgs).iter().any(|l| l.contains("standing")),
         "and is told nothing: {:?}",
@@ -468,15 +530,20 @@ async fn a_plain_account_cannot_set_faction_and_a_consider_names_no_standing() {
     };
     con(&mut plain, Some("brom"), None);
     let line = plain
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("Brom"))
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("Brom")),
+        )
         .await;
     assert!(
         matches!(&line, Some(ServerWorldMsg::ChatMessage { text, .. }) if text == "Brom regards you indifferently."),
         "{line:?}"
     );
-    for (what, npc, target) in [("an unknown id", Some("nobody"), None), ("a player id", None, Some(gm_char as u64))] {
+    for (what, npc, target) in [
+        ("an unknown id", Some("nobody"), None),
+        ("a player id", None, Some(gm_char as u64)),
+    ] {
         con(&mut plain, npc, target);
         let line = plain
             .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
@@ -500,9 +567,11 @@ async fn a_plain_account_cannot_set_faction_and_a_consider_names_no_standing() {
         other => panic!("the brute spawns: {other:?}"),
     };
     let _ = plain
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::EnemySpawn { id, .. } if *id == mob)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::EnemySpawn { id, .. } if *id == mob),
+        )
         .await
         .expect("the plain account sees the brute");
     con(&mut plain, None, Some(mob));
@@ -529,9 +598,11 @@ async fn a_plain_account_cannot_set_faction_and_a_consider_names_no_standing() {
     );
     con(&mut gm, Some("brom"), None);
     let line = gm
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("Brom"))
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("Brom")),
+        )
         .await;
     assert!(
         matches!(&line, Some(ServerWorldMsg::ChatMessage { text, .. }) if text == "Brom kindly considers you."),

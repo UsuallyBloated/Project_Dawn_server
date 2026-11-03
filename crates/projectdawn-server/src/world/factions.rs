@@ -198,13 +198,25 @@ pub fn apply_hit(standing: &mut f32, delta: f32) -> f32 {
 /// EQ's lines for a changed standing.
 pub fn change_line(faction: &Faction, applied: f32, standing_now: f32) -> String {
     if applied > 0.0 {
-        format!("Your faction standing with {} has gotten better.", faction.name)
+        format!(
+            "Your faction standing with {} has gotten better.",
+            faction.name
+        )
     } else if applied < 0.0 {
-        format!("Your faction standing with {} has gotten worse.", faction.name)
+        format!(
+            "Your faction standing with {} has gotten worse.",
+            faction.name
+        )
     } else if standing_now >= STANDING_CAP {
-        format!("Your faction standing with {} could not possibly get any better.", faction.name)
+        format!(
+            "Your faction standing with {} could not possibly get any better.",
+            faction.name
+        )
     } else {
-        format!("Your faction standing with {} could not possibly get any worse.", faction.name)
+        format!(
+            "Your faction standing with {} could not possibly get any worse.",
+            faction.name
+        )
     }
 }
 
@@ -274,7 +286,11 @@ impl Con {
 /// EQ joined the two with a double dash; two sentences here, by the
 /// project's writing rule.
 pub fn mob_con_line(mob_name: &str, level: Level, player_level: i32, mob_level: i32) -> String {
-    format!("{} {}", con_line(mob_name, level), con_for(player_level, mob_level).phrase())
+    format!(
+        "{} {}",
+        con_line(mob_name, level),
+        con_for(player_level, mob_level).phrase()
+    )
 }
 
 #[cfg(test)]
@@ -319,9 +335,15 @@ mod tests {
         let town = lookup("greyveil_town").expect("the town");
         assert_eq!(town.name, "The Folk of Greyveil");
         assert!(town.enemies.iter().any(|e| e == "gnoll_raiders"));
-        assert!(lookup("wildlife").unwrap().enemies.is_empty(), "animals link to no one");
+        assert!(
+            lookup("wildlife").unwrap().enemies.is_empty(),
+            "animals link to no one"
+        );
         assert!(lookup("nobody").is_none());
-        assert!(town.start.race.is_empty() && town.start.class.is_empty(), "v1 ships the start table empty");
+        assert!(
+            town.start.race.is_empty() && town.start.class.is_empty(),
+            "v1 ships the start table empty"
+        );
     }
 
     #[test]
@@ -334,7 +356,10 @@ mod tests {
         // An animal costs only wildlife; the town does not care.
         let wild = kill_hits("wildlife", 5.0);
         assert_eq!(wild, vec![("wildlife".to_string(), -5.0)]);
-        assert!(kill_hits("martians", 5.0).is_empty(), "an unknown faction moves nothing");
+        assert!(
+            kill_hits("martians", 5.0).is_empty(),
+            "an unknown faction moves nothing"
+        );
     }
 
     #[test]
@@ -342,7 +367,11 @@ mod tests {
         assert_eq!(kill_hit(2, false, None), 6.0, "a Plague Rat");
         assert_eq!(kill_hit(10, false, None), 14.0, "a Gnoll Brute");
         assert_eq!(kill_hit(10, true, None), 42.0, "Greth, named");
-        assert_eq!(kill_hit(10, false, Some(20.0)), 20.0, "a template's own number wins");
+        assert_eq!(
+            kill_hit(10, false, Some(20.0)),
+            20.0,
+            "a template's own number wins"
+        );
     }
 
     #[test]
@@ -360,18 +389,31 @@ mod tests {
         assert_eq!(level_for(-501.0), Level::Threatening);
         assert_eq!(level_for(-750.0), Level::Threatening);
         assert_eq!(level_for(-751.0), Level::Scowls);
-        assert!(Level::Scowls < Level::Dubious && Level::Dubious < Level::Ally, "they order worst first");
+        assert!(
+            Level::Scowls < Level::Dubious && Level::Dubious < Level::Ally,
+            "they order worst first"
+        );
         assert_eq!(Level::Scowls.as_wire(), 0);
         assert_eq!(Level::Ally.as_wire(), 8);
-        assert_eq!(con_line("Brom", Level::Warmly), "Brom looks upon you warmly.");
-        assert_eq!(con_line("Greth", Level::Scowls), "Greth scowls at you, ready to attack.");
+        assert_eq!(
+            con_line("Brom", Level::Warmly),
+            "Brom looks upon you warmly."
+        );
+        assert_eq!(
+            con_line("Greth", Level::Scowls),
+            "Greth scowls at you, ready to attack."
+        );
     }
 
     #[test]
     fn standing_clamps_and_the_lines_say_so() {
         let town = lookup("greyveil_town").unwrap();
         let mut s = 1990.0;
-        assert_eq!(apply_hit(&mut s, 25.0), 10.0, "only the room to the cap lands");
+        assert_eq!(
+            apply_hit(&mut s, 25.0),
+            10.0,
+            "only the room to the cap lands"
+        );
         assert_eq!(s, STANDING_CAP);
         assert_eq!(apply_hit(&mut s, 25.0), 0.0);
         assert!(change_line(town, 0.0, s).contains("could not possibly get any better"));
@@ -385,12 +427,19 @@ mod tests {
     #[test]
     fn the_start_table_adds_to_what_an_npc_sees() {
         let mut f = lookup("greyveil_town").unwrap().clone();
-        assert_eq!(shown_standing(10.0, &f, "Dark Elf", "Necromancer"), 10.0, "empty table");
+        assert_eq!(
+            shown_standing(10.0, &f, "Dark Elf", "Necromancer"),
+            10.0,
+            "empty table"
+        );
         f.start.race.insert("Dark Elf".into(), -300);
         f.start.class.insert("Necromancer".into(), -100);
         assert_eq!(start_modifier(&f, "Dark Elf", "Necromancer"), -400);
         assert_eq!(shown_standing(10.0, &f, "Dark Elf", "Necromancer"), -390.0);
-        assert_eq!(level_for(shown_standing(10.0, &f, "Dark Elf", "Necromancer")), Level::Dubious);
+        assert_eq!(
+            level_for(shown_standing(10.0, &f, "Dark Elf", "Necromancer")),
+            Level::Dubious
+        );
         assert_eq!(shown_standing(10.0, &f, "Human", "Cleric"), 10.0);
     }
 }

@@ -47,12 +47,23 @@ async fn pet_summon_visible_to_peer() {
     }
 
     let pet_spawn = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("B receives PetSpawn fanned from A's Summon Skeleton cast");
-    if let ServerWorldMsg::PetSpawn { id, owner, pet_name, level, max_hp, hp, .. } = pet_spawn {
+    if let ServerWorldMsg::PetSpawn {
+        id,
+        owner,
+        pet_name,
+        level,
+        max_hp,
+        hp,
+        ..
+    } = pet_spawn
+    {
         assert!(
             id >= PET_ID_BASE,
             "pet id must be in the pet partition (got {id}, base {PET_ID_BASE})"
@@ -121,9 +132,11 @@ async fn pet_follows_owner() {
     }
 
     let pet_id: u64 = match b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("B sees A's pet spawn")
     {
@@ -137,7 +150,11 @@ async fn pet_follows_owner() {
     // for the pet id with x > 0 (it spawned at owner_pos + 1.5 east,
     // so x starts > 0; we want to see x KEEP increasing as the owner
     // walks).
-    let dir = Vec3 { x: 1.0, y: 0.0, z: 0.0 };
+    let dir = Vec3 {
+        x: 1.0,
+        y: 0.0,
+        z: 0.0,
+    };
     let walk_end = Instant::now() + Duration::from_millis(2_500);
     let mut seq: u32 = 1;
     let mut max_pet_x: f32 = f32::MIN;
@@ -149,10 +166,9 @@ async fn pet_follows_owner() {
         // Drain CHANNEL_POSITION on B for pet position updates as we
         // walk; latch the highest x value we see.
         while let Some(bytes) = b.client.receive_message(CHANNEL_POSITION) {
-            if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(
-                &bytes,
-                bincode_cfg(),
-            ) {
+            if let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
                 if let ServerWorldMsg::Position { id, pos, .. } = msg {
                     if id == pet_id {
                         max_pet_x = max_pet_x.max(pos.x);
@@ -235,14 +251,28 @@ async fn pet_attacks_owners_target() {
     // thread used to come up short): to 2 m from the spawn point, well
     // inside its aggro whatever the spawn jitter.
     let mut seq: u32 = 1;
-    walk_until_within(&mut a, &mut seq, a_char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, BONEPILE_SPAWN, 2.0).await;
+    walk_until_within(
+        &mut a,
+        &mut seq,
+        a_char_id,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        BONEPILE_SPAWN,
+        2.0,
+    )
+    .await;
 
     // Wait for an enemy hit on us â€” proves the AI walked an enemy into
     // melee with us.
     let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
-            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(35),
+            |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64),
+        )
         .await
         .expect("an enemy locks on and swings");
     let enemy_id: u64 = match hit_evt {
@@ -349,11 +379,25 @@ async fn pet_command_attack_locks_onto_target() {
     // thread used to come up short): to 2 m from the spawn point, well
     // inside its aggro whatever the spawn jitter.
     let mut seq: u32 = 1;
-    walk_until_within(&mut a, &mut seq, a_char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, BONEPILE_SPAWN, 2.0).await;
+    walk_until_within(
+        &mut a,
+        &mut seq,
+        a_char_id,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        BONEPILE_SPAWN,
+        2.0,
+    )
+    .await;
     let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
-            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(35),
+            |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64),
+        )
         .await
         .expect("an enemy aggros and hits the player");
     let enemy_id: u64 = match hit_evt {
@@ -403,7 +447,9 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
     set_char_level(&h.db_url, a_char_id, 6).await;
     // GM for the dev spawn; the token is minted after the grant.
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "tnk", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "tnk", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
@@ -422,9 +468,11 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
         tokio::time::sleep(TICK_DT).await;
     }
     let pet_id: u64 = match a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("PetSpawn for own pet")
     {
@@ -462,7 +510,10 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
                 if *attacker == enemy_id && *target == a_char_id as u64)
         })
         .await;
-    assert!(in_melee.is_some(), "the dummy walks into melee and swings at the player");
+    assert!(
+        in_melee.is_some(),
+        "the dummy walks into melee and swings at the player"
+    );
     a.send_attack(enemy_id, "", false, DamageType::Physical);
     for _ in 0..3 {
         tick_one(&mut a.client, &mut a.transport);
@@ -496,7 +547,9 @@ async fn charm_converts_enemy_to_pet() {
     set_char_level(&h.db_url, a_char_id, 20).await;
     // GM for the dev spawn below; re-mint the token so the flag rides it.
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "ench", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "ench", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
@@ -535,17 +588,21 @@ async fn charm_converts_enemy_to_pet() {
     }
 
     let despawn = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id),
+        )
         .await
         .expect("old enemy id is despawned on charm");
     let _ = despawn;
 
     let pet_spawn = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("a fresh pet id spawns for the caster");
     if let ServerWorldMsg::PetSpawn { id, pet_name, .. } = pet_spawn {
@@ -558,11 +615,16 @@ async fn charm_converts_enemy_to_pet() {
         // landed (seen in play 2026-10-06). Charm lasts 60 s; nothing may
         // despawn the pet in the next second and a half.
         let early_release = a
-            .wait_for(CHANNEL_SYSTEM, Duration::from_millis(1500), |m| {
-                matches!(m, ServerWorldMsg::EntityDespawn { id: gone } if *gone == id)
-            })
+            .wait_for(
+                CHANNEL_SYSTEM,
+                Duration::from_millis(1500),
+                |m| matches!(m, ServerWorldMsg::EntityDespawn { id: gone } if *gone == id),
+            )
             .await;
-        assert!(early_release.is_none(), "a fresh charm must not release on the next tick");
+        assert!(
+            early_release.is_none(),
+            "a fresh charm must not release on the next tick"
+        );
     }
 }
 
@@ -580,7 +642,9 @@ async fn an_expired_charm_hands_the_mob_back_and_it_turns_on_the_charmer() {
     // Siren's Song is Bard level 14.
     set_char_level(&h.db_url, a_char_id, 14).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "siren", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "siren", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
@@ -606,16 +670,22 @@ async fn an_expired_charm_hands_the_mob_back_and_it_turns_on_the_charmer() {
     a.pump_for(Duration::from_millis(1700)).await;
     a.send_cast_spell("Siren's Song", Some(enemy_id));
     let pet_spawn = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("the charm lands");
     // One creature throughout (EQ): the pet names the enemy it was, so a
     // client that had the mob targeted keeps it targeted.
     let pet_id: u64 = match pet_spawn {
         ServerWorldMsg::PetSpawn { id, replaces, .. } => {
-            assert_eq!(replaces, Some(enemy_id), "the charmed pet replaces the enemy id");
+            assert_eq!(
+                replaces,
+                Some(enemy_id),
+                "the charmed pet replaces the enemy id"
+            );
             id
         }
         _ => unreachable!(),
@@ -628,12 +698,17 @@ async fn an_expired_charm_hands_the_mob_back_and_it_turns_on_the_charmer() {
     while released.is_none() && Instant::now() < deadline {
         a.send_heartbeat();
         released = a
-            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-                matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == pet_id)
-            })
+            .wait_for(
+                CHANNEL_SYSTEM,
+                Duration::from_secs(3),
+                |m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == pet_id),
+            )
             .await;
     }
-    assert!(released.is_some(), "the charm ends and the pet is despawned");
+    assert!(
+        released.is_some(),
+        "the charm ends and the pet is despawned"
+    );
 
     let back = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
@@ -642,14 +717,26 @@ async fn an_expired_charm_hands_the_mob_back_and_it_turns_on_the_charmer() {
         .await
         .expect("the mob comes back as an enemy where the pet stood");
     let (mob_id, hp) = match back {
-        ServerWorldMsg::EnemySpawn { id, hp, replaces, .. } => {
-            assert_eq!(replaces, Some(pet_id), "the returned mob replaces the pet id");
+        ServerWorldMsg::EnemySpawn {
+            id, hp, replaces, ..
+        } => {
+            assert_eq!(
+                replaces,
+                Some(pet_id),
+                "the returned mob replaces the pet id"
+            );
             (id, hp)
         }
         _ => unreachable!(),
     };
-    assert_ne!(mob_id, enemy_id, "a fresh enemy id; the old one is never reused");
-    assert!((hp - 500.0).abs() < 1e-3, "it keeps the HP it had, got {hp}");
+    assert_ne!(
+        mob_id, enemy_id,
+        "a fresh enemy id; the old one is never reused"
+    );
+    assert!(
+        (hp - 500.0).abs() < 1e-3,
+        "it keeps the HP it had, got {hp}"
+    );
 
     a.send_heartbeat();
     let turned = a
@@ -658,14 +745,20 @@ async fn an_expired_charm_hands_the_mob_back_and_it_turns_on_the_charmer() {
                 if *id == mob_id && *t == a_char_id as u64)
         })
         .await;
-    assert!(turned.is_some(), "the returned mob targets its former charmer");
+    assert!(
+        turned.is_some(),
+        "the returned mob targets its former charmer"
+    );
     let hit = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(10), |m| {
             matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
                 if *attacker == mob_id && *target == a_char_id as u64)
         })
         .await;
-    assert!(hit.is_some(), "and comes for them: a hit on the bard within seconds");
+    assert!(
+        hit.is_some(),
+        "and comes for them: a hit on the bard within seconds"
+    );
 }
 
 /// Track 12 Piece B â€” Beast Masters auto-summon a Wolf warder when
@@ -685,13 +778,25 @@ async fn beast_master_auto_summons_warder() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     let pet_spawn = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("Beast Master receives an auto-summoned warder on EnterWorld");
-    if let ServerWorldMsg::PetSpawn { pet_name, level, max_hp, hp, .. } = pet_spawn {
-        assert_eq!(pet_name, "Wolf", "Beast Master's auto-summon is a Wolf warder");
+    if let ServerWorldMsg::PetSpawn {
+        pet_name,
+        level,
+        max_hp,
+        hp,
+        ..
+    } = pet_spawn
+    {
+        assert_eq!(
+            pet_name, "Wolf",
+            "Beast Master's auto-summon is a Wolf warder"
+        );
         // Deterministic owner - 1: the free auto-summon takes no variance
         // roll (pet interim A).
         assert_eq!(level, 21, "warder tracks its owner: 22 - 1");
@@ -718,9 +823,11 @@ async fn warders_mend_heals_the_beast_masters_own_warder() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     let pet_spawn = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("the warder auto-summons");
     let pet_id: u64 = match pet_spawn {
@@ -733,14 +840,19 @@ async fn warders_mend_heals_the_beast_masters_own_warder() {
     a.pump_for(Duration::from_millis(1700)).await;
     a.send_cast_spell("Warder's Mend", None);
     let mended = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == pet_id)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == pet_id),
+        )
         .await;
     let Some(ServerWorldMsg::HealthUpdate { hp, max_hp, .. }) = mended else {
         panic!("the server mends the warder and fans its health");
     };
-    assert!((hp - max_hp).abs() < 0.01, "an unhurt warder stays at full, got {hp}/{max_hp}");
+    assert!(
+        (hp - max_hp).abs() < 0.01,
+        "an unhurt warder stays at full, got {hp}/{max_hp}"
+    );
 }
 
 /// Track 12 Piece B â€” non-Beast-Master classes do NOT get an
@@ -756,11 +868,16 @@ async fn non_beast_master_gets_no_auto_warder() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     let stray = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await;
-    assert!(stray.is_none(), "Warrior must not receive an auto-summoned pet");
+    assert!(
+        stray.is_none(),
+        "Warrior must not receive an auto-summoned pet"
+    );
 }
 
 /// The pet arm of the same crossing: a pet following its owner across a cell
@@ -781,14 +898,31 @@ async fn pet_following_its_owner_across_a_cell_spawns_for_players() {
 
     let pet_id = summon_skeleton(&mut b, &mut a, b_char_id).await;
     assert!(pet_id >= PET_ID_BASE);
-    let early = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_millis(300), |m| {
-        matches!(m, ServerWorldMsg::PetSpawn { id, .. } if *id == pet_id)
-    })
+    let early = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_millis(300),
+        |m| matches!(m, ServerWorldMsg::PetSpawn { id, .. } if *id == pet_id),
+    )
     .await;
-    assert!(early.is_none(), "a pet two cells away must not be seeded to A");
+    assert!(
+        early.is_none(),
+        "a pet two cells away must not be seeded to A"
+    );
 
     let mut seq: u32 = 1;
-    walk_pumping(&mut b, &mut a, &mut seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 }, 40).await;
+    walk_pumping(
+        &mut b,
+        &mut a,
+        &mut seq,
+        Vec3 {
+            x: -1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        40,
+    )
+    .await;
     let spawned = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(15), |m| {
         matches!(m, ServerWorldMsg::PetSpawn { id, owner, .. }
             if *id == pet_id && *owner == b_char_id as u64)
@@ -819,8 +953,12 @@ async fn charm_refuses_a_target_out_of_range() {
         provision_client(&h.auth_url, "farspawn", "Farspawn", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
     // Both are GMs: B conjures the far dummy, A conjures a near one at the end.
-    db::set_account_gm(&pool, "farench", true).await.expect("set is_gm");
-    db::set_account_gm(&pool, "farspawn", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "farench", true)
+        .await
+        .expect("set is_gm");
+    db::set_account_gm(&pool, "farspawn", true)
+        .await
+        .expect("set is_gm");
     set_char_pos(&h.db_url, b_char_id, 248.0, 60.0).await;
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
@@ -830,9 +968,12 @@ async fn charm_refuses_a_target_out_of_range() {
     pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
 
     b.send_dev_spawn("Far Dummy", 1, 30.0, 0, 0.0, 0.0);
-    let spawn_evt = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Far Dummy")
-    })
+    let spawn_evt = wait_on_a_pumping_b(
+        &mut b,
+        &mut a,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Far Dummy"),
+    )
     .await
     .expect("the dummy spawns beside B");
     let enemy_id: u64 = match spawn_evt {
@@ -843,31 +984,46 @@ async fn charm_refuses_a_target_out_of_range() {
     a.send_cast_start("Charm", 2.0);
     pump_both_for(&mut a, &mut b, Duration::from_millis(2150)).await;
     a.send_cast_spell("Charm", Some(enemy_id));
-    wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::CastFail { reason, .. } if reason.contains("too far away"))
-    })
+    wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::CastFail { reason, .. } if reason.contains("too far away")),
+    )
     .await
     .expect("an out-of-range charm is refused with the line");
 
     // Nothing was charmed: no pet for A, and B never sees its dummy despawn.
-    let pet = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_millis(600), |m| {
-        matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-    })
+    let pet = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_millis(600),
+        |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+    )
     .await;
     assert!(pet.is_none(), "nothing is charmed from out of range");
-    let gone = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_millis(300), |m| {
-        matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id)
-    })
+    let gone = wait_on_a_pumping_b(
+        &mut b,
+        &mut a,
+        Duration::from_millis(300),
+        |m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id),
+    )
     .await;
-    assert!(gone.is_none(), "the dummy is still standing where B conjured it");
+    assert!(
+        gone.is_none(),
+        "the dummy is still standing where B conjured it"
+    );
 
     // A refused cast costs NOTHING, cooldown included. Charm's cooldown is
     // 60 s; when refusals were handled after the stamp, the cast above would
     // have locked Charm out for a minute. A charms a dummy at its feet at once.
     a.send_dev_spawn("Near Dummy", 1, 30.0, 0, 0.0, 0.0);
-    let near_evt = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Near Dummy")
-    })
+    let near_evt = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Near Dummy"),
+    )
     .await
     .expect("the near dummy spawns beside A");
     let near_id: u64 = match near_evt {
@@ -877,9 +1033,12 @@ async fn charm_refuses_a_target_out_of_range() {
     a.send_cast_start("Charm", 2.0);
     pump_both_for(&mut a, &mut b, Duration::from_millis(2150)).await;
     a.send_cast_spell("Charm", Some(near_id));
-    wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-    })
+    wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+    )
     .await
     .expect("the refused cast burned no cooldown: the next Charm lands");
 }
@@ -908,15 +1067,29 @@ async fn charm_converts_a_camp_mob_that_is_fighting_someone_else() {
     // fight then happens under 20 m from A, who stays at spawn, outside that
     // circle and inside charm range (25 m).
     let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
-    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
+    let dir = Vec3 {
+        x: -16.0 / len,
+        y: 0.0,
+        z: -14.0 / len,
+    };
     let mut seq: u32 = 1;
     let moves = (18.0 / (world::RUN_SPEED * 0.05)).ceil() as u32;
     walk_pumping(&mut b, &mut a, &mut seq, dir, moves).await;
-    b.send_move(seq, Vec3 { x: 0.0, y: 0.0, z: 0.0 });
+    b.send_move(
+        seq,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+    );
 
-    let hit_evt = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_secs(35), |m| {
-        matches!(m, ServerWorldMsg::Hit { target, .. } if *target == b_char_id as u64)
-    })
+    let hit_evt = wait_on_a_pumping_b(
+        &mut b,
+        &mut a,
+        Duration::from_secs(35),
+        |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == b_char_id as u64),
+    )
     .await
     .expect("the skeleton engages B");
     let enemy_id: u64 = match hit_evt {
@@ -928,18 +1101,27 @@ async fn charm_converts_a_camp_mob_that_is_fighting_someone_else() {
     pump_both_for(&mut a, &mut b, Duration::from_millis(2150)).await;
     a.send_cast_spell("Charm", Some(enemy_id));
 
-    wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id)
-    })
+    wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id),
+    )
     .await
     .expect("the fighting mob's enemy id despawns on charm");
-    let pet_spawn = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-    })
+    let pet_spawn = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+    )
     .await
     .expect("it comes back as the caster's pet");
     if let ServerWorldMsg::PetSpawn { id, pet_name, .. } = pet_spawn {
-        assert!(id >= PET_ID_BASE, "charmed pet id must be in the pet partition");
+        assert!(
+            id >= PET_ID_BASE,
+            "charmed pet id must be in the pet partition"
+        );
         assert_eq!(pet_name, "Decrepit Skeleton");
     }
 }
@@ -959,18 +1141,23 @@ async fn a_pet_stays_with_its_owner_after_gate() {
     set_char_level(&h.db_url, a_char_id, 8).await;
     set_char_pos(&h.db_url, a_char_id, 15.0, 0.0).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "petgate", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "petgate", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
 
     a.send_cast_start("Summon Skeleton", 3.0);
-    a.pump_for(Duration::from_millis(3_000) + CAST_RELEASE_MARGIN).await;
+    a.pump_for(Duration::from_millis(3_000) + CAST_RELEASE_MARGIN)
+        .await;
     a.send_cast_spell("Summon Skeleton", None);
     let pet_spawn = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("the skeleton is summoned");
     let pet_id: u64 = match pet_spawn {
@@ -997,7 +1184,11 @@ async fn a_pet_stays_with_its_owner_after_gate() {
     // suite ran it out of reach: the swing missed and the pet had nothing
     // to inherit.
     let mut seq: u32 = 1;
-    let start = Vec3 { x: 15.0, y: 0.0, z: 0.0 };
+    let start = Vec3 {
+        x: 15.0,
+        y: 0.0,
+        z: 0.0,
+    };
     walk_until_within(&mut a, &mut seq, a_char_id, start, dummy_pos, 1.5).await;
     a.send_attack(dummy, "", false, DamageType::Physical);
     let engaged = a
@@ -1007,22 +1198,34 @@ async fn a_pet_stays_with_its_owner_after_gate() {
                     && ((pos.x - dummy_pos.x).powi(2) + (pos.z - dummy_pos.z).powi(2)).sqrt() < 3.0)
         })
         .await;
-    assert!(engaged.is_some(), "the pet inherits the owner's target and closes on the dummy");
+    assert!(
+        engaged.is_some(),
+        "the pet inherits the owner's target and closes on the dummy"
+    );
 
     // Gate home. The dummy cannot interrupt (no damage, no legs). The summon
     // started the global cooldown; let it pass first, with the same margin,
     // since the server starts that clock when IT accepts the summon.
-    a.pump_for(Duration::from_millis(2_000) + CAST_RELEASE_MARGIN).await;
+    a.pump_for(Duration::from_millis(2_000) + CAST_RELEASE_MARGIN)
+        .await;
     a.send_cast_start("Gate", 5.0);
-    a.pump_for(Duration::from_millis(5_000) + CAST_RELEASE_MARGIN).await;
+    a.pump_for(Duration::from_millis(5_000) + CAST_RELEASE_MARGIN)
+        .await;
     a.send_cast_spell("Gate", None);
     let tp = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| matches!(m, ServerWorldMsg::Teleport { .. }))
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::Teleport { .. })
+        })
         .await;
     let Some(ServerWorldMsg::Teleport { pos: dest }) = tp else {
         panic!("Gate teleports the owner");
     };
-    assert!(dest.x.abs() < 1.0 && dest.z.abs() < 1.0, "to the birth bind at the spawn, got ({}, {})", dest.x, dest.z);
+    assert!(
+        dest.x.abs() < 1.0 && dest.z.abs() < 1.0,
+        "to the birth bind at the spawn, got ({}, {})",
+        dest.x,
+        dest.z
+    );
 
     // For the next three seconds every Position of the pet stays beside the
     // owner. On the previous code it is walking back to the dummy at 3 m/s,
@@ -1036,9 +1239,11 @@ async fn a_pet_stays_with_its_owner_after_gate() {
     while Instant::now() < end {
         let left = end.saturating_duration_since(Instant::now());
         let Some(ServerWorldMsg::Position { pos, .. }) = a
-            .wait_for(CHANNEL_POSITION, left, |m| {
-                matches!(m, ServerWorldMsg::Position { id, .. } if *id == pet_id)
-            })
+            .wait_for(
+                CHANNEL_POSITION,
+                left,
+                |m| matches!(m, ServerWorldMsg::Position { id, .. } if *id == pet_id),
+            )
             .await
         else {
             break;
@@ -1048,9 +1253,15 @@ async fn a_pet_stays_with_its_owner_after_gate() {
         }
         pet_positions += 1;
         let off = ((pos.x - dest.x).powi(2) + (pos.z - dest.z).powi(2)).sqrt();
-        assert!(off < 6.0, "the pet stays with its owner after Gate; it was {off:.1} m away");
+        assert!(
+            off < 6.0,
+            "the pet stays with its owner after Gate; it was {off:.1} m away"
+        );
     }
-    assert!(pet_positions > 0, "the pet's position is still fanned to its owner after the port");
+    assert!(
+        pet_positions > 0,
+        "the pet's position is still fanned to its owner after the port"
+    );
 }
 
 /// The review's other find: a CHARMED mob rode Gate into the town square and,
@@ -1066,7 +1277,9 @@ async fn a_charmed_mob_is_released_in_place_when_its_charmer_gates() {
     set_char_level(&h.db_url, a_char_id, 14).await;
     set_char_pos(&h.db_url, a_char_id, 15.0, 0.0).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "charmgate", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "charmgate", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -1087,9 +1300,11 @@ async fn a_charmed_mob_is_released_in_place_when_its_charmer_gates() {
     a.pump_for(Duration::from_millis(1_700)).await;
     a.send_cast_spell("Siren's Song", Some(dummy));
     let pet_spawn = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("the charm lands");
     let pet_id: u64 = match pet_spawn {
@@ -1141,19 +1356,40 @@ async fn a_charmed_mob_is_released_in_place_when_its_charmer_gates() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn warders_fury_sends_the_warder_at_the_target() {
     let h = start_both().await;
-    let (session, a_id, _stale) = provision_client(&h.auth_url, "furious", "Furiousa", "Human", "Beast Master").await;
+    let (session, a_id, _stale) =
+        provision_client(&h.auth_url, "furious", "Furiousa", "Human", "Beast Master").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "furious", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "furious", true)
+        .await
+        .expect("set is_gm");
     master_weapon_skill(&h.db_url, a_id, "hand_to_hand").await;
     let token = request_world_token(&h.auth_url, &session, a_id).await;
     let mut a = WorldClient::start(token, &session, a_id).await;
     let pet = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(4), |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_id as u64))
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(4),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_id as u64),
+        )
         .await;
-    let Some(ServerWorldMsg::PetSpawn { id: warder, .. }) = pet else { panic!("the warder comes") };
+    let Some(ServerWorldMsg::PetSpawn { id: warder, .. }) = pet else {
+        panic!("the warder comes")
+    };
     let (dummy, dummy_pos) = spawn_dummy(&mut a, "Fury Dummy", 0, 0.0).await;
     let mut seq: u32 = 1;
-    walk_until_within(&mut a, &mut seq, a_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, dummy_pos, 1.0).await;
+    walk_until_within(
+        &mut a,
+        &mut seq,
+        a_id,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        dummy_pos,
+        1.0,
+    )
+    .await;
     // Guard stance: a guarding warder never inherits the owner's target on
     // its own (the follow-stance assist), so a swing from it here is the
     // skill's command and nothing else.

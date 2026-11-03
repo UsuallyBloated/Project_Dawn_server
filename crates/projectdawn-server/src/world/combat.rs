@@ -83,14 +83,25 @@ pub struct Swing {
 /// `skill`, or `hand_to_hand` for a bare hand or a weapon with none.
 pub fn weapon_skill_key(weapon_path: &str) -> String {
     items::lookup(weapon_path)
-        .map(|w| if w.skill.is_empty() { "hand_to_hand".to_string() } else { w.skill.clone() })
+        .map(|w| {
+            if w.skill.is_empty() {
+                "hand_to_hand".to_string()
+            } else {
+                w.skill.clone()
+            }
+        })
         .unwrap_or_else(|| "hand_to_hand".to_string())
 }
 
 /// The attacker's score in a weapon skill against its cap for their class
 /// and level; `None` when the class cannot use that weapon type at all.
 fn skill_ratio(attacker: &PerConnection, key: &str) -> Option<f32> {
-    let cap = super::skills::cap_for(super::skills::Skill::Weapon, &attacker.class, attacker.level, key);
+    let cap = super::skills::cap_for(
+        super::skills::Skill::Weapon,
+        &attacker.class,
+        attacker.level,
+        key,
+    );
     if cap <= 0 {
         return None;
     }
@@ -125,11 +136,7 @@ pub fn skill_damage_mult(attacker: &PerConnection, key: &str) -> f32 {
 /// empty string or unknown path falls back to bare-handed damage.
 /// `is_offhand` applies the 0.80× damage multiplier matching
 /// `Combat.calc_offhand_damage`.
-pub fn calc_swing(
-    attacker: &PerConnection,
-    weapon_path: &str,
-    is_offhand: bool,
-) -> Swing {
+pub fn calc_swing(attacker: &PerConnection, weapon_path: &str, is_offhand: bool) -> Swing {
     swing_with(attacker, weapon_path, is_offhand, false)
 }
 
@@ -139,11 +146,7 @@ pub fn calc_swing(
 /// 2026-10-14). It never rolls a miss. The crit roll is untouched, since a crit is the attacker's
 /// luck on top of the roll, not part of it. Pair with `mitigated`, which
 /// takes no armor off a seated target.
-pub fn calc_swing_max(
-    attacker: &PerConnection,
-    weapon_path: &str,
-    is_offhand: bool,
-) -> Swing {
+pub fn calc_swing_max(attacker: &PerConnection, weapon_path: &str, is_offhand: bool) -> Swing {
     swing_with(attacker, weapon_path, is_offhand, true)
 }
 
@@ -173,7 +176,11 @@ fn swing_with(
     // seated target (max_roll) cannot miss.
     let skill_key = weapon_skill_key(weapon_path);
     if !max_roll && rng.gen::<f32>() < miss_chance(attacker, &skill_key, is_offhand) {
-        return Swing { amount: 0, crit: false, missed: true };
+        return Swing {
+            amount: 0,
+            crit: false,
+            missed: true,
+        };
     }
 
     let weapon = items::lookup(weapon_path);
@@ -191,7 +198,11 @@ fn swing_with(
     let base_roll: i32 = match weapon {
         Some(w) if w.damage_max > 0 => {
             let span = (w.damage_max - w.damage_min).max(0);
-            let roll = if max_roll || span == 0 { span } else { rng.gen_range(0..=span) };
+            let roll = if max_roll || span == 0 {
+                span
+            } else {
+                rng.gen_range(0..=span)
+            };
             w.damage_min + roll
         }
         _ if max_roll => 4,
@@ -222,7 +233,11 @@ fn swing_with(
 
     let skill_mult = skill_damage_mult(attacker, &skill_key);
     let amount = ((base as f32 * skill_mult * crit_mult) as i32).max(1);
-    Swing { amount, crit, missed: false }
+    Swing {
+        amount,
+        crit,
+        missed: false,
+    }
 }
 
 #[cfg(test)]
@@ -288,14 +303,26 @@ mod tests {
         let attacker = make_attacker(50, 10);
         // Iron short sword 7..=15 plus STR 50/5: the max is 25, every time.
         for _ in 0..50 {
-            let swing = calc_swing_max(&attacker, "res://data/loot/items/iron_short_sword.tres", false);
+            let swing = calc_swing_max(
+                &attacker,
+                "res://data/loot/items/iron_short_sword.tres",
+                false,
+            );
             assert_eq!(swing.amount, 25);
             assert!(!swing.crit);
         }
         // Fists: 4 plus STR 20/5.
         assert_eq!(calc_swing_max(&make_attacker(20, 10), "", false).amount, 8);
         // The offhand keeps its multiplier: floor(25 * 0.8) = 20.
-        assert_eq!(calc_swing_max(&attacker, "res://data/loot/items/iron_short_sword.tres", true).amount, 20);
+        assert_eq!(
+            calc_swing_max(
+                &attacker,
+                "res://data/loot/items/iron_short_sword.tres",
+                true
+            )
+            .amount,
+            20
+        );
         // Armor takes armor/(armor+100) off a standing target and nothing off
         // a seated one; the floor of 1 holds for both.
         assert_eq!(mitigated(100, 100, false), 50);
@@ -311,9 +338,11 @@ mod tests {
         // Base roll 1-4, STR/5 = 4 bonus, no crit cap on 0% chance.
         // amount = (1..=4) + 4 = 5..=8 worst case, up to 2x on the
         // 0% crit chance (never crits at DEX 10). So strict 5..=8.
-        assert!(swing.amount >= 5 && swing.amount <= 8,
-                "bare-handed should land 5-8 at STR 20 DEX 10, got {}",
-                swing.amount);
+        assert!(
+            swing.amount >= 5 && swing.amount <= 8,
+            "bare-handed should land 5-8 at STR 20 DEX 10, got {}",
+            swing.amount
+        );
         assert!(!swing.crit, "DEX 10 should never crit");
     }
 
@@ -323,10 +352,16 @@ mod tests {
         // damage_min=7, damage_max=15, STR bonus = 50/5 = 10.
         // Range: (7+10) ..= (15+10) = 17..=25 (no crit at DEX 10).
         for _ in 0..50 {
-            let swing = landed(&attacker, "res://data/loot/items/iron_short_sword.tres", false);
-            assert!(swing.amount >= 17 && swing.amount <= 25,
-                    "iron short sword should land 17-25, got {}",
-                    swing.amount);
+            let swing = landed(
+                &attacker,
+                "res://data/loot/items/iron_short_sword.tres",
+                false,
+            );
+            assert!(
+                swing.amount >= 17 && swing.amount <= 25,
+                "iron short sword should land 17-25, got {}",
+                swing.amount
+            );
             assert!(!swing.crit);
         }
     }
@@ -336,10 +371,16 @@ mod tests {
         let attacker = make_attacker(50, 10);
         // Main = 17..=25, offhand = floor(main * 0.8) = 13..=20.
         for _ in 0..50 {
-            let swing = landed(&attacker, "res://data/loot/items/iron_short_sword.tres", true);
-            assert!(swing.amount >= 13 && swing.amount <= 20,
-                    "offhand should land 13-20, got {}",
-                    swing.amount);
+            let swing = landed(
+                &attacker,
+                "res://data/loot/items/iron_short_sword.tres",
+                true,
+            );
+            assert!(
+                swing.amount >= 13 && swing.amount <= 20,
+                "offhand should land 13-20, got {}",
+                swing.amount
+            );
         }
     }
 
@@ -371,16 +412,34 @@ mod tests {
         let mut a = make_attacker(20, 10);
         a.weapon_skills.clear();
         let key = "1h_slashing";
-        assert!((miss_chance(&a, key, false) - 0.35).abs() < 1e-6, "no skill: 35%");
-        assert!((miss_chance(&a, key, true) - 0.55).abs() < 1e-6, "the off hand: 20 points more");
-        let cap = super::super::skills::cap_for(super::super::skills::Skill::Weapon, "Warrior", 1, key);
+        assert!(
+            (miss_chance(&a, key, false) - 0.35).abs() < 1e-6,
+            "no skill: 35%"
+        );
+        assert!(
+            (miss_chance(&a, key, true) - 0.55).abs() < 1e-6,
+            "the off hand: 20 points more"
+        );
+        let cap =
+            super::super::skills::cap_for(super::super::skills::Skill::Weapon, "Warrior", 1, key);
         a.weapon_skills.insert(key.into(), cap);
-        assert!((miss_chance(&a, key, false) - 0.05).abs() < 1e-6, "at the cap: the 5% floor");
-        assert!((skill_damage_mult(&a, key) - 1.15).abs() < 1e-6, "at the cap: +15% damage");
+        assert!(
+            (miss_chance(&a, key, false) - 0.05).abs() < 1e-6,
+            "at the cap: the 5% floor"
+        );
+        assert!(
+            (skill_damage_mult(&a, key) - 1.15).abs() < 1e-6,
+            "at the cap: +15% damage"
+        );
         // An accuracy buff takes points off, never below zero.
-        a.active_buffs.push(super::super::buffs::ActiveBuff::new_accuracy_crit(
-            "Hunter's Eye".into(), 0.10, 0.0, 60.0, Instant::now(),
-        ));
+        a.active_buffs
+            .push(super::super::buffs::ActiveBuff::new_accuracy_crit(
+                "Hunter's Eye".into(),
+                0.10,
+                0.0,
+                60.0,
+                Instant::now(),
+            ));
         assert_eq!(miss_chance(&a, key, false), 0.0);
     }
 
@@ -406,10 +465,14 @@ mod tests {
                 assert!(!s.crit);
             }
         }
-        assert!((500..=900).contains(&misses), "about 35% miss: {misses} of {swings}");
+        assert!(
+            (500..=900).contains(&misses),
+            "about 35% miss: {misses} of {swings}"
+        );
         for _ in 0..200 {
-            assert!(!calc_swing_max(&a, "res://data/loot/items/iron_short_sword.tres", false).missed);
+            assert!(
+                !calc_swing_max(&a, "res://data/loot/items/iron_short_sword.tres", false).missed
+            );
         }
     }
 }
-

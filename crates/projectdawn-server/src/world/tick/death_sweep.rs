@@ -4,8 +4,21 @@
 
 use super::*;
 
-pub(super) async fn run_death_sweep(world: &mut WorldState, _q: &mut Intents, now: Instant, in_world_recipients_now: &[ClientId]) {
-    let WorldState { pool, server, connections, aoi, enemies, corpses, .. } = world;
+pub(super) async fn run_death_sweep(
+    world: &mut WorldState,
+    _q: &mut Intents,
+    now: Instant,
+    in_world_recipients_now: &[ClientId],
+) {
+    let WorldState {
+        pool,
+        server,
+        connections,
+        aoi,
+        enemies,
+        corpses,
+        ..
+    } = world;
     // 5a-bis. Corpse / resurrection Slice 0 — server-authoritative death
     //     detection. After all combat damage this tick, any in-world player
     //     whose hp reached zero (and hasn't already been processed) dies
@@ -75,18 +88,19 @@ pub(super) async fn run_death_sweep(world: &mut WorldState, _q: &mut Intents, no
         if let Some(c) = connections.get_mut(&client_id) {
             c.corpse_pending = false;
         }
-        let (owner_name, zone, pos, items, coins, lost_xp, after_death) = match connections.get(&client_id) {
-            Some(c) => (
-                c.name.clone(),
-                c.zone.clone().unwrap_or_default(),
-                c.pos,
-                c.inventory.corpse_stacks(),
-                c.coins,
-                c.death_lost_xp,
-                crate::world::progression::current_progress(c),
-            ),
-            None => continue,
-        };
+        let (owner_name, zone, pos, items, coins, lost_xp, after_death) =
+            match connections.get(&client_id) {
+                Some(c) => (
+                    c.name.clone(),
+                    c.zone.clone().unwrap_or_default(),
+                    c.pos,
+                    c.inventory.corpse_stacks(),
+                    c.coins,
+                    c.death_lost_xp,
+                    crate::world::progression::current_progress(c),
+                ),
+                None => continue,
+            };
         // Always leave a corpse, even an empty one (player died naked +
         // broke). A corpse is the Cleric's resurrection anchor (Slice 3), so
         // someone who dies mid-corpse-run with nothing on them STILL needs a
@@ -117,7 +131,10 @@ pub(super) async fn run_death_sweep(world: &mut WorldState, _q: &mut Intents, no
         //    join the queue the flush above emptied and ride the same
         //    transaction; a failed save takes them back off the queue
         //    with the retry.
-        let death_mark = connections.get(&client_id).map(|c| c.ledger_mark()).unwrap_or(0);
+        let death_mark = connections
+            .get(&client_id)
+            .map(|c| c.ledger_mark())
+            .unwrap_or(0);
         let events: Vec<db::ItemEventRow> = match connections.get_mut(&client_id) {
             Some(c) => {
                 let detail = Some(format!("corpse:{corpse_id}"));
@@ -207,6 +224,11 @@ pub(super) async fn run_death_sweep(world: &mut WorldState, _q: &mut Intents, no
         // can loot it (peers got only the render-only CorpseSpawn above).
         handlers::send_corpse_contents(&mut *server, client_id, &corpse);
         corpses.insert(corpse_id, corpse);
-        tracing::info!(char_id = cid, corpse_id, item_stacks = items.len(), "corpse created");
+        tracing::info!(
+            char_id = cid,
+            corpse_id,
+            item_stacks = items.len(),
+            "corpse created"
+        );
     }
 }

@@ -21,8 +21,13 @@ pub(super) enum InterruptOutcome {
     NotCasting,
     /// The cast cache was cleared; `mana_charged` is what the interrupt
     /// cost (spell batch step 3), already taken off the caster.
-    Interrupted { spell_name: String, mana_charged: f32 },
-    Survived { advanced_to: Option<i32> },
+    Interrupted {
+        spell_name: String,
+        mana_charged: f32,
+    },
+    Survived {
+        advanced_to: Option<i32>,
+    },
 }
 
 /// Track 19A — roll the channeling-based interrupt on a target who
@@ -33,7 +38,11 @@ pub(super) enum InterruptOutcome {
 /// interrupt charges the spell's mana in proportion to how far the bar
 /// had run (`cast_gate::interrupt_charge`), and a hit that did nothing
 /// charges nothing.
-pub(super) fn roll_cast_interrupt(conn: &mut PerConnection, now: Instant, damage_applied: i32) -> InterruptOutcome {
+pub(super) fn roll_cast_interrupt(
+    conn: &mut PerConnection,
+    now: Instant,
+    damage_applied: i32,
+) -> InterruptOutcome {
     if conn.cast_spell_name.is_empty() || conn.cast_set_at.is_none() {
         return InterruptOutcome::NotCasting;
     }
@@ -51,7 +60,15 @@ pub(super) fn roll_cast_interrupt(conn: &mut PerConnection, now: Instant, damage
         // fraction is elapsed over the spell's own duration.
         let elapsed_ms = conn.cast_set_at.map(|t| now.duration_since(t).as_millis());
         let mana_charged = spells::lookup(&spell_name)
-            .map(|s| crate::world::cast_gate::interrupt_charge(s.mana_cost, s.cast_time, elapsed_ms, damage_applied, conn.mp))
+            .map(|s| {
+                crate::world::cast_gate::interrupt_charge(
+                    s.mana_cost,
+                    s.cast_time,
+                    elapsed_ms,
+                    damage_applied,
+                    conn.mp,
+                )
+            })
             .unwrap_or(0.0);
         if mana_charged > 0.0 {
             conn.mp = (conn.mp - mana_charged).max(0.0);
@@ -63,7 +80,10 @@ pub(super) fn roll_cast_interrupt(conn: &mut PerConnection, now: Instant, damage
         // Stamped so a CastSpell for this bar that is already in the tick's
         // queue is refused too (`cast_gate::beaten_by_interrupt`).
         conn.cast_interrupted_at = Some(now);
-        InterruptOutcome::Interrupted { spell_name, mana_charged }
+        InterruptOutcome::Interrupted {
+            spell_name,
+            mana_charged,
+        }
     } else {
         let advanced_to = skills::try_advance(conn, skills::Skill::Casting, "channeling");
         InterruptOutcome::Survived { advanced_to }
@@ -157,8 +177,11 @@ pub(super) fn cast_target_refusal(
     let in_reach = |pos: Vec3f| pos.distance_to(caster_pos) <= reach;
     let unreachable = || Err(TARGET_UNREACHABLE.to_string());
     let no_effect = || Err(NO_EFFECT_YET.to_string());
-    let player_in_reach =
-        |cid: ClientId| connections.get(&cid).filter(|c| c.in_world && in_reach(c.pos));
+    let player_in_reach = |cid: ClientId| {
+        connections
+            .get(&cid)
+            .filter(|c| c.in_world && in_reach(c.pos))
+    };
     let entity_in_reach =
         |id: EntityId| enemies.get(&id).filter(|e| e.is_alive() && in_reach(e.pos));
     let attackable = |other: &PerConnection| {
@@ -194,8 +217,8 @@ pub(super) fn cast_target_refusal(
             // and never the caster's own.
             if let Some(owner_id) = e.owner {
                 let owner_cid = owner_id as ClientId;
-                let allowed = owner_cid != caster_cid
-                    && connections.get(&owner_cid).is_some_and(attackable);
+                let allowed =
+                    owner_cid != caster_cid && connections.get(&owner_cid).is_some_and(attackable);
                 if !allowed {
                     return Err("You cannot attack that pet.".to_string());
                 }
@@ -292,8 +315,7 @@ pub(super) fn cast_target_refusal(
         }
         "PET_SUMMON" => {
             let known = !spell.pet_type.is_empty()
-                && pet_templates::scaled(&spell.pet_type, caster.level.max(1) as u32, 0)
-                    .is_some();
+                && pet_templates::scaled(&spell.pet_type, caster.level.max(1) as u32, 0).is_some();
             if known {
                 Ok(ResolvedTarget::Nothing)
             } else {
@@ -321,7 +343,9 @@ pub(super) fn cast_target_refusal(
                 return Err("That target is no longer here.".to_string());
             }
             if crate::world::safe_areas::containing(t.pos).is_none() {
-                return Err("You can only bind another in a safe place, such as the town.".to_string());
+                return Err(
+                    "You can only bind another in a safe place, such as the town.".to_string(),
+                );
             }
             Ok(ResolvedTarget::Player(target_cid))
         }
@@ -392,7 +416,15 @@ pub(super) fn cast_resolution_lost(
         what,
         "cast target resolved by the pre-flight was gone at the arm; refunded"
     );
-    refund_spell_cost(server, connections, recipients, caster_cid, caster_id, mana_cost, hp_cost);
+    refund_spell_cost(
+        server,
+        connections,
+        recipients,
+        caster_cid,
+        caster_id,
+        mana_cost,
+        hp_cost,
+    );
     handlers::send_refusal(server, caster_cid, TARGET_UNREACHABLE);
 }
 
@@ -415,7 +447,10 @@ pub(super) fn tell_interrupt_charge(
     handlers::send_system_line(
         server,
         caster_cid,
-        &format!("Your concentration breaks: {} mana lost.", mana_charged.round() as i32),
+        &format!(
+            "Your concentration breaks: {} mana lost.",
+            mana_charged.round() as i32
+        ),
     );
 }
 
@@ -426,8 +461,12 @@ pub(super) fn stop_song(
     connections: &mut HashMap<ClientId, PerConnection>,
     cid: ClientId,
 ) {
-    let Some(c) = connections.get_mut(&cid) else { return };
-    let Some(song) = c.active_song.take() else { return };
+    let Some(c) = connections.get_mut(&cid) else {
+        return;
+    };
+    let Some(song) = c.active_song.take() else {
+        return;
+    };
     c.song_next_pulse_at = None;
     let singer = c.char_id;
     handlers::send_system_line(server, cid, &format!("You stop singing {song}."));
@@ -452,30 +491,57 @@ pub(super) fn song_pulse(
 ) {
     let linger = crate::world::SONG_LINGER_SECS;
     let (effects, target, singer_pos) = {
-        let Some(c) = connections.get(&cid) else { return };
-        (crate::world::songs::pulse_effects(spell, c.level, &c.class), c.current_target, c.pos)
+        let Some(c) = connections.get(&cid) else {
+            return;
+        };
+        (
+            crate::world::songs::pulse_effects(spell, c.level, &c.class),
+            c.current_target,
+            c.pos,
+        )
     };
     let name = spell.name.clone();
     let mut changed = false;
     if let Some(c) = connections.get_mut(&cid) {
         if effects.hot_hps > 0.0 {
-            apply_buff(c, ActiveBuff::new_hot(name.clone(), effects.hot_hps, linger, now));
+            apply_buff(
+                c,
+                ActiveBuff::new_hot(name.clone(), effects.hot_hps, linger, now),
+            );
             changed = true;
         }
         if effects.speed_mult > 1.0 {
-            apply_buff(c, ActiveBuff::new_speed(name.clone(), effects.speed_mult, linger, now));
+            apply_buff(
+                c,
+                ActiveBuff::new_speed(name.clone(), effects.speed_mult, linger, now),
+            );
             changed = true;
         }
         if effects.mp_regen_hps > 0.0 {
-            apply_mp_regen_exclusive(c, ActiveBuff::new_mp_regen(name.clone(), effects.mp_regen_hps, linger, now));
+            apply_mp_regen_exclusive(
+                c,
+                ActiveBuff::new_mp_regen(name.clone(), effects.mp_regen_hps, linger, now),
+            );
             changed = true;
         }
         if effects.haste > 0.0 {
-            apply_buff(c, ActiveBuff::new_haste(name.clone(), effects.haste, linger, now));
+            apply_buff(
+                c,
+                ActiveBuff::new_haste(name.clone(), effects.haste, linger, now),
+            );
             changed = true;
         }
         if effects.accuracy > 0.0 || effects.crit > 0.0 {
-            apply_buff(c, ActiveBuff::new_accuracy_crit(name.clone(), effects.accuracy, effects.crit, linger, now));
+            apply_buff(
+                c,
+                ActiveBuff::new_accuracy_crit(
+                    name.clone(),
+                    effects.accuracy,
+                    effects.crit,
+                    linger,
+                    now,
+                ),
+            );
             changed = true;
         }
     }
@@ -575,8 +641,11 @@ mod tests {
     mod cast_pre_flight {
         use super::super::{cast_target_refusal, ResolvedTarget, Vec3f, TARGET_UNREACHABLE};
         use crate::world::{
-            connection::PerConnection, corpses::Corpse, entity::{mint_pet_id, Entity},
-            groups::GroupManager, pet_templates, spells,
+            connection::PerConnection,
+            corpses::Corpse,
+            entity::{mint_pet_id, Entity},
+            groups::GroupManager,
+            pet_templates, spells,
         };
         use protocol::world::{Coins, LOOT_BAG_ID_BASE};
         use renet::ClientId;
@@ -596,10 +665,19 @@ mod tests {
                 level: 20,
                 xp: 0,
                 xp_to_next: 100,
-                strength: 10, dexterity: 10, agility: 10, intelligence: 10,
-                wisdom: 10, charisma: 10, constitution: 10,
-                max_hp: 100.0, max_mp: 100.0, max_stamina: 100.0,
-                hp: 100.0, mp: 100.0, stamina: 100.0,
+                strength: 10,
+                dexterity: 10,
+                agility: 10,
+                intelligence: 10,
+                wisdom: 10,
+                charisma: 10,
+                constitution: 10,
+                max_hp: 100.0,
+                max_mp: 100.0,
+                max_stamina: 100.0,
+                hp: 100.0,
+                mp: 100.0,
+                stamina: 100.0,
                 coins: Coins::ZERO,
                 bank_coins: Coins::ZERO,
                 zone: None,
@@ -655,44 +733,102 @@ mod tests {
             let mut corpses = HashMap::new();
             corpses.insert(
                 corpse_id,
-                Corpse::new(corpse_id, friend as i64, "Char2".into(), String::new(), at(8.0),
-                    Vec::new(), Coins::ZERO, 0, false, Instant::now()),
+                Corpse::new(
+                    corpse_id,
+                    friend as i64,
+                    "Char2".into(),
+                    String::new(),
+                    at(8.0),
+                    Vec::new(),
+                    Coins::ZERO,
+                    0,
+                    false,
+                    Instant::now(),
+                ),
             );
             let groups = GroupManager::new();
             let resolve = |name: &str, target: Option<u64>| {
                 let spell = spells::lookup(name).unwrap_or_else(|| panic!("{name} in spells.toml"));
-                cast_target_refusal(spell, target, caster, caster, at(0.0),
-                    &connections, &enemies, &corpses, &groups)
+                cast_target_refusal(
+                    spell,
+                    target,
+                    caster,
+                    caster,
+                    at(0.0),
+                    &connections,
+                    &enemies,
+                    &corpses,
+                    &groups,
+                )
             };
             let refused = |line: &str| Err(line.to_string());
 
             // ENEMY: a mob, a rival's pet (its owner attackable), a flagged
             // player; never one's own pet, nothing out of reach, nothing
             // untargeted.
-            assert_eq!(resolve("Fireball", Some(mob_id)), Ok(ResolvedTarget::Mob(mob_id)));
-            assert_eq!(resolve("Fireball", Some(rival_pet_id)), Ok(ResolvedTarget::Pet(rival_pet_id)));
-            assert_eq!(resolve("Fireball", Some(rival)), Ok(ResolvedTarget::Player(rival)));
-            assert_eq!(resolve("Fireball", Some(own_pet_id)), refused("You cannot attack that pet."));
-            assert_eq!(resolve("Fireball", Some(far_mob_id)), refused(TARGET_UNREACHABLE));
-            assert_eq!(resolve("Fireball", None), refused("You need a target for that spell."));
+            assert_eq!(
+                resolve("Fireball", Some(mob_id)),
+                Ok(ResolvedTarget::Mob(mob_id))
+            );
+            assert_eq!(
+                resolve("Fireball", Some(rival_pet_id)),
+                Ok(ResolvedTarget::Pet(rival_pet_id))
+            );
+            assert_eq!(
+                resolve("Fireball", Some(rival)),
+                Ok(ResolvedTarget::Player(rival))
+            );
+            assert_eq!(
+                resolve("Fireball", Some(own_pet_id)),
+                refused("You cannot attack that pet.")
+            );
+            assert_eq!(
+                resolve("Fireball", Some(far_mob_id)),
+                refused(TARGET_UNREACHABLE)
+            );
+            assert_eq!(
+                resolve("Fireball", None),
+                refused("You need a target for that spell.")
+            );
             // ALLY: nothing targeted (or oneself) is a self-heal; a player; a pet.
             assert_eq!(resolve("Heal", None), Ok(ResolvedTarget::Player(caster)));
-            assert_eq!(resolve("Heal", Some(caster)), Ok(ResolvedTarget::Player(caster)));
-            assert_eq!(resolve("Heal", Some(friend)), Ok(ResolvedTarget::Player(friend)));
-            assert_eq!(resolve("Heal", Some(own_pet_id)), Ok(ResolvedTarget::Pet(own_pet_id)));
+            assert_eq!(
+                resolve("Heal", Some(caster)),
+                Ok(ResolvedTarget::Player(caster))
+            );
+            assert_eq!(
+                resolve("Heal", Some(friend)),
+                Ok(ResolvedTarget::Player(friend))
+            );
+            assert_eq!(
+                resolve("Heal", Some(own_pet_id)),
+                Ok(ResolvedTarget::Pet(own_pet_id))
+            );
             // PET_HEAL: the caster's own pet, whatever the client targeted.
-            assert_eq!(resolve("Warder's Mend", Some(mob_id)), Ok(ResolvedTarget::Pet(own_pet_id)));
+            assert_eq!(
+                resolve("Warder's Mend", Some(mob_id)),
+                Ok(ResolvedTarget::Pet(own_pet_id))
+            );
             // PET_CHARM: a mob, never a pet (a pet id is outside the enemy
             // partition, so the partition check answers before the lookup).
-            assert_eq!(resolve("Charm", Some(mob_id)), Ok(ResolvedTarget::Mob(mob_id)));
-            assert_eq!(resolve("Charm", Some(rival_pet_id)), refused("You cannot charm that."));
+            assert_eq!(
+                resolve("Charm", Some(mob_id)),
+                Ok(ResolvedTarget::Mob(mob_id))
+            );
+            assert_eq!(
+                resolve("Charm", Some(rival_pet_id)),
+                refused("You cannot charm that.")
+            );
             // CORPSE: the corpse and its owner, who is in the world.
             assert_eq!(
                 resolve("Resurrection (Minor)", Some(corpse_id)),
                 Ok(ResolvedTarget::Corpse(corpse_id, friend))
             );
             // BIND: oneself; a group member only (none here).
-            assert_eq!(resolve("Bind Affinity", None), Ok(ResolvedTarget::Player(caster)));
+            assert_eq!(
+                resolve("Bind Affinity", None),
+                Ok(ResolvedTarget::Player(caster))
+            );
             assert_eq!(
                 resolve("Bind Affinity", Some(friend)),
                 refused("You can only bind yourself or a group member.")

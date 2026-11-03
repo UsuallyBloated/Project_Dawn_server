@@ -40,7 +40,13 @@ pub(super) fn correct_client_slots(
     for (loc, slot) in targets {
         // Empty is a real answer and the one the client most needs: it is
         // usually the phantom item that started the divergence.
-        handlers::send_slot_delta(server, cid, loc.to_string(), slot, conn.inventory.peek_at(loc, slot));
+        handlers::send_slot_delta(
+            server,
+            cid,
+            loc.to_string(),
+            slot,
+            conn.inventory.peek_at(loc, slot),
+        );
         // Full-bags-move: when the corrected slot is a base slot holding a
         // bag, a different-bag correction makes the client re-init that
         // bag's contents vec and wait for inner rows — so re-fan the
@@ -66,8 +72,15 @@ pub(super) fn correct_client_slots(
 }
 
 pub(super) fn apply_moves(world: &mut WorldState, q: &mut Intents, _now: Instant) {
-    let WorldState { server, connections, trade_manager, .. } = world;
-    let Intents { move_item_intents, .. } = q;
+    let WorldState {
+        server,
+        connections,
+        trade_manager,
+        ..
+    } = world;
+    let Intents {
+        move_item_intents, ..
+    } = q;
     // 4hd. Track 13.2 / 14.3 — apply move-item intents. Routes
     //      through `move_across`, which handles every combination
     //      of "base" and "bag_<i>" locations (equip slots stay
@@ -80,9 +93,19 @@ pub(super) fn apply_moves(world: &mut WorldState, q: &mut Intents, _now: Instant
             let owner_cid = intent.owner as ClientId;
             // PD_W0028 escrow: an offered slot moves for no one — not
             // out of (src) and not merged/swapped into (dst).
-            if trade_locked(&mut *server, &trade_manager, owner_cid, &intent.src_location, intent.src_slot)
-                || trade_locked(&mut *server, &trade_manager, owner_cid, &intent.dst_location, intent.dst_slot)
-            {
+            if trade_locked(
+                &mut *server,
+                &trade_manager,
+                owner_cid,
+                &intent.src_location,
+                intent.src_slot,
+            ) || trade_locked(
+                &mut *server,
+                &trade_manager,
+                owner_cid,
+                &intent.dst_location,
+                intent.dst_slot,
+            ) {
                 continue;
             }
             let Some(conn) = connections.get_mut(&owner_cid) else {
@@ -165,8 +188,16 @@ pub(super) fn apply_moves(world: &mut WorldState, q: &mut Intents, _now: Instant
 }
 
 pub(super) fn apply_splits(world: &mut WorldState, q: &mut Intents, _now: Instant) {
-    let WorldState { server, connections, trade_manager, .. } = world;
-    let Intents { split_stack_intents, .. } = q;
+    let WorldState {
+        server,
+        connections,
+        trade_manager,
+        ..
+    } = world;
+    let Intents {
+        split_stack_intents,
+        ..
+    } = q;
     // 4he. Track 13.2.b — apply split-stack intents. Splits part
     //      of one base stack into another slot (empty dst or
     //      merge same-path dst). Bag/equip locations defer.
@@ -189,9 +220,19 @@ pub(super) fn apply_splits(world: &mut WorldState, q: &mut Intents, _now: Instan
             let owner_cid = intent.owner as ClientId;
             // PD_W0028 escrow: an offered slot neither splits nor
             // receives a split.
-            if trade_locked(&mut *server, &trade_manager, owner_cid, "base", intent.src_slot)
-                || trade_locked(&mut *server, &trade_manager, owner_cid, "base", intent.dst_slot)
-            {
+            if trade_locked(
+                &mut *server,
+                &trade_manager,
+                owner_cid,
+                "base",
+                intent.src_slot,
+            ) || trade_locked(
+                &mut *server,
+                &trade_manager,
+                owner_cid,
+                "base",
+                intent.dst_slot,
+            ) {
                 continue;
             }
             let Some(conn) = connections.get_mut(&owner_cid) else {
@@ -210,7 +251,11 @@ pub(super) fn apply_splits(world: &mut WorldState, q: &mut Intents, _now: Instan
                         error = %e,
                         "SplitStack rejected"
                     );
-                    handlers::send_refusal(&mut *server, owner_cid, "That stack won't split like that.");
+                    handlers::send_refusal(
+                        &mut *server,
+                        owner_cid,
+                        "That stack won't split like that.",
+                    );
                     continue;
                 }
             };
@@ -228,16 +273,43 @@ pub(super) fn apply_splits(world: &mut WorldState, q: &mut Intents, _now: Instan
                 })
                 .collect();
             for (slot, payload) in deltas {
-                handlers::send_slot_delta(&mut *server, owner_cid, "base".to_string(), slot, payload);
+                handlers::send_slot_delta(
+                    &mut *server,
+                    owner_cid,
+                    "base".to_string(),
+                    slot,
+                    payload,
+                );
             }
-            tracing::debug!(char_id = intent.owner, src, dst, count = intent.count, "SplitStack applied");
+            tracing::debug!(
+                char_id = intent.owner,
+                src,
+                dst,
+                count = intent.count,
+                "SplitStack applied"
+            );
         }
     }
 }
 
-pub(super) async fn apply_drops(world: &mut WorldState, q: &mut Intents, now: Instant, in_world_recipients_now: &[ClientId]) {
-    let WorldState { pool, server, connections, aoi, loot_bags, trade_manager, .. } = world;
-    let Intents { drop_item_intents, .. } = q;
+pub(super) async fn apply_drops(
+    world: &mut WorldState,
+    q: &mut Intents,
+    now: Instant,
+    in_world_recipients_now: &[ClientId],
+) {
+    let WorldState {
+        pool,
+        server,
+        connections,
+        aoi,
+        loot_bags,
+        trade_manager,
+        ..
+    } = world;
+    let Intents {
+        drop_item_intents, ..
+    } = q;
     // 4hf. Track 13.2.b — apply drop-item intents. Removes
     //      `count` from `(base, slot)` (0 = whole stack) and
     //      spawns a server-owned LootBag at the player's pos
@@ -274,7 +346,13 @@ pub(super) async fn apply_drops(world: &mut WorldState, q: &mut Intents, now: In
         for intent in drop_item_intents.drain(..) {
             let owner_cid = intent.owner as ClientId;
             // PD_W0028 escrow: an offered slot cannot be dropped.
-            if trade_locked(&mut *server, &trade_manager, owner_cid, &intent.location, intent.slot) {
+            if trade_locked(
+                &mut *server,
+                &trade_manager,
+                owner_cid,
+                &intent.location,
+                intent.slot,
+            ) {
                 continue;
             }
             let Some(conn) = connections.get_mut(&owner_cid) else {
@@ -290,9 +368,13 @@ pub(super) async fn apply_drops(world: &mut WorldState, q: &mut Intents, now: In
             }
             // Snapshot once per dropper, before their first removal this
             // tick, so a failed save can restore exactly what was there.
-            before
-                .entry(owner_cid)
-                .or_insert_with(|| (conn.inventory.clone(), conn.inventory_dirty, conn.ledger_mark()));
+            before.entry(owner_cid).or_insert_with(|| {
+                (
+                    conn.inventory.clone(),
+                    conn.inventory_dirty,
+                    conn.ledger_mark(),
+                )
+            });
             // Bag-aware removal (base or bag_<i>); mirrors the
             // DestroyItem apply path. Rejects a non-empty
             // bag-typed slot (the bag must be emptied first).
@@ -364,7 +446,13 @@ pub(super) async fn apply_drops(world: &mut WorldState, q: &mut Intents, now: In
             let post = connections
                 .get(&drop.owner_cid)
                 .and_then(|c| c.inventory.peek_at(&drop.location, drop.slot));
-            handlers::send_slot_delta(&mut *server, drop.owner_cid, drop.location.clone(), drop.slot, post);
+            handlers::send_slot_delta(
+                &mut *server,
+                drop.owner_cid,
+                drop.location.clone(),
+                drop.slot,
+                post,
+            );
             // Spawn a single-stack LootBag at the player's feet
             // and fan via the existing AOI-filtered loot pipeline.
             // Dropped items are public (no kill-owner) — anyone in
@@ -391,11 +479,7 @@ pub(super) async fn apply_drops(world: &mut WorldState, q: &mut Intents, now: In
                 .filter(|id| visible.contains(id))
                 .collect();
             if !bag_recipients.is_empty() {
-                handlers::fan_out_loot_bag_spawn(
-                    &mut *server,
-                    &bag_recipients,
-                    &bag,
-                );
+                handlers::fan_out_loot_bag_spawn(&mut *server, &bag_recipients, &bag);
             }
             loot_bags.insert(bag_id, bag);
             tracing::info!(
@@ -410,9 +494,21 @@ pub(super) async fn apply_drops(world: &mut WorldState, q: &mut Intents, now: In
     }
 }
 
-pub(super) fn apply_equips(world: &mut WorldState, q: &mut Intents, _now: Instant, in_world_recipients_now: &[ClientId]) {
-    let WorldState { server, connections, trade_manager, .. } = world;
-    let Intents { equip_item_intents, .. } = q;
+pub(super) fn apply_equips(
+    world: &mut WorldState,
+    q: &mut Intents,
+    _now: Instant,
+    in_world_recipients_now: &[ClientId],
+) {
+    let WorldState {
+        server,
+        connections,
+        trade_manager,
+        ..
+    } = world;
+    let Intents {
+        equip_item_intents, ..
+    } = q;
     // 4hg. Track 13.3 / 14.1 / 14.2 / 15.1 — apply equip-item
     //      intents. Validates src location (base or bag_<i>) +
     //      slot in range + equip_slot in range; item type vs
@@ -426,7 +522,13 @@ pub(super) fn apply_equips(world: &mut WorldState, q: &mut Intents, _now: Instan
         for intent in equip_item_intents.drain(..) {
             let owner_cid = intent.owner as ClientId;
             // PD_W0028 escrow: an offered slot cannot be equipped from.
-            if trade_locked(&mut *server, &trade_manager, owner_cid, &intent.src_location, intent.src_slot) {
+            if trade_locked(
+                &mut *server,
+                &trade_manager,
+                owner_cid,
+                &intent.src_location,
+                intent.src_slot,
+            ) {
                 continue;
             }
             let Some(conn) = connections.get_mut(&owner_cid) else {
@@ -436,16 +538,23 @@ pub(super) fn apply_equips(world: &mut WorldState, q: &mut Intents, _now: Instan
             // the class never trains, or a weapon in the off hand before
             // it can dual wield, is refused with the line the client
             // already printed; only a modified client reaches this.
-            if let Some((path, _)) = conn.inventory.peek_at(&intent.src_location, intent.src_slot) {
+            if let Some((path, _)) = conn
+                .inventory
+                .peek_at(&intent.src_location, intent.src_slot)
+            {
                 // The other weapon hand, for the two-hander rule.
                 let other_hand = match intent.equip_slot {
                     0 => conn.equipped_weapon_path(true),
                     1 => conn.equipped_weapon_path(false),
                     _ => String::new(),
                 };
-                if let Some(line) =
-                    skills::equip_refusal(&conn.class, conn.level, &path, intent.equip_slot, &other_hand)
-                {
+                if let Some(line) = skills::equip_refusal(
+                    &conn.class,
+                    conn.level,
+                    &path,
+                    intent.equip_slot,
+                    &other_hand,
+                ) {
                     tracing::info!(
                         char_id = intent.owner,
                         src_loc = %intent.src_location,
@@ -459,10 +568,11 @@ pub(super) fn apply_equips(world: &mut WorldState, q: &mut Intents, _now: Instan
                     continue;
                 }
             }
-            let touched = match conn
-                .inventory
-                .equip_from_location(&intent.src_location, intent.src_slot, intent.equip_slot)
-            {
+            let touched = match conn.inventory.equip_from_location(
+                &intent.src_location,
+                intent.src_slot,
+                intent.equip_slot,
+            ) {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::info!(
@@ -504,11 +614,7 @@ pub(super) fn apply_equips(world: &mut WorldState, q: &mut Intents, _now: Instan
                 handlers::send_slot_delta(&mut *server, owner_cid, loc, slot, payload);
             }
             if recompute.any_resource_max_changed() {
-                handlers::fan_out_resources(
-                    &mut *server,
-                    &in_world_recipients_now,
-                    conn,
-                );
+                handlers::fan_out_resources(&mut *server, &in_world_recipients_now, conn);
             }
             tracing::info!(
                 char_id = intent.owner,
@@ -524,9 +630,22 @@ pub(super) fn apply_equips(world: &mut WorldState, q: &mut Intents, _now: Instan
     }
 }
 
-pub(super) fn apply_unequips(world: &mut WorldState, q: &mut Intents, _now: Instant, in_world_recipients_now: &[ClientId]) {
-    let WorldState { server, connections, trade_manager, .. } = world;
-    let Intents { unequip_item_intents, .. } = q;
+pub(super) fn apply_unequips(
+    world: &mut WorldState,
+    q: &mut Intents,
+    _now: Instant,
+    in_world_recipients_now: &[ClientId],
+) {
+    let WorldState {
+        server,
+        connections,
+        trade_manager,
+        ..
+    } = world;
+    let Intents {
+        unequip_item_intents,
+        ..
+    } = q;
     // 4hh. Track 13.3 / 14.2 — apply unequip-item intents.
     //      Mirror of 4hg in the other direction. Track 14.2
     //      runs the same stat recompute + resource fan after
@@ -550,7 +669,13 @@ pub(super) fn apply_unequips(world: &mut WorldState, q: &mut Intents, _now: Inst
             // PD_W0028 escrow: an unequip cannot land in (or swap with)
             // an offered slot.
             if intent.dst_location == "base"
-                && trade_locked(&mut *server, &trade_manager, owner_cid, "base", intent.dst_slot)
+                && trade_locked(
+                    &mut *server,
+                    &trade_manager,
+                    owner_cid,
+                    "base",
+                    intent.dst_slot,
+                )
             {
                 continue;
             }
@@ -616,11 +741,7 @@ pub(super) fn apply_unequips(world: &mut WorldState, q: &mut Intents, _now: Inst
                 handlers::send_slot_delta(&mut *server, owner_cid, loc, slot, payload);
             }
             if recompute.any_resource_max_changed() {
-                handlers::fan_out_resources(
-                    &mut *server,
-                    &in_world_recipients_now,
-                    conn,
-                );
+                handlers::fan_out_resources(&mut *server, &in_world_recipients_now, conn);
             }
             tracing::info!(
                 char_id = intent.owner,
@@ -636,8 +757,16 @@ pub(super) fn apply_unequips(world: &mut WorldState, q: &mut Intents, _now: Inst
 }
 
 pub(super) fn apply_destroys(world: &mut WorldState, q: &mut Intents, _now: Instant) {
-    let WorldState { server, connections, trade_manager, .. } = world;
-    let Intents { destroy_item_intents, .. } = q;
+    let WorldState {
+        server,
+        connections,
+        trade_manager,
+        ..
+    } = world;
+    let Intents {
+        destroy_item_intents,
+        ..
+    } = q;
     // 4hh-bis. Track 15.1 — apply destroy-item intents. Decrements
     //      `count` from `(location, slot)` (0 = whole stack) and
     //      fans a single `InventoryDelta` for the touched slot.
@@ -648,29 +777,36 @@ pub(super) fn apply_destroys(world: &mut WorldState, q: &mut Intents, _now: Inst
         for intent in destroy_item_intents.drain(..) {
             let owner_cid = intent.owner as ClientId;
             // PD_W0028 escrow: an offered slot cannot be destroyed.
-            if trade_locked(&mut *server, &trade_manager, owner_cid, &intent.location, intent.slot) {
+            if trade_locked(
+                &mut *server,
+                &trade_manager,
+                owner_cid,
+                &intent.location,
+                intent.slot,
+            ) {
                 continue;
             }
             let Some(conn) = connections.get_mut(&owner_cid) else {
                 continue;
             };
-            let destroyed = match conn
-                .inventory
-                .destroy_at(&intent.location, intent.slot, intent.count)
-            {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::debug!(
-                        char_id = intent.owner,
-                        loc = %intent.location,
-                        slot = intent.slot,
-                        error = %e,
-                        "DestroyItem rejected"
-                    );
-                    handlers::send_refusal(&mut *server, owner_cid, "You can't destroy that.");
-                    continue;
-                }
-            };
+            let destroyed =
+                match conn
+                    .inventory
+                    .destroy_at(&intent.location, intent.slot, intent.count)
+                {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::debug!(
+                            char_id = intent.owner,
+                            loc = %intent.location,
+                            slot = intent.slot,
+                            error = %e,
+                            "DestroyItem rejected"
+                        );
+                        handlers::send_refusal(&mut *server, owner_cid, "You can't destroy that.");
+                        continue;
+                    }
+                };
             conn.inventory_dirty = true;
             let (item_path, count) = destroyed;
             conn.ledger(ledger::item_event(
@@ -681,7 +817,13 @@ pub(super) fn apply_destroys(world: &mut WorldState, q: &mut Intents, _now: Inst
                 None,
             ));
             let payload = conn.inventory.peek_at(&intent.location, intent.slot);
-            handlers::send_slot_delta(&mut *server, owner_cid, intent.location.clone(), intent.slot, payload);
+            handlers::send_slot_delta(
+                &mut *server,
+                owner_cid,
+                intent.location.clone(),
+                intent.slot,
+                payload,
+            );
             tracing::info!(
                 char_id = intent.owner,
                 loc = %intent.location,
@@ -694,9 +836,23 @@ pub(super) fn apply_destroys(world: &mut WorldState, q: &mut Intents, _now: Inst
     }
 }
 
-pub(super) fn apply_consumables(world: &mut WorldState, q: &mut Intents, _now: Instant, in_world_recipients_now: &[ClientId]) {
-    let WorldState { server, connections, trade_manager, .. } = world;
-    let Intents { use_consumable_intents, eat_emotes, .. } = q;
+pub(super) fn apply_consumables(
+    world: &mut WorldState,
+    q: &mut Intents,
+    _now: Instant,
+    in_world_recipients_now: &[ClientId],
+) {
+    let WorldState {
+        server,
+        connections,
+        trade_manager,
+        ..
+    } = world;
+    let Intents {
+        use_consumable_intents,
+        eat_emotes,
+        ..
+    } = q;
     // 4hh-tris. Track 15.2 — apply use-consumable intents. Looks
     //      up the item, validates it's consumable, decrements one
     //      from the stack, fans `InventoryDelta`, applies the
@@ -707,7 +863,13 @@ pub(super) fn apply_consumables(world: &mut WorldState, q: &mut Intents, _now: I
         for intent in use_consumable_intents.drain(..) {
             let owner_cid = intent.owner as ClientId;
             // PD_W0028 escrow: an offered slot cannot be eaten from.
-            if trade_locked(&mut *server, &trade_manager, owner_cid, &intent.location, intent.slot) {
+            if trade_locked(
+                &mut *server,
+                &trade_manager,
+                owner_cid,
+                &intent.location,
+                intent.slot,
+            ) {
                 continue;
             }
             let Some(conn) = connections.get_mut(&owner_cid) else {
@@ -781,13 +943,21 @@ pub(super) fn apply_consumables(world: &mut WorldState, q: &mut Intents, _now: I
                         error = %e,
                         "UseConsumable rejected — decrement failed"
                     );
-                    handlers::send_refusal(&mut *server, owner_cid, "You can't use that right now.");
+                    handlers::send_refusal(
+                        &mut *server,
+                        owner_cid,
+                        "You can't use that right now.",
+                    );
                     continue;
                 }
             };
             conn.inventory_dirty = true;
             conn.ledger(ledger::item_event(
-                if is_food || is_drink { ItemAction::Eat } else { ItemAction::Use },
+                if is_food || is_drink {
+                    ItemAction::Eat
+                } else {
+                    ItemAction::Use
+                },
                 &item.path,
                 1,
                 -1,
@@ -795,7 +965,13 @@ pub(super) fn apply_consumables(world: &mut WorldState, q: &mut Intents, _now: I
             ));
             // Inventory Delta for the touched slot.
             let payload = conn.inventory.peek_at(&intent.location, intent.slot);
-            handlers::send_slot_delta(&mut *server, owner_cid, intent.location.clone(), intent.slot, payload);
+            handlers::send_slot_delta(
+                &mut *server,
+                owner_cid,
+                intent.location.clone(),
+                intent.slot,
+                payload,
+            );
             // Apply the effect.
             if heal_amt > 0.0 {
                 let before = conn.hp;
@@ -827,14 +1003,36 @@ pub(super) fn apply_consumables(world: &mut WorldState, q: &mut Intents, _now: I
             // lasts half as long if you click it"); there is no buff any
             // more, a fed character simply regenerates.
             if is_food && food_dur > 0.0 {
-                hunger::feed(conn, hunger::Need::Food, food_dur * hunger::HAND_EAT_FRACTION);
-                handlers::send_system_line(&mut *server, owner_cid, &format!("You eat a {}.", item.name));
-                eat_emotes.push((owner_cid, hunger::eat_emote(&conn.name, &item.name, hunger::Need::Food)));
+                hunger::feed(
+                    conn,
+                    hunger::Need::Food,
+                    food_dur * hunger::HAND_EAT_FRACTION,
+                );
+                handlers::send_system_line(
+                    &mut *server,
+                    owner_cid,
+                    &format!("You eat a {}.", item.name),
+                );
+                eat_emotes.push((
+                    owner_cid,
+                    hunger::eat_emote(&conn.name, &item.name, hunger::Need::Food),
+                ));
             }
             if is_drink && food_dur > 0.0 {
-                hunger::feed(conn, hunger::Need::Drink, food_dur * hunger::HAND_EAT_FRACTION);
-                handlers::send_system_line(&mut *server, owner_cid, &format!("You drink a {}.", item.name));
-                eat_emotes.push((owner_cid, hunger::eat_emote(&conn.name, &item.name, hunger::Need::Drink)));
+                hunger::feed(
+                    conn,
+                    hunger::Need::Drink,
+                    food_dur * hunger::HAND_EAT_FRACTION,
+                );
+                handlers::send_system_line(
+                    &mut *server,
+                    owner_cid,
+                    &format!("You drink a {}.", item.name),
+                );
+                eat_emotes.push((
+                    owner_cid,
+                    hunger::eat_emote(&conn.name, &item.name, hunger::Need::Drink),
+                ));
             }
             tracing::info!(
                 char_id = intent.owner,
@@ -852,8 +1050,14 @@ pub(super) fn apply_consumables(world: &mut WorldState, q: &mut Intents, _now: I
 }
 
 pub(super) fn apply_gm_gives(world: &mut WorldState, q: &mut Intents, _now: Instant) {
-    let WorldState { server, connections, .. } = world;
-    let Intents { gm_give_intents, .. } = q;
+    let WorldState {
+        server,
+        connections,
+        ..
+    } = world;
+    let Intents {
+        gm_give_intents, ..
+    } = q;
     // 4hh-quad. Track 15.2 follow-up — apply GM /give intents.
     //      Server-side spawn of a stack into the player's
     //      inventory by item display name. Looks up via
@@ -876,19 +1080,19 @@ pub(super) fn apply_gm_gives(world: &mut WorldState, q: &mut Intents, _now: Inst
                 continue;
             };
             let item_path = item.path.clone();
-            let (touched, leftover) =
-                match conn.inventory.add_item_locating(&item_path, intent.qty) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::info!(
-                            char_id = intent.owner,
-                            item_name = %intent.item_name,
-                            error = %e,
-                            "GmGive rejected — add_item_locating error"
-                        );
-                        continue;
-                    }
-                };
+            let (touched, leftover) = match conn.inventory.add_item_locating(&item_path, intent.qty)
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::info!(
+                        char_id = intent.owner,
+                        item_name = %intent.item_name,
+                        error = %e,
+                        "GmGive rejected — add_item_locating error"
+                    );
+                    continue;
+                }
+            };
             let placed = intent.qty - leftover;
             if placed == 0 {
                 tracing::info!(

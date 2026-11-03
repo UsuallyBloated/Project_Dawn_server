@@ -207,9 +207,19 @@ mod tests {
 
     #[test]
     fn momentum_slows_the_climb_away_from_centre_and_never_the_return() {
-        assert_eq!(apply(0.0, 25.0), 25.0, "from the centre a delta lands whole");
-        assert!((apply(1000.0, 100.0) - 1050.0).abs() < 1e-4, "halfway out, half lands");
-        assert!((apply(1000.0, -100.0) - 900.0).abs() < 1e-4, "coming back lands whole");
+        assert_eq!(
+            apply(0.0, 25.0),
+            25.0,
+            "from the centre a delta lands whole"
+        );
+        assert!(
+            (apply(1000.0, 100.0) - 1050.0).abs() < 1e-4,
+            "halfway out, half lands"
+        );
+        assert!(
+            (apply(1000.0, -100.0) - 900.0).abs() < 1e-4,
+            "coming back lands whole"
+        );
         assert!((apply(-1000.0, -100.0) - -1050.0).abs() < 1e-4);
         assert_eq!(apply(2000.0, 500.0), 2000.0, "nothing past the cap");
         assert_eq!(apply(1990.0, 5000.0), SCORE_CAP);
@@ -232,12 +242,36 @@ mod tests {
     fn a_spell_moves_a_hundred_thousandth_of_its_mana_by_its_school() {
         let smite = spells::lookup("Smite").expect("Smite");
         assert_eq!(spell_sign(smite), 1.0, "holy damage leans good");
-        assert!((spell_delta(smite) - 12.0 * SPELL_MANA_FRACTION).abs() < 1e-9, "{}", spell_delta(smite));
-        assert_eq!(spell_sign(spells::lookup("Healing Light").unwrap()), 1.0, "a heal leans good");
-        assert_eq!(spell_sign(spells::lookup("Bone Shards").unwrap()), -1.0, "shadow damage leans evil");
-        assert_eq!(spell_sign(spells::lookup("Fireball").unwrap()), 0.0, "fire leans nowhere");
-        assert_eq!(spell_sign(spells::lookup("Blood Price").unwrap()), -1.0, "a blood price leans evil");
-        assert_eq!(spell_sign(spells::lookup("Charm").unwrap()), -1.0, "a charm leans evil");
+        assert!(
+            (spell_delta(smite) - 12.0 * SPELL_MANA_FRACTION).abs() < 1e-9,
+            "{}",
+            spell_delta(smite)
+        );
+        assert_eq!(
+            spell_sign(spells::lookup("Healing Light").unwrap()),
+            1.0,
+            "a heal leans good"
+        );
+        assert_eq!(
+            spell_sign(spells::lookup("Bone Shards").unwrap()),
+            -1.0,
+            "shadow damage leans evil"
+        );
+        assert_eq!(
+            spell_sign(spells::lookup("Fireball").unwrap()),
+            0.0,
+            "fire leans nowhere"
+        );
+        assert_eq!(
+            spell_sign(spells::lookup("Blood Price").unwrap()),
+            -1.0,
+            "a blood price leans evil"
+        );
+        assert_eq!(
+            spell_sign(spells::lookup("Charm").unwrap()),
+            -1.0,
+            "a charm leans evil"
+        );
         // Eight thousand Smites move about one point from the centre.
         let mut s = 0.0;
         for _ in 0..8000 {
@@ -261,13 +295,24 @@ mod tests {
     fn the_prestige_classes_and_the_penalty_follow_the_tier() {
         assert_eq!(effective_class("Paladin", -1600.0), "Paladin_Fallen");
         assert_eq!(effective_class("Paladin", -1000.0), "Paladin");
-        assert_eq!(effective_class("Shadow Knight", 1600.0), "Shadow Knight_Redeemed");
+        assert_eq!(
+            effective_class("Shadow Knight", 1600.0),
+            "Shadow Knight_Redeemed"
+        );
         assert_eq!(effective_class("Shadow Knight", 500.0), "Shadow Knight");
         assert_eq!(effective_class("Cleric", -1600.0), "Cleric");
-        assert_eq!(off_side_multiplier("Paladin", 500.0), 1.0, "a Good Paladin casts whole");
+        assert_eq!(
+            off_side_multiplier("Paladin", 500.0),
+            1.0,
+            "a Good Paladin casts whole"
+        );
         assert_eq!(off_side_multiplier("Paladin", 0.0), 0.7);
         assert_eq!(off_side_multiplier("Paladin", -1000.0), 0.4);
-        assert_eq!(off_side_multiplier("Paladin", -1600.0), 1.0, "a Fallen Paladin has its own kit");
+        assert_eq!(
+            off_side_multiplier("Paladin", -1600.0),
+            1.0,
+            "a Fallen Paladin has its own kit"
+        );
         assert_eq!(off_side_multiplier("Shadow Knight", 0.0), 0.7);
         assert_eq!(off_side_multiplier("Shadow Knight", 1000.0), 0.4);
         assert_eq!(off_side_multiplier("Cleric", 0.0), 1.0);

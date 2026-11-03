@@ -98,7 +98,10 @@ impl LoginRateLimiter {
         if map.len() >= RATE_LIMIT_PRUNE_AT {
             map.retain(|_, w| now.duration_since(w.start) < LOGIN_WINDOW);
         }
-        let w = map.entry((ip, kind)).or_insert(Window { count: 0, start: now });
+        let w = map.entry((ip, kind)).or_insert(Window {
+            count: 0,
+            start: now,
+        });
         if now.duration_since(w.start) >= LOGIN_WINDOW {
             w.count = 0;
             w.start = now;
@@ -292,10 +295,9 @@ async fn dispatch(
         } => {
             // Version check first — an outdated client is not a credential guess,
             // so it must not consume a rate-limit slot.
-            let cv = crate::config::semver::Version::parse(&client_version)
-                .ok_or_else(|| AuthError::InvalidInput(format!(
-                    "client_version is not semver: {client_version}"
-                )))?;
+            let cv = crate::config::semver::Version::parse(&client_version).ok_or_else(|| {
+                AuthError::InvalidInput(format!("client_version is not semver: {client_version}"))
+            })?;
             if !cv.at_least(&cfg.min_client_version) {
                 return Err(AuthError::VersionMismatch {
                     client: client_version,
@@ -438,7 +440,10 @@ mod tests {
         for _ in 0..MAX_LOGIN_ATTEMPTS {
             assert!(lim.try_acquire(ip, Login, t));
         }
-        assert!(!lim.try_acquire(ip, Login, t), "cap re-applies after clear + reuse");
+        assert!(
+            !lim.try_acquire(ip, Login, t),
+            "cap re-applies after clear + reuse"
+        );
     }
 
     // The launcher auto-logs-in after each Register; a login success clears the
@@ -453,12 +458,18 @@ mod tests {
         // Simulate register-then-login-success MAX times: each register consumes a
         // Register slot; each login success clears only the Login budget.
         for i in 0..MAX_LOGIN_ATTEMPTS {
-            assert!(lim.try_acquire(ip, Register, t), "register {i} within budget");
+            assert!(
+                lim.try_acquire(ip, Register, t),
+                "register {i} within budget"
+            );
             assert!(lim.try_acquire(ip, Login, t)); // the auto-login attempt
             lim.clear(ip, Login); // login succeeded -> clears LOGIN only
         }
         // Register budget is now exhausted despite all the login-success clears.
-        assert!(!lim.try_acquire(ip, Register, t), "register throttles at the cap");
+        assert!(
+            !lim.try_acquire(ip, Register, t),
+            "register throttles at the cap"
+        );
         // And Login is still freely available (its budget was cleared each time).
         assert!(lim.try_acquire(ip, Login, t));
     }

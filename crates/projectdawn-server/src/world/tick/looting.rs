@@ -12,9 +12,27 @@ pub(super) fn corpse_emptied_by_loot(had_content: bool, empty_now: bool) -> bool
     had_content && empty_now
 }
 
-pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, _now: Instant, in_world_recipients_now: &[ClientId]) {
-    let WorldState { pool, server, connections, aoi, loot_bags, group_manager, corpses, .. } = world;
-    let Intents { loot_intents, loot_to_cursor_intents, .. } = q;
+pub(super) async fn apply_loot_intents(
+    world: &mut WorldState,
+    q: &mut Intents,
+    _now: Instant,
+    in_world_recipients_now: &[ClientId],
+) {
+    let WorldState {
+        pool,
+        server,
+        connections,
+        aoi,
+        loot_bags,
+        group_manager,
+        corpses,
+        ..
+    } = world;
+    let Intents {
+        loot_intents,
+        loot_to_cursor_intents,
+        ..
+    } = q;
     // 4ka. Apply loot pickup intents. For each: validate bag, slot
     //      bounds, and looter range. On success drain the relevant
     //      stack(s), send LootGranted privately to the looter, and
@@ -184,7 +202,12 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
                                     Some(format!("corpse:{corpse_id}")),
                                 ));
                                 reequipped += 1;
-                                inv_deltas.push(("equip".to_string(), slot as u32, path.clone(), count));
+                                inv_deltas.push((
+                                    "equip".to_string(),
+                                    slot as u32,
+                                    path.clone(),
+                                    count,
+                                ));
                                 granted_lines.push((path, count));
                                 continue;
                             }
@@ -220,9 +243,15 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
                     }
                     if leftover_count > 0 {
                         left_on_corpse += 1;
-                        corpses.get_mut(&corpse_id).unwrap().items.push(
-                            loot::LootItemStack { item_path: path, count: leftover_count, equip_slot: worn },
-                        );
+                        corpses
+                            .get_mut(&corpse_id)
+                            .unwrap()
+                            .items
+                            .push(loot::LootItemStack {
+                                item_path: path,
+                                count: leftover_count,
+                                equip_slot: worn,
+                            });
                     }
                 }
                 // Gear went back on: the gear bonuses and max resources change
@@ -314,7 +343,11 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
                     }
                     if resources_changed {
                         if let Some(conn) = connections.get(&looter_cid) {
-                            handlers::fan_out_resources(&mut *server, &in_world_recipients_now, conn);
+                            handlers::fan_out_resources(
+                                &mut *server,
+                                &in_world_recipients_now,
+                                conn,
+                            );
                         }
                     }
                     // Say why anything is still on the body, instead of
@@ -323,7 +356,9 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
                         let line = if left_on_corpse == 1 {
                             "Your bags are full: one item stays on your corpse.".to_string()
                         } else {
-                            format!("Your bags are full: {left_on_corpse} items stay on your corpse.")
+                            format!(
+                                "Your bags are full: {left_on_corpse} items stay on your corpse."
+                            )
                         };
                         handlers::send_refusal(&mut *server, looter_cid, &line);
                     }
@@ -339,7 +374,11 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
                                 handlers::send_entity_despawn(&mut *server, recipient, corpse_id);
                             }
                         }
-                        tracing::info!(corpse_id, char_id = intent.looter, "corpse looted empty — despawned");
+                        tracing::info!(
+                            corpse_id,
+                            char_id = intent.looter,
+                            "corpse looted empty — despawned"
+                        );
                     } else if let Some(corpse) = corpses.get(&corpse_id) {
                         handlers::send_corpse_contents(&mut *server, looter_cid, corpse);
                     }
@@ -535,7 +574,11 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
             }
             // The ledger: a creature's bag is loot, a player's drop a
             // pickup, named by the bag and what it was.
-            let loot_kind = if bag.creature_name.is_empty() { ItemAction::Pickup } else { ItemAction::Loot };
+            let loot_kind = if bag.creature_name.is_empty() {
+                ItemAction::Pickup
+            } else {
+                ItemAction::Loot
+            };
             let loot_detail = if bag.creature_name.is_empty() {
                 format!("bag:{}", intent.bag_id)
             } else {
@@ -663,11 +706,7 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
                     .copied()
                     .filter(|id| bag_visible.contains(id))
                     .collect();
-                handlers::fan_out_loot_bag_spawn(
-                    &mut *server,
-                    &bag_recipients,
-                    bag,
-                );
+                handlers::fan_out_loot_bag_spawn(&mut *server, &bag_recipients, bag);
             }
         }
     }
@@ -686,11 +725,7 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
             };
             let (stack, dropped_by_a_player) = {
                 let Some(bag) = loot_bags.get_mut(&bag_id) else {
-                    handlers::send_refusal(
-                        &mut *server,
-                        looter_cid,
-                        "That isn't there any more.",
-                    );
+                    handlers::send_refusal(&mut *server, looter_cid, "That isn't there any more.");
                     continue;
                 };
                 if bag.pos.distance_to(looter_pos) > LOOT_PICKUP_RANGE {
@@ -715,16 +750,12 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
                 if let Some(owner_cid) = bag.owner_killer {
                     if bag.assigned_looter.is_none() {
                         let bag_pos = bag.pos;
-                        bag.assigned_looter =
-                            group_manager.next_loot_turn(owner_cid, |cand| {
-                                connections
-                                    .get(&cand)
-                                    .map(|c| {
-                                        c.pos.distance_to(bag_pos)
-                                            <= GROUP_SHARE_RANGE
-                                    })
-                                    .unwrap_or(false)
-                            });
+                        bag.assigned_looter = group_manager.next_loot_turn(owner_cid, |cand| {
+                            connections
+                                .get(&cand)
+                                .map(|c| c.pos.distance_to(bag_pos) <= GROUP_SHARE_RANGE)
+                                .unwrap_or(false)
+                        });
                     }
                     if let Some(turn) = bag.assigned_looter {
                         if looter_cid != turn {
@@ -771,7 +802,11 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
             });
             conn.inventory_dirty = true;
             conn.ledger(ledger::item_event(
-                if dropped_by_a_player { ItemAction::Pickup } else { ItemAction::Loot },
+                if dropped_by_a_player {
+                    ItemAction::Pickup
+                } else {
+                    ItemAction::Loot
+                },
                 &stack.item_path,
                 stack.count,
                 i64::from(stack.count),
@@ -827,8 +862,20 @@ pub(super) async fn apply_loot_intents(world: &mut WorldState, q: &mut Intents, 
     }
 }
 
-pub(super) async fn expire_bags_and_corpses(world: &mut WorldState, _q: &mut Intents, now: Instant, in_world_recipients_now: &[ClientId]) {
-    let WorldState { pool, server, aoi, loot_bags, corpses, .. } = world;
+pub(super) async fn expire_bags_and_corpses(
+    world: &mut WorldState,
+    _q: &mut Intents,
+    now: Instant,
+    in_world_recipients_now: &[ClientId],
+) {
+    let WorldState {
+        pool,
+        server,
+        aoi,
+        loot_bags,
+        corpses,
+        ..
+    } = world;
     // 4k. Loot bag expiry. Bags linger LOOT_BAG_LINGER_SECS so
     //     players have time to walk over and click; afterwards we
     //     fan out EntityDespawn and drop the bag. Bags emptied
@@ -881,7 +928,11 @@ pub(super) async fn expire_bags_and_corpses(world: &mut WorldState, _q: &mut Int
             if let Err(e) = db::delete_corpse(&pool, id as i64).await {
                 tracing::error!(corpse_id = id, error = %e, "delete_corpse on decay failed");
             }
-            tracing::info!(corpse_id = id, char_id = corpse.owner_char, "corpse decayed — gear lost");
+            tracing::info!(
+                corpse_id = id,
+                char_id = corpse.owner_char,
+                "corpse decayed — gear lost"
+            );
         }
     }
 }

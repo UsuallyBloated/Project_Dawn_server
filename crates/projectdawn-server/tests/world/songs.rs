@@ -20,9 +20,16 @@ async fn bard_songs_ignore_the_global_cooldown() {
     assert!(first.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "You begin singing Poet's Mending.")), "the first song lands");
     a.send_cast_start("Selos' Melody", 3.0);
     let refused = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(600), |m| matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64))
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_millis(600),
+            |m| matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64),
+        )
         .await;
-    assert!(refused.is_none(), "a song's CastStart inside the global cooldown is accepted");
+    assert!(
+        refused.is_none(),
+        "a song's CastStart inside the global cooldown is accepted"
+    );
     a.pump_alive_for(Duration::from_millis(3_300)).await;
     a.send_cast_spell("Selos' Melody", None);
     let second = a.collect_for(Duration::from_millis(1_000)).await;
@@ -37,7 +44,8 @@ async fn bard_songs_ignore_the_global_cooldown() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_song_is_sung_pulsed_and_lingers_after_it_stops() {
     let h = start_both().await;
-    let (session, a_id, _stale) = provision_client(&h.auth_url, "singer", "Singera", "Human", "Bard").await;
+    let (session, a_id, _stale) =
+        provision_client(&h.auth_url, "singer", "Singera", "Human", "Bard").await;
     set_char_level(&h.db_url, a_id, 10).await;
     let token = request_world_token(&h.auth_url, &session, a_id).await;
     let mut a = WorldClient::start(token, &session, a_id).await;
@@ -48,18 +56,28 @@ async fn a_song_is_sung_pulsed_and_lingers_after_it_stops() {
     a.pump_for(Duration::from_millis(300)).await;
     a.send_cast_spell("Selos' Melody", None);
     let early = a.collect_for(Duration::from_millis(800)).await;
-    assert!(early.iter().any(|m| matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_id as u64)), "released early: refused");
+    assert!(
+        early.iter().any(
+            |m| matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_id as u64)
+        ),
+        "released early: refused"
+    );
     assert!(!early.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("You begin singing"))));
 
     let begun = sing(&mut a, "Selos' Melody", None).await;
     assert!(begun.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "You begin singing Selos' Melody.")));
-    let rem = song_remaining(&begun, a_id as u64, "Selos' Melody").expect("the first pulse's effect is on the bard");
-    assert!(rem > 11.0 && rem <= 12.05, "lingering the song linger: {rem}");
+    let rem = song_remaining(&begun, a_id as u64, "Selos' Melody")
+        .expect("the first pulse's effect is on the bard");
+    assert!(
+        rem > 11.0 && rem <= 12.05,
+        "lingering the song linger: {rem}"
+    );
 
     // The next pulse, 6 s on: a fresh snapshot with the effect refreshed.
     let _ = a.collect_for(Duration::from_millis(4_500)).await;
     let around_pulse = a.collect_for(Duration::from_millis(1_500)).await;
-    let refreshed = song_remaining(&around_pulse, a_id as u64, "Selos' Melody").expect("the second pulse re-fans the snapshot");
+    let refreshed = song_remaining(&around_pulse, a_id as u64, "Selos' Melody")
+        .expect("the second pulse re-fans the snapshot");
     assert!(refreshed > 11.0, "refreshed by the pulse: {refreshed}");
 
     let stop_at = Instant::now();
@@ -99,9 +117,12 @@ async fn a_song_is_sung_pulsed_and_lingers_after_it_stops() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn twisting_holds_two_songs_and_a_nuke_ends_the_song() {
     let h = start_both().await;
-    let (session, a_id, _stale) = provision_client(&h.auth_url, "twister", "Twistera", "Human", "Bard").await;
+    let (session, a_id, _stale) =
+        provision_client(&h.auth_url, "twister", "Twistera", "Human", "Bard").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "twister", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "twister", true)
+        .await
+        .expect("set is_gm");
     set_char_level(&h.db_url, a_id, 10).await;
     let token = request_world_token(&h.auth_url, &session, a_id).await;
     let mut a = WorldClient::start(token, &session, a_id).await;
@@ -131,10 +152,15 @@ async fn twisting_holds_two_songs_and_a_nuke_ends_the_song() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_bard_sings_while_running_and_a_young_bard_runs_slower_than_the_data() {
     let h = start_both().await;
-    let (session, a_id, a_token) = provision_client(&h.auth_url, "runner", "Runnera", "Human", "Bard").await;
+    let (session, a_id, a_token) =
+        provision_client(&h.auth_url, "runner", "Runnera", "Human", "Bard").await;
     let mut a = WorldClient::start(a_token, &session, a_id).await;
     a.pump_for(Duration::from_millis(300)).await;
-    let east = Vec3 { x: 1.0, y: 0.0, z: 0.0 };
+    let east = Vec3 {
+        x: 1.0,
+        y: 0.0,
+        z: 0.0,
+    };
     let mut seq: u32 = 1;
 
     a.send_cast_start("Selos' Melody", 3.0);
@@ -148,8 +174,13 @@ async fn a_bard_sings_while_running_and_a_young_bard_runs_slower_than_the_data()
     let begun = a.collect_for(Duration::from_millis(1_000)).await;
     assert!(begun.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "You begin singing Selos' Melody.")),
         "fifteen metres of running did not interrupt the sing");
-    assert!(!begun.iter().any(|m| matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_id as u64)));
+    assert!(!begun
+        .iter()
+        .any(|m| matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_id as u64)));
 
     let step = median_step(&mut a, a_id, &mut seq, east, 30).await;
-    assert!((step - 0.300).abs() < 0.012, "a level 1 Selos' runs 1.2x, 0.300 m a tick: {step}");
+    assert!(
+        (step - 0.300).abs() < 0.012,
+        "a level 1 Selos' runs 1.2x, 0.300 m a tick: {step}"
+    );
 }

@@ -88,7 +88,10 @@ pub struct GroupManager {
 
 impl GroupManager {
     pub fn new() -> Self {
-        Self { next_id: 1, ..Default::default() }
+        Self {
+            next_id: 1,
+            ..Default::default()
+        }
     }
 
     /// Create or fetch the inviter's group. If the inviter is solo,
@@ -99,13 +102,16 @@ impl GroupManager {
         }
         let gid = self.next_id;
         self.next_id += 1;
-        self.groups.insert(gid, Group {
-            id: gid,
-            leader: inviter,
-            members: vec![inviter],
-            loot_mode: LootMode::default(),
-            loot_turn: 0,
-        });
+        self.groups.insert(
+            gid,
+            Group {
+                id: gid,
+                leader: inviter,
+                members: vec![inviter],
+                loot_mode: LootMode::default(),
+                loot_turn: 0,
+            },
+        );
         self.member_to_group.insert(inviter, gid);
         gid
     }
@@ -276,8 +282,8 @@ mod tests {
     fn skips_ineligible_members() {
         let mut gm = GroupManager::new();
         grouped(&mut gm, 1, &[2, 3]); // {1,2,3}
-        // Only 3 is eligible (e.g. the only one in range); the turn lands
-        // on 3 and the pointer advances past it.
+                                      // Only 3 is eligible (e.g. the only one in range); the turn lands
+                                      // on 3 and the pointer advances past it.
         assert_eq!(gm.next_loot_turn(1, |c| c == 3), Some(3));
         assert_eq!(gm.next_loot_turn(1, |_| true), Some(1));
     }
@@ -286,7 +292,7 @@ mod tests {
     fn pass_leadership_only_from_leader_to_member() {
         let mut gm = GroupManager::new();
         grouped(&mut gm, 1, &[2, 3]); // leader 1, members {1,2,3}
-        // Non-leader can't pass.
+                                      // Non-leader can't pass.
         assert_eq!(gm.pass_leadership(2, 3), None);
         // Leader can't pass to a non-member.
         assert_eq!(gm.pass_leadership(1, 99), None);

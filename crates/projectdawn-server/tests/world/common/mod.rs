@@ -2,11 +2,12 @@
 //! WorldClient, a renet client that logs in, enters the world and reads what the
 //! server sends. Every test module does `use crate::common::*;`.
 
-
 pub use bincode::config::standard as bincode_cfg;
 pub use futures_util::{SinkExt, StreamExt};
 pub use projectdawn_server::{auth, char_data, db, world, Config};
-pub use protocol::world::{ClientWorldMsg, DamageType, ServerWorldMsg, SlotRef, Vec3, ENEMY_ID_BASE, PET_ID_BASE};
+pub use protocol::world::{
+    ClientWorldMsg, DamageType, ServerWorldMsg, SlotRef, Vec3, ENEMY_ID_BASE, PET_ID_BASE,
+};
 pub use renet::{ConnectionConfig, RenetClient};
 pub use renet_netcode::{ClientAuthentication, ConnectToken, NetcodeClientTransport};
 pub use std::{
@@ -96,7 +97,10 @@ async fn start_with(fizzles: bool, panic_probe: Option<String>) -> Harness {
     let (auth_addr, _auth_handle) = auth::serve_bound(cfg, pool).await.expect("auth bind");
 
     let auth_url = format!("ws://{auth_addr}");
-    DB_FOR_AUTH.lock().unwrap().insert(auth_url.clone(), url.clone());
+    DB_FOR_AUTH
+        .lock()
+        .unwrap()
+        .insert(auth_url.clone(), url.clone());
     Harness {
         auth_url,
         db_url: url,
@@ -125,14 +129,18 @@ pub async fn memorize_whole_class(db_url: &str, char_id: i64, class: &str) {
         .map(|(i, n)| (i as i32, n))
         .collect();
     let pool = db::open(db_url).await.expect("open pool");
-    db::save_spell_gems(&pool, char_id, &gems, true).await.expect("memorize the class");
+    db::save_spell_gems(&pool, char_id, &gems, true)
+        .await
+        .expect("memorize the class");
 }
 
 /// Empty a character's spell bar and mark it never held, as a character from
 /// before the server held bars would be.
 pub async fn forget_all_spells(db_url: &str, char_id: i64) {
     let pool = db::open(db_url).await.expect("open pool");
-    db::save_spell_gems(&pool, char_id, &[], false).await.expect("forget all spells");
+    db::save_spell_gems(&pool, char_id, &[], false)
+        .await
+        .expect("forget all spells");
 }
 
 /// Register + login + char-create + request-token for one client. Returns
@@ -148,42 +156,64 @@ pub async fn provision_client(
         .await
         .expect("auth ws connect");
 
-    let resp = rpc(&mut ws, serde_json::json!({
-        "type": "Register",
-        "username": username,
-        "password": "hunter2!",
-    })).await;
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "Register",
+            "username": username,
+            "password": "hunter2!",
+        }),
+    )
+    .await;
     assert_eq!(resp["type"], "RegisterOk", "register {username}: {resp}");
 
-    let resp = rpc(&mut ws, serde_json::json!({
-        "type": "Login",
-        "username": username,
-        "password": "hunter2!",
-        "client_version": "0.1.0",
-    })).await;
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "Login",
+            "username": username,
+            "password": "hunter2!",
+            "client_version": "0.1.0",
+        }),
+    )
+    .await;
     assert_eq!(resp["type"], "LoginOk", "login {username}: {resp}");
     let session = resp["session_token"].as_str().unwrap().to_string();
 
-    let resp = rpc(&mut ws, serde_json::json!({
-        "type": "CharCreate",
-        "session_token": session,
-        "name": char_name,
-        "race": race,
-        "class": class,
-    })).await;
-    assert_eq!(resp["type"], "CharCreated", "charcreate {char_name}: {resp}");
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "CharCreate",
+            "session_token": session,
+            "name": char_name,
+            "race": race,
+            "class": class,
+        }),
+    )
+    .await;
+    assert_eq!(
+        resp["type"], "CharCreated",
+        "charcreate {char_name}: {resp}"
+    );
     let char_id = resp["char_id"].as_i64().unwrap();
     let db_url = DB_FOR_AUTH.lock().unwrap().get(auth_url).cloned();
     if let Some(db_url) = db_url {
         memorize_whole_class(&db_url, char_id, class).await;
     }
 
-    let resp = rpc(&mut ws, serde_json::json!({
-        "type": "RequestWorldToken",
-        "session_token": session,
-        "char_id": char_id,
-    })).await;
-    assert_eq!(resp["type"], "WorldConnectToken", "request token {char_name}: {resp}");
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "RequestWorldToken",
+            "session_token": session,
+            "char_id": char_id,
+        }),
+    )
+    .await;
+    assert_eq!(
+        resp["type"], "WorldConnectToken",
+        "request token {char_name}: {resp}"
+    );
     let token_bytes: Vec<u8> = resp["token_bytes"]
         .as_array()
         .expect("token_bytes is array")
@@ -209,7 +239,9 @@ pub async fn provision_client(
 /// mp high lets the loader clamp it to the new maximum, i.e. "full mana at the
 /// new level".
 pub async fn set_char_level(db_url: &str, char_id: i64, level: i32) {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
     sqlx::query("UPDATE characters SET level = ?1, mp = 99999.0 WHERE id = ?2")
         .bind(level)
         .bind(char_id)
@@ -220,23 +252,35 @@ pub async fn set_char_level(db_url: &str, char_id: i64, level: i32) {
 
 /// Food and water: set a character's counters (seconds of fullness) and,
 /// optionally, its HP, before it logs in (the row is read at login).
-pub async fn set_char_appetite(db_url: &str, char_id: i64, hunger: f32, thirst: f32, hp: Option<f32>) {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
-    sqlx::query("UPDATE characters SET hunger = ?1, thirst = ?2, hp = COALESCE(?3, hp) WHERE id = ?4")
-        .bind(hunger)
-        .bind(thirst)
-        .bind(hp)
-        .bind(char_id)
-        .execute(&pool)
+pub async fn set_char_appetite(
+    db_url: &str,
+    char_id: i64,
+    hunger: f32,
+    thirst: f32,
+    hp: Option<f32>,
+) {
+    let pool = projectdawn_server::db::open(db_url)
         .await
-        .expect("set appetite");
+        .expect("open pool");
+    sqlx::query(
+        "UPDATE characters SET hunger = ?1, thirst = ?2, hp = COALESCE(?3, hp) WHERE id = ?4",
+    )
+    .bind(hunger)
+    .bind(thirst)
+    .bind(hp)
+    .bind(char_id)
+    .execute(&pool)
+    .await
+    .expect("set appetite");
 }
 
 /// Store a weapon skill far over any cap (read at login, over the starting
 /// scores), so the server's miss roll sits at its 5% floor: tests that need a
 /// melee swing to land stop depending on a 35% coin flip.
 pub async fn master_weapon_skill(db_url: &str, char_id: i64, key: &str) {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
     sqlx::query(
         "INSERT OR REPLACE INTO character_skills (char_id, kind, key, score) VALUES (?1, 'weapon', ?2, 1000)",
     )
@@ -249,7 +293,9 @@ pub async fn master_weapon_skill(db_url: &str, char_id: i64, key: &str) {
 
 /// Set a character's persisted casting skill score (read at login).
 pub async fn set_casting_skill(db_url: &str, char_id: i64, key: &str, score: i32) {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
     sqlx::query(
         "INSERT OR REPLACE INTO character_skills (char_id, kind, key, score) VALUES (?1, 'casting', ?2, ?3)",
     )
@@ -263,7 +309,9 @@ pub async fn set_casting_skill(db_url: &str, char_id: i64, key: &str, score: i32
 
 /// Set a character's persisted stamina (read at login).
 pub async fn set_char_stamina(db_url: &str, char_id: i64, stamina: f32) {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
     sqlx::query("UPDATE characters SET stamina = ?1 WHERE id = ?2")
         .bind(stamina)
         .bind(char_id)
@@ -273,8 +321,17 @@ pub async fn set_char_stamina(db_url: &str, char_id: i64, stamina: f32) {
 }
 
 /// Put a stack straight into a character's inventory row (read at login).
-pub async fn give_char_item(db_url: &str, char_id: i64, location: &str, slot: u32, path: &str, count: u32) {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+pub async fn give_char_item(
+    db_url: &str,
+    char_id: i64,
+    location: &str,
+    slot: u32,
+    path: &str,
+    count: u32,
+) {
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
     sqlx::query(
         "INSERT OR REPLACE INTO character_items (char_id, location, slot, item_path, count)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -290,7 +347,9 @@ pub async fn give_char_item(db_url: &str, char_id: i64, location: &str, slot: u3
 }
 
 pub async fn read_char_appetite(db_url: &str, char_id: i64) -> (f32, f32) {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
     let row: (f32, f32) = sqlx::query_as("SELECT hunger, thirst FROM characters WHERE id = ?1")
         .bind(char_id)
         .fetch_one(&pool)
@@ -328,8 +387,8 @@ impl WorldClient {
         session_token_hex: &str,
         char_id: i64,
     ) -> Self {
-        let connect_token = ConnectToken::read(&mut Cursor::new(&token_bytes[..]))
-            .expect("ConnectToken::read");
+        let connect_token =
+            ConnectToken::read(&mut Cursor::new(&token_bytes[..])).expect("ConnectToken::read");
         let socket = UdpSocket::bind("127.0.0.1:0").expect("udp bind");
         socket.set_nonblocking(true).expect("nonblocking");
 
@@ -356,7 +415,11 @@ impl WorldClient {
             client_version: "0.1.0".into(),
         };
         send_msg(&mut client, CHANNEL_SYSTEM, &msg);
-        Self { client, transport, _char_id: char_id }
+        Self {
+            client,
+            transport,
+            _char_id: char_id,
+        }
     }
 
     /// Connect a login the server is expected to REFUSE; returns the Kick.
@@ -368,7 +431,10 @@ impl WorldClient {
         let mut this = Self::handshake_and_connect(token_bytes, session_token_hex, char_id).await;
         let answer = this
             .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-                matches!(m, ServerWorldMsg::ConnectOk { .. } | ServerWorldMsg::Kick { .. })
+                matches!(
+                    m,
+                    ServerWorldMsg::ConnectOk { .. } | ServerWorldMsg::Kick { .. }
+                )
             })
             .await
             .expect("an answer to Connect (ConnectOk or Kick)");
@@ -384,11 +450,7 @@ impl WorldClient {
         answer
     }
 
-    pub async fn start(
-        token_bytes: Vec<u8>,
-        session_token_hex: &str,
-        char_id: i64,
-    ) -> Self {
+    pub async fn start(token_bytes: Vec<u8>, session_token_hex: &str, char_id: i64) -> Self {
         let mut this = Self::handshake_and_connect(token_bytes, session_token_hex, char_id).await;
         this.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(m, ServerWorldMsg::ConnectOk { .. })
@@ -402,7 +464,11 @@ impl WorldClient {
         // otherwise the bytes sit in the outgoing buffer until the next
         // wait_for ticks the client, which may be after the test has
         // moved on to another client's setup.
-        send_msg(&mut this.client, CHANNEL_SYSTEM, &ClientWorldMsg::EnterWorld);
+        send_msg(
+            &mut this.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::EnterWorld,
+        );
         for _ in 0..4 {
             tick_one(&mut this.client, &mut this.transport);
             tokio::time::sleep(TICK_DT).await;
@@ -411,25 +477,44 @@ impl WorldClient {
     }
 
     pub fn send_move(&mut self, sequence: u32, direction: Vec3) {
-        let msg = ClientWorldMsg::Move { sequence, direction, jumping: false, yaw: 0.0 };
+        let msg = ClientWorldMsg::Move {
+            sequence,
+            direction,
+            jumping: false,
+            yaw: 0.0,
+        };
         send_msg(&mut self.client, CHANNEL_POSITION, &msg);
     }
 
     /// A Move carrying the real `jumping` flag (the client sets it on the Move
     /// after a jump begins).
     pub fn send_move_jump(&mut self, sequence: u32, direction: Vec3, jumping: bool) {
-        let msg = ClientWorldMsg::Move { sequence, direction, jumping, yaw: 0.0 };
+        let msg = ClientWorldMsg::Move {
+            sequence,
+            direction,
+            jumping,
+            yaw: 0.0,
+        };
         send_msg(&mut self.client, CHANNEL_POSITION, &msg);
     }
 
     /// A Move carrying a facing (PD_W0029): the client's body yaw.
     pub fn send_move_facing(&mut self, sequence: u32, direction: Vec3, yaw: f32) {
-        let msg = ClientWorldMsg::Move { sequence, direction, jumping: false, yaw };
+        let msg = ClientWorldMsg::Move {
+            sequence,
+            direction,
+            jumping: false,
+            yaw,
+        };
         send_msg(&mut self.client, CHANNEL_POSITION, &msg);
     }
 
     pub fn send_disconnect(&mut self) {
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Disconnect);
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::Disconnect,
+        );
     }
 
     pub fn send_cast_start(&mut self, spell_name: &str, duration: f32) {
@@ -441,7 +526,9 @@ impl WorldClient {
     }
 
     pub fn send_cast_fail(&mut self, reason: &str) {
-        let msg = ClientWorldMsg::CastFailBroadcast { reason: reason.into() };
+        let msg = ClientWorldMsg::CastFailBroadcast {
+            reason: reason.into(),
+        };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
@@ -471,7 +558,11 @@ impl WorldClient {
     }
 
     pub fn send_death(&mut self) {
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::DeathBroadcast);
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::DeathBroadcast,
+        );
     }
 
     pub fn send_resurrect_accept(&mut self, corpse_id: u64, accept: bool) {
@@ -487,14 +578,20 @@ impl WorldClient {
     }
 
     pub fn send_loot_all(&mut self, bag_id: u64) {
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::LootAll { bag_id });
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::LootAll { bag_id },
+        );
     }
 
     pub fn send_gm_command(&mut self, line: &str) {
         send_msg(
             &mut self.client,
             CHANNEL_SYSTEM,
-            &ClientWorldMsg::GmCommand { line: line.to_string() },
+            &ClientWorldMsg::GmCommand {
+                line: line.to_string(),
+            },
         );
     }
 
@@ -528,14 +625,20 @@ impl WorldClient {
     }
 
     pub fn send_trade_accept(&mut self) {
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::TradeAccept);
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeAccept,
+        );
     }
 
     pub fn send_group_invite(&mut self, name: &str) {
         send_msg(
             &mut self.client,
             CHANNEL_SYSTEM,
-            &ClientWorldMsg::GroupInvite { name: name.to_string() },
+            &ClientWorldMsg::GroupInvite {
+                name: name.to_string(),
+            },
         );
     }
 
@@ -553,12 +656,20 @@ impl WorldClient {
 
     /// Dev/GM command: take `amount` damage. Gated like the other dev tools.
     pub fn send_damage_self(&mut self, amount: i32) {
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::DamageSelf { amount });
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::DamageSelf { amount },
+        );
     }
 
     /// The Test Panel's Full Heal: tops HP, mana and stamina off (GM only).
     pub fn send_heal_self(&mut self) {
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::HealSelf { amount: 0 });
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::HealSelf { amount: 0 },
+        );
     }
 
     pub fn send_inspect_player(&mut self, target_char_id: i64) {
@@ -569,7 +680,13 @@ impl WorldClient {
         );
     }
 
-    pub fn send_attack(&mut self, target_id: u64, weapon_path: &str, is_offhand: bool, dmg_type: DamageType) {
+    pub fn send_attack(
+        &mut self,
+        target_id: u64,
+        weapon_path: &str,
+        is_offhand: bool,
+        dmg_type: DamageType,
+    ) {
         let msg = ClientWorldMsg::Attack {
             target_id,
             weapon_path: weapon_path.into(),
@@ -580,7 +697,11 @@ impl WorldClient {
     }
 
     pub fn send_pvp_toggle(&mut self, on: bool) {
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::PvpToggle { on });
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::PvpToggle { on },
+        );
     }
 
     pub fn send_sit(&mut self) {
@@ -595,17 +716,28 @@ impl WorldClient {
         send_msg(
             &mut self.client,
             CHANNEL_SYSTEM,
-            &ClientWorldMsg::MemorizeStart { gem, spell_name: spell.into() },
+            &ClientWorldMsg::MemorizeStart {
+                gem,
+                spell_name: spell.into(),
+            },
         );
     }
 
     pub fn send_memorize_finish(&mut self) {
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::MemorizeFinish);
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::MemorizeFinish,
+        );
     }
 
     pub fn send_seed_spell_gems(&mut self, gems: &[&str]) {
         let gems = gems.iter().map(|g| g.to_string()).collect();
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::SeedSpellGems { gems });
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::SeedSpellGems { gems },
+        );
     }
 
     /// `/camp`: the one intent that needs the SERVER's seated flag, which
@@ -629,7 +761,15 @@ impl WorldClient {
     /// mob exactly 3 m behind the requester. Requires the connection to be
     /// dev or GM â€” grant `is_gm` via `db::set_account_gm` and mint a FRESH
     /// token, as `is_gm_gates_dev_commands` does.
-    pub fn send_dev_spawn(&mut self, name: &str, level: u32, hp: f32, dmg: i32, speed: f32, aggro: f32) {
+    pub fn send_dev_spawn(
+        &mut self,
+        name: &str,
+        level: u32,
+        hp: f32,
+        dmg: i32,
+        speed: f32,
+        aggro: f32,
+    ) {
         send_msg(
             &mut self.client,
             CHANNEL_SYSTEM,
@@ -646,30 +786,45 @@ impl WorldClient {
 
     /// Factions (2026-10-23): consider an NPC by id or a mob by entity id.
     pub fn send_consider(&mut self, npc_id: Option<&str>, target_id: Option<u64>) {
-        let msg = ClientWorldMsg::Consider { npc_id: npc_id.map(str::to_string), target_id };
+        let msg = ClientWorldMsg::Consider {
+            npc_id: npc_id.map(str::to_string),
+            target_id,
+        };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
     /// The GM faction panel's slider: set our own standing with one faction.
     /// Gated like the other dev tools.
     pub fn send_dev_set_faction(&mut self, faction_id: &str, standing: f32) {
-        let msg = ClientWorldMsg::DevSetFaction { faction_id: faction_id.into(), standing };
+        let msg = ClientWorldMsg::DevSetFaction {
+            faction_id: faction_id.into(),
+            standing,
+        };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
     pub fn send_accept_quest(&mut self, quest_id: &str) {
-        let msg = ClientWorldMsg::AcceptQuest { quest_id: quest_id.into(), giver_id: 0 };
+        let msg = ClientWorldMsg::AcceptQuest {
+            quest_id: quest_id.into(),
+            giver_id: 0,
+        };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
     pub fn send_complete_quest(&mut self, quest_id: &str) {
-        let msg = ClientWorldMsg::CompleteQuest { quest_id: quest_id.into() };
+        let msg = ClientWorldMsg::CompleteQuest {
+            quest_id: quest_id.into(),
+        };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
     /// Dev-gated "Despawn All Enemies" (the Test Panel button).
     pub fn send_dev_despawn_enemies(&mut self) {
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::DevDespawnEnemies);
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::DevDespawnEnemies,
+        );
     }
 
     pub fn send_pet_command(&mut self, command: u8, target_id: Option<u64>) {
@@ -678,7 +833,10 @@ impl WorldClient {
     }
 
     pub fn send_use_skill(&mut self, skill_name: &str, target_id: Option<u64>) {
-        let msg = ClientWorldMsg::UseSkill { skill_name: skill_name.into(), target_id };
+        let msg = ClientWorldMsg::UseSkill {
+            skill_name: skill_name.into(),
+            target_id,
+        };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
@@ -740,7 +898,9 @@ impl WorldClient {
         send_msg(
             &mut self.client,
             CHANNEL_SYSTEM,
-            &ClientWorldMsg::UseConsumable { slot: SlotRef::BaseSlot { idx } },
+            &ClientWorldMsg::UseConsumable {
+                slot: SlotRef::BaseSlot { idx },
+            },
         );
     }
 
@@ -824,7 +984,10 @@ impl WorldClient {
     }
 
     pub fn send_bank_withdraw_item(&mut self, vault_slot: u32) {
-        let msg = ClientWorldMsg::BankWithdrawItem { shared: false, vault_slot };
+        let msg = ClientWorldMsg::BankWithdrawItem {
+            shared: false,
+            vault_slot,
+        };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
@@ -838,15 +1001,27 @@ impl WorldClient {
     }
 
     pub fn send_bank_deposit_coins(&mut self, coins: protocol::world::Coins) {
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::BankDepositCoins { coins });
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::BankDepositCoins { coins },
+        );
     }
 
     pub fn send_bank_withdraw_coins(&mut self, coins: protocol::world::Coins) {
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::BankWithdrawCoins { coins });
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::BankWithdrawCoins { coins },
+        );
     }
 
     pub fn send_bank_exchange(&mut self, from_tier: u8, to_tier: u8, qty: u32) {
-        let msg = ClientWorldMsg::BankExchange { from_tier, to_tier, qty };
+        let msg = ClientWorldMsg::BankExchange {
+            from_tier,
+            to_tier,
+            qty,
+        };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);
     }
 
@@ -893,10 +1068,9 @@ impl WorldClient {
                 return None;
             }
             while let Some(bytes) = self.client.receive_message(channel) {
-                if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(
-                    &bytes,
-                    bincode_cfg(),
-                ) {
+                if let Ok((msg, _)) =
+                    bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+                {
                     if pred(&msg) {
                         return Some(msg);
                     }
@@ -922,7 +1096,9 @@ pub async fn grouped_pair_with_dummy(
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, b_user, "Farmate", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, a_user, true).await.expect("set is_gm");
+    db::set_account_gm(&pool, a_user, true)
+        .await
+        .expect("set is_gm");
     set_char_pos(&h.db_url, b_char_id, b_x, 0.0).await;
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
@@ -954,7 +1130,17 @@ pub async fn grouped_pair_with_dummy(
 
 /// Walk `metres` east in full-run Moves (RUN_SPEED), then let the park settle.
 pub async fn walk_east(c: &mut WorldClient, seq: &mut u32, metres: f32) {
-    walk_dir(c, seq, Vec3 { x: 1.0, y: 0.0, z: 0.0 }, metres).await;
+    walk_dir(
+        c,
+        seq,
+        Vec3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        metres,
+    )
+    .await;
 }
 
 /// Walk about `metres` along the unit direction `dir`, one Move per tick,
@@ -982,7 +1168,11 @@ pub async fn walk_dir(c: &mut WorldClient, seq: &mut u32, dir: Vec3, metres: f32
 /// The Bonepile's isolated [-16, 0, -14] spawn: the one ring 1 spawn whose
 /// aggro circle overlaps no other, so exactly one slow level 1 Decrepit
 /// Skeleton pulls (the camp-walking tests' target).
-pub const BONEPILE_SPAWN: Vec3 = Vec3 { x: -16.0, y: 0.0, z: -14.0 };
+pub const BONEPILE_SPAWN: Vec3 = Vec3 {
+    x: -16.0,
+    y: 0.0,
+    z: -14.0,
+};
 
 /// Walk toward `target` on the server's own word: each tick a Move aims at
 /// `target` from the newest Position the server has fanned for `char_id`
@@ -1011,7 +1201,14 @@ pub async fn walk_until_within(
             Instant::now() < deadline,
             "walk_until_within: still {dist:.2} m from the target after 8 s"
         );
-        c.send_move(*seq, Vec3 { x: dx / dist, y: 0.0, z: dz / dist });
+        c.send_move(
+            *seq,
+            Vec3 {
+                x: dx / dist,
+                y: 0.0,
+                z: dz / dist,
+            },
+        );
         *seq += 1;
         tick_one(&mut c.client, &mut c.transport);
         while let Some(bytes) = c.client.receive_message(CHANNEL_POSITION) {
@@ -1028,7 +1225,14 @@ pub async fn walk_until_within(
     // Park. A zero direction is held like any other, so one Move would do;
     // the position channel is unreliable, so send a few.
     for _ in 0..3 {
-        c.send_move(*seq, Vec3 { x: 0.0, y: 0.0, z: 0.0 });
+        c.send_move(
+            *seq,
+            Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        );
         *seq += 1;
         tick_one(&mut c.client, &mut c.transport);
         tokio::time::sleep(TICK_DT).await;
@@ -1109,7 +1313,9 @@ pub async fn gm_world_token(
     char_id: i64,
 ) -> Vec<u8> {
     let pool = db::open(db_url).await.expect("open pool");
-    db::set_account_gm(&pool, username, true).await.expect("set is_gm");
+    db::set_account_gm(&pool, username, true)
+        .await
+        .expect("set is_gm");
     request_world_token(auth_url, session_token_hex, char_id).await
 }
 
@@ -1141,7 +1347,10 @@ pub async fn request_world_token(auth_url: &str, session_token_hex: &str, char_i
 pub const DEAD_LINE: &str = "You cannot do that while dead.";
 
 pub fn dead_lines(msgs: &[ServerWorldMsg]) -> usize {
-    system_lines(msgs).iter().filter(|l| l.as_str() == DEAD_LINE).count()
+    system_lines(msgs)
+        .iter()
+        .filter(|l| l.as_str() == DEAD_LINE)
+        .count()
 }
 
 // ── PD_W0028 — the trade window (docs/design/trade_window.md). The tests
@@ -1161,7 +1370,9 @@ pub async fn trade_pair(
     let (a_session, a_char_id, _stale) =
         provision_client(&h.auth_url, a_user, a_name, "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, a_user, true).await.expect("set is_gm");
+    db::set_account_gm(&pool, a_user, true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, b_user, b_name, "Elf", "Cleric").await;
@@ -1175,7 +1386,12 @@ pub async fn trade_pair(
     send_msg(
         &mut a.client,
         CHANNEL_SYSTEM,
-        &ClientWorldMsg::GiveCoins { platinum: 0, gold: 0, silver: 0, copper: 25 },
+        &ClientWorldMsg::GiveCoins {
+            platinum: 0,
+            gold: 0,
+            silver: 0,
+            copper: 25,
+        },
     );
     let bread = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
@@ -1204,7 +1420,9 @@ pub async fn trade_pair(
 /// Pre-seed a character's world position before it connects, the same slot
 /// `set_char_level` uses.
 pub async fn set_char_pos(db_url: &str, char_id: i64, x: f32, z: f32) {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
     sqlx::query("UPDATE characters SET pos_x = ?1, pos_y = 0.0, pos_z = ?2 WHERE id = ?3")
         .bind(x as f64)
         .bind(z as f64)
@@ -1252,10 +1470,9 @@ pub async fn wait_on_a_pumping_b(
             b.send_heartbeat();
         }
         while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
-            if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(
-                &bytes,
-                bincode_cfg(),
-            ) {
+            if let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
                 if pred(&msg) {
                     return Some(msg);
                 }
@@ -1304,9 +1521,11 @@ pub async fn own_position(c: &mut WorldClient, char_id: i64) -> Option<Vec3> {
     while Instant::now() < deadline {
         let left = deadline.saturating_duration_since(Instant::now());
         match c
-            .wait_for(CHANNEL_POSITION, left, |m| {
-                matches!(m, ServerWorldMsg::Position { id, .. } if *id == char_id as u64)
-            })
+            .wait_for(
+                CHANNEL_POSITION,
+                left,
+                |m| matches!(m, ServerWorldMsg::Position { id, .. } if *id == char_id as u64),
+            )
             .await
         {
             Some(ServerWorldMsg::Position { pos, .. }) => last = Some(pos),
@@ -1344,9 +1563,11 @@ pub async fn summon_skeleton(b: &mut WorldClient, a: &mut WorldClient, b_char_id
     pump_both_for(a, b, Duration::from_millis(3100)).await;
     b.send_cast_spell("Summon Skeleton", None);
     let evt = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == b_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == b_char_id as u64),
+        )
         .await
         .expect("B sees its own PetSpawn");
     match evt {
@@ -1413,7 +1634,10 @@ pub fn hunger_cap() -> f32 {
 /// third is a real answer and not a harness failure.
 pub enum ConnectOutcome {
     Connected(WorldClient),
-    Kicked { code: protocol::world::KickCode, reconnect_after_secs: Option<u32> },
+    Kicked {
+        code: protocol::world::KickCode,
+        reconnect_after_secs: Option<u32>,
+    },
     HandshakeTimedOut,
 }
 
@@ -1451,27 +1675,47 @@ pub async fn try_connect(
         client_version: "0.1.0".into(),
     };
     send_msg(&mut client, CHANNEL_SYSTEM, &msg);
-    let mut this = WorldClient { client, transport, _char_id: char_id };
+    let mut this = WorldClient {
+        client,
+        transport,
+        _char_id: char_id,
+    };
     let answer = this
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::ConnectOk { .. } | ServerWorldMsg::Kick { .. })
+            matches!(
+                m,
+                ServerWorldMsg::ConnectOk { .. } | ServerWorldMsg::Kick { .. }
+            )
         })
         .await;
     match answer {
-        Some(ServerWorldMsg::Kick { code, reconnect_after_secs, .. }) => {
+        Some(ServerWorldMsg::Kick {
+            code,
+            reconnect_after_secs,
+            ..
+        }) => {
             this.transport.disconnect();
             tokio::time::sleep(TICK_DT).await;
-            ConnectOutcome::Kicked { code, reconnect_after_secs }
+            ConnectOutcome::Kicked {
+                code,
+                reconnect_after_secs,
+            }
         }
         Some(_) => {
-            send_msg(&mut this.client, CHANNEL_SYSTEM, &ClientWorldMsg::EnterWorld);
+            send_msg(
+                &mut this.client,
+                CHANNEL_SYSTEM,
+                &ClientWorldMsg::EnterWorld,
+            );
             for _ in 0..4 {
                 tick_one(&mut this.client, &mut this.transport);
                 tokio::time::sleep(TICK_DT).await;
             }
             ConnectOutcome::Connected(this)
         }
-        None => panic!("the server answered the Connect with neither ConnectOk nor Kick within 3 s"),
+        None => {
+            panic!("the server answered the Connect with neither ConnectOk nor Kick within 3 s")
+        }
     }
 }
 
@@ -1480,7 +1724,13 @@ pub async fn try_connect(
 /// own. The server integrates a fixed TICK_DT and fans a moving player's
 /// Position each tick, so one step is speed x 0.05 whatever the wall clock
 /// does; the median shrugs off a skipped or doubled tick.
-pub async fn median_step(c: &mut WorldClient, char_id: i64, seq: &mut u32, dir: Vec3, ticks: u32) -> f32 {
+pub async fn median_step(
+    c: &mut WorldClient,
+    char_id: i64,
+    seq: &mut u32,
+    dir: Vec3,
+    ticks: u32,
+) -> f32 {
     let mut xs: Vec<f32> = Vec::new();
     for _ in 0..ticks {
         c.send_move(*seq, dir);
@@ -1502,14 +1752,23 @@ pub async fn median_step(c: &mut WorldClient, char_id: i64, seq: &mut u32, dir: 
         .map(|w| (w[1] - w[0]).abs())
         .filter(|d| *d > 0.001)
         .collect();
-    assert!(steps.len() >= 5, "too few moving Positions to measure ({})", steps.len());
+    assert!(
+        steps.len() >= 5,
+        "too few moving Positions to measure ({})",
+        steps.len()
+    );
     steps.sort_by(|a, b| a.partial_cmp(b).unwrap());
     steps[steps.len() / 2]
 }
 
 /// Send one Attack from `c` and report whether the server answered it with a
 /// Hit or a Miss from `attacker` within 1.2 s (a refused swing gets nothing).
-pub async fn swing_answered(c: &mut WorldClient, attacker: i64, target: u64, offhand: bool) -> bool {
+pub async fn swing_answered(
+    c: &mut WorldClient,
+    attacker: i64,
+    target: u64,
+    offhand: bool,
+) -> bool {
     c.send_attack(target, "", offhand, DamageType::Physical);
     let answer = c
         .wait_for(CHANNEL_SYSTEM, Duration::from_millis(1_200), |m| {
@@ -1523,7 +1782,11 @@ pub async fn swing_answered(c: &mut WorldClient, attacker: i64, target: u64, off
 
 /// Wait for the next InventoryDelta naming this paperdoll slot, if one comes
 /// within the window.
-pub async fn next_equip_delta(c: &mut WorldClient, equip_slot: u32, window: Duration) -> Option<Option<String>> {
+pub async fn next_equip_delta(
+    c: &mut WorldClient,
+    equip_slot: u32,
+    window: Duration,
+) -> Option<Option<String>> {
     match c
         .wait_for(CHANNEL_SYSTEM, window, |m| {
             matches!(m, ServerWorldMsg::InventoryDelta { location, slot, .. }
@@ -1538,7 +1801,12 @@ pub async fn next_equip_delta(c: &mut WorldClient, equip_slot: u32, window: Dura
 
 /// Pump both clients for `window` and return every yaw `watcher` receives in
 /// a Position for `id`, in order.
-pub async fn yaws_seen(watcher: &mut WorldClient, other: &mut WorldClient, id: u64, window: Duration) -> Vec<f32> {
+pub async fn yaws_seen(
+    watcher: &mut WorldClient,
+    other: &mut WorldClient,
+    id: u64,
+    window: Duration,
+) -> Vec<f32> {
     let mut seen = Vec::new();
     watcher.send_heartbeat();
     other.send_heartbeat();
@@ -1563,7 +1831,9 @@ pub async fn yaws_seen(watcher: &mut WorldClient, other: &mut WorldClient, id: u
 /// Wait for the next SpellGems and return (gems, seeded).
 pub async fn next_spell_gems(c: &mut WorldClient) -> Option<(Vec<String>, bool)> {
     match c
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| matches!(m, ServerWorldMsg::SpellGems { .. }))
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::SpellGems { .. })
+        })
         .await
     {
         Some(ServerWorldMsg::SpellGems { gems, seeded }) => Some((gems, seeded)),
@@ -1577,9 +1847,11 @@ pub async fn next_spell_gems(c: &mut WorldClient) -> Option<(Vec<String>, bool)>
 pub async fn spawn_dummy(c: &mut WorldClient, name: &str, dmg: i32, aggro: f32) -> (u64, Vec3) {
     c.send_dev_spawn(name, 1, 100_000.0, dmg, 0.0, aggro);
     let spawn = c
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == name)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == name),
+        )
         .await
         .expect("the dummy spawns");
     match spawn {
@@ -1589,29 +1861,66 @@ pub async fn spawn_dummy(c: &mut WorldClient, name: &str, dmg: i32, aggro: f32) 
 }
 
 /// A GM of `class`, fists mastered, standing within 1 m of a fresh dummy.
-pub async fn gm_beside_dummy(h: &Harness, user: &str, class: &str, dummy: &str, dmg: i32, aggro: f32) -> (WorldClient, i64, u64) {
-    let (session, char_id, _stale) = provision_client(&h.auth_url, user, &format!("{user}a"), "Human", class).await;
+pub async fn gm_beside_dummy(
+    h: &Harness,
+    user: &str,
+    class: &str,
+    dummy: &str,
+    dmg: i32,
+    aggro: f32,
+) -> (WorldClient, i64, u64) {
+    let (session, char_id, _stale) =
+        provision_client(&h.auth_url, user, &format!("{user}a"), "Human", class).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, user, true).await.expect("set is_gm");
+    db::set_account_gm(&pool, user, true)
+        .await
+        .expect("set is_gm");
     master_weapon_skill(&h.db_url, char_id, "hand_to_hand").await;
     let token = request_world_token(&h.auth_url, &session, char_id).await;
     let mut c = WorldClient::start(token, &session, char_id).await;
     c.pump_for(Duration::from_millis(300)).await;
     let (id, pos) = spawn_dummy(&mut c, dummy, dmg, aggro).await;
     let mut seq: u32 = 1;
-    walk_until_within(&mut c, &mut seq, char_id, Vec3 { x: 0.0, y: 0.0, z: 0.0 }, pos, 1.0).await;
+    walk_until_within(
+        &mut c,
+        &mut seq,
+        char_id,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        pos,
+        1.0,
+    )
+    .await;
     (c, char_id, id)
 }
 
 /// The server's answer to a skill swing within 1.5 s: Ok(Some(amount)) for a
 /// Hit, Ok(None) for a Miss, Err(reason) for a SkillFail.
-pub async fn skill_answer(c: &mut WorldClient, user: i64, skill: &str, target: u64) -> Result<Option<i32>, String> {
+pub async fn skill_answer(
+    c: &mut WorldClient,
+    user: i64,
+    skill: &str,
+    target: u64,
+) -> Result<Option<i32>, String> {
     c.send_use_skill(skill, Some(target));
     for m in c.collect_for(Duration::from_millis(1_500)).await {
         match m {
-            ServerWorldMsg::Hit { attacker, target: t, amount, .. } if attacker == user as u64 && t == target => return Ok(Some(amount)),
-            ServerWorldMsg::Miss { attacker, target: t } if attacker == user as u64 && t == target => return Ok(None),
-            ServerWorldMsg::SkillFail { skill_name, reason } if skill_name == skill => return Err(reason),
+            ServerWorldMsg::Hit {
+                attacker,
+                target: t,
+                amount,
+                ..
+            } if attacker == user as u64 && t == target => return Ok(Some(amount)),
+            ServerWorldMsg::Miss {
+                attacker,
+                target: t,
+            } if attacker == user as u64 && t == target => return Ok(None),
+            ServerWorldMsg::SkillFail { skill_name, reason } if skill_name == skill => {
+                return Err(reason)
+            }
             _ => {}
         }
     }
@@ -1625,8 +1934,10 @@ pub fn mob_hits_on(msgs: &[ServerWorldMsg], mob: u64, player: i64) -> usize {
 }
 
 pub fn snapshot_names(msgs: &[ServerWorldMsg], who: u64, name: &str) -> bool {
-    msgs.iter().any(|m| matches!(m, ServerWorldMsg::BuffSnapshot { target, buffs }
-        if *target == who && buffs.iter().any(|(n, _)| n == name)))
+    msgs.iter().any(|m| {
+        matches!(m, ServerWorldMsg::BuffSnapshot { target, buffs }
+        if *target == who && buffs.iter().any(|(n, _)| n == name))
+    })
 }
 
 // ── Bard songs on the server (the rework of 2026-10-20) ─────────────────────
@@ -1643,9 +1954,12 @@ pub fn snapshot_names(msgs: &[ServerWorldMsg], who: u64, name: &str) -> bool {
 pub fn faction_updates(msgs: &[ServerWorldMsg]) -> Vec<(String, f32, u8)> {
     msgs.iter()
         .filter_map(|m| match m {
-            ServerWorldMsg::FactionUpdate { faction_id, standing, level, .. } => {
-                Some((faction_id.clone(), *standing, *level))
-            }
+            ServerWorldMsg::FactionUpdate {
+                faction_id,
+                standing,
+                level,
+                ..
+            } => Some((faction_id.clone(), *standing, *level)),
             _ => None,
         })
         .collect()
@@ -1701,7 +2015,9 @@ pub const DUBIOUS: u8 = 2;
 // Each of these fails on the code before the fix.
 
 pub async fn count_item_rows(db_url: &str, sql: &str, id: i64, path: &str) -> i64 {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
     let (n,): (i64,) = sqlx::query_as(sql)
         .bind(id)
         .bind(path)
@@ -1714,7 +2030,9 @@ pub async fn count_item_rows(db_url: &str, sql: &str, id: i64, path: &str) -> i6
 // ---- Housekeeping Phase 1: durability -----------------------------------
 
 pub async fn fund_char(db_url: &str, char_id: i64) {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
     sqlx::query("UPDATE characters SET platinum = 10 WHERE id = ?1")
         .bind(char_id)
         .execute(&pool)
@@ -1723,7 +2041,9 @@ pub async fn fund_char(db_url: &str, char_id: i64) {
 }
 
 pub async fn char_xp_level(db_url: &str, char_id: i64) -> (i64, i64) {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
     sqlx::query_as("SELECT xp, level FROM characters WHERE id = ?1")
         .bind(char_id)
         .fetch_one(&pool)
@@ -1737,7 +2057,10 @@ pub async fn char_xp_level(db_url: &str, char_id: i64) -> (i64, i64) {
 pub async fn kicks_for_both(
     a: &mut WorldClient,
     b: &mut WorldClient,
-) -> (Option<protocol::world::KickCode>, Option<protocol::world::KickCode>) {
+) -> (
+    Option<protocol::world::KickCode>,
+    Option<protocol::world::KickCode>,
+) {
     let (mut ka, mut kb) = (None, None);
     let deadline = Instant::now() + Duration::from_secs(5);
     while (ka.is_none() || kb.is_none()) && Instant::now() < deadline {
@@ -1762,7 +2085,9 @@ pub async fn kicks_for_both(
 /// 0017 writes them when the table is created: the tests seed stores straight
 /// into the tables, which the ledger never saw.
 pub async fn seed_ledger_openings(db_url: &str) {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
     for sql in [
         "INSERT INTO item_events (at, char_id, action, item_path, count, delta, copper, detail)
          SELECT 1, char_id, 'opening', item_path, SUM(count), SUM(count), 0, 'inventory'
@@ -1783,8 +2108,13 @@ pub async fn seed_ledger_openings(db_url: &str) {
 
 /// A character's ledger rows after the opening ones, oldest first:
 /// (action, item path, count, delta, copper).
-pub async fn ledger_rows(db_url: &str, char_id: i64) -> Vec<(String, Option<String>, i64, i64, i64)> {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+pub async fn ledger_rows(
+    db_url: &str,
+    char_id: i64,
+) -> Vec<(String, Option<String>, i64, i64, i64)> {
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
     sqlx::query_as(
         "SELECT action, item_path, count, delta, copper FROM item_events
          WHERE char_id = ?1 AND action != 'opening' ORDER BY id",
@@ -1796,6 +2126,10 @@ pub async fn ledger_rows(db_url: &str, char_id: i64) -> Vec<(String, Option<Stri
 }
 
 pub async fn ledger_mismatches(db_url: &str) -> Vec<projectdawn_server::db::LedgerMismatch> {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
-    projectdawn_server::db::ledger_mismatches(&pool).await.expect("ledger check")
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
+    projectdawn_server::db::ledger_mismatches(&pool)
+        .await
+        .expect("ledger check")
 }

@@ -3,7 +3,11 @@
 use super::*;
 
 pub(super) fn camp_sweep(world: &mut WorldState, _q: &mut Intents, now: Instant) {
-    let WorldState { server, connections, .. } = world;
+    let WorldState {
+        server,
+        connections,
+        ..
+    } = world;
     // 5c. Camp sweep (slice B). Advance each in-progress /camp. Runs after
     //     movement integration (which clears is_sitting on a move) and after
     //     all damage application this tick, so both cancel conditions are
@@ -27,15 +31,17 @@ pub(super) fn camp_sweep(world: &mut WorldState, _q: &mut Intents, now: Instant)
         let Some(start) = conn.camp_since else {
             continue;
         };
-        let cancelled =
-            !conn.is_sitting || conn.last_damaged_at.is_some_and(|t| t >= start);
+        let cancelled = !conn.is_sitting || conn.last_damaged_at.is_some_and(|t| t >= start);
         if cancelled {
             conn.camp_since = None;
             handlers::send_camp_update(&mut *server, *camp_cid, 0, false);
         } else if now.duration_since(start) >= CAMP_SECS {
             // Window elapsed; stop tracking. The client logs itself out.
             conn.camp_since = None;
-            tracing::info!(char_id = conn.char_id, "camp window elapsed — client logs out");
+            tracing::info!(
+                char_id = conn.char_id,
+                "camp window elapsed — client logs out"
+            );
         }
     }
 }

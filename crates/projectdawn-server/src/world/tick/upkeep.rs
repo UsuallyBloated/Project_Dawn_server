@@ -4,8 +4,29 @@
 
 use super::*;
 
-pub(super) async fn run_upkeep(world: &mut WorldState, _q: &mut Intents, now: Instant, in_world_ids: &[ClientId]) {
-    let WorldState { pool, server, connections, last_checkpoint, pending_saves, last_pending_retry, tick_health, last_health_report, last_ban_sweep, last_ledger_sweep, last_time_broadcast, ban_tx, ban_rx, ban_sweep_in_flight, .. } = world;
+pub(super) async fn run_upkeep(
+    world: &mut WorldState,
+    _q: &mut Intents,
+    now: Instant,
+    in_world_ids: &[ClientId],
+) {
+    let WorldState {
+        pool,
+        server,
+        connections,
+        last_checkpoint,
+        pending_saves,
+        last_pending_retry,
+        tick_health,
+        last_health_report,
+        last_ban_sweep,
+        last_ledger_sweep,
+        last_time_broadcast,
+        ban_tx,
+        ban_rx,
+        ban_sweep_in_flight,
+        ..
+    } = world;
     // 6-ter. PD_W0024 — flush quest state touched this tick (kill
     //    increments, accepts, abandons — all sync, they only mark
     //    `quests_dirty`). Drained EVERY tick (not the 60s checkpoint:
@@ -63,7 +84,10 @@ pub(super) async fn run_upkeep(world: &mut WorldState, _q: &mut Intents, now: In
         let mut still_pending = Vec::new();
         for mut pending in pending_saves.drain(..) {
             if persistence::flush_connection(&pool, &mut pending.conn, "logout retry").await {
-                tracing::info!(char_id = pending.conn.char_id, "queued logout save landed; relogin open");
+                tracing::info!(
+                    char_id = pending.conn.char_id,
+                    "queued logout save landed; relogin open"
+                );
             } else if now.duration_since(pending.since) >= PENDING_SAVE_GIVE_UP {
                 tracing::error!(
                     char_id = pending.conn.char_id,

@@ -151,7 +151,9 @@ mod tests {
     // offhand-mult x (1-haste), maxf 0.5).
     #[test]
     fn swing_rate_min_interval_is_below_client_fastest_but_above_floor() {
-        use super::{honest_swing_pace, min_swing_interval_secs, HARD_MIN_SWING_SECS, OFFHAND_DELAY_MULT};
+        use super::{
+            honest_swing_pace, min_swing_interval_secs, HARD_MIN_SWING_SECS, OFFHAND_DELAY_MULT,
+        };
         let approx = |a: f32, b: f32| (a - b).abs() < 1e-4;
         let gate = |delay: f32, off: bool, haste: f32| {
             min_swing_interval_secs(honest_swing_pace(delay, off, haste))
@@ -201,14 +203,36 @@ mod tests {
         use super::{carried_haste, honest_swing_pace, min_swing_interval_secs};
         let approx = |a: f32, b: f32| (a - b).abs() < 1e-4;
         let gate = |delay: f32, haste_now: f32, history: [f32; 2]| {
-            min_swing_interval_secs(honest_swing_pace(delay, false, carried_haste(haste_now, history)))
+            min_swing_interval_secs(honest_swing_pace(
+                delay,
+                false,
+                carried_haste(haste_now, history),
+            ))
         };
-        assert!(approx(gate(2.0, 0.0, [0.3, 0.3]), 1.05), "the swing timed under haste passes");
-        assert!(approx(gate(2.0, 0.0, [0.0, 0.3]), 1.05), "and the one after it, timed two swings back");
-        assert!(approx(gate(2.0, 0.0, [0.0, 0.0]), 1.65), "the third is held to the unhasted gate");
-        assert!(approx(gate(3.2, 0.0, [0.0, 0.0]), 2.85), "a staff after a dagger is held to the staff's gate at once");
-        assert!(approx(gate(1.4, 0.0, [0.0, 0.0]), 1.05), "and the dagger after the staff to the dagger's");
-        assert!(gate(2.0, 0.3, [0.0, 0.0]) <= gate(2.0, 0.0, [0.0, 0.0]), "a buff landing between swings only loosens the gate");
+        assert!(
+            approx(gate(2.0, 0.0, [0.3, 0.3]), 1.05),
+            "the swing timed under haste passes"
+        );
+        assert!(
+            approx(gate(2.0, 0.0, [0.0, 0.3]), 1.05),
+            "and the one after it, timed two swings back"
+        );
+        assert!(
+            approx(gate(2.0, 0.0, [0.0, 0.0]), 1.65),
+            "the third is held to the unhasted gate"
+        );
+        assert!(
+            approx(gate(3.2, 0.0, [0.0, 0.0]), 2.85),
+            "a staff after a dagger is held to the staff's gate at once"
+        );
+        assert!(
+            approx(gate(1.4, 0.0, [0.0, 0.0]), 1.05),
+            "and the dagger after the staff to the dagger's"
+        );
+        assert!(
+            gate(2.0, 0.3, [0.0, 0.0]) <= gate(2.0, 0.0, [0.0, 0.0]),
+            "a buff landing between swings only loosens the gate"
+        );
     }
 
     // The client's attack timer as a Godot Timer runs it (measured
@@ -230,7 +254,11 @@ mod tests {
             let mut gap = wait_time;
             for &haste in fight.iter() {
                 t += gap;
-                let carried = if one_deep { haste.max(history[0]) } else { carried_haste(haste, history) };
+                let carried = if one_deep {
+                    haste.max(history[0])
+                } else {
+                    carried_haste(haste, history)
+                };
                 let min = min_swing_interval_secs(honest_swing_pace(delay, false, carried));
                 if last_at.is_some_and(|l| t - l < min) {
                     rejected += 1;
@@ -256,13 +284,37 @@ mod tests {
         let ends_mid_fight: &[f32] = &[0.3, 0.3, 0.3, 0.0, 0.0, 0.0, 0.0];
         let begins_mid_fight: &[f32] = &[0.0, 0.0, 0.3, 0.3, 0.3, 0.3];
         for delay in [2.0_f32, 3.2, 1.4] {
-            assert_eq!(rejected_honest_swings(delay, &[hasted, unhasted], false), 0, "between fights, delay {delay}");
-            assert_eq!(rejected_honest_swings(delay, &[ends_mid_fight], false), 0, "mid-fight, delay {delay}");
-            assert_eq!(rejected_honest_swings(delay, &[begins_mid_fight], false), 0, "a haste landing, delay {delay}");
-            assert_eq!(rejected_honest_swings(delay, &[unhasted, hasted, unhasted], false), 0, "fights both ways, delay {delay}");
+            assert_eq!(
+                rejected_honest_swings(delay, &[hasted, unhasted], false),
+                0,
+                "between fights, delay {delay}"
+            );
+            assert_eq!(
+                rejected_honest_swings(delay, &[ends_mid_fight], false),
+                0,
+                "mid-fight, delay {delay}"
+            );
+            assert_eq!(
+                rejected_honest_swings(delay, &[begins_mid_fight], false),
+                0,
+                "a haste landing, delay {delay}"
+            );
+            assert_eq!(
+                rejected_honest_swings(delay, &[unhasted, hasted, unhasted], false),
+                0,
+                "fights both ways, delay {delay}"
+            );
         }
-        assert_eq!(rejected_honest_swings(2.0, &[hasted, unhasted], true), 1, "the one-swing carry dropped WAROI's swing");
-        assert_eq!(rejected_honest_swings(2.0, &[ends_mid_fight], true), 1, "and one mid-fight");
+        assert_eq!(
+            rejected_honest_swings(2.0, &[hasted, unhasted], true),
+            1,
+            "the one-swing carry dropped WAROI's swing"
+        );
+        assert_eq!(
+            rejected_honest_swings(2.0, &[ends_mid_fight], true),
+            1,
+            "and one mid-fight"
+        );
     }
 
     // The bound on a forged client: once its Haste is gone, swinging on at
@@ -278,7 +330,8 @@ mod tests {
         let mut at_the_hasted_pace = 0;
         for _ in 0..20 {
             t += hasted_gap;
-            let min = min_swing_interval_secs(honest_swing_pace(2.0, false, carried_haste(0.0, history)));
+            let min =
+                min_swing_interval_secs(honest_swing_pace(2.0, false, carried_haste(0.0, history)));
             if t - last_at >= min {
                 if t - last_at < 1.65 - 1e-4 {
                     at_the_hasted_pace += 1;
@@ -302,10 +355,22 @@ mod tests {
         // Never swung -> always accepted.
         assert!(!swing_too_fast(None, base, 0.65));
         // 0.5s after last, min 0.65 -> too fast (rejected).
-        assert!(swing_too_fast(Some(base - Duration::from_millis(500)), base, 0.65));
+        assert!(swing_too_fast(
+            Some(base - Duration::from_millis(500)),
+            base,
+            0.65
+        ));
         // Exactly at the interval -> allowed (not "less than").
-        assert!(!swing_too_fast(Some(base - Duration::from_millis(650)), base, 0.65));
+        assert!(!swing_too_fast(
+            Some(base - Duration::from_millis(650)),
+            base,
+            0.65
+        ));
         // Well after -> allowed.
-        assert!(!swing_too_fast(Some(base - Duration::from_secs(2)), base, 0.65));
+        assert!(!swing_too_fast(
+            Some(base - Duration::from_secs(2)),
+            base,
+            0.65
+        ));
     }
 }

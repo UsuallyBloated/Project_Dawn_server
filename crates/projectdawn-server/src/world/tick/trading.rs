@@ -75,7 +75,13 @@ pub(super) fn trade_locked(
 }
 
 pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents, _now: Instant) {
-    let WorldState { pool, server, connections, trade_manager, .. } = world;
+    let WorldState {
+        pool,
+        server,
+        connections,
+        trade_manager,
+        ..
+    } = world;
     let Intents { trade_intents, .. } = q;
     // 4hd2. PD_W0028 — apply trade intents (docs/design/trade_window.md).
     //       Escrow by locking: offers are references into the owner's
@@ -111,12 +117,16 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                     // Written keep-only-when-in-reach, so a non-finite
                     // distance refuses.
                     let in_reach = target_state.filter(|(tpos, _)| {
-                        connections
-                            .get(&rcid)
-                            .is_some_and(|r| r.pos.distance_to(*tpos) <= crate::world::trade::TRADE_RANGE)
+                        connections.get(&rcid).is_some_and(|r| {
+                            r.pos.distance_to(*tpos) <= crate::world::trade::TRADE_RANGE
+                        })
                     });
                     let Some((_, tname)) = in_reach else {
-                        handlers::send_refusal(&mut *server, rcid, "There is no one here to trade with.");
+                        handlers::send_refusal(
+                            &mut *server,
+                            rcid,
+                            "There is no one here to trade with.",
+                        );
                         continue;
                     };
                     let rname = connections
@@ -136,7 +146,12 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                         Err(e) => handlers::send_refusal(&mut *server, rcid, &e.to_string()),
                     }
                 }
-                TradeI::OfferItem { owner, window_slot, from_location, from_slot } => {
+                TradeI::OfferItem {
+                    owner,
+                    window_slot,
+                    from_location,
+                    from_slot,
+                } => {
                     let cid = owner as ClientId;
                     if trade_manager.session_of(cid).is_none() {
                         handlers::send_refusal(&mut *server, cid, "You are not trading.");
@@ -160,15 +175,20 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                             Some(Ok(((l, s), touched))) => {
                                 if let Some(conn) = connections.get_mut(&cid) {
                                     conn.inventory_dirty = true;
-                                    let deltas: Vec<(String, u32, Option<(String, u32)>)> =
-                                        touched
-                                            .iter()
-                                            .map(|(tl, ts)| {
-                                                (tl.clone(), *ts, conn.inventory.peek_at(tl, *ts))
-                                            })
-                                            .collect();
+                                    let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
+                                        .iter()
+                                        .map(|(tl, ts)| {
+                                            (tl.clone(), *ts, conn.inventory.peek_at(tl, *ts))
+                                        })
+                                        .collect();
                                     for (tl, ts, payload) in deltas {
-                                        handlers::send_slot_delta(&mut *server, cid, tl, ts, payload);
+                                        handlers::send_slot_delta(
+                                            &mut *server,
+                                            cid,
+                                            tl,
+                                            ts,
+                                            payload,
+                                        );
                                     }
                                 }
                                 (l, s)
@@ -242,7 +262,10 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                         Err(e) => handlers::send_refusal(&mut *server, cid, &e.to_string()),
                     }
                 }
-                TradeI::OfferCoins { owner, coins: amount } => {
+                TradeI::OfferCoins {
+                    owner,
+                    coins: amount,
+                } => {
                     let cid = owner as ClientId;
                     // A forged negative would steal from the partner at
                     // commit; `CoinAmount` cannot hold one (refused at the
@@ -373,26 +396,27 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                     // owner sees what happened and can offer it again;
                     // leaving it in would refuse every later accept with
                     // nothing visibly wrong.
-                    let changed = |cid: ClientId, side: &crate::world::trade::TradeSide| -> Vec<usize> {
-                        let Some(conn) = connections.get(&cid) else {
-                            return (0..crate::world::trade::TRADE_SLOTS).collect();
+                    let changed =
+                        |cid: ClientId, side: &crate::world::trade::TradeSide| -> Vec<usize> {
+                            let Some(conn) = connections.get(&cid) else {
+                                return (0..crate::world::trade::TRADE_SLOTS).collect();
+                            };
+                            side.offers
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(i, offer)| {
+                                    let o = offer.as_ref()?;
+                                    let same = conn
+                                        .inventory
+                                        .peek_at(&o.location, o.slot)
+                                        .map(|(p, c)| p == o.item_path && c == o.count)
+                                        .unwrap_or(false);
+                                    let bag_still_empty = o.location != "base"
+                                        || !conn.inventory.bag_key_is_nonempty(o.slot as u8);
+                                    (!(same && bag_still_empty)).then_some(i)
+                                })
+                                .collect()
                         };
-                        side.offers
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(i, offer)| {
-                                let o = offer.as_ref()?;
-                                let same = conn
-                                    .inventory
-                                    .peek_at(&o.location, o.slot)
-                                    .map(|(p, c)| p == o.item_path && c == o.count)
-                                    .unwrap_or(false);
-                                let bag_still_empty = o.location != "base"
-                                    || !conn.inventory.bag_key_is_nonempty(o.slot as u8);
-                                (!(same && bag_still_empty)).then_some(i)
-                            })
-                            .collect()
-                    };
                     let a_changed = changed(acid, &session.a);
                     let b_changed = changed(bcid, &session.b);
                     if !a_changed.is_empty() || !b_changed.is_empty() {
@@ -403,7 +427,9 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                             }
                         }
                         trade_manager.clear_accepts_of(acid);
-                        for (c, mine) in [(acid, !a_changed.is_empty()), (bcid, !b_changed.is_empty())] {
+                        for (c, mine) in
+                            [(acid, !a_changed.is_empty()), (bcid, !b_changed.is_empty())]
+                        {
                             let text = if mine {
                                 "An item you offered changed, so it was taken out of the trade."
                             } else {
@@ -503,9 +529,10 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                     // Apply for real, with full revert clones (the db
                     // write below can still fail; the in-memory swap
                     // must be reversible until it commits).
-                    let revert = |connections: &HashMap<ClientId, PerConnection>,
-                                  cid: ClientId| {
-                        connections.get(&cid).map(|c| (c.inventory.clone(), c.coins))
+                    let revert = |connections: &HashMap<ClientId, PerConnection>, cid: ClientId| {
+                        connections
+                            .get(&cid)
+                            .map(|c| (c.inventory.clone(), c.coins))
                     };
                     let (Some(a_before), Some(b_before)) =
                         (revert(&connections, acid), revert(&connections, bcid))
@@ -517,8 +544,7 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                     // the commit fails.
                     let a_mark = connections.get(&acid).map(|c| c.ledger_mark()).unwrap_or(0);
                     let b_mark = connections.get(&bcid).map(|c| c.ledger_mark()).unwrap_or(0);
-                    let mut touched_by: HashMap<ClientId, Vec<(String, u32)>> =
-                        HashMap::new();
+                    let mut touched_by: HashMap<ClientId, Vec<(String, u32)>> = HashMap::new();
                     let mut apply_side = |cid: ClientId,
                                           partner: ClientId,
                                           gives: &[(String, u32, String, u32)],
@@ -604,32 +630,30 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                             .get(&bcid)
                             .map(|c| (c.inventory.to_rows(), c.coins, c.item_events.clone()));
                         match (rows_a, rows_b) {
-                            (Some((ra, ca, ea)), Some((rb, cb, eb))) => {
-                                match db::commit_trade(
-                                    &pool,
-                                    acid as i64,
-                                    &ra,
-                                    ca,
-                                    &ea,
-                                    bcid as i64,
-                                    &rb,
-                                    cb,
-                                    &eb,
-                                )
-                                .await
-                                {
-                                    Ok(()) => true,
-                                    Err(e) => {
-                                        tracing::error!(
-                                            a = acid as u64,
-                                            b = bcid as u64,
-                                            error = %e,
-                                            "commit_trade persist failed"
-                                        );
-                                        false
-                                    }
+                            (Some((ra, ca, ea)), Some((rb, cb, eb))) => match db::commit_trade(
+                                &pool,
+                                acid as i64,
+                                &ra,
+                                ca,
+                                &ea,
+                                bcid as i64,
+                                &rb,
+                                cb,
+                                &eb,
+                            )
+                            .await
+                            {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    tracing::error!(
+                                        a = acid as u64,
+                                        b = bcid as u64,
+                                        error = %e,
+                                        "commit_trade persist failed"
+                                    );
+                                    false
                                 }
-                            }
+                            },
                             _ => false,
                         }
                     } else {
@@ -667,7 +691,13 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                         if let Some(conn) = connections.get(&c) {
                             if let Some(touched) = touched_by.get(&c) {
                                 for (l, s) in touched {
-                                    handlers::send_slot_delta(&mut *server, c, l.clone(), *s, conn.inventory.peek_at(l, *s));
+                                    handlers::send_slot_delta(
+                                        &mut *server,
+                                        c,
+                                        l.clone(),
+                                        *s,
+                                        conn.inventory.peek_at(l, *s),
+                                    );
                                 }
                             }
                             handlers::send_coins_update(&mut *server, c, conn.coins);
@@ -690,7 +720,12 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
 }
 
 pub(super) fn sweep_trades(world: &mut WorldState, _q: &mut Intents, _now: Instant) {
-    let WorldState { server, connections, trade_manager, .. } = world;
+    let WorldState {
+        server,
+        connections,
+        trade_manager,
+        ..
+    } = world;
     // 4hd3. PD_W0028 — trade session sweep: range, liveness, and
     //       presence, every tick (ledger 7). A session survives only
     //       while both parties are connected, in-world, alive, and

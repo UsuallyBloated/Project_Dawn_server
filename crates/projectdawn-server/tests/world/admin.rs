@@ -13,16 +13,20 @@ use crate::common::*;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn death_broadcast_is_a_dev_command() {
     if std::env::var("PD_DEV_CMDS").as_deref() == Ok("1") {
-        eprintln!("skipping death_broadcast_is_a_dev_command: PD_DEV_CMDS=1 makes every connection dev");
+        eprintln!(
+            "skipping death_broadcast_is_a_dev_command: PD_DEV_CMDS=1 makes every connection dev"
+        );
         return;
     }
     let h = start_both().await;
     let pool = db::open(&h.db_url).await.expect("open pool");
     let death_rows = |pool: sqlx::SqlitePool| async move {
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM gm_actions WHERE command = 'death_broadcast'")
-            .fetch_one(&pool)
-            .await
-            .expect("count death_broadcast rows")
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM gm_actions WHERE command = 'death_broadcast'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count death_broadcast rows")
     };
 
     // A plain account: the forged death does nothing.
@@ -36,8 +40,15 @@ async fn death_broadcast_is_a_dev_command() {
             matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == pl_id && *hp <= 0.01)
         })
         .await;
-    assert!(died.is_none(), "a plain account's DeathBroadcast must not kill it");
-    assert_eq!(death_rows(pool.clone()).await, 0, "a refused dev command writes no audit row");
+    assert!(
+        died.is_none(),
+        "a plain account's DeathBroadcast must not kill it"
+    );
+    assert_eq!(
+        death_rows(pool.clone()).await,
+        0,
+        "a refused dev command writes no audit row"
+    );
 
     // A GM: the Test Panel's Trigger Death still works, and is audited once.
     let (gm_session, gm_char, _stale) =
@@ -55,7 +66,11 @@ async fn death_broadcast_is_a_dev_command() {
     // The honest client's follow-up send, already dead: no second row.
     gm.send_death();
     gm.pump_for(Duration::from_millis(600)).await;
-    assert_eq!(death_rows(pool.clone()).await, 1, "one death, one audit row");
+    assert_eq!(
+        death_rows(pool.clone()).await,
+        1,
+        "one death, one audit row"
+    );
 }
 
 /// Phase 1 keystone: the per-account GM gate. A dev/GM command must APPLY for an
@@ -102,9 +117,11 @@ async fn is_gm_gates_dev_commands() {
     // GM sends the dev command â†’ the server applies it and fans the gain back.
     gm.send_grant_quest_xp(PROBE_XP);
     let gm_xp = gm
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount == PROBE_XP)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount == PROBE_XP),
+        )
         .await;
     assert!(
         gm_xp.is_some(),
@@ -115,9 +132,11 @@ async fn is_gm_gates_dev_commands() {
     // (only the connect-time seed, which the amount filter excludes).
     plain.send_grant_quest_xp(PROBE_XP);
     let plain_xp = plain
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount == PROBE_XP)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount == PROBE_XP),
+        )
         .await;
     assert!(
         plain_xp.is_none(),
@@ -142,7 +161,9 @@ async fn gm_commands_are_audited_only_when_authorized() {
     let (gm_session, gm_char, _stale_token) =
         provision_client(&h.auth_url, "auditgm", "Auditgm", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "auditgm", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "auditgm", true)
+        .await
+        .expect("set is_gm");
     let gm_token = request_world_token(&h.auth_url, &gm_session, gm_char).await;
     let (pl_session, pl_char, pl_token) =
         provision_client(&h.auth_url, "auditpl", "Auditpl", "Human", "Warrior").await;
@@ -162,9 +183,12 @@ async fn gm_commands_are_audited_only_when_authorized() {
 
     // Wait on effects, not on a clock. The GM's dev spawn is fanned in the
     // same tick as the flush that records it, after it.
-    wait_on_a_pumping_b(&mut gm, &mut plain, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Audit Dummy")
-    })
+    wait_on_a_pumping_b(
+        &mut gm,
+        &mut plain,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Audit Dummy"),
+    )
     .await
     .expect("the GM's dev spawn takes effect");
     wait_on_a_pumping_b(&mut plain, &mut gm, Duration::from_secs(5), |m| {
@@ -184,13 +208,27 @@ async fn gm_commands_are_audited_only_when_authorized() {
     .expect("read gm_actions");
     let seen: Vec<(String, i64, String, String)> = rows
         .iter()
-        .map(|r| (r.get("actor"), r.get("target_char"), r.get("command"), r.get("args")))
+        .map(|r| {
+            (
+                r.get("actor"),
+                r.get("target_char"),
+                r.get("command"),
+                r.get("args"),
+            )
+        })
         .collect();
-    assert_eq!(seen.len(), 2, "exactly the GM's two commands are recorded, got {seen:?}");
+    assert_eq!(
+        seen.len(),
+        2,
+        "exactly the GM's two commands are recorded, got {seen:?}"
+    );
     for (actor, target_char, _, args) in &seen {
         assert_eq!(actor, "auditgm", "only the authorized account appears");
         assert_eq!(*target_char, gm_char);
-        assert!(args.ends_with("via=gm"), "the row names the authority: {args}");
+        assert!(
+            args.ends_with("via=gm"),
+            "the row names the authority: {args}"
+        );
     }
     assert_eq!(seen[0].2, "grant_xp");
     assert!(seen[0].3.starts_with("amount=250"));
@@ -212,7 +250,9 @@ async fn gm_command_burst_is_recorded_whole() {
     let (gm_session, gm_char, _stale_token) =
         provision_client(&h.auth_url, "burstgm", "Burstgm", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "burstgm", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "burstgm", true)
+        .await
+        .expect("set is_gm");
     let gm_token = request_world_token(&h.auth_url, &gm_session, gm_char).await;
     let mut gm = WorldClient::start(gm_token, &gm_session, gm_char).await;
 
@@ -221,9 +261,11 @@ async fn gm_command_burst_is_recorded_whole() {
     }
     // Marker: ordered after the burst, fanned after the flush that records it.
     gm.send_dev_spawn("Burst Marker", 1, 10.0, 0, 0.0, 0.0);
-    gm.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Burst Marker")
-    })
+    gm.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Burst Marker"),
+    )
     .await
     .expect("the marker spawn takes effect");
 
@@ -343,7 +385,10 @@ async fn banned_account_is_kicked_out_of_the_world() {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
-    assert!(a.client.is_disconnected(), "the kicked connection is dropped by the server");
+    assert!(
+        a.client.is_disconnected(),
+        "the kicked connection is dropped by the server"
+    );
 }
 
 /// The Test Panel's "Despawn All Enemies" removes the mobs on the SERVER. It
@@ -361,15 +406,19 @@ async fn dev_despawn_removes_enemies_on_the_server() {
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "sweepwatch", "Watcha", "Human", "Beast Master").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "sweeper", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "sweeper", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
 
     let warder: u64 = match b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == b_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == b_char_id as u64),
+        )
         .await
         .expect("B's warder is summoned on entering the world")
     {
@@ -381,9 +430,11 @@ async fn dev_despawn_removes_enemies_on_the_server() {
     for name in ["Despawn Dummy", "Despawn Target"] {
         a.send_dev_spawn(name, 1, 500.0, 0, 0.0, 0.0);
         let spawn = a
-            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-                matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == name)
-            })
+            .wait_for(
+                CHANNEL_SYSTEM,
+                Duration::from_secs(3),
+                |m| matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == name),
+            )
             .await
             .expect("the dummy spawns");
         match spawn {
@@ -398,9 +449,11 @@ async fn dev_despawn_removes_enemies_on_the_server() {
         b.send_dev_despawn_enemies();
         b.pump_for(Duration::from_millis(300)).await;
         let gone = a
-            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(1), |m| {
-                matches!(m, ServerWorldMsg::EntityDespawn { id } if dummies.contains(id))
-            })
+            .wait_for(
+                CHANNEL_SYSTEM,
+                Duration::from_secs(1),
+                |m| matches!(m, ServerWorldMsg::EntityDespawn { id } if dummies.contains(id)),
+            )
             .await;
         assert!(gone.is_none(), "a plain account cannot despawn anything");
     }
@@ -416,14 +469,18 @@ async fn dev_despawn_removes_enemies_on_the_server() {
             })
             .await
             .expect("the bystander sees every dummy despawn");
-        let ServerWorldMsg::EntityDespawn { id } = msg else { unreachable!() };
+        let ServerWorldMsg::EntityDespawn { id } = msg else {
+            unreachable!()
+        };
         assert_ne!(id, warder, "a player's pet is not an enemy to despawn");
         despawned.push(id);
     }
     let warder_gone = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(1), |m| {
-            matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == warder)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(1),
+            |m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == warder),
+        )
         .await;
     assert!(warder_gone.is_none(), "the warder stays");
 
@@ -434,13 +491,18 @@ async fn dev_despawn_removes_enemies_on_the_server() {
         })
         .await
         .expect("the GM is told how many went");
-    let ServerWorldMsg::ChatMessage { text, .. } = told else { unreachable!() };
+    let ServerWorldMsg::ChatMessage { text, .. } = told else {
+        unreachable!()
+    };
     let count: usize = text
         .trim_start_matches("Despawned ")
         .trim_end_matches(" enemies.")
         .parse()
         .expect("the line carries a count");
-    assert!(count >= dummies.len(), "the count covers both dummies ({text})");
+    assert!(
+        count >= dummies.len(),
+        "the count covers both dummies ({text})"
+    );
 
     a.send_cast_spell("Smite", Some(dummies[0]));
     let refused = a
@@ -449,7 +511,10 @@ async fn dev_despawn_removes_enemies_on_the_server() {
                 if *caster == a_char_id as u64 && reason.contains("no longer here"))
         })
         .await;
-    assert!(refused.is_some(), "the server no longer has the mob, so a Smite at it is refused");
+    assert!(
+        refused.is_some(),
+        "the server no longer has the mob, so a Smite at it is refused"
+    );
 
     // Audited like every dev command: one row, the GM's; the plain account's
     // refused request wrote nothing.
@@ -458,7 +523,10 @@ async fn dev_despawn_removes_enemies_on_the_server() {
             .fetch_one(&pool)
             .await
             .expect("read gm_actions");
-    assert_eq!(rows, 1, "the GM's despawn is recorded, the plain account's is not");
+    assert_eq!(
+        rows, 1,
+        "the GM's despawn is recorded, the plain account's is not"
+    );
 
     a.send_disconnect();
     b.send_disconnect();
@@ -483,7 +551,9 @@ async fn the_ledger_records_a_sale_a_purchase_a_drop_and_a_pickup_and_balances()
         provision_client(&h.auth_url, "ledgerb", "Ledgerb", "Human", "Warrior").await;
     give_char_item(&h.db_url, a_char, "base", 0, BREAD, 3).await;
     {
-        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        let pool = projectdawn_server::db::open(&h.db_url)
+            .await
+            .expect("open pool");
         // At the spawn, in reach of the merchant, with coin for the potion.
         sqlx::query("UPDATE characters SET copper = 1000, pos_x = 0.0, pos_z = 0.0 WHERE id = ?1")
             .bind(a_char)
@@ -512,9 +582,11 @@ async fn the_ledger_records_a_sale_a_purchase_a_drop_and_a_pickup_and_balances()
     .await
     .expect("the sale takes one loaf");
     a.send_buy_item(0, "Minor Healing Potion", 1);
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == POTION)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == POTION),
+    )
     .await
     .expect("the potion arrives");
     a.send_drop_item("base", 0, 1);
@@ -531,9 +603,11 @@ async fn the_ledger_records_a_sale_a_purchase_a_drop_and_a_pickup_and_balances()
         _ => unreachable!(),
     };
     b.send_loot_all(bag_id);
-    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD)
-    })
+    b.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::InventoryDelta { item_path: Some(p), .. } if p == BREAD),
+    )
     .await
     .expect("the loaf reaches B");
 
@@ -544,25 +618,46 @@ async fn the_ledger_records_a_sale_a_purchase_a_drop_and_a_pickup_and_balances()
 
     let a_rows = ledger_rows(&h.db_url, a_char).await;
     let actions: Vec<&str> = a_rows.iter().map(|r| r.0.as_str()).collect();
-    assert_eq!(actions, vec!["sell", "buy", "drop"], "A's rows in order: {a_rows:?}");
+    assert_eq!(
+        actions,
+        vec!["sell", "buy", "drop"],
+        "A's rows in order: {a_rows:?}"
+    );
     let sale = &a_rows[0];
-    assert_eq!((sale.1.as_deref(), sale.2, sale.3), (Some(BREAD), 1, -1), "{sale:?}");
+    assert_eq!(
+        (sale.1.as_deref(), sale.2, sale.3),
+        (Some(BREAD), 1, -1),
+        "{sale:?}"
+    );
     assert!(sale.4 > 0, "the sale credits coin: {sale:?}");
     let purchase = &a_rows[1];
-    assert_eq!((purchase.1.as_deref(), purchase.2, purchase.3), (Some(POTION), 1, 1), "{purchase:?}");
+    assert_eq!(
+        (purchase.1.as_deref(), purchase.2, purchase.3),
+        (Some(POTION), 1, 1),
+        "{purchase:?}"
+    );
     assert!(purchase.4 < 0, "the purchase costs coin: {purchase:?}");
     let drop = &a_rows[2];
-    assert_eq!((drop.1.as_deref(), drop.2, drop.3, drop.4), (Some(BREAD), 1, -1, 0), "{drop:?}");
+    assert_eq!(
+        (drop.1.as_deref(), drop.2, drop.3, drop.4),
+        (Some(BREAD), 1, -1, 0),
+        "{drop:?}"
+    );
     let b_rows = ledger_rows(&h.db_url, b_char).await;
     assert_eq!(
         b_rows,
         vec![("pickup".to_string(), Some(BREAD.to_string()), 1, 1, 0)],
         "B's one row is the pickup"
     );
-    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "the books balance after every move");
+    assert!(
+        ledger_mismatches(&h.db_url).await.is_empty(),
+        "the books balance after every move"
+    );
 
     {
-        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        let pool = projectdawn_server::db::open(&h.db_url)
+            .await
+            .expect("open pool");
         sqlx::query(
             "INSERT INTO character_items (char_id, location, slot, item_path, count) VALUES (?1, 'base', 7, ?2, 5)",
         )
@@ -573,8 +668,19 @@ async fn the_ledger_records_a_sale_a_purchase_a_drop_and_a_pickup_and_balances()
         .expect("plant a dupe");
     }
     let found = ledger_mismatches(&h.db_url).await;
-    assert_eq!(found.len(), 1, "the planted stack is the one mismatch: {found:?}");
-    assert_eq!((found[0].item_path.as_deref(), found[0].ledger, found[0].held), (Some(BREAD), 1, 6));
+    assert_eq!(
+        found.len(),
+        1,
+        "the planted stack is the one mismatch: {found:?}"
+    );
+    assert_eq!(
+        (
+            found[0].item_path.as_deref(),
+            found[0].ledger,
+            found[0].held
+        ),
+        (Some(BREAD), 1, 6)
+    );
 }
 
 /// The bank in the ledger: a vault deposit and withdrawal (delta 0, the
@@ -594,7 +700,9 @@ async fn the_ledger_records_the_bank_and_balances() {
         provision_client(&h.auth_url, "ledgerbank", "Ledgerbank", "Human", "Warrior").await;
     give_char_item(&h.db_url, char_id, "base", 0, BREAD, 3).await;
     {
-        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        let pool = projectdawn_server::db::open(&h.db_url)
+            .await
+            .expect("open pool");
         // At the spawn, in reach of the banker, with coin to bank.
         sqlx::query("UPDATE characters SET copper = 1000, pos_x = 0.0, pos_z = 0.0 WHERE id = ?1")
             .bind(char_id)
@@ -623,16 +731,30 @@ async fn the_ledger_records_the_bank_and_balances() {
     })
     .await
     .expect("the loaves come back to the bags");
-    a.send_bank_deposit_coins(Coins { platinum: 0, gold: 0, silver: 0, copper: 150 });
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::BankSnapshot { coins } if coins.copper == 150)
-    })
+    a.send_bank_deposit_coins(Coins {
+        platinum: 0,
+        gold: 0,
+        silver: 0,
+        copper: 150,
+    });
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::BankSnapshot { coins } if coins.copper == 150),
+    )
     .await
     .expect("the bank holds the deposit");
-    a.send_bank_withdraw_coins(Coins { platinum: 0, gold: 0, silver: 0, copper: 50 });
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::BankSnapshot { coins } if coins.copper == 100)
-    })
+    a.send_bank_withdraw_coins(Coins {
+        platinum: 0,
+        gold: 0,
+        silver: 0,
+        copper: 50,
+    });
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::BankSnapshot { coins } if coins.copper == 100),
+    )
     .await
     .expect("the bank gives some back");
     // 100 of the 900 copper in hand into one silver: the wallet's value is
@@ -659,7 +781,9 @@ async fn the_ledger_records_the_bank_and_balances() {
         "the bank's rows, written with the logout flush"
     );
     {
-        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        let pool = projectdawn_server::db::open(&h.db_url)
+            .await
+            .expect("open pool");
         let details: Vec<(Option<String>,)> = sqlx::query_as(
             "SELECT detail FROM item_events WHERE char_id = ?1 AND action LIKE 'bank%' ORDER BY id",
         )
@@ -667,10 +791,19 @@ async fn the_ledger_records_the_bank_and_balances() {
         .fetch_all(&pool)
         .await
         .expect("details");
-        let details: Vec<&str> = details.iter().map(|(d,)| d.as_deref().unwrap_or("")).collect();
+        let details: Vec<&str> = details
+            .iter()
+            .map(|(d,)| d.as_deref().unwrap_or(""))
+            .collect();
         assert_eq!(
             details,
-            vec!["vault", "vault", "150 copper", "50 copper", "100 of tier 0 to tier 1"],
+            vec![
+                "vault",
+                "vault",
+                "150 copper",
+                "50 copper",
+                "100 of tier 0 to tier 1"
+            ],
             "each row names the vault, the amount or the conversion"
         );
         let (wallet, bank): (i64, i64) = sqlx::query_as(
@@ -680,9 +813,16 @@ async fn the_ledger_records_the_bank_and_balances() {
         .fetch_one(&pool)
         .await
         .expect("the stores");
-        assert_eq!((wallet, bank), (900, 100), "the coin sits on both sides of the counter");
+        assert_eq!(
+            (wallet, bank),
+            (900, 100),
+            "the coin sits on both sides of the counter"
+        );
     }
-    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "the books balance after the bank");
+    assert!(
+        ledger_mismatches(&h.db_url).await.is_empty(),
+        "the books balance after the bank"
+    );
 }
 
 /// The death strip and the corpse loot in the ledger: the strip's rows (one
@@ -704,7 +844,9 @@ async fn a_death_and_the_corpse_loot_keep_the_books_balanced() {
         .execute(&pool)
         .await
         .expect("coin");
-    db::set_account_gm(&pool, "ledgerdie", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "ledgerdie", true)
+        .await
+        .expect("set is_gm");
     seed_ledger_openings(&h.db_url).await;
     let token = request_world_token(&h.auth_url, &session, char_id).await;
     let mut a = WorldClient::start(token, &session, char_id).await;
@@ -730,12 +872,17 @@ async fn a_death_and_the_corpse_loot_keep_the_books_balanced() {
         ],
         "the strip's rows, written with the corpse"
     );
-    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "balanced with the gear on the corpse");
+    assert!(
+        ledger_mismatches(&h.db_url).await.is_empty(),
+        "balanced with the gear on the corpse"
+    );
 
     a.send_respawn();
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| matches!(m, ServerWorldMsg::Teleport { .. }))
-        .await
-        .expect("respawned beside the corpse");
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::Teleport { .. })
+    })
+    .await
+    .expect("respawned beside the corpse");
     a.send_loot_all(corpse_id);
     a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
         matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), .. }
@@ -754,7 +901,10 @@ async fn a_death_and_the_corpse_loot_keep_the_books_balanced() {
         ],
         "the loot's rows, written with the loot: {rows:?}"
     );
-    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "balanced with everything back");
+    assert!(
+        ledger_mismatches(&h.db_url).await.is_empty(),
+        "balanced with everything back"
+    );
     a.send_disconnect();
     a.pump_for(Duration::from_millis(200)).await;
 }

@@ -58,10 +58,18 @@ pub struct Vec3f {
 }
 
 impl Vec3f {
-    pub const ZERO: Self = Self { x: 0.0, y: 0.0, z: 0.0 };
+    pub const ZERO: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
 
     pub fn from_tuple(t: (f32, f32, f32)) -> Self {
-        Self { x: t.0, y: t.1, z: t.2 }
+        Self {
+            x: t.0,
+            y: t.1,
+            z: t.2,
+        }
     }
 
     pub fn into_tuple(self) -> (f32, f32, f32) {
@@ -78,14 +86,22 @@ impl Vec3f {
         let len = self.length();
         if len > max && len > 0.0 {
             let s = max / len;
-            Self { x: self.x * s, y: self.y * s, z: self.z * s }
+            Self {
+                x: self.x * s,
+                y: self.y * s,
+                z: self.z * s,
+            }
         } else {
             self
         }
     }
 
     pub fn sub(self, other: Self) -> Self {
-        Self { x: self.x - other.x, y: self.y - other.y, z: self.z - other.z }
+        Self {
+            x: self.x - other.x,
+            y: self.y - other.y,
+            z: self.z - other.z,
+        }
     }
 
     pub fn distance_to(self, other: Self) -> f32 {
@@ -98,7 +114,11 @@ impl Vec3f {
     pub fn normalize_or_zero(self) -> Self {
         let len = self.length();
         if len > 0.0 {
-            Self { x: self.x / len, y: self.y / len, z: self.z / len }
+            Self {
+                x: self.x / len,
+                y: self.y / len,
+                z: self.z / len,
+            }
         } else {
             Self::ZERO
         }
@@ -111,7 +131,11 @@ impl Vec3f {
         let delta = target.sub(self);
         let dist = delta.length();
         if dist <= step || dist <= f32::EPSILON {
-            Self { x: target.x, y: self.y, z: target.z }
+            Self {
+                x: target.x,
+                y: self.y,
+                z: target.z,
+            }
         } else {
             let dir = delta.normalize_or_zero();
             Self {
@@ -651,7 +675,10 @@ impl PerConnection {
             .map(|(id, standing)| {
                 (
                     id.clone(),
-                    standing.clamp(-super::factions::STANDING_CAP, super::factions::STANDING_CAP),
+                    standing.clamp(
+                        -super::factions::STANDING_CAP,
+                        super::factions::STANDING_CAP,
+                    ),
                 )
             })
             .collect();
@@ -786,7 +813,9 @@ impl PerConnection {
             bank_dirty: false,
             bank_items: super::inventory::ItemVault::new(super::inventory::BANK_VAULT_SLOTS),
             bank_items_dirty: false,
-            account_bank_items: super::inventory::ItemVault::new(super::inventory::ACCOUNT_VAULT_SLOTS),
+            account_bank_items: super::inventory::ItemVault::new(
+                super::inventory::ACCOUNT_VAULT_SLOTS,
+            ),
             account_bank_items_dirty: false,
             autosplit: true,
             equip_stat_bonuses: super::inventory::EquipStatBonuses::default(),
@@ -804,7 +833,10 @@ impl PerConnection {
 
     /// Every standing as rows for `db::save_factions`.
     pub fn faction_rows(&self) -> Vec<(String, f32)> {
-        self.factions.iter().map(|(id, s)| (id.clone(), *s)).collect()
+        self.factions
+            .iter()
+            .map(|(id, s)| (id.clone(), *s))
+            .collect()
     }
 
     /// This character's PERSONAL standing with a faction: what kills, quests
@@ -816,7 +848,12 @@ impl PerConnection {
     /// The standing the faction's NPCs see: the personal number plus the
     /// character's starting modifier with it for its race and class.
     pub fn faction_shown(&self, faction: &super::factions::Faction) -> f32 {
-        super::factions::shown_standing(self.faction_standing(faction), faction, &self.race, &self.class)
+        super::factions::shown_standing(
+            self.faction_standing(faction),
+            faction,
+            &self.race,
+            &self.class,
+        )
     }
 
     pub fn faction_level(&self, faction: &super::factions::Faction) -> super::factions::Level {
@@ -849,7 +886,10 @@ impl PerConnection {
         kind: &str,
     ) -> Result<&'static super::npcs::Npc, Option<&'static super::npcs::Npc>> {
         let in_range = super::npcs::all_within_range(kind, self.pos);
-        if let Some(npc) = in_range.iter().find(|n| self.npc_serves(n, super::factions::Level::Apprehensive)) {
+        if let Some(npc) = in_range
+            .iter()
+            .find(|n| self.npc_serves(n, super::factions::Level::Apprehensive))
+        {
             return Ok(npc);
         }
         Err(in_range.first().copied())
@@ -891,8 +931,11 @@ impl PerConnection {
         if !self.can_use_dev_cmds() {
             return DevCmdAuth::Denied;
         }
-        let elapsed = now.saturating_duration_since(self.gm_cmd_refill_at).as_secs_f32();
-        self.gm_cmd_tokens = (self.gm_cmd_tokens + elapsed * GM_CMD_REFILL_PER_SEC).min(GM_CMD_BURST);
+        let elapsed = now
+            .saturating_duration_since(self.gm_cmd_refill_at)
+            .as_secs_f32();
+        self.gm_cmd_tokens =
+            (self.gm_cmd_tokens + elapsed * GM_CMD_REFILL_PER_SEC).min(GM_CMD_BURST);
         self.gm_cmd_refill_at = now;
         if self.gm_cmd_tokens < 1.0 {
             self.gm_cmd_refused = self.gm_cmd_refused.saturating_add(1);
@@ -935,9 +978,9 @@ impl PerConnection {
         if !rising {
             return false;
         }
-        let due = self
-            .last_jump_relayed_at
-            .map_or(true, |t| now.duration_since(t) >= super::JUMP_RELAY_MIN_INTERVAL);
+        let due = self.last_jump_relayed_at.map_or(true, |t| {
+            now.duration_since(t) >= super::JUMP_RELAY_MIN_INTERVAL
+        });
         if !due {
             return false;
         }
@@ -1128,12 +1171,25 @@ mod tests {
         let now = Instant::now();
         let mut c = PerConnection::from_spawn(test_spawn(), now);
         assert!(c.haste_total().is_sign_positive() && c.haste_total() == 0.0);
-        c.active_buffs.push(super::super::buffs::ActiveBuff::new_haste("Haste".into(), 0.3, 660.0, now));
+        c.active_buffs
+            .push(super::super::buffs::ActiveBuff::new_haste(
+                "Haste".into(),
+                0.3,
+                660.0,
+                now,
+            ));
         assert!((c.limiter_haste(now) - 0.3).abs() < 1e-6);
         c.haste_lapsed = Some((c.haste_total(), now));
         c.active_buffs.clear();
-        assert!((c.limiter_haste(now + Duration::from_millis(900)) - 0.3).abs() < 1e-6, "inside the grace");
-        assert_eq!(c.limiter_haste(now + HASTE_LAPSE_GRACE), 0.0, "and gone after it");
+        assert!(
+            (c.limiter_haste(now + Duration::from_millis(900)) - 0.3).abs() < 1e-6,
+            "inside the grace"
+        );
+        assert_eq!(
+            c.limiter_haste(now + HASTE_LAPSE_GRACE),
+            0.0,
+            "and gone after it"
+        );
     }
 
     /// Minimal spawn for connection-state tests. Field values are arbitrary;
@@ -1189,19 +1245,34 @@ mod tests {
         // Equip a main-hand and an off-hand weapon.
         conn.inventory.equipment.insert(
             0,
-            InventoryEntry { item_path: "res://items/iron_short_sword.tres".into(), count: 1 },
+            InventoryEntry {
+                item_path: "res://items/iron_short_sword.tres".into(),
+                count: 1,
+            },
         );
         conn.inventory.equipment.insert(
             1,
-            InventoryEntry { item_path: "res://items/rusty_dagger.tres".into(), count: 1 },
+            InventoryEntry {
+                item_path: "res://items/rusty_dagger.tres".into(),
+                count: 1,
+            },
         );
-        assert_eq!(conn.equipped_weapon_path(false), "res://items/iron_short_sword.tres");
-        assert_eq!(conn.equipped_weapon_path(true), "res://items/rusty_dagger.tres");
+        assert_eq!(
+            conn.equipped_weapon_path(false),
+            "res://items/iron_short_sword.tres"
+        );
+        assert_eq!(
+            conn.equipped_weapon_path(true),
+            "res://items/rusty_dagger.tres"
+        );
         // An off-hand swing with an empty off-hand is unarmed, NOT the main-hand
         // weapon — a client can't fabricate an off-hand hit it isn't geared for.
         conn.inventory.equipment.remove(&1);
         assert_eq!(conn.equipped_weapon_path(true), "");
-        assert_eq!(conn.equipped_weapon_path(false), "res://items/iron_short_sword.tres");
+        assert_eq!(
+            conn.equipped_weapon_path(false),
+            "res://items/iron_short_sword.tres"
+        );
     }
 
     // Respawn must never leave the player where they died. An unbound character
@@ -1210,18 +1281,33 @@ mod tests {
     fn respawn_destination_prefers_bind_then_starter_spawn() {
         let mut conn = PerConnection::from_spawn(test_spawn(), Instant::now());
         // Simulate having died somewhere dangerous.
-        conn.pos = Vec3f { x: 120.0, y: 4.0, z: -80.0 };
+        conn.pos = Vec3f {
+            x: 120.0,
+            y: 4.0,
+            z: -80.0,
+        };
 
         // Unbound -> starter spawn, NOT the death position.
         assert!(conn.bind.is_none(), "fixture starts unbound");
         let d = conn.respawn_destination();
-        assert_eq!((d.x, d.y, d.z), (super::super::STARTER_SPAWN.x,
-                                     super::super::STARTER_SPAWN.y,
-                                     super::super::STARTER_SPAWN.z));
-        assert_ne!((d.x, d.z), (conn.pos.x, conn.pos.z), "must not respawn at the death site");
+        assert_eq!(
+            (d.x, d.y, d.z),
+            (
+                super::super::STARTER_SPAWN.x,
+                super::super::STARTER_SPAWN.y,
+                super::super::STARTER_SPAWN.z
+            )
+        );
+        assert_ne!(
+            (d.x, d.z),
+            (conn.pos.x, conn.pos.z),
+            "must not respawn at the death site"
+        );
 
         // Bound -> the bind point.
-        conn.bind = Some(crate::db::BindPoint { pos: (10.0, 1.0, -5.0) });
+        conn.bind = Some(crate::db::BindPoint {
+            pos: (10.0, 1.0, -5.0),
+        });
         let d2 = conn.respawn_destination();
         assert_eq!((d2.x, d2.y, d2.z), (10.0, 1.0, -5.0));
     }
@@ -1255,7 +1341,10 @@ mod tests {
             conn.authorize_dev_cmd(now, "heal_self", "amount=50".to_string()),
             DevCmdAuth::Denied
         );
-        assert!(conn.gm_audit.is_empty(), "a refused attempt must queue no write");
+        assert!(
+            conn.gm_audit.is_empty(),
+            "a refused attempt must queue no write"
+        );
         assert_eq!(conn.gm_cmd_tokens, GM_CMD_BURST, "nor spend any budget");
 
         conn.is_gm = true;
@@ -1265,7 +1354,10 @@ mod tests {
         );
         assert_eq!(
             conn.gm_audit,
-            vec![GmAuditEntry { command: "heal_self", args: "amount=50 via=gm".to_string() }]
+            vec![GmAuditEntry {
+                command: "heal_self",
+                args: "amount=50 via=gm".to_string()
+            }]
         );
 
         // A GM on a dev server must not read as a clean hosted row.
@@ -1311,7 +1403,11 @@ mod tests {
             DevCmdAuth::RateLimited { notify: true },
             "the command hidden behind the flood is refused, not granted"
         );
-        assert_eq!(conn.gm_audit.len(), recorded, "and nothing was queued for it");
+        assert_eq!(
+            conn.gm_audit.len(),
+            recorded,
+            "and nothing was queued for it"
+        );
         assert_eq!(conn.gm_cmd_refused, 1);
         assert_eq!(
             conn.authorize_dev_cmd(t0, "heal_self", "amount=0".to_string()),
@@ -1343,10 +1439,10 @@ mod tests {
         let mut spawn = test_spawn();
         spawn.completed_quests = vec!["rat_infestation".into()];
         spawn.active_quests = vec![
-            ("wolf_threat".into(), vec![-2]),        // negative -> clamps to 0
-            ("rat_infestation".into(), vec![8]),     // also completed -> drops
-            ("deleted_old_quest".into(), vec![1]),   // not in quests.toml -> drops
-            ("test_q1".into(), Vec::new()),          // short (corrupt row) -> pads to len 1
+            ("wolf_threat".into(), vec![-2]),      // negative -> clamps to 0
+            ("rat_infestation".into(), vec![8]),   // also completed -> drops
+            ("deleted_old_quest".into(), vec![1]), // not in quests.toml -> drops
+            ("test_q1".into(), Vec::new()),        // short (corrupt row) -> pads to len 1
         ];
         let conn = PerConnection::from_spawn(spawn, Instant::now());
         assert_eq!(conn.active_quests.len(), 2);
@@ -1392,14 +1488,26 @@ mod tests {
         assert!(!conn.note_move_jump(false, t0), "no flag, no jump");
         assert!(conn.note_move_jump(true, t0), "the rising edge relays");
         assert!(!conn.is_sitting, "a jump stands the player");
-        assert!(!conn.note_move_jump(true, t0 + Duration::from_millis(50)), "a held flag is the same jump");
-        assert!(!conn.note_move_jump(false, t0 + Duration::from_millis(100)), "clearing it relays nothing");
+        assert!(
+            !conn.note_move_jump(true, t0 + Duration::from_millis(50)),
+            "a held flag is the same jump"
+        );
+        assert!(
+            !conn.note_move_jump(false, t0 + Duration::from_millis(100)),
+            "clearing it relays nothing"
+        );
         assert!(
             !conn.note_move_jump(true, t0 + Duration::from_millis(150)),
             "a second edge inside the interval is dropped"
         );
         let later = t0 + super::super::JUMP_RELAY_MIN_INTERVAL + Duration::from_millis(1);
-        assert!(!conn.note_move_jump(false, later), "the flag clears between jumps");
-        assert!(conn.note_move_jump(true, later), "past the interval the next edge relays again");
+        assert!(
+            !conn.note_move_jump(false, later),
+            "the flag clears between jumps"
+        );
+        assert!(
+            conn.note_move_jump(true, later),
+            "past the interval the next edge relays again"
+        );
     }
 }

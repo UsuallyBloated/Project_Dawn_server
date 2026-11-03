@@ -115,7 +115,11 @@ async fn wait_for_stop_signal() {
     #[cfg(windows)]
     {
         use tokio::signal::windows;
-        match (windows::ctrl_break(), windows::ctrl_close(), windows::ctrl_shutdown()) {
+        match (
+            windows::ctrl_break(),
+            windows::ctrl_close(),
+            windows::ctrl_shutdown(),
+        ) {
             (Ok(mut brk), Ok(mut close), Ok(mut shut)) => {
                 tokio::select! {
                     _ = tokio::signal::ctrl_c() => {}

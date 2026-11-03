@@ -25,7 +25,9 @@ pub fn decode_and_handle(data: &[u8]) {
 /// fail to decode.
 pub fn handle_arbitrary(data: &[u8]) {
     let mut input = arbitrary::Unstructured::new(data);
-    if let Ok(msg) = <protocol::world::ClientWorldMsg as arbitrary::Arbitrary>::arbitrary(&mut input) {
+    if let Ok(msg) =
+        <protocol::world::ClientWorldMsg as arbitrary::Arbitrary>::arbitrary(&mut input)
+    {
         handle(msg);
     }
 }
@@ -67,8 +69,18 @@ pub(crate) fn spawn() -> crate::db::CharacterSpawn {
         hp: 100.0,
         mp: 100.0,
         stamina: 100.0,
-        coins: Coins { platinum: 1, gold: 1, silver: 1, copper: 1 },
-        bank_coins: Coins { platinum: 1, gold: 1, silver: 1, copper: 1 },
+        coins: Coins {
+            platinum: 1,
+            gold: 1,
+            silver: 1,
+            copper: 1,
+        },
+        bank_coins: Coins {
+            platinum: 1,
+            gold: 1,
+            silver: 1,
+            copper: 1,
+        },
         zone: None,
         pos: (0.0, 0.0, 0.0),
         yaw: 0.0,
@@ -131,10 +143,10 @@ mod tests {
             text: "hello".into(),
             target_name: None,
         };
-        let bytes = bincode::serde::encode_to_vec(&say, bincode::config::standard()).expect("encode");
+        let bytes =
+            bincode::serde::encode_to_vec(&say, bincode::config::standard()).expect("encode");
         super::decode_and_handle(&bytes);
         super::decode_and_handle(&[0xff; 64]);
         super::decode_and_handle(&[]);
     }
 }
-

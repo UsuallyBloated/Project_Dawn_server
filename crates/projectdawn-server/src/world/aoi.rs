@@ -31,7 +31,10 @@ pub type Cell = (i32, i32);
 /// Returns the cell that contains world position `(x, z)`.
 #[inline]
 pub fn cell_for(x: f32, z: f32) -> Cell {
-    (x.div_euclid(CELL_SIZE) as i32, z.div_euclid(CELL_SIZE) as i32)
+    (
+        x.div_euclid(CELL_SIZE) as i32,
+        z.div_euclid(CELL_SIZE) as i32,
+    )
 }
 
 /// Returns the 9 cells in the 3×3 neighbourhood centred on `cell`
@@ -39,9 +42,15 @@ pub fn cell_for(x: f32, z: f32) -> Cell {
 pub fn neighbors(cell: Cell) -> [Cell; 9] {
     let (cx, cz) = cell;
     [
-        (cx - 1, cz - 1), (cx, cz - 1), (cx + 1, cz - 1),
-        (cx - 1, cz    ), (cx, cz    ), (cx + 1, cz    ),
-        (cx - 1, cz + 1), (cx, cz + 1), (cx + 1, cz + 1),
+        (cx - 1, cz - 1),
+        (cx, cz - 1),
+        (cx + 1, cz - 1),
+        (cx - 1, cz),
+        (cx, cz),
+        (cx + 1, cz),
+        (cx - 1, cz + 1),
+        (cx, cz + 1),
+        (cx + 1, cz + 1),
     ]
 }
 
@@ -81,7 +90,12 @@ impl AoiGrid {
     ///
     /// Returns `([], [])` when `old_cell == new_cell` (common case — avoids
     /// spurious work on every tick for stationary entities).
-    pub fn update(&mut self, id: EntityId, old_cell: Cell, new_cell: Cell) -> (Vec<Cell>, Vec<Cell>) {
+    pub fn update(
+        &mut self,
+        id: EntityId,
+        old_cell: Cell,
+        new_cell: Cell,
+    ) -> (Vec<Cell>, Vec<Cell>) {
         if old_cell == new_cell {
             return (Vec::new(), Vec::new());
         }
@@ -112,7 +126,10 @@ impl AoiGrid {
     /// Returns all entity ids in exactly the cells in `cells` (no
     /// neighbourhood expansion). Used when the caller has already computed
     /// the relevant cells (e.g. the gained/lost sets from `update`).
-    pub fn entities_in_cells<'a>(&self, cells: impl IntoIterator<Item = &'a Cell>) -> HashSet<EntityId> {
+    pub fn entities_in_cells<'a>(
+        &self,
+        cells: impl IntoIterator<Item = &'a Cell>,
+    ) -> HashSet<EntityId> {
         let mut out = HashSet::new();
         for cell in cells {
             if let Some(set) = self.cells.get(cell) {

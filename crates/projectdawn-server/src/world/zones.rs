@@ -140,9 +140,18 @@ mod tests {
     #[test]
     fn a_dev_spawn_takes_its_camps_faction_named_or_not() {
         let own = |a: &str, b: &str| (Some(a.to_string()), Some(b.to_string()));
-        assert_eq!(faction_of_camp_mob("Gnoll Raider", None), own("gnoll_raiders", "bad"));
-        assert_eq!(faction_of_camp_mob("Rotfang", Some("rotfang")), own("wildlife", "neutral"));
-        assert_eq!(faction_of_camp_mob("The Undying", Some("the_undying")), own("restless_dead", "undead"));
+        assert_eq!(
+            faction_of_camp_mob("Gnoll Raider", None),
+            own("gnoll_raiders", "bad")
+        );
+        assert_eq!(
+            faction_of_camp_mob("Rotfang", Some("rotfang")),
+            own("wildlife", "neutral")
+        );
+        assert_eq!(
+            faction_of_camp_mob("The Undying", Some("the_undying")),
+            own("restless_dead", "undead")
+        );
         assert_eq!(faction_of_camp_mob("Practice Dummy", None), (None, None));
     }
 
@@ -180,7 +189,13 @@ mod tests {
             .iter()
             .filter_map(|c| c.mob.named_id.as_deref())
             .collect();
-        for id in ["sable", "rotfang", "ancient_crawler", "greth", "the_undying"] {
+        for id in [
+            "sable",
+            "rotfang",
+            "ancient_crawler",
+            "greth",
+            "the_undying",
+        ] {
             assert_eq!(
                 placed.iter().filter(|p| **p == id).count(),
                 1,

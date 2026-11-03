@@ -300,14 +300,16 @@ mod tests {
         let w = lookup("res://data/loot/items/flamebrand.tres").expect("flamebrand in table");
         assert!((w.proc_chance - 0.15).abs() < 0.001);
         assert_eq!(w.proc_damage, 25);
-        assert_eq!(w.proc_damage_type, 0, "Flamebrand procs FIRE (SpellData 0), not ICE");
+        assert_eq!(
+            w.proc_damage_type, 0,
+            "Flamebrand procs FIRE (SpellData 0), not ICE"
+        );
         assert_eq!(w.proc_name, "Flaming Strike");
     }
 
     #[test]
     fn cloth_robe_resolves_as_chest() {
-        let i = lookup("res://data/loot/items/cloth_robe.tres")
-            .expect("cloth robe in table");
+        let i = lookup("res://data/loot/items/cloth_robe.tres").expect("cloth robe in table");
         assert_eq!(i.item_type, ItemType::Chest);
         assert_eq!(i.armor, 4);
         assert_eq!(i.armor_type, "cloth");
@@ -315,8 +317,7 @@ mod tests {
 
     #[test]
     fn minor_healing_potion_resolves_as_consumable_with_stack() {
-        let i = lookup("res://data/loot/items/minor_healing_potion.tres")
-            .expect("potion in table");
+        let i = lookup("res://data/loot/items/minor_healing_potion.tres").expect("potion in table");
         assert_eq!(i.item_type, ItemType::Consumable);
         assert_eq!(i.stack_size, 10);
         assert_eq!(i.heal_on_use, 50.0);
@@ -372,10 +373,7 @@ mod tests {
             max_stack("res://data/loot/items/minor_healing_potion.tres"),
             10
         );
-        assert_eq!(
-            max_stack("res://data/loot/items/iron_short_sword.tres"),
-            1
-        );
+        assert_eq!(max_stack("res://data/loot/items/iron_short_sword.tres"), 1);
         // Unknown path falls back to unlimited (legacy behaviour).
         assert_eq!(max_stack("res://nope.tres"), u32::MAX);
     }

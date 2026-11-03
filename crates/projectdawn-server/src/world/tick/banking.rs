@@ -5,8 +5,17 @@
 use super::*;
 
 pub(super) fn apply_coin_bank(world: &mut WorldState, q: &mut Intents, _now: Instant) {
-    let WorldState { server, connections, .. } = world;
-    let Intents { bank_deposit_intents, bank_withdraw_intents, bank_exchange_intents, .. } = q;
+    let WorldState {
+        server,
+        connections,
+        ..
+    } = world;
+    let Intents {
+        bank_deposit_intents,
+        bank_withdraw_intents,
+        bank_exchange_intents,
+        ..
+    } = q;
     // 4i-bank. PD_W0015 — Banker, slice 1 (coins). Deposit / withdraw move
     //          per-tier amounts between the carried wallet and the
     //          zero-weight bank balance; exchange converts tiers on the
@@ -15,7 +24,9 @@ pub(super) fn apply_coin_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
     //          (bank) to the actor; failures fan a private BankRejected.
     for intent in bank_deposit_intents.drain(..) {
         let cid = intent.owner as ClientId;
-        let Some(conn) = connections.get_mut(&cid) else { continue };
+        let Some(conn) = connections.get_mut(&cid) else {
+            continue;
+        };
         // Proximity gate (dead-intents audit, 2026-08-24): banking requires
         // the banker. This is the arm that voided the death penalty — a
         // modified client could BankStoreItem its whole inventory from a
@@ -23,12 +34,20 @@ pub(super) fn apply_coin_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
         match conn.npc_service("banker") {
             Err(None) => {
                 tracing::info!(char_id = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
-                handlers::send_bank_rejected(&mut *server, cid, "There is no banker near you.".to_string());
+                handlers::send_bank_rejected(
+                    &mut *server,
+                    cid,
+                    "There is no banker near you.".to_string(),
+                );
                 continue;
             }
             Err(Some(npc)) => {
                 tracing::info!(char_id = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
-                handlers::send_bank_rejected(&mut *server, cid, format!("{} will not deal with you.", npc.name));
+                handlers::send_bank_rejected(
+                    &mut *server,
+                    cid,
+                    format!("{} will not deal with you.", npc.name),
+                );
                 continue;
             }
             Ok(_) => {}
@@ -47,7 +66,9 @@ pub(super) fn apply_coin_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
         let mut wallet_after = conn.coins;
         if !wallet_after.pay_value_of(coins) {
             handlers::send_bank_rejected(
-                &mut *server, cid, "You don't have that much coin to deposit.".to_string(),
+                &mut *server,
+                cid,
+                "You don't have that much coin to deposit.".to_string(),
             );
             continue;
         }
@@ -72,17 +93,27 @@ pub(super) fn apply_coin_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
     }
     for intent in bank_withdraw_intents.drain(..) {
         let cid = intent.owner as ClientId;
-        let Some(conn) = connections.get_mut(&cid) else { continue };
+        let Some(conn) = connections.get_mut(&cid) else {
+            continue;
+        };
         // Same banker proximity gate as the deposit loop above.
         match conn.npc_service("banker") {
             Err(None) => {
                 tracing::info!(char_id = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
-                handlers::send_bank_rejected(&mut *server, cid, "There is no banker near you.".to_string());
+                handlers::send_bank_rejected(
+                    &mut *server,
+                    cid,
+                    "There is no banker near you.".to_string(),
+                );
                 continue;
             }
             Err(Some(npc)) => {
                 tracing::info!(char_id = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
-                handlers::send_bank_rejected(&mut *server, cid, format!("{} will not deal with you.", npc.name));
+                handlers::send_bank_rejected(
+                    &mut *server,
+                    cid,
+                    format!("{} will not deal with you.", npc.name),
+                );
                 continue;
             }
             Ok(_) => {}
@@ -97,7 +128,9 @@ pub(super) fn apply_coin_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
         let mut bank_after = conn.bank_coins;
         if !bank_after.pay_value_of(coins) {
             handlers::send_bank_rejected(
-                &mut *server, cid, "Your bank doesn't hold that much coin.".to_string(),
+                &mut *server,
+                cid,
+                "Your bank doesn't hold that much coin.".to_string(),
             );
             continue;
         }
@@ -122,22 +155,35 @@ pub(super) fn apply_coin_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
     }
     for intent in bank_exchange_intents.drain(..) {
         let cid = intent.owner as ClientId;
-        let Some(conn) = connections.get_mut(&cid) else { continue };
+        let Some(conn) = connections.get_mut(&cid) else {
+            continue;
+        };
         // Same banker proximity gate as the deposit loop above.
         match conn.npc_service("banker") {
             Err(None) => {
                 tracing::info!(char_id = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
-                handlers::send_bank_rejected(&mut *server, cid, "There is no banker near you.".to_string());
+                handlers::send_bank_rejected(
+                    &mut *server,
+                    cid,
+                    "There is no banker near you.".to_string(),
+                );
                 continue;
             }
             Err(Some(npc)) => {
                 tracing::info!(char_id = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
-                handlers::send_bank_rejected(&mut *server, cid, format!("{} will not deal with you.", npc.name));
+                handlers::send_bank_rejected(
+                    &mut *server,
+                    cid,
+                    format!("{} will not deal with you.", npc.name),
+                );
                 continue;
             }
             Ok(_) => {}
         }
-        match conn.coins.exchange(intent.from_tier, intent.to_tier, intent.qty) {
+        match conn
+            .coins
+            .exchange(intent.from_tier, intent.to_tier, intent.qty)
+        {
             Ok(()) => {
                 conn.coins_dirty = true;
                 conn.ledger(ledger::coin_event(
@@ -166,8 +212,17 @@ pub(super) fn apply_coin_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
 }
 
 pub(super) fn apply_item_bank(world: &mut WorldState, q: &mut Intents, _now: Instant) {
-    let WorldState { server, connections, trade_manager, .. } = world;
-    let Intents { bank_store_item_intents, bank_withdraw_item_intents, .. } = q;
+    let WorldState {
+        server,
+        connections,
+        trade_manager,
+        ..
+    } = world;
+    let Intents {
+        bank_store_item_intents,
+        bank_withdraw_item_intents,
+        ..
+    } = q;
     // 4i-bank2. PD_W0016 — Banker, slice 2 (item vaults). Quick-transfer
     //           whole stacks between inventory and a vault. Store sizes the
     //           deposit against the vault's room first (capacity_for) so the
@@ -180,32 +235,57 @@ pub(super) fn apply_item_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
         let cid = intent.owner as ClientId;
         // PD_W0028 escrow: an offered slot cannot be banked (this is
         // also the death-penalty-void slot, so the lock matters twice).
-        if trade_locked(&mut *server, &trade_manager, cid, &intent.src_location, intent.src_slot) {
+        if trade_locked(
+            &mut *server,
+            &trade_manager,
+            cid,
+            &intent.src_location,
+            intent.src_slot,
+        ) {
             continue;
         }
-        let Some(conn) = connections.get_mut(&cid) else { continue };
+        let Some(conn) = connections.get_mut(&cid) else {
+            continue;
+        };
         // Same banker proximity gate as the deposit loop above.
         match conn.npc_service("banker") {
             Err(None) => {
                 tracing::info!(char_id = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
-                handlers::send_bank_rejected(&mut *server, cid, "There is no banker near you.".to_string());
+                handlers::send_bank_rejected(
+                    &mut *server,
+                    cid,
+                    "There is no banker near you.".to_string(),
+                );
                 continue;
             }
             Err(Some(npc)) => {
                 tracing::info!(char_id = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
-                handlers::send_bank_rejected(&mut *server, cid, format!("{} will not deal with you.", npc.name));
+                handlers::send_bank_rejected(
+                    &mut *server,
+                    cid,
+                    format!("{} will not deal with you.", npc.name),
+                );
                 continue;
             }
             Ok(_) => {}
         }
-        let Some((path, avail)) =
-            conn.inventory.peek_at(&intent.src_location, intent.src_slot)
+        let Some((path, avail)) = conn
+            .inventory
+            .peek_at(&intent.src_location, intent.src_slot)
         else {
-            handlers::send_bank_rejected(&mut *server, cid, "Nothing to deposit there.".to_string());
+            handlers::send_bank_rejected(
+                &mut *server,
+                cid,
+                "Nothing to deposit there.".to_string(),
+            );
             continue;
         };
         if items::bag_num_slots(&path).is_some() {
-            handlers::send_bank_rejected(&mut *server, cid, "Bags can't go in the bank vault.".to_string());
+            handlers::send_bank_rejected(
+                &mut *server,
+                cid,
+                "Bags can't go in the bank vault.".to_string(),
+            );
             continue;
         }
         let room = if intent.shared {
@@ -224,10 +304,17 @@ pub(super) fn apply_item_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
         // inventory). destroy_at can't fail here today — peek_at vetted the
         // slot and bags are rejected above — but bailing on Err keeps a
         // future change from turning this into a dup.
-        let removed = match conn.inventory.destroy_at(&intent.src_location, intent.src_slot, take) {
+        let removed = match conn
+            .inventory
+            .destroy_at(&intent.src_location, intent.src_slot, take)
+        {
             Ok((_, removed)) => removed,
             Err(_) => {
-                handlers::send_bank_rejected(&mut *server, cid, "Couldn't move that item.".to_string());
+                handlers::send_bank_rejected(
+                    &mut *server,
+                    cid,
+                    "Couldn't move that item.".to_string(),
+                );
                 continue;
             }
         };
@@ -247,10 +334,25 @@ pub(super) fn apply_item_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
             &path,
             removed,
             0,
-            Some(if intent.shared { "account vault" } else { "vault" }.to_string()),
+            Some(
+                if intent.shared {
+                    "account vault"
+                } else {
+                    "vault"
+                }
+                .to_string(),
+            ),
         ));
-        let post = conn.inventory.peek_at(&intent.src_location, intent.src_slot);
-        handlers::send_slot_delta(&mut *server, cid, intent.src_location.clone(), intent.src_slot, post);
+        let post = conn
+            .inventory
+            .peek_at(&intent.src_location, intent.src_slot);
+        handlers::send_slot_delta(
+            &mut *server,
+            cid,
+            intent.src_location.clone(),
+            intent.src_slot,
+            post,
+        );
         let entries = if intent.shared {
             conn.account_bank_items.to_snapshot_entries()
         } else {
@@ -261,17 +363,27 @@ pub(super) fn apply_item_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
     }
     for intent in bank_withdraw_item_intents.drain(..) {
         let cid = intent.owner as ClientId;
-        let Some(conn) = connections.get_mut(&cid) else { continue };
+        let Some(conn) = connections.get_mut(&cid) else {
+            continue;
+        };
         // Same banker proximity gate as the deposit loop above.
         match conn.npc_service("banker") {
             Err(None) => {
                 tracing::info!(char_id = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
-                handlers::send_bank_rejected(&mut *server, cid, "There is no banker near you.".to_string());
+                handlers::send_bank_rejected(
+                    &mut *server,
+                    cid,
+                    "There is no banker near you.".to_string(),
+                );
                 continue;
             }
             Err(Some(npc)) => {
                 tracing::info!(char_id = intent.owner, npc = %npc.id, level = conn.npc_faction_level(npc).name(), "bank op rejected — faction");
-                handlers::send_bank_rejected(&mut *server, cid, format!("{} will not deal with you.", npc.name));
+                handlers::send_bank_rejected(
+                    &mut *server,
+                    cid,
+                    format!("{} will not deal with you.", npc.name),
+                );
                 continue;
             }
             Ok(_) => {}
@@ -283,7 +395,11 @@ pub(super) fn apply_item_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
             conn.bank_items.peek(slot).cloned()
         };
         let Some(entry) = present else {
-            handlers::send_bank_rejected(&mut *server, cid, "Nothing to withdraw there.".to_string());
+            handlers::send_bank_rejected(
+                &mut *server,
+                cid,
+                "Nothing to withdraw there.".to_string(),
+            );
             continue;
         };
         let path = entry.item_path;
@@ -326,11 +442,24 @@ pub(super) fn apply_item_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
                 &path,
                 count - leftover,
                 0,
-                Some(if intent.shared { "account vault" } else { "vault" }.to_string()),
+                Some(
+                    if intent.shared {
+                        "account vault"
+                    } else {
+                        "vault"
+                    }
+                    .to_string(),
+                ),
             ));
         }
         for (loc, slot) in &touched {
-            handlers::send_slot_delta(&mut *server, cid, loc.clone(), *slot, conn.inventory.peek_at(loc, *slot));
+            handlers::send_slot_delta(
+                &mut *server,
+                cid,
+                loc.clone(),
+                *slot,
+                conn.inventory.peek_at(loc, *slot),
+            );
         }
         let entries = if intent.shared {
             conn.account_bank_items.to_snapshot_entries()

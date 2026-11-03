@@ -7,11 +7,7 @@ use super::*;
 /// `autoloads/buff_manager.gd::add_hot`'s behaviour). Caller is
 /// responsible for fanning a BuffSnapshot afterwards.
 pub(super) fn apply_buff(conn: &mut PerConnection, buff: ActiveBuff) {
-    if let Some(existing) = conn
-        .active_buffs
-        .iter_mut()
-        .find(|b| b.name == buff.name)
-    {
+    if let Some(existing) = conn.active_buffs.iter_mut().find(|b| b.name == buff.name) {
         existing.effect = buff.effect;
         existing.remaining = buff.remaining;
         existing.tick_acc = 0.0;
@@ -29,9 +25,22 @@ pub(super) fn apply_stat_buff(conn: &mut PerConnection, buff: ActiveBuff) {
     // Pull deltas out of the incoming buff.
     let (str_d, agi_d, int_d, wis_d, con_d, hp_d, mp_d) = match buff.effect {
         buffs::BuffEffect::StatBuff {
-            strength, agility, intelligence, wisdom, constitution,
-            max_hp_delta, max_mp_delta,
-        } => (strength, agility, intelligence, wisdom, constitution, max_hp_delta, max_mp_delta),
+            strength,
+            agility,
+            intelligence,
+            wisdom,
+            constitution,
+            max_hp_delta,
+            max_mp_delta,
+        } => (
+            strength,
+            agility,
+            intelligence,
+            wisdom,
+            constitution,
+            max_hp_delta,
+            max_mp_delta,
+        ),
         _ => return,
     };
     // If an existing same-named stat buff is present, undo its
@@ -39,13 +48,24 @@ pub(super) fn apply_stat_buff(conn: &mut PerConnection, buff: ActiveBuff) {
     // conn.strength etc. = base + sum(active stat buffs).
     if let Some(idx) = conn.active_buffs.iter().position(|b| b.name == buff.name) {
         if let buffs::BuffEffect::StatBuff {
-            strength, agility, intelligence, wisdom, constitution,
-            max_hp_delta, max_mp_delta,
+            strength,
+            agility,
+            intelligence,
+            wisdom,
+            constitution,
+            max_hp_delta,
+            max_mp_delta,
         } = conn.active_buffs[idx].effect
         {
             buffs::undo_stat_deltas(
-                conn, strength, agility, intelligence, wisdom, constitution,
-                max_hp_delta, max_mp_delta,
+                conn,
+                strength,
+                agility,
+                intelligence,
+                wisdom,
+                constitution,
+                max_hp_delta,
+                max_mp_delta,
             );
         }
         conn.active_buffs.remove(idx);
@@ -92,7 +112,11 @@ pub(super) fn apply_absorb_exclusive(conn: &mut PerConnection, buff: ActiveBuff)
 /// Returns true if the active set changed so the caller fans a
 /// BuffSnapshot. `mark_dirty` is called for stat/MP changes so the next
 /// regen tick fans the updated max HP/MP caps.
-pub(super) fn apply_player_spell_buffs(conn: &mut PerConnection, spell: &spells::Spell, now: Instant) -> bool {
+pub(super) fn apply_player_spell_buffs(
+    conn: &mut PerConnection,
+    spell: &spells::Spell,
+    now: Instant,
+) -> bool {
     let mut changed = false;
     if spell.hot_hps > 0.0 && spell.hot_duration > 0.0 {
         apply_buff(
@@ -128,7 +152,12 @@ pub(super) fn apply_player_spell_buffs(conn: &mut PerConnection, spell: &spells:
     if spell.haste_amount > 0.0 && spell.haste_duration > 0.0 {
         apply_buff(
             conn,
-            ActiveBuff::new_haste(spell.name.clone(), spell.haste_amount, spell.haste_duration, now),
+            ActiveBuff::new_haste(
+                spell.name.clone(),
+                spell.haste_amount,
+                spell.haste_duration,
+                now,
+            ),
         );
         changed = true;
     }
@@ -207,36 +236,59 @@ pub(super) fn apply_pet_spell_buffs(pet: &mut Entity, spell: &spells::Spell, now
     let mut changed = false;
     if spell.hot_hps > 0.0 && spell.hot_duration > 0.0 {
         pet.apply_buff(ActiveBuff::new_hot(
-            spell.name.clone(), spell.hot_hps, spell.hot_duration, now,
+            spell.name.clone(),
+            spell.hot_hps,
+            spell.hot_duration,
+            now,
         ));
         changed = true;
     }
     if spell.move_speed_mult > 0.0 && spell.move_speed_duration > 0.0 {
         pet.apply_buff(ActiveBuff::new_speed(
-            spell.name.clone(), spell.move_speed_mult, spell.move_speed_duration, now,
+            spell.name.clone(),
+            spell.move_speed_mult,
+            spell.move_speed_duration,
+            now,
         ));
         changed = true;
     }
     if spell.haste_amount > 0.0 && spell.haste_duration > 0.0 {
         pet.apply_buff(ActiveBuff::new_haste(
-            spell.name.clone(), spell.haste_amount, spell.haste_duration, now,
+            spell.name.clone(),
+            spell.haste_amount,
+            spell.haste_duration,
+            now,
         ));
         changed = true;
     }
     if spell.damage_shield_amount > 0.0 && spell.damage_shield_duration > 0.0 {
         pet.apply_buff(ActiveBuff::new_damage_shield(
-            spell.name.clone(), spell.damage_shield_amount, spell.damage_shield_duration, now,
+            spell.name.clone(),
+            spell.damage_shield_amount,
+            spell.damage_shield_duration,
+            now,
         ));
         changed = true;
     }
     if spell.primary_stat_buff_duration > 0.0 {
-        let any_nonzero = spell.str_buff != 0 || spell.agi_buff != 0 || spell.int_buff != 0
-            || spell.wis_buff != 0 || spell.con_buff != 0 || spell.max_hp_buff != 0.0;
+        let any_nonzero = spell.str_buff != 0
+            || spell.agi_buff != 0
+            || spell.int_buff != 0
+            || spell.wis_buff != 0
+            || spell.con_buff != 0
+            || spell.max_hp_buff != 0.0;
         if any_nonzero {
             pet.apply_buff(ActiveBuff::new_stat_buff(
-                spell.name.clone(), spell.str_buff, spell.agi_buff, spell.int_buff,
-                spell.wis_buff, spell.con_buff, spell.max_hp_buff, spell.max_mp_buff,
-                spell.primary_stat_buff_duration, now,
+                spell.name.clone(),
+                spell.str_buff,
+                spell.agi_buff,
+                spell.int_buff,
+                spell.wis_buff,
+                spell.con_buff,
+                spell.max_hp_buff,
+                spell.max_mp_buff,
+                spell.primary_stat_buff_duration,
+                now,
             ));
             changed = true;
         }

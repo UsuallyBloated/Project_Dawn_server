@@ -4,7 +4,12 @@
 use super::*;
 
 pub(super) fn run_regen(world: &mut WorldState, q: &mut Intents, now: Instant, dt: f32) {
-    let WorldState { server, connections, trade_manager, .. } = world;
+    let WorldState {
+        server,
+        connections,
+        trade_manager,
+        ..
+    } = world;
     let Intents { eat_emotes, .. } = q;
     // 5b. Track 6 regen tick — HP/MP/Stamina recovery, then fan
     //     `HealthUpdate` / `ManaUpdate` / `StaminaUpdate` for any
@@ -32,17 +37,20 @@ pub(super) fn run_regen(world: &mut WorldState, q: &mut Intents, now: Instant, d
             // Eat before speaking: a character that runs out WITH bread in
             // the bags eats this tick and is never told it is out of food.
             let mut fed_now = [false, false];
-            for (i, need) in [hunger::Need::Food, hunger::Need::Drink].into_iter().enumerate() {
+            for (i, need) in [hunger::Need::Food, hunger::Need::Drink]
+                .into_iter()
+                .enumerate()
+            {
                 if !hunger::is_famished(conn, need) {
                     continue;
                 }
                 // Food offered in an open trade is not the character's to
                 // eat until the trade ends.
-                let Some((loc, slot, item)) = hunger::first_in_slot_order(
-                    &conn.inventory,
-                    need,
-                    |l, s| trade_manager.is_locked(*client_id, l, s),
-                ) else {
+                let Some((loc, slot, item)) =
+                    hunger::first_in_slot_order(&conn.inventory, need, |l, s| {
+                        trade_manager.is_locked(*client_id, l, s)
+                    })
+                else {
                     continue;
                 };
                 if conn.inventory.decrement_at(&loc, slot).is_err() {
@@ -56,11 +64,21 @@ pub(super) fn run_regen(world: &mut WorldState, q: &mut Intents, now: Instant, d
                     -1,
                     Some("hunger".to_string()),
                 ));
-                handlers::send_slot_delta(&mut *server, *client_id, loc.clone(), slot, conn.inventory.peek_at(&loc, slot));
+                handlers::send_slot_delta(
+                    &mut *server,
+                    *client_id,
+                    loc.clone(),
+                    slot,
+                    conn.inventory.peek_at(&loc, slot),
+                );
                 let added = hunger::feed(conn, need, hunger::fullness_of(item));
                 fed_now[i] = true;
                 eat_emotes.push((*client_id, hunger::eat_emote(&conn.name, &item.name, need)));
-                let verb = if need == hunger::Need::Food { "eat" } else { "drink" };
+                let verb = if need == hunger::Need::Food {
+                    "eat"
+                } else {
+                    "drink"
+                };
                 handlers::send_system_line(
                     &mut *server,
                     *client_id,

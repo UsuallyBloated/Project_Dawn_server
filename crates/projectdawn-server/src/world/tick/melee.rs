@@ -3,9 +3,23 @@
 
 use super::*;
 
-pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: Instant, in_world_recipients_now: &[ClientId]) {
-    let WorldState { server, connections, enemies, .. } = world;
-    let Intents { attack_intents, use_skill_intents, .. } = q;
+pub(super) fn apply_active_skills(
+    world: &mut WorldState,
+    q: &mut Intents,
+    now: Instant,
+    in_world_recipients_now: &[ClientId],
+) {
+    let WorldState {
+        server,
+        connections,
+        enemies,
+        ..
+    } = world;
+    let Intents {
+        attack_intents,
+        use_skill_intents,
+        ..
+    } = q;
     // 4g. Active skills (client-authority audit item 6). The handler
     //     checked the skill, the class, the crowd control, the cooldown
     //     and the stamina; here the target is checked, the stamina and
@@ -17,8 +31,12 @@ pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: 
     if !use_skill_intents.is_empty() {
         for intent in use_skill_intents.drain(..) {
             let user_cid = intent.user as ClientId;
-            let Some(skill) = active_skills::lookup(&intent.skill_name) else { continue };
-            let Some(user) = connections.get(&user_cid) else { continue };
+            let Some(skill) = active_skills::lookup(&intent.skill_name) else {
+                continue;
+            };
+            let Some(user) = connections.get(&user_cid) else {
+                continue;
+            };
             // A dead user uses nothing (as a dead caster casts nothing).
             if !user.in_world || user.hp <= 0.0 || user.death_processed {
                 continue;
@@ -26,11 +44,21 @@ pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: 
             // Checked again against this tick's state: two UseSkills in
             // one datagram passed the handler on the same stamina.
             if active_skills::on_cooldown(user.skill_cooldowns.get(&skill.name).copied(), now) {
-                handlers::send_skill_fail(&mut *server, user_cid, &skill.name, "You cannot use that yet.");
+                handlers::send_skill_fail(
+                    &mut *server,
+                    user_cid,
+                    &skill.name,
+                    "You cannot use that yet.",
+                );
                 continue;
             }
             if user.stamina < skill.stamina_cost {
-                handlers::send_skill_fail(&mut *server, user_cid, &skill.name, "You are too tired.");
+                handlers::send_skill_fail(
+                    &mut *server,
+                    user_cid,
+                    &skill.name,
+                    "You are too tired.",
+                );
                 continue;
             }
             let user_pos = user.pos;
@@ -44,7 +72,12 @@ pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: 
                 let weapon_path = user.equipped_weapon_path(false);
                 let ranged = items::lookup(&weapon_path).is_some_and(|w| w.is_ranged);
                 let Some(target_id) = intent.target_id else {
-                    handlers::send_skill_fail(&mut *server, user_cid, &skill.name, "You have no target.");
+                    handlers::send_skill_fail(
+                        &mut *server,
+                        user_cid,
+                        &skill.name,
+                        "You have no target.",
+                    );
                     continue;
                 };
                 // Presence, liveness and reach share ONE line, so an id
@@ -58,10 +91,23 @@ pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: 
                     if target_id == intent.user {
                         Err("You cannot use that on yourself.")
                     } else {
-                        let allowed = if ranged { RANGED_ATTACK_RANGE } else { 3.0 * ATTACK_RANGE_TOLERANCE };
+                        let allowed = if ranged {
+                            RANGED_ATTACK_RANGE
+                        } else {
+                            3.0 * ATTACK_RANGE_TOLERANCE
+                        };
                         match connections.get(&(target_id as ClientId)) {
-                            Some(t) if t.in_world && t.hp > 0.0 && t.pos.distance_to(user_pos) <= allowed => {
-                                if combat::can_attack(user, t, user_zone.as_deref(), t.zone.as_deref()) {
+                            Some(t)
+                                if t.in_world
+                                    && t.hp > 0.0
+                                    && t.pos.distance_to(user_pos) <= allowed =>
+                            {
+                                if combat::can_attack(
+                                    user,
+                                    t,
+                                    user_zone.as_deref(),
+                                    t.zone.as_deref(),
+                                ) {
                                     Ok(())
                                 } else {
                                     Err("Unable to attack that target.")
@@ -73,15 +119,30 @@ pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: 
                 } else {
                     match enemies.get(&target_id) {
                         Some(e) if e.is_alive() => {
-                            let allowed = if ranged { RANGED_ATTACK_RANGE } else { e.melee_range() * ATTACK_RANGE_TOLERANCE };
+                            let allowed = if ranged {
+                                RANGED_ATTACK_RANGE
+                            } else {
+                                e.melee_range() * ATTACK_RANGE_TOLERANCE
+                            };
                             if e.pos.distance_to(user_pos) > allowed {
                                 Err(NOT_HERE)
                             } else {
                                 match e.owner {
                                     None => Ok(()),
-                                    Some(owner) if owner as ClientId == user_cid => Err("You cannot attack your own pet."),
+                                    Some(owner) if owner as ClientId == user_cid => {
+                                        Err("You cannot attack your own pet.")
+                                    }
                                     Some(owner) => match connections.get(&(owner as ClientId)) {
-                                        Some(o) if combat::can_attack(user, o, user_zone.as_deref(), o.zone.as_deref()) => Ok(()),
+                                        Some(o)
+                                            if combat::can_attack(
+                                                user,
+                                                o,
+                                                user_zone.as_deref(),
+                                                o.zone.as_deref(),
+                                            ) =>
+                                        {
+                                            Ok(())
+                                        }
                                         _ => Err("Unable to attack that target."),
                                     },
                                 }
@@ -103,11 +164,15 @@ pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: 
             // nothing.
             let holding: Option<&str> = match effect {
                 active_skills::Effect::AbsorbShield
-                    if user.active_buffs.iter().any(|b| matches!(b.effect, buffs::BuffEffect::Absorb { pool } if pool > 0.0)) =>
+                    if user.active_buffs.iter().any(
+                        |b| matches!(b.effect, buffs::BuffEffect::Absorb { pool } if pool > 0.0),
+                    ) =>
                 {
                     Some("Your shield still holds.")
                 }
-                active_skills::Effect::Stealth if buffs::is_hidden(&user.active_buffs) => Some("You are already hidden."),
+                active_skills::Effect::Stealth if buffs::is_hidden(&user.active_buffs) => {
+                    Some("You are already hidden.")
+                }
                 _ => None,
             };
             if let Some(line) = holding {
@@ -123,7 +188,8 @@ pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: 
             if let Some(u) = connections.get_mut(&user_cid) {
                 u.stamina = (u.stamina - skill.stamina_cost).max(0.0);
                 regen::mark_dirty(u);
-                u.skill_cooldowns.insert(skill.name.clone(), now + skill.cooldown_duration());
+                u.skill_cooldowns
+                    .insert(skill.name.clone(), now + skill.cooldown_duration());
                 u.is_sitting = false;
                 if skill.is_damage() {
                     u.last_attack_at = Some(now);
@@ -152,24 +218,40 @@ pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: 
                 active_skills::Effect::EvadeBoost => {
                     if let Some(u) = connections.get_mut(&user_cid) {
                         u.active_buffs.retain(|b| b.name != skill.name);
-                        u.active_buffs.push(ActiveBuff::new_evade_all(skill.name.clone(), skill.effect_duration, now));
+                        u.active_buffs.push(ActiveBuff::new_evade_all(
+                            skill.name.clone(),
+                            skill.effect_duration,
+                            now,
+                        ));
                         snapshot_changed = true;
                     }
                 }
                 active_skills::Effect::AbsorbShield => {
                     if let Some(u) = connections.get_mut(&user_cid) {
                         u.active_buffs.retain(|b| b.name != skill.name);
-                        u.active_buffs.push(ActiveBuff::new_absorb(skill.name.clone(), skill.absorb_amount, now));
+                        u.active_buffs.push(ActiveBuff::new_absorb(
+                            skill.name.clone(),
+                            skill.absorb_amount,
+                            now,
+                        ));
                         snapshot_changed = true;
                     }
                 }
                 active_skills::Effect::Stealth => {
                     if let Some(u) = connections.get_mut(&user_cid) {
                         u.active_buffs.retain(|b| b.name != skill.name);
-                        u.active_buffs.push(ActiveBuff::new_stealth(skill.name.clone(), skill.stealth_duration, now));
+                        u.active_buffs.push(ActiveBuff::new_stealth(
+                            skill.name.clone(),
+                            skill.stealth_duration,
+                            now,
+                        ));
                         snapshot_changed = true;
                     }
-                    handlers::send_system_line(&mut *server, user_cid, "You have hidden yourself from view.");
+                    handlers::send_system_line(
+                        &mut *server,
+                        user_cid,
+                        "You have hidden yourself from view.",
+                    );
                 }
                 active_skills::Effect::FeignDeath => {
                     let roll: f32 = rand::thread_rng().gen();
@@ -179,14 +261,20 @@ pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: 
                         // by what they left ticking), and the mobs that
                         // lost their target are fanned as such.
                         for mob_id in wipe_hate(&mut *enemies, &[intent.user]) {
-                            handlers::fan_out_entity_target(&mut *server, &in_world_recipients_now, mob_id, None);
+                            handlers::fan_out_entity_target(
+                                &mut *server,
+                                &in_world_recipients_now,
+                                mob_id,
+                                None,
+                            );
                         }
                         // And they lie unnoticed until they stand (any
                         // movement), swing, use a skill or cast at a mob,
                         // or two minutes pass; otherwise a mob with an
                         // aggro radius would turn straight back on them.
                         if let Some(u) = connections.get_mut(&user_cid) {
-                            u.active_buffs.retain(|b| !matches!(b.effect, buffs::BuffEffect::Feigned));
+                            u.active_buffs
+                                .retain(|b| !matches!(b.effect, buffs::BuffEffect::Feigned));
                             u.active_buffs.push(ActiveBuff::new_feigned(
                                 "Feigned Death".to_string(),
                                 active_skills::FEIGN_DEATH_HOLD_SECS,
@@ -194,10 +282,18 @@ pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: 
                             ));
                             snapshot_changed = true;
                         }
-                        handlers::send_system_line(&mut *server, user_cid, "You feign death successfully.");
+                        handlers::send_system_line(
+                            &mut *server,
+                            user_cid,
+                            "You feign death successfully.",
+                        );
                         tracing::info!(char_id = intent.user, "feign death succeeded");
                     } else {
-                        handlers::send_system_line(&mut *server, user_cid, "Your feign death fails!");
+                        handlers::send_system_line(
+                            &mut *server,
+                            user_cid,
+                            "Your feign death fails!",
+                        );
                         tracing::info!(char_id = intent.user, "feign death failed");
                     }
                 }
@@ -212,9 +308,26 @@ pub(super) fn apply_active_skills(world: &mut WorldState, q: &mut Intents, now: 
     }
 }
 
-pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instant, in_world_recipients_now: &[ClientId]) {
-    let WorldState { server, connections, aoi, enemies, loot_bags, group_manager, .. } = world;
-    let Intents { attack_intents, pet_command_intents, .. } = q;
+pub(super) fn apply_attacks(
+    world: &mut WorldState,
+    q: &mut Intents,
+    now: Instant,
+    in_world_recipients_now: &[ClientId],
+) {
+    let WorldState {
+        server,
+        connections,
+        aoi,
+        enemies,
+        loot_bags,
+        group_manager,
+        ..
+    } = world;
+    let Intents {
+        attack_intents,
+        pet_command_intents,
+        ..
+    } = q;
     // 4h. Apply player → server attack intents. The handler queued
     //     these without touching the enemies map; here we run the
     //     server-authoritative damage formula against the attacker's
@@ -257,8 +370,7 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
             // bare-handed combat still works. is_offhand now only selects the
             // slot, so a client can't fabricate an off-hand swing it isn't
             // geared for (empty slot 1 -> fists, not the main-hand weapon).
-            let server_weapon_path: String =
-                attacker_conn.equipped_weapon_path(intent.is_offhand);
+            let server_weapon_path: String = attacker_conn.equipped_weapon_path(intent.is_offhand);
             // Phase 1 exploit gate — off-hand swings require an actual off-hand
             // weapon. A stock client only sends is_offhand=true when
             // dual-wielding a real slot-1 weapon (combat.gd `_is_dual_wielding`);
@@ -318,7 +430,9 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
             // A skill's swing is outside the auto-attack limiter: its own
             // cooldown paces it (step 4g charged it), and it neither reads
             // nor advances the hand's timer.
-            if intent.skill.is_none() && swing_too_fast(attacker_conn.last_swing_at[hand], now, min_interval) {
+            if intent.skill.is_none()
+                && swing_too_fast(attacker_conn.last_swing_at[hand], now, min_interval)
+            {
                 tracing::info!(
                     attacker = intent.attacker,
                     is_offhand = intent.is_offhand,
@@ -332,11 +446,7 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
             // Track 6 sub-task 2: server computes the damage roll.
             // Client-supplied amount is ignored — even a malicious
             // client can't claim 999 damage anymore.
-            let swing = combat::calc_swing(
-                attacker_conn,
-                &server_weapon_path,
-                intent.is_offhand,
-            );
+            let swing = combat::calc_swing(attacker_conn, &server_weapon_path, intent.is_offhand);
             // An active skill's swing: the ordinary roll times its
             // multiplier; Truesight Strike never misses.
             let swing = skill_swing(swing, intent.skill.as_ref());
@@ -376,31 +486,27 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                     continue;
                 }
                 let target_cid = intent.target_id as ClientId;
-                let target_zone = connections
-                    .get(&target_cid)
-                    .and_then(|c| c.zone.clone());
-                let allowed_pvp = match (
-                    connections.get(&attacker_cid),
-                    connections.get(&target_cid),
-                ) {
-                    (Some(a), Some(t)) => combat::can_attack(
-                        a, t,
-                        attacker_zone.as_deref(),
-                        target_zone.as_deref(),
-                    ),
-                    _ => false,
-                };
+                let target_zone = connections.get(&target_cid).and_then(|c| c.zone.clone());
+                let allowed_pvp =
+                    match (connections.get(&attacker_cid), connections.get(&target_cid)) {
+                        (Some(a), Some(t)) => combat::can_attack(
+                            a,
+                            t,
+                            attacker_zone.as_deref(),
+                            target_zone.as_deref(),
+                        ),
+                        _ => false,
+                    };
                 let target_in_range_alive = connections
                     .get(&target_cid)
                     .map(|t| {
                         t.in_world
                             && t.hp > 0.0
-                            && t.pos.distance_to(attacker_pos) <= match items::lookup(
-                                &server_weapon_path,
-                            ) {
-                                Some(w) if w.is_ranged => RANGED_ATTACK_RANGE,
-                                _ => 3.0 * ATTACK_RANGE_TOLERANCE,
-                            }
+                            && t.pos.distance_to(attacker_pos)
+                                <= match items::lookup(&server_weapon_path) {
+                                    Some(w) if w.is_ranged => RANGED_ATTACK_RANGE,
+                                    _ => 3.0 * ATTACK_RANGE_TOLERANCE,
+                                }
                     })
                     .unwrap_or(false);
                 if !allowed_pvp {
@@ -441,9 +547,17 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                 let target_evading = connections
                     .get(&target_cid)
                     .is_some_and(|t| buffs::is_evading(&t.active_buffs));
-                let truesight = intent.skill.as_ref().is_some_and(|s| s.effect == active_skills::Effect::Truesight);
+                let truesight = intent
+                    .skill
+                    .as_ref()
+                    .is_some_and(|s| s.effect == active_skills::Effect::Truesight);
                 if target_evading && !truesight {
-                    handlers::fan_out_evade(&mut *server, &in_world_recipients_now, intent.attacker, intent.target_id);
+                    handlers::fan_out_evade(
+                        &mut *server,
+                        &in_world_recipients_now,
+                        intent.attacker,
+                        intent.target_id,
+                    );
                     continue;
                 }
                 // Seated-combat rule (classic EQ, user call 2026-10-14):
@@ -451,20 +565,27 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                 // with no armor; the hit then stands them
                 // (note_damage_taken). Decided here, after the gates, so
                 // a refused swing never re-rolls.
-                let target_seated = connections
-                    .get(&target_cid)
-                    .is_some_and(|t| t.is_sitting);
+                let target_seated = connections.get(&target_cid).is_some_and(|t| t.is_sitting);
                 let swing = if target_seated {
                     connections
                         .get(&attacker_cid)
-                        .map(|a| skill_swing(combat::calc_swing_max(a, &server_weapon_path, intent.is_offhand), intent.skill.as_ref()))
+                        .map(|a| {
+                            skill_swing(
+                                combat::calc_swing_max(a, &server_weapon_path, intent.is_offhand),
+                                intent.skill.as_ref(),
+                            )
+                        })
                         .unwrap_or(swing)
                 } else {
                     swing
                 };
                 // Warder's Fury commands the warder whether the blow lands
                 // or not (the /pet attack path PvP-gates it again).
-                if intent.skill.as_ref().is_some_and(|s| s.effect == active_skills::Effect::WarderFury) {
+                if intent
+                    .skill
+                    .as_ref()
+                    .is_some_and(|s| s.effect == active_skills::Effect::WarderFury)
+                {
                     pet_command_intents.push(PetCommandI {
                         owner: intent.attacker,
                         command: protocol::world::pet_command::ATTACK,
@@ -501,17 +622,23 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                         buffs::consume_absorb(&mut target_conn.active_buffs, amount);
                     amount = after_absorb;
                     if exhausted {
-                        absorb_strip_pvp = target_conn.active_buffs.iter().position(|b| {
-                            matches!(b.effect, buffs::BuffEffect::Absorb { .. })
-                        });
+                        absorb_strip_pvp = target_conn
+                            .active_buffs
+                            .iter()
+                            .position(|b| matches!(b.effect, buffs::BuffEffect::Absorb { .. }));
                     }
-                    shield_to_attacker_pvp =
-                        buffs::damage_shield_total(&target_conn.active_buffs);
-                    shield_name_pvp = buffs::first_damage_shield_name(&target_conn.active_buffs).map(|s| s.to_string());
+                    shield_to_attacker_pvp = buffs::damage_shield_total(&target_conn.active_buffs);
+                    shield_name_pvp = buffs::first_damage_shield_name(&target_conn.active_buffs)
+                        .map(|s| s.to_string());
                     target_conn.hp = (target_conn.hp - amount as f32).max(0.0);
                     regen::mark_dirty(target_conn);
                     target_conn.note_damage_taken(now); // camp breaks on damage
-                    (target_conn.hp, target_conn.max_hp, amount, target_conn.equipped_armor)
+                    (
+                        target_conn.hp,
+                        target_conn.max_hp,
+                        amount,
+                        target_conn.equipped_armor,
+                    )
                 };
                 // Strip exhausted absorb buff + fan snapshot.
                 if let Some(idx) = absorb_strip_pvp {
@@ -521,11 +648,7 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                         }
                     }
                     if let Some(tc) = connections.get(&target_cid) {
-                        handlers::fan_out_buff_snapshot(
-                            &mut *server,
-                            &in_world_recipients_now,
-                            tc,
-                        );
+                        handlers::fan_out_buff_snapshot(&mut *server, &in_world_recipients_now, tc);
                     }
                 }
                 // Damage shield reflects damage to the attacker
@@ -565,14 +688,24 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                             let outcome = roll_cast_interrupt(att, now, reflect_dmg);
                             let (att_mp, att_max_mp) = (att.mp, att.max_mp);
                             match &outcome {
-                                InterruptOutcome::Interrupted { spell_name, mana_charged } => {
+                                InterruptOutcome::Interrupted {
+                                    spell_name,
+                                    mana_charged,
+                                } => {
                                     handlers::fan_out_cast_fail(
                                         &mut *server,
                                         &in_world_recipients_now,
                                         intent.attacker,
                                         "interrupted (hit during cast)".to_string(),
                                     );
-                                    tell_interrupt_charge(&mut *server, attacker_cid, intent.attacker, att_mp, att_max_mp, *mana_charged);
+                                    tell_interrupt_charge(
+                                        &mut *server,
+                                        attacker_cid,
+                                        intent.attacker,
+                                        att_mp,
+                                        att_max_mp,
+                                        *mana_charged,
+                                    );
                                     tracing::info!(
                                         caster = intent.attacker,
                                         spell = %spell_name,
@@ -613,14 +746,24 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                     let interrupt_outcome = roll_cast_interrupt(tc, now, amount as i32);
                     let (tc_mp, tc_max_mp) = (tc.mp, tc.max_mp);
                     match &interrupt_outcome {
-                        InterruptOutcome::Interrupted { spell_name, mana_charged } => {
+                        InterruptOutcome::Interrupted {
+                            spell_name,
+                            mana_charged,
+                        } => {
                             handlers::fan_out_cast_fail(
                                 &mut *server,
                                 &in_world_recipients_now,
                                 intent.target_id,
                                 "interrupted (hit during cast)".to_string(),
                             );
-                            tell_interrupt_charge(&mut *server, target_cid, intent.target_id, tc_mp, tc_max_mp, *mana_charged);
+                            tell_interrupt_charge(
+                                &mut *server,
+                                target_cid,
+                                intent.target_id,
+                                tc_mp,
+                                tc_max_mp,
+                                *mana_charged,
+                            );
                             tracing::info!(
                                 caster = intent.target_id,
                                 spell = %spell_name,
@@ -666,8 +809,13 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                     if sk.effect == active_skills::Effect::Stun {
                         let mut interrupted: Option<String> = None;
                         if let Some(tc) = connections.get_mut(&target_cid) {
-                            tc.active_buffs.retain(|b| !matches!(b.effect, buffs::BuffEffect::Stun));
-                            tc.active_buffs.push(ActiveBuff::new_stun("Stunned".to_string(), sk.stun_duration, now));
+                            tc.active_buffs
+                                .retain(|b| !matches!(b.effect, buffs::BuffEffect::Stun));
+                            tc.active_buffs.push(ActiveBuff::new_stun(
+                                "Stunned".to_string(),
+                                sk.stun_duration,
+                                now,
+                            ));
                             // A stun ends a running cast outright (the
                             // hit's own channeling roll may have let it
                             // through); no mana charge, since a stun is
@@ -690,7 +838,11 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                             tracing::info!(caster = intent.target_id, spell = %spell, "PvP cast interrupted by a stun");
                         }
                         if let Some(tc) = connections.get(&target_cid) {
-                            handlers::fan_out_buff_snapshot(&mut *server, &in_world_recipients_now, tc);
+                            handlers::fan_out_buff_snapshot(
+                                &mut *server,
+                                &in_world_recipients_now,
+                                tc,
+                            );
                         }
                     }
                 }
@@ -710,17 +862,12 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                 if let Some(owner_id) = pet_owner {
                     let owner_cid = owner_id as ClientId;
                     let allowed = if owner_cid == attacker_cid {
-                        false  // attacking your own pet — defensive guard
+                        false // attacking your own pet — defensive guard
                     } else {
-                        match (
-                            connections.get(&attacker_cid),
-                            connections.get(&owner_cid),
-                        ) {
-                            (Some(a), Some(o)) => combat::can_attack(
-                                a, o,
-                                a.zone.as_deref(),
-                                o.zone.as_deref(),
-                            ),
+                        match (connections.get(&attacker_cid), connections.get(&owner_cid)) {
+                            (Some(a), Some(o)) => {
+                                combat::can_attack(a, o, a.zone.as_deref(), o.zone.as_deref())
+                            }
                             _ => false,
                         }
                     };
@@ -811,7 +958,11 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
             }
             // Warder's Fury commands the warder at the target whether the
             // user's own blow lands or not (the command is not the blow).
-            if intent.skill.as_ref().is_some_and(|s| s.effect == active_skills::Effect::WarderFury) {
+            if intent
+                .skill
+                .as_ref()
+                .is_some_and(|s| s.effect == active_skills::Effect::WarderFury)
+            {
                 pet_command_intents.push(PetCommandI {
                     owner: intent.attacker,
                     command: protocol::world::pet_command::ATTACK,
@@ -875,8 +1026,12 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
             if let Some(sk) = intent.skill.as_ref() {
                 if sk.effect == active_skills::Effect::Stun {
                     entity.apply_cc(ActiveCc::new_stun(sk.stun_duration));
-                    tracing::info!(attacker = intent.attacker, target = intent.target_id,
-                        secs = sk.stun_duration, "mob stunned");
+                    tracing::info!(
+                        attacker = intent.attacker,
+                        target = intent.target_id,
+                        secs = sk.stun_duration,
+                        "mob stunned"
+                    );
                 }
             }
             // PD_W0025 — server-authoritative weapon proc. Roll the equipped
@@ -904,10 +1059,8 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                             })
                             .max(1);
                             entity.hp = (entity.hp - proc_dmg as f32).max(0.0);
-                            *entity.aggro.entry(intent.attacker).or_insert(0.0) +=
-                                proc_dmg as f32;
-                            *entity.threat.entry(intent.attacker).or_insert(0.0) +=
-                                proc_dmg as f32;
+                            *entity.aggro.entry(intent.attacker).or_insert(0.0) += proc_dmg as f32;
+                            *entity.threat.entry(intent.attacker).or_insert(0.0) += proc_dmg as f32;
                             // Private to the attacker — the proc's named
                             // number/flash/log is their flavor; the mob's HP
                             // drop is already fanned to everyone via the
@@ -944,11 +1097,7 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
             );
             if entity.hp <= 0.0 {
                 entity.transition(EnemyState::Dead, now);
-                handlers::fan_out_entity_died(
-                    &mut *server,
-                    &in_world_recipients_now,
-                    entity.id,
-                );
+                handlers::fan_out_entity_died(&mut *server, &in_world_recipients_now, entity.id);
                 // Warder respawn — if a player kill (PvP or
                 // accidental) drops a Beast Master warder, schedule
                 // the same retreat-and-respawn the enemy-kill path
@@ -957,8 +1106,7 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                 if crate::world::pet_templates::is_warder_template(&entity.mob.name) {
                     if let Some(owner_id) = entity.owner {
                         const WARDER_RETREAT_SECS: f32 = 15.0;
-                        let due = now
-                            + std::time::Duration::from_secs_f32(WARDER_RETREAT_SECS);
+                        let due = now + std::time::Duration::from_secs_f32(WARDER_RETREAT_SECS);
                         let owner_cid = owner_id as ClientId;
                         if let Some(conn) = connections.get_mut(&owner_cid) {
                             conn.warder_respawn_at = Some(due);
@@ -982,16 +1130,16 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                 if let Some((&credit_id, _)) = entity
                     .aggro
                     .iter()
-                    .max_by(|a, b| {
-                        a.1.partial_cmp(b.1)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                 {
                     // EQ quadratic per-kill award from the mob's level (see
                     // progression::kill_xp), split across the killer's
                     // group + quest credit via the shared helper (same
                     // path as spell and pet kills).
-                    let base_xp = crate::world::progression::kill_xp(entity.mob.level as i32, crate::world::progression::ZEM_NORMAL);
+                    let base_xp = crate::world::progression::kill_xp(
+                        entity.mob.level as i32,
+                        crate::world::progression::ZEM_NORMAL,
+                    );
                     let mob_name = entity.mob.name.clone();
                     // Owned victims (pets / charmed mobs) grant no quest
                     // credit — the warder is literally named "Wolf".
@@ -1024,10 +1172,7 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                 let owner_cid_opt: Option<ClientId> = entity
                     .aggro
                     .iter()
-                    .max_by(|a, b| {
-                        a.1.partial_cmp(b.1)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                     .map(|(&id, _)| id)
                     .filter(|&id| IdKind::of(id) == IdKind::Player)
                     .map(|id| id as ClientId);
@@ -1069,11 +1214,7 @@ pub(super) fn apply_attacks(world: &mut WorldState, q: &mut Intents, now: Instan
                         .filter(|id| visible.contains(id))
                         .collect();
                     if !bag_recipients.is_empty() {
-                        handlers::fan_out_loot_bag_spawn(
-                            &mut *server,
-                            &bag_recipients,
-                            &bag,
-                        );
+                        handlers::fan_out_loot_bag_spawn(&mut *server, &bag_recipients, &bag);
                     }
                     loot_bags.insert(bag.id, bag);
                     tracing::info!(

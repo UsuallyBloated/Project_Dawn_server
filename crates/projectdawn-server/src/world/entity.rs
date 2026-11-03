@@ -29,8 +29,12 @@ const YAW_EPSILON: f32 = 0.001;
 pub enum CcKind {
     Mez,
     Root,
-    Snare { factor_pct: u8 }, // 0–100; 50 = half speed
-    AttackSlow { factor_pct: u8 }, // extra delay fraction × 100
+    Snare {
+        factor_pct: u8,
+    }, // 0–100; 50 = half speed
+    AttackSlow {
+        factor_pct: u8,
+    }, // extra delay fraction × 100
     /// Shield Bash (active skills, 2026-10-19): frozen like mez, but damage
     /// does not end it.
     Stun,
@@ -74,21 +78,36 @@ pub struct DotTick {
 
 impl ActiveCc {
     pub fn new_mez(duration: f32) -> Self {
-        Self { kind: CcKind::Mez, remaining: duration }
+        Self {
+            kind: CcKind::Mez,
+            remaining: duration,
+        }
     }
     pub fn new_root(duration: f32) -> Self {
-        Self { kind: CcKind::Root, remaining: duration }
+        Self {
+            kind: CcKind::Root,
+            remaining: duration,
+        }
     }
     pub fn new_stun(duration: f32) -> Self {
-        Self { kind: CcKind::Stun, remaining: duration }
+        Self {
+            kind: CcKind::Stun,
+            remaining: duration,
+        }
     }
     pub fn new_snare(slow_amount: f32, duration: f32) -> Self {
         let factor_pct = (slow_amount.clamp(0.0, 1.0) * 100.0) as u8;
-        Self { kind: CcKind::Snare { factor_pct }, remaining: duration }
+        Self {
+            kind: CcKind::Snare { factor_pct },
+            remaining: duration,
+        }
     }
     pub fn new_attack_slow(slow_amount: f32, duration: f32) -> Self {
         let factor_pct = (slow_amount.clamp(0.0, 1.0) * 100.0) as u8;
-        Self { kind: CcKind::AttackSlow { factor_pct }, remaining: duration }
+        Self {
+            kind: CcKind::AttackSlow { factor_pct },
+            remaining: duration,
+        }
     }
 }
 
@@ -346,12 +365,7 @@ impl Entity {
     /// nothing in the code path that consumes this field runs for
     /// pets (corpse cleanup arms by id partition for the despawn
     /// fan-out instead).
-    pub fn from_pet_summon(
-        owner: EntityId,
-        pos: Vec3f,
-        mob: MobTemplate,
-        now: Instant,
-    ) -> Self {
+    pub fn from_pet_summon(owner: EntityId, pos: Vec3f, mob: MobTemplate, now: Instant) -> Self {
         let id = mint_pet_id();
         let hp = mob.hp;
         // Track 13 — pets get a level-derived primary-stat baseline so
@@ -473,18 +487,44 @@ impl Entity {
     pub fn apply_buff(&mut self, buff: ActiveBuff) {
         if let Some(idx) = self.active_buffs.iter().position(|b| b.name == buff.name) {
             if let BuffEffect::StatBuff {
-                strength, agility, intelligence, wisdom, constitution, max_hp_delta, ..
+                strength,
+                agility,
+                intelligence,
+                wisdom,
+                constitution,
+                max_hp_delta,
+                ..
             } = self.active_buffs[idx].effect
             {
-                self.undo_stat_deltas(strength, agility, intelligence, wisdom, constitution, max_hp_delta);
+                self.undo_stat_deltas(
+                    strength,
+                    agility,
+                    intelligence,
+                    wisdom,
+                    constitution,
+                    max_hp_delta,
+                );
             }
             self.active_buffs.remove(idx);
         }
         if let BuffEffect::StatBuff {
-            strength, agility, intelligence, wisdom, constitution, max_hp_delta, ..
+            strength,
+            agility,
+            intelligence,
+            wisdom,
+            constitution,
+            max_hp_delta,
+            ..
         } = buff.effect
         {
-            self.apply_stat_deltas(strength, agility, intelligence, wisdom, constitution, max_hp_delta);
+            self.apply_stat_deltas(
+                strength,
+                agility,
+                intelligence,
+                wisdom,
+                constitution,
+                max_hp_delta,
+            );
         }
         self.active_buffs.push(buff);
     }
@@ -519,10 +559,23 @@ impl Entity {
         while i < self.active_buffs.len() {
             if self.active_buffs[i].remaining <= 0.0 {
                 if let BuffEffect::StatBuff {
-                    strength, agility, intelligence, wisdom, constitution, max_hp_delta, ..
+                    strength,
+                    agility,
+                    intelligence,
+                    wisdom,
+                    constitution,
+                    max_hp_delta,
+                    ..
                 } = self.active_buffs[i].effect
                 {
-                    self.undo_stat_deltas(strength, agility, intelligence, wisdom, constitution, max_hp_delta);
+                    self.undo_stat_deltas(
+                        strength,
+                        agility,
+                        intelligence,
+                        wisdom,
+                        constitution,
+                        max_hp_delta,
+                    );
                 }
                 self.active_buffs.remove(i);
                 set_changed = true;
@@ -701,7 +754,8 @@ impl Entity {
             }
         }
         let kind_disc = std::mem::discriminant(&cc.kind);
-        self.active_cc.retain(|c| std::mem::discriminant(&c.kind) != kind_disc);
+        self.active_cc
+            .retain(|c| std::mem::discriminant(&c.kind) != kind_disc);
         self.active_cc.push(cc);
     }
 
@@ -809,11 +863,15 @@ impl Entity {
     }
 
     pub fn is_rooted(&self) -> bool {
-        self.active_cc.iter().any(|c| matches!(c.kind, CcKind::Root))
+        self.active_cc
+            .iter()
+            .any(|c| matches!(c.kind, CcKind::Root))
     }
 
     pub fn is_stunned(&self) -> bool {
-        self.active_cc.iter().any(|c| matches!(c.kind, CcKind::Stun))
+        self.active_cc
+            .iter()
+            .any(|c| matches!(c.kind, CcKind::Stun))
     }
 
     /// Speed multiplier from snare (0.0 = full speed, 0.5 = half speed).
@@ -971,9 +1029,7 @@ impl Entity {
                     self.face_toward(target_pos);
                     let due = match self.last_attack_at {
                         None => true,
-                        Some(t) => {
-                            now.duration_since(t).as_secs_f32() >= self.attack_interval()
-                        }
+                        Some(t) => now.duration_since(t).as_secs_f32() >= self.attack_interval(),
                     };
                     if due {
                         self.last_attack_at = Some(now);
@@ -1086,12 +1142,7 @@ impl Entity {
         self.pos = self.pos.step_toward(target_pos, step);
     }
 
-    fn tick_attack(
-        &mut self,
-        targets: &[(EntityId, Vec3f)],
-        now: Instant,
-        events: &mut AiEvents,
-    ) {
+    fn tick_attack(&mut self, targets: &[(EntityId, Vec3f)], now: Instant, events: &mut AiEvents) {
         self.maybe_switch_target_by_threat(targets);
         let Some(target_id) = self.target else {
             self.transition(EnemyState::Leash, now);
@@ -1156,8 +1207,12 @@ impl Entity {
         let current_threat = self.threat.get(&current).copied().unwrap_or(0.0);
         let mut best: Option<(EntityId, f32)> = None;
         for (&id, &threat) in &self.threat {
-            if id == current { continue; }
-            if !targets.iter().any(|(t, _)| *t == id) { continue; }
+            if id == current {
+                continue;
+            }
+            if !targets.iter().any(|(t, _)| *t == id) {
+                continue;
+            }
             match best {
                 None => best = Some((id, threat)),
                 Some((_, b)) if threat > b => best = Some((id, threat)),
@@ -1268,7 +1323,16 @@ mod tests {
     // ── Position broadcast gate ───────────────────────────────────────────
 
     fn idle_entity() -> Entity {
-        Entity::from_spawn(0, Vec3f { x: 10.0, y: 0.0, z: 5.0 }, template(), Instant::now())
+        Entity::from_spawn(
+            0,
+            Vec3f {
+                x: 10.0,
+                y: 0.0,
+                z: 5.0,
+            },
+            template(),
+            Instant::now(),
+        )
     }
 
     #[test]
@@ -1335,7 +1399,10 @@ mod tests {
     #[test]
     fn named_mob_is_scaled_at_spawn() {
         let e = Entity::from_spawn(0, Vec3f::ZERO, named_template("rotfang"), Instant::now());
-        assert_eq!(e.mob.name, "Rotfang the Feared", "nameplate uses full_name()");
+        assert_eq!(
+            e.mob.name, "Rotfang the Feared",
+            "nameplate uses full_name()"
+        );
         assert_eq!(e.mob.level, 6, "level is overridden, not multiplied");
         assert_eq!(e.max_hp, 50.0 * 3.5);
         assert_eq!(e.hp, e.max_hp, "spawns at full health");
@@ -1364,8 +1431,7 @@ mod tests {
     #[test]
     fn enrage_fires_once_below_the_threshold_and_persists() {
         let named = crate::world::named::lookup("rotfang").expect("rotfang");
-        let mut e =
-            Entity::from_spawn(0, Vec3f::ZERO, named_template("rotfang"), Instant::now());
+        let mut e = Entity::from_spawn(0, Vec3f::ZERO, named_template("rotfang"), Instant::now());
         let calm_dmg = e.melee_swing_damage();
         let calm_speed = e.enraged_speed();
 
@@ -1387,7 +1453,10 @@ mod tests {
             e.melee_swing_damage(),
             calm_dmg
         );
-        assert!(e.enraged_speed() > calm_speed, "enraged speed should exceed calm");
+        assert!(
+            e.enraged_speed() > calm_speed,
+            "enraged speed should exceed calm"
+        );
 
         // Healing back up does not calm it — enrage is a last stand.
         e.hp = e.max_hp;
@@ -1468,11 +1537,25 @@ mod tests {
         // Pet id sits in the dedicated partition; the value doesn't
         // matter for aggro logic (tick_idle picks by distance, not id).
         let pet_id = PET_ID_BASE + 17;
-        let targets = vec![(pet_id, Vec3f { x: 2.0, y: 0.0, z: 0.0 })];
+        let targets = vec![(
+            pet_id,
+            Vec3f {
+                x: 2.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        )];
         let enemy_targets: Vec<(EntityId, Vec3f, bool)> = vec![];
         let _events = e.tick_ai(&targets, &enemy_targets, &[], 0.05, now);
-        assert_eq!(e.target, Some(pet_id), "enemy should aggro on nearest target regardless of id partition");
-        assert!(matches!(e.state, EnemyState::Chase), "transitioning Idle → Chase on acquisition");
+        assert_eq!(
+            e.target,
+            Some(pet_id),
+            "enemy should aggro on nearest target regardless of id partition"
+        );
+        assert!(
+            matches!(e.state, EnemyState::Chase),
+            "transitioning Idle → Chase on acquisition"
+        );
     }
 
     /// Playtest 2026-09-22 — being attacked IS aggro. An idle mob whose
@@ -1485,7 +1568,11 @@ mod tests {
         let attacker: EntityId = 1;
         // Just past the aggro radius (template aggro is well under this),
         // inside leash (aggro * 2 by default).
-        let pos = Vec3f { x: e.mob.aggro + 2.0, y: 0.0, z: 0.0 };
+        let pos = Vec3f {
+            x: e.mob.aggro + 2.0,
+            y: 0.0,
+            z: 0.0,
+        };
         assert!(pos.x <= e.leash_range(), "test setup: inside leash");
         e.threat.insert(attacker, 12.0);
         let targets = vec![(attacker, pos)];
@@ -1503,14 +1590,28 @@ mod tests {
         let now = Instant::now();
         let mut e = Entity::from_spawn(0, Vec3f::ZERO, template(), now);
         let rogue: EntityId = 7;
-        let targets = vec![(rogue, Vec3f { x: 2.0, y: 0.0, z: 0.0 })];
+        let targets = vec![(
+            rogue,
+            Vec3f {
+                x: 2.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        )];
         let enemy_targets: Vec<(EntityId, Vec3f, bool)> = vec![];
         let _ = e.tick_ai(&targets, &enemy_targets, &[rogue], 0.05, now);
-        assert_eq!(e.target, None, "a hidden rogue two metres away goes unnoticed");
+        assert_eq!(
+            e.target, None,
+            "a hidden rogue two metres away goes unnoticed"
+        );
         assert!(matches!(e.state, EnemyState::Idle));
         e.threat.insert(rogue, 5.0);
         let _ = e.tick_ai(&targets, &enemy_targets, &[rogue], 0.05, now);
-        assert_eq!(e.target, Some(rogue), "a hit from the shadows still provokes the mob");
+        assert_eq!(
+            e.target,
+            Some(rogue),
+            "a hit from the shadows still provokes the mob"
+        );
     }
 
     /// Shield Bash's stun freezes the state machine like mez, and taking
@@ -1520,14 +1621,24 @@ mod tests {
         let now = Instant::now();
         let mut e = Entity::from_spawn(0, Vec3f::ZERO, template(), now);
         let player: EntityId = 1;
-        let targets = vec![(player, Vec3f { x: 1.0, y: 0.0, z: 0.0 })];
+        let targets = vec![(
+            player,
+            Vec3f {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        )];
         let enemy_targets: Vec<(EntityId, Vec3f, bool)> = vec![];
         let _ = e.tick_ai(&targets, &enemy_targets, &[], 0.05, now);
         assert_eq!(e.target, Some(player));
         e.apply_cc(ActiveCc::new_stun(3.0));
         e.clear_mez();
         assert!(e.is_stunned(), "damage clears mez, never a stun");
-        assert!(e.status_pairs().iter().any(|(n, _)| n == "Stunned"), "the frame says so");
+        assert!(
+            e.status_pairs().iter().any(|(n, _)| n == "Stunned"),
+            "the frame says so"
+        );
         let mut swung = false;
         for _ in 0..55 {
             let ev = e.tick_ai(&targets, &enemy_targets, &[], 0.05, now);
@@ -1571,12 +1682,19 @@ mod tests {
         wide.aggro = 20.0;
         wide.leash = None;
         let e = Entity::from_spawn(0, Vec3f::ZERO, wide, now);
-        assert!((e.leash_range() - 40.0).abs() < 1e-6, "a long leash is untouched");
+        assert!(
+            (e.leash_range() - 40.0).abs() < 1e-6,
+            "a long leash is untouched"
+        );
         let mut passive = template();
         passive.aggro = 0.0;
         passive.leash = None;
         let e = Entity::from_spawn(0, Vec3f::ZERO, passive, now);
-        assert_eq!(e.leash_range(), 0.0, "a mob that never aggros stays passive");
+        assert_eq!(
+            e.leash_range(),
+            0.0,
+            "a mob that never aggros stays passive"
+        );
     }
 
     /// The other half of the same fix: an attacker beyond leash range is NOT
@@ -1587,7 +1705,11 @@ mod tests {
         let now = Instant::now();
         let mut e = Entity::from_spawn(0, Vec3f::ZERO, template(), now);
         let attacker: EntityId = 1;
-        let pos = Vec3f { x: e.leash_range() + 5.0, y: 0.0, z: 0.0 };
+        let pos = Vec3f {
+            x: e.leash_range() + 5.0,
+            y: 0.0,
+            z: 0.0,
+        };
         e.threat.insert(attacker, 12.0);
         let targets = vec![(attacker, pos)];
         let enemy_targets: Vec<(EntityId, Vec3f, bool)> = vec![];
@@ -1602,7 +1724,11 @@ mod tests {
     #[test]
     fn released_from_charm_returns_the_same_mob_scaled_once() {
         let now = Instant::now();
-        let home = Vec3f { x: 10.0, y: 0.0, z: -4.0 };
+        let home = Vec3f {
+            x: 10.0,
+            y: 0.0,
+            z: -4.0,
+        };
         let original = Entity::from_spawn(7, home, named_template("rotfang"), now);
         let scaled_dmg = original.mob.dmg;
         let scaled_hp = original.max_hp;
@@ -1612,7 +1738,11 @@ mod tests {
         pet.spawn_pos = original.spawn_pos;
         pet.max_hp = original.max_hp;
         pet.hp = original.hp * 0.5;
-        pet.pos = Vec3f { x: 12.0, y: 0.0, z: -1.0 };
+        pet.pos = Vec3f {
+            x: 12.0,
+            y: 0.0,
+            z: -1.0,
+        };
         pet.charm_expires_at = Some(now);
 
         let mut back = Entity::released_from_charm(&pet, now);
@@ -1624,7 +1754,10 @@ mod tests {
         assert!(close(back.pos, pet.pos), "it stands where the pet stood");
         assert!((back.hp - pet.hp).abs() < 1e-6, "the HP it had as a pet");
         assert!((back.max_hp - scaled_hp).abs() < 1e-6);
-        assert_eq!(back.mob.dmg, scaled_dmg, "named damage multiplied once, not again");
+        assert_eq!(
+            back.mob.dmg, scaled_dmg,
+            "named damage multiplied once, not again"
+        );
         assert_eq!(back.mob.named_id.as_deref(), Some("rotfang"));
         assert!(!back.is_pet() && back.charm_expires_at.is_none());
         assert_eq!(back.target, None, "hostility is the caller's call");
@@ -1639,12 +1772,18 @@ mod tests {
         // and a mob already at home just stands.
         let mut orphan = Entity::released_from_charm(&pet, now);
         orphan.go_home(now);
-        assert!(matches!(orphan.state, EnemyState::Leash), "away from home: walk back");
+        assert!(
+            matches!(orphan.state, EnemyState::Leash),
+            "away from home: walk back"
+        );
         assert_eq!(orphan.target, None);
         pet.pos = home;
         let mut at_home = Entity::released_from_charm(&pet, now);
         at_home.go_home(now);
-        assert!(matches!(at_home.state, EnemyState::Idle), "already home: stay");
+        assert!(
+            matches!(at_home.state, EnemyState::Idle),
+            "already home: stay"
+        );
     }
 
     /// One attack slow at a time, strongest wins: a weaker slow never
@@ -1661,7 +1800,10 @@ mod tests {
         assert_eq!(e.attack_slow_pct(), 10, "the weaker slow is ignored");
         assert_eq!(e.active_cc.len(), 1, "and never stacks beside it");
         e.apply_cc(ActiveCc::new_attack_slow(0.10, 5.0)); // equal: refresh
-        assert!((e.active_cc[0].remaining - 5.0).abs() < 1e-6, "an equal slow refreshes");
+        assert!(
+            (e.active_cc[0].remaining - 5.0).abs() < 1e-6,
+            "an equal slow refreshes"
+        );
         e.apply_cc(ActiveCc::new_attack_slow(0.35, 10.0)); // stronger
         assert_eq!(e.attack_slow_pct(), 35, "a stronger slow takes over");
         e.apply_cc(ActiveCc::new_root(3.0));
@@ -1694,21 +1836,37 @@ mod tests {
         assert_eq!(t[0].caster, 1);
         e.apply_dot(dot(5.0, 7.0));
         assert_eq!(e.active_dots.len(), 1, "a re-cast refreshes, never stacks");
-        assert_eq!(e.tick_dots(3.0).len(), 1, "the refreshed dot ticks three seconds in");
+        assert_eq!(
+            e.tick_dots(3.0).len(),
+            1,
+            "the refreshed dot ticks three seconds in"
+        );
         assert_eq!(e.tick_dots(3.0).len(), 1, "and again at six");
-        assert!(e.tick_dots(1.0).is_empty(), "seven seconds: no partial tick");
+        assert!(
+            e.tick_dots(1.0).is_empty(),
+            "seven seconds: no partial tick"
+        );
         assert!(e.active_dots.is_empty(), "and the dot is gone");
         e.apply_cc(ActiveCc::new_mez(10.0));
         e.apply_dot(dot(5.0, 30.0));
         assert!(!e.is_mezzed(), "a dot landing breaks mez like any damage");
         e.transition(EnemyState::Leash, now);
-        assert!(e.active_dots.is_empty(), "a mob walking home sheds its dots");
+        assert!(
+            e.active_dots.is_empty(),
+            "a mob walking home sheds its dots"
+        );
         e.apply_dot(dot(5.0, 30.0));
-        assert!(e.active_dots.is_empty(), "and takes none on the way (the review's walk-home farm)");
+        assert!(
+            e.active_dots.is_empty(),
+            "and takes none on the way (the review's walk-home farm)"
+        );
         e.transition(EnemyState::Idle, now);
         e.apply_dot(dot(5.0, 30.0));
         e.clear_dots_from(1);
-        assert!(e.active_dots.is_empty(), "the caster leaving ends their dots");
+        assert!(
+            e.active_dots.is_empty(),
+            "the caster leaving ends their dots"
+        );
     }
 
     /// At the real tick rate (20 Hz, dt 0.05) an 18 s Entangle deals exactly
@@ -1732,6 +1890,9 @@ mod tests {
             dealt += e.tick_dots(0.05).len();
         }
         assert_eq!(dealt, 6, "18 s at 5 dps is six whole ticks");
-        assert!(e.active_dots.is_empty(), "and the dot is gone once they are dealt");
+        assert!(
+            e.active_dots.is_empty(),
+            "and the dot is gone once they are dealt"
+        );
     }
 }

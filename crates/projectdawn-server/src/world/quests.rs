@@ -228,7 +228,10 @@ mod tests {
         assert_eq!(wolf.objectives[0].target, "Wolf");
         assert_eq!(wolf.objectives[0].count, 5);
         assert_eq!(lookup("rat_infestation").unwrap().objectives[0].count, 8);
-        assert_eq!(lookup("gnoll_raiders").unwrap().objectives[0].target, "Gnoll");
+        assert_eq!(
+            lookup("gnoll_raiders").unwrap().objectives[0].target,
+            "Gnoll"
+        );
         assert_eq!(lookup("rotfang_hunt").unwrap().objectives[0].count, 1);
         assert_eq!(lookup("test_q1").unwrap().objectives[0].target, "Wolf");
     }
@@ -253,9 +256,7 @@ mod tests {
         assert!(lookup("rat_infestation").unwrap().item_rewards.is_empty());
         assert!(lookup("test_q1").unwrap().item_rewards.is_empty());
         // The registry actually knows the reward item.
-        assert!(
-            crate::world::items::lookup("res://data/loot/items/hunters_medal.tres").is_some()
-        );
+        assert!(crate::world::items::lookup("res://data/loot/items/hunters_medal.tres").is_some());
     }
 
     #[test]

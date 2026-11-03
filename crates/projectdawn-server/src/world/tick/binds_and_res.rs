@@ -20,8 +20,17 @@ pub(super) async fn persist_binds(world: &mut WorldState, q: &mut Intents, _now:
 }
 
 pub(super) async fn apply_res_accepts(world: &mut WorldState, q: &mut Intents, now: Instant) {
-    let WorldState { pool, server, connections, corpses, .. } = world;
-    let Intents { resurrect_accept_intents, .. } = q;
+    let WorldState {
+        pool,
+        server,
+        connections,
+        corpses,
+        ..
+    } = world;
+    let Intents {
+        resurrect_accept_intents,
+        ..
+    } = q;
     // 4k-res. Corpse / resurrection Slice 3 — apply accepted res offers.
     //      Re-validate against the owner's recorded pending offer (so the
     //      refund % can't be forged), summon the living player to their corpse,
@@ -35,8 +44,9 @@ pub(super) async fn apply_res_accepts(world: &mut WorldState, q: &mut Intents, n
         // transient DB failure below ate an accepted resurrection outright —
         // the old comment conceded as much ("the offer was already consumed
         // above"). Consume it only once the outcome is decided.
-        let Some((offered_corpse, xp_percent)) =
-            connections.get(&responder_cid).and_then(|c| c.pending_res_offer)
+        let Some((offered_corpse, xp_percent)) = connections
+            .get(&responder_cid)
+            .and_then(|c| c.pending_res_offer)
         else {
             continue; // nothing pending; nothing to lose
         };
@@ -68,11 +78,14 @@ pub(super) async fn apply_res_accepts(world: &mut WorldState, q: &mut Intents, n
                     c.pending_res_offer = None;
                 }
                 tracing::info!(
-                    char_id = responder, corpse_id,
+                    char_id = responder,
+                    corpse_id,
                     "resurrection failed — corpse missing, not owned, or already resurrected"
                 );
                 handlers::send_refusal(
-                    &mut *server, responder_cid, "That corpse can't be resurrected.",
+                    &mut *server,
+                    responder_cid,
+                    "That corpse can't be resurrected.",
                 );
                 continue;
             }
@@ -90,7 +103,8 @@ pub(super) async fn apply_res_accepts(world: &mut WorldState, q: &mut Intents, n
             continue;
         };
         if let Err(e) =
-            db::set_corpse_resurrected(&pool, corpse_id as i64, responder as i64, after_refund).await
+            db::set_corpse_resurrected(&pool, corpse_id as i64, responder as i64, after_refund)
+                .await
         {
             tracing::error!(corpse_id, error = %e, "set_corpse_resurrected failed — res not granted");
             // Transient, and NOT decisive: the offer stays live so the player
@@ -142,8 +156,20 @@ pub(super) async fn apply_res_accepts(world: &mut WorldState, q: &mut Intents, n
             .collect();
         if let Some(conn) = connections.get(&responder_cid) {
             handlers::fan_out_buff_snapshot(&mut *server, &recipients, conn);
-            handlers::fan_out_health_update(&mut *server, &recipients, responder, conn.hp, conn.max_hp);
-            handlers::fan_out_mana_update(&mut *server, &recipients, responder, conn.mp, conn.max_mp);
+            handlers::fan_out_health_update(
+                &mut *server,
+                &recipients,
+                responder,
+                conn.hp,
+                conn.max_hp,
+            );
+            handlers::fan_out_mana_update(
+                &mut *server,
+                &recipients,
+                responder,
+                conn.mp,
+                conn.max_mp,
+            );
         }
         handlers::fan_out_chat_message(
             &mut *server,
@@ -152,6 +178,12 @@ pub(super) async fn apply_res_accepts(world: &mut WorldState, q: &mut Intents, n
             protocol::world::ChatChannel::System,
             "You are exhausted.",
         );
-        tracing::info!(char_id = responder, corpse_id, xp_percent, refund, "resurrection accepted");
+        tracing::info!(
+            char_id = responder,
+            corpse_id,
+            xp_percent,
+            refund,
+            "resurrection accepted"
+        );
     }
 }

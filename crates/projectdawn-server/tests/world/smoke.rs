@@ -77,8 +77,8 @@ async fn world_connect_move_position_disconnect() {
 
     // ─── World phase ────────────────────────────────────────────────────
     // Decode the token bytes and build a Secure-mode client.
-    let connect_token = ConnectToken::read(&mut Cursor::new(&token_bytes[..]))
-        .expect("ConnectToken::read");
+    let connect_token =
+        ConnectToken::read(&mut Cursor::new(&token_bytes[..])).expect("ConnectToken::read");
     assert_eq!(
         connect_token.client_id, char_id as u64,
         "minted token client_id == char_id"
@@ -146,7 +146,11 @@ async fn world_connect_move_position_disconnect() {
     // assert "we got a Position with our id and pos.x > 0".
     let move_msg = ClientWorldMsg::Move {
         sequence: 1,
-        direction: Vec3 { x: 1.0, y: 0.0, z: 0.0 },
+        direction: Vec3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        },
         jumping: false,
         yaw: 0.0,
     };

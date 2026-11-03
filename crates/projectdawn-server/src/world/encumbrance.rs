@@ -105,6 +105,10 @@ mod tests {
         // reached the server (tools/check_item_lockstep.gd compares them all).
         let bread = super::super::items::lookup("res://data/loot/items/bread_loaf.tres")
             .expect("bread exists");
-        assert!((bread.weight - 0.3).abs() < 1e-6, "bread weighs {}", bread.weight);
+        assert!(
+            (bread.weight - 0.3).abs() < 1e-6,
+            "bread weighs {}",
+            bread.weight
+        );
     }
 }

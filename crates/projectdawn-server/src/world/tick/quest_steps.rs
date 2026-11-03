@@ -5,8 +5,18 @@
 use super::*;
 
 pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents, _now: Instant) {
-    let WorldState { pool, server, connections, enemies, .. } = world;
-    let Intents { complete_quest_intents, consider_intents, .. } = q;
+    let WorldState {
+        pool,
+        server,
+        connections,
+        enemies,
+        ..
+    } = world;
+    let Intents {
+        complete_quest_intents,
+        consider_intents,
+        ..
+    } = q;
     // 4k-quest. PD_W0023/24 — server-authoritative quest turn-ins. The
     //      reward comes from the server's own quest table (never a client
     //      amount), the turn-in must be backed by real counted gameplay
@@ -34,7 +44,12 @@ pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents
                     .and_then(crate::world::factions::lookup)
                     .map(|f| conn.faction_level(f))
                     .unwrap_or(crate::world::factions::Level::Indifferent);
-                crate::world::factions::mob_con_line(&e.mob.name, level, conn.level, e.mob.level as i32)
+                crate::world::factions::mob_con_line(
+                    &e.mob.name,
+                    level,
+                    conn.level,
+                    e.mob.level as i32,
+                )
             }
             None => "You cannot consider that.".to_string(),
         };
@@ -46,12 +61,24 @@ pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents
             // {:?} escapes control chars — the id is attacker-controlled and
             // a raw newline could forge log lines in the triage artifact.
             tracing::info!(char_id = responder, quest_id = ?quest_id, "quest turn-in rejected — unknown quest id");
-            handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "Unknown quest.", false);
+            handlers::send_quest_rejected(
+                &mut *server,
+                responder_cid,
+                &quest_id,
+                "Unknown quest.",
+                false,
+            );
             continue;
         };
         let Some(reward) = crate::world::quests::xp_reward_for(&quest_id) else {
             tracing::warn!(char_id = responder, quest_id = %quest_id, "quest turn-in rejected — bad reward tier in quests.toml");
-            handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "Quest data error.", false);
+            handlers::send_quest_rejected(
+                &mut *server,
+                responder_cid,
+                &quest_id,
+                "Quest data error.",
+                false,
+            );
             continue;
         };
         let Some(conn_ro) = connections.get(&responder_cid) else {
@@ -64,7 +91,9 @@ pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents
         // real rewards + XP without ever walking back.
         if let Some(npc_id) = quest.turn_in_npc.as_deref() {
             if !crate::world::npcs::id_within_range(npc_id, conn_ro.pos) {
-                let npc_name = crate::world::npcs::lookup(npc_id).map(|n| n.name.as_str()).unwrap_or(npc_id);
+                let npc_name = crate::world::npcs::lookup(npc_id)
+                    .map(|n| n.name.as_str())
+                    .unwrap_or(npc_id);
                 tracing::info!(char_id = responder, quest_id = %quest_id, npc = npc_id, "quest turn-in rejected — too far from the turn-in NPC");
                 handlers::send_quest_rejected(
                     &mut *server,
@@ -78,7 +107,11 @@ pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents
         }
         // The turn-in NPC's faction (2026-10-23): at Apprehensive or
         // below the NPC has nothing to say, as EQ's quest givers.
-        if let Some(npc) = quest.turn_in_npc.as_deref().and_then(crate::world::npcs::lookup) {
+        if let Some(npc) = quest
+            .turn_in_npc
+            .as_deref()
+            .and_then(crate::world::npcs::lookup)
+        {
             if !conn_ro.npc_serves(npc, crate::world::factions::Level::Indifferent) {
                 tracing::info!(char_id = responder, quest_id = %quest_id, npc = %npc.id, level = conn_ro.npc_faction_level(npc).name(), "quest turn-in rejected — faction");
                 handlers::send_quest_rejected(
@@ -97,12 +130,24 @@ pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents
         // actually have.
         if conn_ro.level < quest.level_req {
             tracing::info!(char_id = responder, quest_id = %quest_id, level = conn_ro.level, level_req = quest.level_req, "quest turn-in rejected — below level_req");
-            handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "You are too low level for this quest.", false);
+            handlers::send_quest_rejected(
+                &mut *server,
+                responder_cid,
+                &quest_id,
+                "You are too low level for this quest.",
+                false,
+            );
             continue;
         }
         if conn_ro.completed_quests.contains(&quest_id) {
             tracing::info!(char_id = responder, quest_id = %quest_id, "quest turn-in rejected — already completed");
-            handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "You have already completed this quest.", false);
+            handlers::send_quest_rejected(
+                &mut *server,
+                responder_cid,
+                &quest_id,
+                "You have already completed this quest.",
+                false,
+            );
             continue;
         }
         // PD_W0024 — the objective check. The quest must actually be in
@@ -111,23 +156,44 @@ pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents
         // CompleteQuest with no kills behind it pays nothing.
         let Some(progress) = conn_ro.active_quests.get(&quest_id) else {
             tracing::info!(char_id = responder, quest_id = %quest_id, "quest turn-in rejected — not in journal");
-            handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "That quest is not in your journal.", false);
+            handlers::send_quest_rejected(
+                &mut *server,
+                responder_cid,
+                &quest_id,
+                "That quest is not in your journal.",
+                false,
+            );
             continue;
         };
         if !crate::world::quests::objectives_met(quest, progress) {
             tracing::info!(char_id = responder, quest_id = %quest_id, progress = ?progress, "quest turn-in rejected — objectives incomplete");
-            handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "Quest objectives are not complete.", false);
+            handlers::send_quest_rejected(
+                &mut *server,
+                responder_cid,
+                &quest_id,
+                "Quest objectives are not complete.",
+                false,
+            );
             continue;
         }
         // PD_W0024 slice B — item rewards. Pre-check capacity BEFORE the
         // once-ever completion record: a full bag rejects the turn-in (keep
         // the quest, make room, retry) rather than burning the completion
         // with no item. rollback=false so the quest stays in the journal.
-        let rewards: Vec<(String, u32)> =
-            quest.item_rewards.iter().map(|p| (p.clone(), 1u32)).collect();
+        let rewards: Vec<(String, u32)> = quest
+            .item_rewards
+            .iter()
+            .map(|p| (p.clone(), 1u32))
+            .collect();
         if !rewards.is_empty() && !conn_ro.inventory.can_accept(&rewards) {
             tracing::info!(char_id = responder, quest_id = %quest_id, "quest turn-in rejected — inventory full");
-            handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "Your inventory is full — make room and try again.", false);
+            handlers::send_quest_rejected(
+                &mut *server,
+                responder_cid,
+                &quest_id,
+                "Your inventory is full — make room and try again.",
+                false,
+            );
             continue;
         }
         // The reward XP is written in the completion's own transaction:
@@ -137,7 +203,13 @@ pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents
             db::record_quest_completion(&pool, responder as i64, &quest_id, after_reward).await
         {
             tracing::error!(char_id = responder, quest_id = %quest_id, error = %e, "record_quest_completion failed — reward not granted");
-            handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "Server error — try again.", false);
+            handlers::send_quest_rejected(
+                &mut *server,
+                responder_cid,
+                &quest_id,
+                "Server error — try again.",
+                false,
+            );
             continue;
         }
         // The active row is now redundant (completed_quests is the
@@ -159,8 +231,11 @@ pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents
             // Factions and alignment (2026-10-23): the quest's explicit
             // hits (sorted, so the lines come in one order) and its
             // alignment delta, after the XP as EQ's turn-ins paid.
-            let mut hits: Vec<(String, f32)> =
-                quest.faction_hits.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            let mut hits: Vec<(String, f32)> = quest
+                .faction_hits
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect();
             hits.sort_by(|a, b| a.0.cmp(&b.0));
             handlers::apply_faction_hits(&mut *server, responder_cid, conn, &hits);
             handlers::move_alignment(&mut *server, responder_cid, conn, quest.alignment_delta);
@@ -186,9 +261,20 @@ pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents
                             tracing::error!(char_id = responder, quest_id = %quest_id, %path, leftover, "quest reward partially placed despite capacity pre-check");
                         }
                         for (loc, slot) in &touched {
-                            handlers::send_slot_delta(&mut *server, responder_cid, loc.clone(), *slot, conn.inventory.peek_at(loc, *slot));
+                            handlers::send_slot_delta(
+                                &mut *server,
+                                responder_cid,
+                                loc.clone(),
+                                *slot,
+                                conn.inventory.peek_at(loc, *slot),
+                            );
                         }
-                        handlers::send_loot_granted(&mut *server, responder_cid, path.clone(), count.saturating_sub(leftover));
+                        handlers::send_loot_granted(
+                            &mut *server,
+                            responder_cid,
+                            path.clone(),
+                            count.saturating_sub(leftover),
+                        );
                     }
                     Err(e) => {
                         tracing::error!(char_id = responder, quest_id = %quest_id, %path, error = %e, "quest reward grant failed after completion recorded");
@@ -214,8 +300,15 @@ pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents
 }
 
 pub(super) fn apply_quest_lifecycle(world: &mut WorldState, q: &mut Intents, _now: Instant) {
-    let WorldState { server, connections, .. } = world;
-    let Intents { quest_lifecycle_intents, .. } = q;
+    let WorldState {
+        server,
+        connections,
+        ..
+    } = world;
+    let Intents {
+        quest_lifecycle_intents,
+        ..
+    } = q;
     // 4k-quest-lifecycle. PD_W0024 — accept / abandon, drained in ARRIVAL
     //      order so a same-tick abandon-then-accept (or the reverse) on one
     //      quest ends in the client's last-stated state. These only mutate
@@ -232,7 +325,13 @@ pub(super) fn apply_quest_lifecycle(world: &mut WorldState, q: &mut Intents, _no
                 // the client undoes its optimistic journal add.
                 let Some(quest) = crate::world::quests::lookup(&quest_id) else {
                     tracing::info!(char_id = responder, quest_id = ?quest_id, "quest accept rejected — unknown quest id");
-                    handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "Unknown quest.", true);
+                    handlers::send_quest_rejected(
+                        &mut *server,
+                        responder_cid,
+                        &quest_id,
+                        "Unknown quest.",
+                        true,
+                    );
                     continue;
                 };
                 let Some(conn) = connections.get_mut(&responder_cid) else {
@@ -240,12 +339,24 @@ pub(super) fn apply_quest_lifecycle(world: &mut WorldState, q: &mut Intents, _no
                 };
                 if conn.level < quest.level_req {
                     tracing::info!(char_id = responder, quest_id = %quest_id, level = conn.level, level_req = quest.level_req, "quest accept rejected — below level_req");
-                    handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "You are too low level for this quest.", true);
+                    handlers::send_quest_rejected(
+                        &mut *server,
+                        responder_cid,
+                        &quest_id,
+                        "You are too low level for this quest.",
+                        true,
+                    );
                     continue;
                 }
                 if conn.completed_quests.contains(&quest_id) {
                     tracing::info!(char_id = responder, quest_id = %quest_id, "quest accept rejected — already completed");
-                    handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "You have already completed this quest.", true);
+                    handlers::send_quest_rejected(
+                        &mut *server,
+                        responder_cid,
+                        &quest_id,
+                        "You have already completed this quest.",
+                        true,
+                    );
                     continue;
                 }
                 if conn.active_quests.contains_key(&quest_id) {
@@ -257,20 +368,37 @@ pub(super) fn apply_quest_lifecycle(world: &mut WorldState, q: &mut Intents, _no
                 }
                 if conn.active_quests.len() >= crate::world::quests::MAX_ACTIVE {
                     tracing::info!(char_id = responder, quest_id = %quest_id, "quest accept rejected — journal full");
-                    handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, "Your quest journal is full.", true);
+                    handlers::send_quest_rejected(
+                        &mut *server,
+                        responder_cid,
+                        &quest_id,
+                        "Your quest journal is full.",
+                        true,
+                    );
                     continue;
                 }
                 // The giver's faction (2026-10-23): the quest's NPC (its
                 // turn-in NPC gives it too) has nothing to say at
                 // Apprehensive or below, so the quest is not offered.
-                if let Some(npc) = quest.turn_in_npc.as_deref().and_then(crate::world::npcs::lookup) {
+                if let Some(npc) = quest
+                    .turn_in_npc
+                    .as_deref()
+                    .and_then(crate::world::npcs::lookup)
+                {
                     if !conn.npc_serves(npc, crate::world::factions::Level::Indifferent) {
                         tracing::info!(char_id = responder, quest_id = %quest_id, npc = %npc.id, "quest accept rejected — faction");
-                        handlers::send_quest_rejected(&mut *server, responder_cid, &quest_id, &format!("{} has nothing to say to you.", npc.name), true);
+                        handlers::send_quest_rejected(
+                            &mut *server,
+                            responder_cid,
+                            &quest_id,
+                            &format!("{} has nothing to say to you.", npc.name),
+                            true,
+                        );
                         continue;
                     }
                 }
-                conn.active_quests.insert(quest_id.clone(), vec![0i32; quest.objectives.len()]);
+                conn.active_quests
+                    .insert(quest_id.clone(), vec![0i32; quest.objectives.len()]);
                 conn.quests_dirty.insert(quest_id.clone());
                 tracing::info!(char_id = responder, quest_id = %quest_id, "quest accepted");
             }

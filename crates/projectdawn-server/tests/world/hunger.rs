@@ -13,8 +13,24 @@ async fn a_famished_character_eats_the_first_food_in_slot_order_and_regenerates_
         provision_client(&h.auth_url, "hungry", "Hungrus", "Human", "Warrior").await;
     // Out of both, at 1 HP, with bread in a bag AND in a later base slot.
     set_char_appetite(&h.db_url, char_id, 0.0, 0.0, Some(1.0)).await;
-    give_char_item(&h.db_url, char_id, "base", 0, "res://data/loot/items/small_pouch.tres", 1).await;
-    give_char_item(&h.db_url, char_id, "base", 1, "res://data/loot/items/cloth_cap.tres", 1).await;
+    give_char_item(
+        &h.db_url,
+        char_id,
+        "base",
+        0,
+        "res://data/loot/items/small_pouch.tres",
+        1,
+    )
+    .await;
+    give_char_item(
+        &h.db_url,
+        char_id,
+        "base",
+        1,
+        "res://data/loot/items/cloth_cap.tres",
+        1,
+    )
+    .await;
     give_char_item(&h.db_url, char_id, "base", 3, BREAD, 2).await;
     give_char_item(&h.db_url, char_id, "bag_0", 0, BREAD, 2).await;
     let token = request_world_token(&h.auth_url, &session, char_id).await;
@@ -57,7 +73,10 @@ async fn a_famished_character_eats_the_first_food_in_slot_order_and_regenerates_
     drop(a);
     tokio::time::sleep(Duration::from_millis(500)).await;
     let (hunger, thirst) = read_char_appetite(&h.db_url, char_id).await;
-    assert!(hunger > 2880.0 - 60.0 && hunger <= 2880.0, "a meal of twenty units, less what ran: {hunger}");
+    assert!(
+        hunger > 2880.0 - 60.0 && hunger <= 2880.0,
+        "a meal of twenty units, less what ran: {hunger}"
+    );
     assert_eq!(thirst, 0.0, "no drink was carried, so still out of water");
 }
 
@@ -106,7 +125,10 @@ async fn out_of_food_means_no_hp_regen_and_the_dead_do_not_starve() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let (_, thirst) = read_char_appetite(&h.db_url, char_id).await;
     assert!(thirst < 1000.0 - 10.0, "thirst ran while alive: {thirst}");
-    assert!(thirst > 1000.0 - 25.0, "and stopped at death (15 s dead would have taken 15 more): {thirst}");
+    assert!(
+        thirst > 1000.0 - 25.0,
+        "and stopped at death (15 s dead would have taken 15 more): {thirst}"
+    );
 }
 
 /// Eating by hand: refused with EQ's line when full (nothing taken), and an
@@ -142,7 +164,10 @@ async fn hand_eating_is_refused_when_full_and_halved_when_early() {
                 if location == "base" && *slot == 0 && *count == 0)
         })
         .await;
-    assert!(emptied.is_none(), "nothing is taken on a refusal: the second loaf stays");
+    assert!(
+        emptied.is_none(),
+        "nothing is taken on a refusal: the second loaf stays"
+    );
     a.send_disconnect();
     a.pump_for(Duration::from_millis(500)).await;
     drop(a);
@@ -196,8 +221,10 @@ async fn the_hunger_window_reaches_its_owner_and_the_room_hears_the_meal() {
     let mut w = WorldClient::start(w_token, &w_session, w_char_id).await;
     let w_first = collect_system(&mut w, Duration::from_millis(500)).await;
     assert!(
-        w_first.iter().any(|m| matches!(m, ServerWorldMsg::HungerUpdate { hunger_secs, drain_per_sec, .. }
-            if *hunger_secs > hunger_cap() - 5.0 && (*drain_per_sec - 1.0).abs() < 1e-6)),
+        w_first.iter().any(
+            |m| matches!(m, ServerWorldMsg::HungerUpdate { hunger_secs, drain_per_sec, .. }
+            if *hunger_secs > hunger_cap() - 5.0 && (*drain_per_sec - 1.0).abs() < 1e-6)
+        ),
         "the watcher's own update arrives on entering: full, at the Human rate"
     );
 
@@ -212,28 +239,41 @@ async fn the_hunger_window_reaches_its_owner_and_the_room_hears_the_meal() {
     let update = e_msgs
         .iter()
         .find_map(|m| match m {
-            ServerWorldMsg::HungerUpdate { hunger_secs, thirst_secs, cap_secs, drain_per_sec } => {
-                Some((*hunger_secs, *thirst_secs, *cap_secs, *drain_per_sec))
-            }
+            ServerWorldMsg::HungerUpdate {
+                hunger_secs,
+                thirst_secs,
+                cap_secs,
+                drain_per_sec,
+            } => Some((*hunger_secs, *thirst_secs, *cap_secs, *drain_per_sec)),
             _ => None,
         })
         .expect("the eater gets a HungerUpdate on entering");
     let (hunger, thirst, cap, rate) = update;
-    assert!(hunger > 2880.0 - 30.0 && hunger <= 2880.0, "the update carries the meal just eaten: {hunger}");
+    assert!(
+        hunger > 2880.0 - 30.0 && hunger <= 2880.0,
+        "the update carries the meal just eaten: {hunger}"
+    );
     assert!(thirst > cap - 30.0, "thirst still full: {thirst}");
     assert_eq!(cap, hunger_cap(), "the cap");
-    assert!((rate - 2.0).abs() < 1e-6, "a living Halfling drains at twice the Human rate: {rate}");
+    assert!(
+        (rate - 2.0).abs() < 1e-6,
+        "a living Halfling drains at twice the Human rate: {rate}"
+    );
     assert!(
         e_msgs.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == "You eat a Bread Loaf.")),
         "the eater is told what it ate"
     );
     assert!(
-        !e_msgs.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("Chomp"))),
+        !e_msgs.iter().any(
+            |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("Chomp"))
+        ),
         "the eater does not get the emote about itself"
     );
 
     assert!(
-        w_msgs.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. }
+        w_msgs
+            .iter()
+            .any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. }
             if text == "Chomp, chomp, chomp... Munchkin takes a bite from a Bread Loaf.")),
         "the watcher beside the eater hears EQ's emote"
     );

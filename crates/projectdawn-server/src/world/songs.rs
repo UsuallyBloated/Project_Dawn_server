@@ -28,7 +28,11 @@ pub fn song_scale(level: i32, learn_level: i32, at_learn: f32) -> f32 {
 
 /// The start fraction `spell` uses: its own when set, the global otherwise.
 pub fn scale_at_learn(spell: &Spell) -> f32 {
-    if spell.song_scale_at_learn > 0.0 { spell.song_scale_at_learn } else { SONG_SCALE_AT_LEARN }
+    if spell.song_scale_at_learn > 0.0 {
+        spell.song_scale_at_learn
+    } else {
+        SONG_SCALE_AT_LEARN
+    }
 }
 
 /// What one pulse of `spell` puts on a bard of `level` and `class`, scaled.
@@ -50,8 +54,16 @@ pub struct PulseEffects {
 pub fn pulse_effects(spell: &Spell, level: i32, class: &str) -> PulseEffects {
     let s = song_scale(level, spell.required_level(class), scale_at_learn(spell));
     PulseEffects {
-        hot_hps: if spell.heal_amount > 0.0 { spell.heal_amount * s / SONG_PULSE_SECS } else { 0.0 },
-        speed_mult: if spell.move_speed_mult > 1.0 { 1.0 + (spell.move_speed_mult - 1.0) * s } else { 1.0 },
+        hot_hps: if spell.heal_amount > 0.0 {
+            spell.heal_amount * s / SONG_PULSE_SECS
+        } else {
+            0.0
+        },
+        speed_mult: if spell.move_speed_mult > 1.0 {
+            1.0 + (spell.move_speed_mult - 1.0) * s
+        } else {
+            1.0
+        },
         mp_regen_hps: spell.mp_regen_hps * s,
         haste: spell.haste_amount * s,
         accuracy: spell.accuracy_buff * s,
@@ -71,10 +83,22 @@ mod tests {
         assert!((song_scale(50, 1, g) - 1.0).abs() < 1e-6, "full at 50");
         assert!((song_scale(60, 1, g) - 1.0).abs() < 1e-6, "and past it");
         let mid = song_scale(25, 1, g);
-        assert!(mid > 0.65 && mid < 0.75, "about 0.7 halfway on the global shape: {mid}");
-        assert!(song_scale(10, 10, g) < song_scale(10, 1, g), "a song learned later starts lower at the same level");
-        assert!((song_scale(4, 10, g) - g).abs() < 1e-6, "below the learn level counts as the learn level");
-        assert!((song_scale(1, 1, 0.3077) - 0.3077).abs() < 1e-6, "a song's own fraction is honoured");
+        assert!(
+            mid > 0.65 && mid < 0.75,
+            "about 0.7 halfway on the global shape: {mid}"
+        );
+        assert!(
+            song_scale(10, 10, g) < song_scale(10, 1, g),
+            "a song learned later starts lower at the same level"
+        );
+        assert!(
+            (song_scale(4, 10, g) - g).abs() < 1e-6,
+            "below the learn level counts as the learn level"
+        );
+        assert!(
+            (song_scale(1, 1, 0.3077) - 0.3077).abs() < 1e-6,
+            "a song's own fraction is honoured"
+        );
     }
 
     #[test]
@@ -82,20 +106,46 @@ mod tests {
         let selos = super::super::spells::lookup("Selos' Melody").expect("Selos' Melody");
         let at1 = pulse_effects(selos, 1, "Bard");
         let at50 = pulse_effects(selos, 50, "Bard");
-        assert!((at50.speed_mult - 1.65).abs() < 1e-6, "EQ's Selo's +65% at 50");
-        assert!((at1.speed_mult - 1.20).abs() < 1e-3, "and +20% when learned, Selo's own curve: {}", at1.speed_mult);
+        assert!(
+            (at50.speed_mult - 1.65).abs() < 1e-6,
+            "EQ's Selo's +65% at 50"
+        );
+        assert!(
+            (at1.speed_mult - 1.20).abs() < 1e-3,
+            "and +20% when learned, Selo's own curve: {}",
+            at1.speed_mult
+        );
         let mending = super::super::spells::lookup("Poet's Mending").expect("Poet's Mending");
         let heal50 = pulse_effects(mending, 50, "Bard");
-        assert!((heal50.hot_hps - 11.0 / SONG_PULSE_SECS).abs() < 1e-6, "Hymn of Restoration's line: 11 a pulse at 50, as HP a second");
+        assert!(
+            (heal50.hot_hps - 11.0 / SONG_PULSE_SECS).abs() < 1e-6,
+            "Hymn of Restoration's line: 11 a pulse at 50, as HP a second"
+        );
         let heal4 = pulse_effects(mending, 4, "Bard");
-        assert!((heal4.hot_hps - 0.4 * 11.0 / SONG_PULSE_SECS).abs() < 1e-6, "the global 0.4 when learned at 4");
+        assert!(
+            (heal4.hot_hps - 0.4 * 11.0 / SONG_PULSE_SECS).abs() < 1e-6,
+            "the global 0.4 when learned at 4"
+        );
         let chord = super::super::spells::lookup("Wanderer's Chord").expect("Wanderer's Chord");
-        assert!((pulse_effects(chord, 50, "Bard").haste - 0.10).abs() < 1e-6, "Anthem de Arms' +10% at 50");
+        assert!(
+            (pulse_effects(chord, 50, "Bard").haste - 0.10).abs() < 1e-6,
+            "Anthem de Arms' +10% at 50"
+        );
         let weave = super::super::spells::lookup("Mana Weave").expect("Mana Weave");
-        assert!((pulse_effects(weave, 50, "Bard").mp_regen_hps - 1.0).abs() < 1e-6, "P99's 6 a tick");
-        assert!(pulse_effects(weave, 10, "Bard").mp_regen_hps < 0.5, "and less when first learned");
+        assert!(
+            (pulse_effects(weave, 50, "Bard").mp_regen_hps - 1.0).abs() < 1e-6,
+            "P99's 6 a tick"
+        );
+        assert!(
+            pulse_effects(weave, 10, "Bard").mp_regen_hps < 0.5,
+            "and less when first learned"
+        );
         for s in super::super::spells::all().filter(|s| s.is_song) {
-            assert!((s.cast_time - 3.0).abs() < 1e-6 && s.mana_cost == 0.0, "{}: a 3 s sing, free", s.name);
+            assert!(
+                (s.cast_time - 3.0).abs() < 1e-6 && s.mana_cost == 0.0,
+                "{}: a 3 s sing, free",
+                s.name
+            );
         }
     }
 }

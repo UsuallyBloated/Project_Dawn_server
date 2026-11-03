@@ -149,14 +149,7 @@ pub(super) async fn reap_connection(
             // Group dissolved. Survivors (0 or 1) get an empty roster so their
             // HUD clears. The leaver's transport is already torn down.
             for m in &remaining {
-                handlers::fan_group_roster(
-                    server,
-                    std::slice::from_ref(m),
-                    gid,
-                    *m,
-                    Vec::new(),
-                    0,
-                );
+                handlers::fan_group_roster(server, std::slice::from_ref(m), gid, *m, Vec::new(), 0);
             }
         } else if let Some(g) = group_manager.groups.get(&gid) {
             // Re-fetch the group with name lookups for the survivor fan-out.
@@ -212,7 +205,10 @@ pub(super) async fn reap_connection(
                 char_id = conn.char_id,
                 "logout save incomplete; queued for retry, relogin held until it lands"
             );
-            pending_saves.push(PendingSave { conn, since: Instant::now() });
+            pending_saves.push(PendingSave {
+                conn,
+                since: Instant::now(),
+            });
         }
     }
 }
@@ -276,7 +272,10 @@ pub(super) async fn shut_down_world(
     {
         if persistence::has_unsaved_state(conn) {
             unsaved += 1;
-            tracing::error!(char_id = conn.char_id, "shutdown save incomplete; progress since the last save is lost");
+            tracing::error!(
+                char_id = conn.char_id,
+                "shutdown save incomplete; progress since the last save is lost"
+            );
         }
     }
     for (client_id, conn) in connections.iter() {
@@ -331,8 +330,23 @@ pub(super) fn parse_is_gm_from_user_data(user_data: Option<[u8; 256]>) -> bool {
     user_data.map(|d| d[8] != 0).unwrap_or(false)
 }
 
-pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Intents, now: Instant, transport: &NetcodeServerTransport) {
-    let WorldState { cfg, pool, server, connections, aoi, pending_saves, enemies, group_manager, .. } = world;
+pub(super) async fn handle_transport_events(
+    world: &mut WorldState,
+    _q: &mut Intents,
+    now: Instant,
+    transport: &NetcodeServerTransport,
+) {
+    let WorldState {
+        cfg,
+        pool,
+        server,
+        connections,
+        aoi,
+        pending_saves,
+        enemies,
+        group_manager,
+        ..
+    } = world;
     // 2. Drain transport-level events (Connected/Disconnected).
     while let Some(event) = server.get_event() {
         match event {
@@ -387,7 +401,9 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
                                     .as_secs() as u32
                             });
                             tracing::info!(
-                                account_id, char_id, ?reconnect_after_secs,
+                                account_id,
+                                char_id,
+                                ?reconnect_after_secs,
                                 "duplicate login refused — account already in-world"
                             );
                             // The EQ phrasing, plus a "try again in ~Ns"
@@ -430,8 +446,15 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
                         // as the duplicate-login refusal, with a short retry.
                         // No countdown: when the save lands is not known, and
                         // the client draws one as "log in again in N s".
-                        if pending_saves.iter().any(|p| p.conn.account_id == account_id) {
-                            tracing::warn!(account_id, char_id, "relogin refused — the last session's save is still pending");
+                        if pending_saves
+                            .iter()
+                            .any(|p| p.conn.account_id == account_id)
+                        {
+                            tracing::warn!(
+                                account_id,
+                                char_id,
+                                "relogin refused — the last session's save is still pending"
+                            );
                             handlers::send_kick(
                                 &mut *server,
                                 client_id,
@@ -457,7 +480,11 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
                             }
                         };
                         if banned {
-                            tracing::info!(account_id, char_id, "banned account refused at world connect");
+                            tracing::info!(
+                                account_id,
+                                char_id,
+                                "banned account refused at world connect"
+                            );
                             handlers::send_kick(
                                 &mut *server,
                                 client_id,
@@ -486,7 +513,14 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
                             let acct = db::load_account_bank_items(&pool, account_id).await?;
                             let gems = db::load_spell_gems(&pool, char_id).await?;
                             let logged_out_at = db::load_logged_out_at(&pool, char_id).await?;
-                            Ok::<_, crate::error::DbError>((inv, skills, bank, acct, gems, logged_out_at))
+                            Ok::<_, crate::error::DbError>((
+                                inv,
+                                skills,
+                                bank,
+                                acct,
+                                gems,
+                                logged_out_at,
+                            ))
                         }
                         .await;
                         let (
@@ -497,19 +531,19 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
                             (gem_rows, gems_seeded),
                             logged_out_at,
                         ) = match loaded {
-                                Ok(rows) => rows,
-                                Err(e) => {
-                                    tracing::error!(account_id, char_id, error = %e,
+                            Ok(rows) => rows,
+                            Err(e) => {
+                                tracing::error!(account_id, char_id, error = %e,
                                         "could not load the character's stores at connect — refusing");
-                                    handlers::send_kick(
+                                handlers::send_kick(
                                         &mut *server,
                                         client_id,
                                         KickCode::Unknown,
                                         "The server could not load your character. Please try again in a moment.",
                                     );
-                                    continue;
-                                }
-                            };
+                                continue;
+                            }
+                        };
                         let mut fresh = PerConnection::from_spawn(spawn, now);
                         fresh.fizzles = cfg.fizzles;
                         fresh.panic_probe = cfg.panic_probe.clone();
@@ -583,7 +617,12 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
                                             detail.clone(),
                                         ));
                                     }
-                                    tracing::info!(char_id, gone = stacks, away_secs = away, "NO RENT items purged at login");
+                                    tracing::info!(
+                                        char_id,
+                                        gone = stacks,
+                                        away_secs = away,
+                                        "NO RENT items purged at login"
+                                    );
                                 }
                             }
                         }
@@ -668,7 +707,14 @@ pub(super) async fn handle_transport_events(world: &mut WorldState, _q: &mut Int
                     )
                     .await;
                 } else {
-                    go_linkdead(&mut *server, &mut *connections, &mut *aoi, &mut *enemies, client_id, now);
+                    go_linkdead(
+                        &mut *server,
+                        &mut *connections,
+                        &mut *aoi,
+                        &mut *enemies,
+                        client_id,
+                        now,
+                    );
                 }
             }
         }
@@ -696,7 +742,15 @@ fn go_linkdead(
         .filter(|c| c.in_world)
         .map(|c| c.char_id as u64);
     if let Some(owner_entity) = owner_entity {
-        despawn_owned_pets(server, connections, aoi, enemies, owner_entity, client_id, now);
+        despawn_owned_pets(
+            server,
+            connections,
+            aoi,
+            enemies,
+            owner_entity,
+            client_id,
+            now,
+        );
     }
     if let Some(conn) = connections.get_mut(&client_id) {
         conn.linkdead_since = Some(now);
@@ -736,15 +790,30 @@ pub(super) fn in_world_ids(connections: &HashMap<ClientId, PerConnection>) -> Ve
 /// faster way out of a fight than pulling the cable. The transport's own
 /// disconnect event then finds the body already linkdead and ignores it.
 pub(super) fn drop_panicked(world: &mut WorldState, q: &mut Intents, now: Instant) {
-    let WorldState { server, connections, aoi, enemies, .. } = world;
+    let WorldState {
+        server,
+        connections,
+        aoi,
+        enemies,
+        ..
+    } = world;
     for client_id in std::mem::take(&mut q.panicked) {
         server.disconnect(client_id);
-        go_linkdead(&mut *server, &mut *connections, &mut *aoi, &mut *enemies, client_id, now);
+        go_linkdead(
+            &mut *server,
+            &mut *connections,
+            &mut *aoi,
+            &mut *enemies,
+            client_id,
+            now,
+        );
     }
 }
 
 pub(super) async fn flush_gm_audit(world: &mut WorldState, _q: &mut Intents, now: Instant) {
-    let WorldState { pool, connections, .. } = world;
+    let WorldState {
+        pool, connections, ..
+    } = world;
     // 3-bis. GM action audit flush. A dev/GM command runs only if
     //    `authorize_dev_cmd` queued its row, and the rows are written
     //    here, straight after the message drain (`reap_connection`
@@ -763,7 +832,11 @@ pub(super) async fn flush_gm_audit(world: &mut WorldState, _q: &mut Intents, now
 }
 
 pub(super) fn reap_timed_out(world: &mut WorldState, q: &mut Intents, now: Instant) {
-    let WorldState { server, connections, .. } = world;
+    let WorldState {
+        server,
+        connections,
+        ..
+    } = world;
     let Intents { to_disconnect, .. } = q;
     // 4. App-layer heartbeat timeout — catches frozen game windows that
     //    transport-level keepalive doesn't notice. Skip connections that
@@ -800,7 +873,16 @@ pub(super) fn reap_timed_out(world: &mut WorldState, q: &mut Intents, now: Insta
 }
 
 pub(super) async fn reap_linkdead(world: &mut WorldState, _q: &mut Intents, now: Instant) {
-    let WorldState { pool, server, connections, aoi, pending_saves, enemies, group_manager, .. } = world;
+    let WorldState {
+        pool,
+        server,
+        connections,
+        aoi,
+        pending_saves,
+        enemies,
+        group_manager,
+        ..
+    } = world;
     // 4-bis. Linkdead reaper. A connection marked linkdead on an unclean
     //        disconnect lingers (vulnerable) for LINKDEAD_SECS, then we run
     //        the full disconnect cleanup. renet already dropped its

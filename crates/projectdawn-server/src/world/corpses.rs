@@ -71,6 +71,17 @@ impl Corpse {
         resurrected: bool,
         now: Instant,
     ) -> Self {
-        Self { id, owner_char, owner_name, zone, pos, items, coins, lost_xp, resurrected, spawned_at: now }
+        Self {
+            id,
+            owner_char,
+            owner_name,
+            zone,
+            pos,
+            items,
+            coins,
+            lost_xp,
+            resurrected,
+            spawned_at: now,
+        }
     }
 }

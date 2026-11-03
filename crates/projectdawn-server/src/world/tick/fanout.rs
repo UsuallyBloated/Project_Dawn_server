@@ -11,13 +11,18 @@ use super::*;
 /// the jumper's AOI view instead, since 2026-10-29: a jump is seen, not
 /// heard). Written keep-only-when-in-range, so a non-finite position hears
 /// nothing.
-pub(super) fn say_recipients(speaker: ClientId, connections: &HashMap<ClientId, PerConnection>) -> Vec<ClientId> {
+pub(super) fn say_recipients(
+    speaker: ClientId,
+    connections: &HashMap<ClientId, PerConnection>,
+) -> Vec<ClientId> {
     let Some(from) = connections.get(&speaker) else {
         return Vec::new();
     };
     connections
         .iter()
-        .filter(|(id, c)| **id != speaker && c.in_world && c.pos.distance_to(from.pos) <= crate::world::SAY_RANGE)
+        .filter(|(id, c)| {
+            **id != speaker && c.in_world && c.pos.distance_to(from.pos) <= crate::world::SAY_RANGE
+        })
         .map(|(id, _)| *id)
         .collect()
 }
@@ -69,8 +74,20 @@ pub(super) fn fan_entity_cell_crossing(
 }
 
 pub(super) fn seed_joiners(world: &mut WorldState, q: &mut Intents, now: Instant) {
-    let WorldState { server, connections, aoi, enemies, loot_bags, corpses, .. } = world;
-    let Intents { to_disconnect, newly_in_world, .. } = q;
+    let WorldState {
+        server,
+        connections,
+        aoi,
+        enemies,
+        loot_bags,
+        corpses,
+        ..
+    } = world;
+    let Intents {
+        to_disconnect,
+        newly_in_world,
+        ..
+    } = q;
     // 4a. EntitySpawn fan-out for clients that just sent `EnterWorld`.
     //     Each new client gets an EntitySpawn for every in_world peer;
     //     each in_world peer gets an EntitySpawn for the new client.
@@ -115,11 +132,7 @@ pub(super) fn seed_joiners(world: &mut WorldState, q: &mut Intents, now: Instant
         if let Some(new_conn) = connections.get(new_id) {
             for peer_id in &peer_ids {
                 handlers::send_entity_spawn(&mut *server, *peer_id, new_conn);
-                handlers::fan_out_resources(
-                    &mut *server,
-                    std::slice::from_ref(peer_id),
-                    new_conn,
-                );
+                handlers::fan_out_resources(&mut *server, std::slice::from_ref(peer_id), new_conn);
                 if !new_conn.cast_spell_name.is_empty() {
                     if let Some(set_at) = new_conn.cast_set_at {
                         let elapsed = now.duration_since(set_at).as_secs_f32();
@@ -150,11 +163,7 @@ pub(super) fn seed_joiners(world: &mut WorldState, q: &mut Intents, now: Instant
                 // known resources (Track 4). No-op for peers that
                 // haven't broadcast yet; their values land naturally on
                 // the next ResourceUpdate fan-out.
-                handlers::fan_out_resources(
-                    &mut *server,
-                    std::slice::from_ref(new_id),
-                    peer_conn,
-                );
+                handlers::fan_out_resources(&mut *server, std::slice::from_ref(new_id), peer_conn);
                 // Seed cast bar if a peer is mid-cast. Server estimates
                 // remaining time from `cast_set_at`; if it's already
                 // elapsed (peer's CastComplete just hasn't arrived yet,
@@ -198,7 +207,9 @@ pub(super) fn seed_joiners(world: &mut WorldState, q: &mut Intents, now: Instant
             if !entity.is_pet() || !entity.is_alive() {
                 continue;
             }
-            let Some(owner_id) = entity.owner else { continue };
+            let Some(owner_id) = entity.owner else {
+                continue;
+            };
             // Keyed on the PET's own cell (`visible_to_new` is every id
             // in the joiner's 3x3), the same key step 6b Positions and
             // the cell-crossing fans use. Keying on the owner's cell
@@ -209,12 +220,7 @@ pub(super) fn seed_joiners(world: &mut WorldState, q: &mut Intents, now: Instant
             if !visible_to_new.contains(entity_id) {
                 continue;
             }
-            handlers::fan_out_pet_spawn(
-                &mut *server,
-                std::slice::from_ref(new_id),
-                entity,
-                None,
-            );
+            handlers::fan_out_pet_spawn(&mut *server, std::slice::from_ref(new_id), entity, None);
             tracing::debug!(
                 new_client = *new_id as u64,
                 pet_id = *entity_id,
@@ -310,14 +316,16 @@ pub(super) fn seed_joiners(world: &mut WorldState, q: &mut Intents, now: Instant
                 .iter()
                 .map(|(id, p)| (id.clone(), p.clone()))
                 .collect();
-            let completed: Vec<String> =
-                new_conn.completed_quests.iter().cloned().collect();
+            let completed: Vec<String> = new_conn.completed_quests.iter().cloned().collect();
             handlers::send_quest_snapshot(&mut *server, *new_id, active, completed);
         }
         // Track 5 sub-task 1B — seed the new joiner with alive enemies
         // in their AOI neighbourhood. Track 7: filter by aoi.can_see
         // so only nearby enemies are seeded on enter-world.
-        let joiner_cell = connections.get(new_id).map(|c| c.aoi_cell).unwrap_or((0, 0));
+        let joiner_cell = connections
+            .get(new_id)
+            .map(|c| c.aoi_cell)
+            .unwrap_or((0, 0));
         for entity in enemies.values() {
             // Pets share this map and were seeded here as EnemySpawn on
             // top of their PetSpawn above; the client's enemy manager
@@ -341,11 +349,7 @@ pub(super) fn seed_joiners(world: &mut WorldState, q: &mut Intents, now: Instant
         for bag in loot_bags.values() {
             let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
             if aoi.can_see(joiner_cell, bag_cell) {
-                handlers::fan_out_loot_bag_spawn(
-                    &mut *server,
-                    std::slice::from_ref(new_id),
-                    bag,
-                );
+                handlers::fan_out_loot_bag_spawn(&mut *server, std::slice::from_ref(new_id), bag);
             }
         }
         // Corpse / resurrection Slice 1 — seed the joiner with nearby
@@ -353,11 +357,7 @@ pub(super) fn seed_joiners(world: &mut WorldState, q: &mut Intents, now: Instant
         for corpse in corpses.values() {
             let corpse_cell = aoi::cell_for(corpse.pos.x, corpse.pos.z);
             if aoi.can_see(joiner_cell, corpse_cell) {
-                handlers::fan_out_corpse_spawn(
-                    &mut *server,
-                    std::slice::from_ref(new_id),
-                    corpse,
-                );
+                handlers::fan_out_corpse_spawn(&mut *server, std::slice::from_ref(new_id), corpse);
                 // Slice 2 — seed the owner with the contents on relog /
                 // enter-world so they can loot a corpse they spawn next to.
                 if corpse.owner_char == *new_id as i64 {
@@ -368,9 +368,31 @@ pub(super) fn seed_joiners(world: &mut WorldState, q: &mut Intents, now: Instant
     }
 }
 
-pub(super) fn fan_out_events(world: &mut WorldState, q: &mut Intents, _now: Instant, in_world_recipients: &[ClientId]) {
-    let WorldState { server, connections, aoi, group_manager, .. } = world;
-    let Intents { to_disconnect, cast_fanouts, jump_fanouts, buff_fanouts, combat_fanouts, death_fanouts, player_target_fanouts, chat_fanouts, inspect_intents, .. } = q;
+pub(super) fn fan_out_events(
+    world: &mut WorldState,
+    q: &mut Intents,
+    _now: Instant,
+    in_world_recipients: &[ClientId],
+) {
+    let WorldState {
+        server,
+        connections,
+        aoi,
+        group_manager,
+        ..
+    } = world;
+    let Intents {
+        to_disconnect,
+        cast_fanouts,
+        jump_fanouts,
+        buff_fanouts,
+        combat_fanouts,
+        death_fanouts,
+        player_target_fanouts,
+        chat_fanouts,
+        inspect_intents,
+        ..
+    } = q;
     // 4b. (Track 6 removed the client-driven ResourceUpdate fan-out.
     //     Resources are now server-authoritative: regen mutates
     //     `conn.hp` / `conn.mp` / `conn.stamina` in step 4l below and
@@ -446,18 +468,12 @@ pub(super) fn fan_out_events(world: &mut WorldState, q: &mut Intents, _now: Inst
                 spell_name,
                 duration,
             ),
-            CastEvent::Complete { spell_name } => handlers::fan_out_cast_complete(
-                &mut *server,
-                &recipients,
-                caster,
-                spell_name,
-            ),
-            CastEvent::Fail { reason } => handlers::fan_out_cast_fail(
-                &mut *server,
-                &recipients,
-                caster,
-                reason,
-            ),
+            CastEvent::Complete { spell_name } => {
+                handlers::fan_out_cast_complete(&mut *server, &recipients, caster, spell_name)
+            }
+            CastEvent::Fail { reason } => {
+                handlers::fan_out_cast_fail(&mut *server, &recipients, caster, reason)
+            }
         }
     }
 
@@ -582,11 +598,11 @@ pub(super) fn fan_out_events(world: &mut WorldState, q: &mut Intents, _now: Inst
                 let Some(group) = group_manager.group_of(sender_id) else {
                     continue; // sender isn't in a group
                 };
-                let recipients: Vec<ClientId> = group.members
+                let recipients: Vec<ClientId> = group
+                    .members
                     .iter()
                     .filter(|id| {
-                        **id != sender_id
-                            && connections.get(*id).map_or(false, |c| c.in_world)
+                        **id != sender_id && connections.get(*id).map_or(false, |c| c.in_world)
                     })
                     .copied()
                     .collect();

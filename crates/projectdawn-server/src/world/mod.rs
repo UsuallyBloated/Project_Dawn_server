@@ -17,7 +17,6 @@ mod active_skills;
 pub mod alignment;
 mod aoi;
 mod buffs;
-mod songs;
 mod cast_gate;
 mod clock;
 mod combat;
@@ -44,12 +43,13 @@ mod progression;
 mod quests;
 mod regen;
 mod safe_areas;
+mod songs;
 // `pub` so the persistence layer (`crate::db::load_character`) can read MAX_LEVEL
 // to clamp a stored level into the cap on load.
 pub mod skills;
+mod spawn_points;
 mod spell_gems;
 mod spell_power;
-mod spawn_points;
 mod spells;
 mod tick;
 mod trade;
@@ -59,9 +59,7 @@ use crate::Config;
 use anyhow::Context;
 use protocol::world::WORLD_PROTOCOL_ID;
 use renet::{ChannelConfig, ConnectionConfig, RenetServer, SendType};
-use renet_netcode::{
-    ConnectToken, NetcodeServerTransport, ServerAuthentication, ServerConfig,
-};
+use renet_netcode::{ConnectToken, NetcodeServerTransport, ServerAuthentication, ServerConfig};
 use sqlx::SqlitePool;
 use std::{net::UdpSocket, sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
@@ -212,7 +210,6 @@ pub const LOOT_PICKUP_RANGE: f32 = 6.0;
 /// for all three, knowing the trade-off: a group-mate in town shares from the
 /// camps nearest town. See docs/design/group_loot_and_coin.md.
 pub const GROUP_SHARE_RANGE: f32 = 200.0;
-
 
 /// The global cooldown (spell batch step 4, decided 2026-10-05): after any
 /// accepted cast, no spell may START for this long, Bard songs excepted on
@@ -414,12 +411,12 @@ pub async fn serve_with_socket_until(
     socket: UdpSocket,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
-    let public_addr = cfg
-        .world_endpoint
-        .parse()
-        .with_context(|| {
-            format!("world_endpoint not a valid SocketAddr: {}", cfg.world_endpoint)
-        })?;
+    let public_addr = cfg.world_endpoint.parse().with_context(|| {
+        format!(
+            "world_endpoint not a valid SocketAddr: {}",
+            cfg.world_endpoint
+        )
+    })?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

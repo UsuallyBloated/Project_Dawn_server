@@ -116,7 +116,11 @@ fn skills() -> &'static HashMap<String, ActiveSkill> {
     SKILLS.get_or_init(|| {
         let parsed: SkillsFile = toml::from_str(ACTIVE_SKILLS_TOML)
             .expect("active_skills.toml must parse; fix the embedded file");
-        parsed.skills.into_iter().map(|s| (s.name.clone(), s)).collect()
+        parsed
+            .skills
+            .into_iter()
+            .map(|s| (s.name.clone(), s))
+            .collect()
     })
 }
 
@@ -149,16 +153,34 @@ mod tests {
         assert!(n >= 32, "the client's 32 skills are all here: {n}");
         for s in skills().values() {
             assert!(!s.classes.is_empty(), "{} names a class", s.name);
-            assert!(s.cooldown > 0.0 && s.stamina_cost > 0.0, "{} costs something", s.name);
+            assert!(
+                s.cooldown > 0.0 && s.stamina_cost > 0.0,
+                "{} costs something",
+                s.name
+            );
             if !s.effect_type.is_empty() {
-                assert_ne!(s.effect(), Effect::None, "{} has an unknown effect {}", s.name, s.effect_type);
+                assert_ne!(
+                    s.effect(),
+                    Effect::None,
+                    "{} has an unknown effect {}",
+                    s.name,
+                    s.effect_type
+                );
             }
             match s.effect() {
                 Effect::EvadeBoost => assert!(s.effect_duration > 0.0, "{} lasts", s.name),
                 Effect::AbsorbShield => assert!(s.absorb_amount > 0.0, "{} absorbs", s.name),
-                Effect::Stun => assert!(s.stun_duration > 0.0 && s.is_damage(), "{} stuns with a hit", s.name),
-                Effect::Stealth => assert!(s.stealth_duration > 0.0, "{} hides for a while", s.name),
-                Effect::WarderFury | Effect::Truesight => assert!(s.is_damage(), "{} swings", s.name),
+                Effect::Stun => assert!(
+                    s.stun_duration > 0.0 && s.is_damage(),
+                    "{} stuns with a hit",
+                    s.name
+                ),
+                Effect::Stealth => {
+                    assert!(s.stealth_duration > 0.0, "{} hides for a while", s.name)
+                }
+                Effect::WarderFury | Effect::Truesight => {
+                    assert!(s.is_damage(), "{} swings", s.name)
+                }
                 Effect::FeignDeath | Effect::None => {}
             }
         }
@@ -174,8 +196,14 @@ mod tests {
         let now = Instant::now();
         assert!(!on_cooldown(None, now));
         assert!(on_cooldown(Some(now + Duration::from_secs(3)), now));
-        assert!(!on_cooldown(Some(now + Duration::from_millis(200)), now), "inside the grace");
-        assert!(on_cooldown(Some(now + Duration::from_millis(400)), now), "past it");
+        assert!(
+            !on_cooldown(Some(now + Duration::from_millis(200)), now),
+            "inside the grace"
+        );
+        assert!(
+            on_cooldown(Some(now + Duration::from_millis(400)), now),
+            "past it"
+        );
     }
 
     #[test]

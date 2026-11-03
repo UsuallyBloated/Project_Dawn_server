@@ -111,7 +111,11 @@ pub async fn flush_connection(pool: &SqlitePool, conn: &mut PerConnection, when:
             ("casting", &conn.casting_skills),
         ] {
             for (key, score) in map {
-                rows.push(db::SkillRow { kind: kind.to_string(), key: key.clone(), score: *score });
+                rows.push(db::SkillRow {
+                    kind: kind.to_string(),
+                    key: key.clone(),
+                    score: *score,
+                });
             }
         }
         match db::save_skills(pool, conn.char_id, &rows).await {
@@ -144,7 +148,9 @@ pub async fn flush_quests(pool: &SqlitePool, conn: &mut PerConnection, when: &st
     let dirty_quests: Vec<String> = conn.quests_dirty.iter().cloned().collect();
     for quest_id in dirty_quests {
         let result = match conn.active_quests.get(&quest_id) {
-            Some(progress) => db::save_quest_progress(pool, conn.char_id, &quest_id, progress).await,
+            Some(progress) => {
+                db::save_quest_progress(pool, conn.char_id, &quest_id, progress).await
+            }
             None => db::delete_active_quest(pool, conn.char_id, &quest_id).await,
         };
         match result {

@@ -208,8 +208,18 @@ mod tests {
         let row = item_event(ItemAction::Destroy, "res://x.tres", 3, -3, None);
         assert_eq!(row.action, "destroy");
         assert_eq!((row.count, row.delta, row.copper), (3, -3, 0));
-        let vault = item_event(ItemAction::BankIn, "res://x.tres", 3, 0, Some("vault".into()));
-        assert_eq!((vault.count, vault.delta), (3, 0), "a vault deposit keeps the item the character's");
+        let vault = item_event(
+            ItemAction::BankIn,
+            "res://x.tres",
+            3,
+            0,
+            Some("vault".into()),
+        );
+        assert_eq!(
+            (vault.count, vault.delta),
+            (3, 0),
+            "a vault deposit keeps the item the character's"
+        );
         let coin = coin_event(ItemAction::Sell, 250, None);
         assert_eq!((coin.item_path.as_deref(), coin.copper), (None, 250));
     }
@@ -217,16 +227,38 @@ mod tests {
     #[test]
     fn every_action_has_a_distinct_name() {
         let all = [
-            ItemAction::Loot, ItemAction::Pickup, ItemAction::LootCoins, ItemAction::CorpseLoot,
-            ItemAction::CorpseCoins, ItemAction::Drop, ItemAction::Destroy, ItemAction::Eat,
-            ItemAction::Use, ItemAction::TradeOut, ItemAction::TradeIn, ItemAction::TradeCoins,
-            ItemAction::Buy, ItemAction::Sell, ItemAction::BankIn, ItemAction::BankOut,
-            ItemAction::BankCoinIn, ItemAction::BankCoinOut, ItemAction::BankExchange,
-            ItemAction::QuestReward, ItemAction::Summon, ItemAction::GmGive, ItemAction::GmCoins,
-            ItemAction::Death, ItemAction::DeathCoins, ItemAction::NoRent,
+            ItemAction::Loot,
+            ItemAction::Pickup,
+            ItemAction::LootCoins,
+            ItemAction::CorpseLoot,
+            ItemAction::CorpseCoins,
+            ItemAction::Drop,
+            ItemAction::Destroy,
+            ItemAction::Eat,
+            ItemAction::Use,
+            ItemAction::TradeOut,
+            ItemAction::TradeIn,
+            ItemAction::TradeCoins,
+            ItemAction::Buy,
+            ItemAction::Sell,
+            ItemAction::BankIn,
+            ItemAction::BankOut,
+            ItemAction::BankCoinIn,
+            ItemAction::BankCoinOut,
+            ItemAction::BankExchange,
+            ItemAction::QuestReward,
+            ItemAction::Summon,
+            ItemAction::GmGive,
+            ItemAction::GmCoins,
+            ItemAction::Death,
+            ItemAction::DeathCoins,
+            ItemAction::NoRent,
         ];
         let names: std::collections::HashSet<&str> = all.iter().map(|a| a.as_str()).collect();
         assert_eq!(names.len(), all.len());
-        assert!(!names.contains("opening") && !names.contains("carry"), "those two are the database's own");
+        assert!(
+            !names.contains("opening") && !names.contains("carry"),
+            "those two are the database's own"
+        );
     }
 }

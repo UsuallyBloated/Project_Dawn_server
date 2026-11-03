@@ -6,7 +6,11 @@ use super::*;
 use protocol::world::ClientWorldMsg;
 
 pub(super) fn drain_messages(world: &mut WorldState, q: &mut Intents, now: Instant) {
-    let WorldState { server, connections, .. } = world;
+    let WorldState {
+        server,
+        connections,
+        ..
+    } = world;
     // 3. Drain incoming application messages on each channel for each client.
     let client_ids: Vec<ClientId> = server.clients_id_iter().collect();
     for client_id in client_ids {
@@ -18,8 +22,12 @@ pub(super) fn drain_messages(world: &mut WorldState, q: &mut Intents, now: Insta
         };
         // Every line logged while this client's messages are handled (and
         // their outcomes queued) names who sent them.
-        let _span =
-            tracing::info_span!("client", char_id = conn.char_id, account_id = conn.account_id).entered();
+        let _span = tracing::info_span!(
+            "client",
+            char_id = conn.char_id,
+            account_id = conn.account_id
+        )
+        .entered();
         // A client's batch is all or nothing (`handle_batch`): if any of its
         // messages panics, the connection is put back as it was before the
         // batch and the outcomes are discarded, then `session::drop_panicked`
@@ -121,8 +129,57 @@ fn route_outcome(
     client_id: ClientId,
     outcome: Outcome,
 ) {
-
-    let Intents { to_disconnect, newly_in_world, cast_fanouts, jump_fanouts, buff_fanouts, combat_fanouts, death_fanouts, player_target_fanouts, chat_fanouts, inspect_intents, attack_intents, use_skill_intents, cast_spell_intents, cast_overflow_told, group_invite_intents, group_accept_intents, group_leave_intents, group_kick_intents, group_loot_mode_intents, group_pass_leadership_intents, autosplit_notice_intents, loot_intents, loot_to_cursor_intents, resurrect_accept_intents, bind_intents, dev_spawn_intents, dev_despawn_intents, spell_gem_saves, complete_quest_intents, quest_lifecycle_intents, consider_intents, pet_command_intents, move_item_intents, trade_intents, split_stack_intents, drop_item_intents, destroy_item_intents, use_consumable_intents, gm_give_intents, equip_item_intents, unequip_item_intents, buy_item_intents, sell_item_intents, bank_deposit_intents, bank_withdraw_intents, bank_exchange_intents, bank_store_item_intents, bank_withdraw_item_intents, .. } = q;
+    let Intents {
+        to_disconnect,
+        newly_in_world,
+        cast_fanouts,
+        jump_fanouts,
+        buff_fanouts,
+        combat_fanouts,
+        death_fanouts,
+        player_target_fanouts,
+        chat_fanouts,
+        inspect_intents,
+        attack_intents,
+        use_skill_intents,
+        cast_spell_intents,
+        cast_overflow_told,
+        group_invite_intents,
+        group_accept_intents,
+        group_leave_intents,
+        group_kick_intents,
+        group_loot_mode_intents,
+        group_pass_leadership_intents,
+        autosplit_notice_intents,
+        loot_intents,
+        loot_to_cursor_intents,
+        resurrect_accept_intents,
+        bind_intents,
+        dev_spawn_intents,
+        dev_despawn_intents,
+        spell_gem_saves,
+        complete_quest_intents,
+        quest_lifecycle_intents,
+        consider_intents,
+        pet_command_intents,
+        move_item_intents,
+        trade_intents,
+        split_stack_intents,
+        drop_item_intents,
+        destroy_item_intents,
+        use_consumable_intents,
+        gm_give_intents,
+        equip_item_intents,
+        unequip_item_intents,
+        buy_item_intents,
+        sell_item_intents,
+        bank_deposit_intents,
+        bank_withdraw_intents,
+        bank_exchange_intents,
+        bank_store_item_intents,
+        bank_withdraw_item_intents,
+        ..
+    } = q;
     match outcome {
         Outcome::Disconnect => to_disconnect.push(client_id),
         Outcome::JustEnteredWorld => newly_in_world.push(client_id),
@@ -140,14 +197,10 @@ fn route_outcome(
         }
         Outcome::JumpFanOut => jump_fanouts.push(client_id),
         Outcome::CastCompleteFanOut { spell_name } => {
-            cast_fanouts.push((
-                client_id,
-                CastEvent::Complete { spell_name },
-            ));
+            cast_fanouts.push((client_id, CastEvent::Complete { spell_name }));
         }
         Outcome::CastFailFanOut { reason } => {
-            cast_fanouts
-                .push((client_id, CastEvent::Fail { reason }));
+            cast_fanouts.push((client_id, CastEvent::Fail { reason }));
         }
         Outcome::BuffSnapshotFanOut => {
             if !buff_fanouts.contains(&client_id) {
@@ -188,7 +241,12 @@ fn route_outcome(
             // other fan-outs.
             player_target_fanouts.push((client_id, target));
         }
-        Outcome::ChatFanOut { channel, text, speaker, target_name } => {
+        Outcome::ChatFanOut {
+            channel,
+            text,
+            speaker,
+            target_name,
+        } => {
             chat_fanouts.push((client_id, channel, text, speaker, target_name));
         }
         Outcome::InspectIntent { target_char_id } => {
@@ -208,7 +266,11 @@ fn route_outcome(
                 skill: None,
             });
         }
-        Outcome::UseSkillIntent { user, skill_name, target_id } => {
+        Outcome::UseSkillIntent {
+            user,
+            skill_name,
+            target_id,
+        } => {
             // One UseSkill per user per tick (the CastSpell
             // rule): the handler stamps no cooldown, so every
             // copy in a forged datagram would pass it and be
@@ -217,7 +279,11 @@ fn route_outcome(
             if use_skill_intents.iter().any(|i| i.user == user) {
                 tracing::debug!(user, skill = %skill_name, "UseSkill dropped — one per tick");
             } else {
-                use_skill_intents.push(UseSkillIntent { user, skill_name, target_id });
+                use_skill_intents.push(UseSkillIntent {
+                    user,
+                    skill_name,
+                    target_id,
+                });
             }
         }
         Outcome::CastSpellIntent {
@@ -268,8 +334,16 @@ fn route_outcome(
                 });
             }
         }
-        Outcome::PetCommandIntent { owner, command, target_id } => {
-            pet_command_intents.push(PetCommandI { owner, command, target_id });
+        Outcome::PetCommandIntent {
+            owner,
+            command,
+            target_id,
+        } => {
+            pet_command_intents.push(PetCommandI {
+                owner,
+                command,
+                target_id,
+            });
         }
         Outcome::MoveItemIntent {
             owner,
@@ -427,23 +501,51 @@ fn route_outcome(
         Outcome::BankWithdrawIntent { owner, coins } => {
             bank_withdraw_intents.push(BankWithdrawI { owner, coins });
         }
-        Outcome::BankExchangeIntent { owner, from_tier, to_tier, qty } => {
+        Outcome::BankExchangeIntent {
+            owner,
+            from_tier,
+            to_tier,
+            qty,
+        } => {
             bank_exchange_intents.push(BankExchangeI {
-                owner, from_tier, to_tier, qty,
+                owner,
+                from_tier,
+                to_tier,
+                qty,
             });
         }
-        Outcome::BankStoreItemIntent { owner, src_location, src_slot, shared } => {
+        Outcome::BankStoreItemIntent {
+            owner,
+            src_location,
+            src_slot,
+            shared,
+        } => {
             bank_store_item_intents.push(BankStoreItemI {
-                owner, src_location, src_slot, shared,
+                owner,
+                src_location,
+                src_slot,
+                shared,
             });
         }
-        Outcome::BankWithdrawItemIntent { owner, shared, vault_slot } => {
+        Outcome::BankWithdrawItemIntent {
+            owner,
+            shared,
+            vault_slot,
+        } => {
             bank_withdraw_item_intents.push(BankWithdrawItemI {
-                owner, shared, vault_slot,
+                owner,
+                shared,
+                vault_slot,
             });
         }
-        Outcome::GroupInviteIntent { inviter, target_name } => {
-            group_invite_intents.push(GroupInviteI { inviter, target_name });
+        Outcome::GroupInviteIntent {
+            inviter,
+            target_name,
+        } => {
+            group_invite_intents.push(GroupInviteI {
+                inviter,
+                target_name,
+            });
         }
         Outcome::GroupAcceptIntent { invitee, from } => {
             group_accept_intents.push(GroupAcceptI { invitee, from });
@@ -451,19 +553,23 @@ fn route_outcome(
         Outcome::GroupLeaveIntent { member } => {
             group_leave_intents.push(GroupLeaveI { member });
         }
-        Outcome::GroupKickIntent { leader, target_name } => {
-            group_kick_intents.push(GroupKickI { leader, target_name });
+        Outcome::GroupKickIntent {
+            leader,
+            target_name,
+        } => {
+            group_kick_intents.push(GroupKickI {
+                leader,
+                target_name,
+            });
         }
         Outcome::SetGroupLootModeIntent { leader, mode } => {
             group_loot_mode_intents.push(GroupLootModeI { leader, mode });
         }
         Outcome::PassLeadershipIntent { leader, new_leader } => {
-            group_pass_leadership_intents
-                .push(GroupPassLeadershipI { leader, new_leader });
+            group_pass_leadership_intents.push(GroupPassLeadershipI { leader, new_leader });
         }
         Outcome::AutosplitNoticeIntent { char_id, on } => {
-            autosplit_notice_intents
-                .push(AutosplitNoticeI { char_id, on });
+            autosplit_notice_intents.push(AutosplitNoticeI { char_id, on });
         }
         Outcome::LootItemIntent {
             looter,
@@ -486,7 +592,11 @@ fn route_outcome(
         Outcome::LootToCursorIntent { looter, bag_id } => {
             loot_to_cursor_intents.push((looter, bag_id));
         }
-        Outcome::ResurrectAcceptIntent { responder, corpse_id, accept } => {
+        Outcome::ResurrectAcceptIntent {
+            responder,
+            corpse_id,
+            accept,
+        } => {
             resurrect_accept_intents.push((responder, corpse_id, accept));
         }
         Outcome::BindIntent { char_id, zone, pos } => {
@@ -505,19 +615,35 @@ fn route_outcome(
         Outcome::DevDespawnEnemiesIntent { requester, pos } => {
             dev_despawn_intents.push((requester, pos));
         }
-        Outcome::ConsiderIntent { requester, target_id } => {
+        Outcome::ConsiderIntent {
+            requester,
+            target_id,
+        } => {
             consider_intents.push((requester, target_id));
         }
-        Outcome::SpellGemsChanged { char_id, gems, seeded } => {
+        Outcome::SpellGemsChanged {
+            char_id,
+            gems,
+            seeded,
+        } => {
             spell_gem_saves.push((char_id, gems, seeded));
         }
-        Outcome::CompleteQuestIntent { responder, quest_id } => {
+        Outcome::CompleteQuestIntent {
+            responder,
+            quest_id,
+        } => {
             complete_quest_intents.push((responder, quest_id));
         }
-        Outcome::AcceptQuestIntent { responder, quest_id } => {
+        Outcome::AcceptQuestIntent {
+            responder,
+            quest_id,
+        } => {
             quest_lifecycle_intents.push((responder, QuestLifecycle::Accept, quest_id));
         }
-        Outcome::AbandonQuestIntent { responder, quest_id } => {
+        Outcome::AbandonQuestIntent {
+            responder,
+            quest_id,
+        } => {
             quest_lifecycle_intents.push((responder, QuestLifecycle::Abandon, quest_id));
         }
         Outcome::Continue => {}
@@ -532,7 +658,11 @@ mod tests {
     const CLIENT: ClientId = 7;
 
     fn say(text: &str) -> ClientWorldMsg {
-        ClientWorldMsg::Chat { channel: ChatChannel::Say, text: text.into(), target_name: None }
+        ClientWorldMsg::Chat {
+            channel: ChatChannel::Say,
+            text: text.into(),
+            target_name: None,
+        }
     }
 
     /// A handler that changes the connection, as a real one does, and panics
@@ -567,8 +697,17 @@ mod tests {
         conn.hp = 0.0;
         conn.death_processed = true;
         let before = format!("{conn:?}");
-        let result = handle_batch(&mut conn, CLIENT, vec![say("a"), say("boom"), say("c")], handler);
+        let result = handle_batch(
+            &mut conn,
+            CLIENT,
+            vec![say("a"), say("boom"), say("c")],
+            handler,
+        );
         assert!(result.is_none(), "a panic discards the batch");
-        assert_eq!(format!("{conn:?}"), before, "every field is as it was before the batch");
+        assert_eq!(
+            format!("{conn:?}"),
+            before,
+            "every field is as it was before the batch"
+        );
     }
 }

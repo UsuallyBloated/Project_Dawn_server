@@ -32,8 +32,13 @@ pub struct StatBlock {
 impl StatBlock {
     pub const fn flat(v: i32) -> Self {
         Self {
-            strength: v, dexterity: v, agility: v, intelligence: v,
-            wisdom: v, charisma: v, constitution: v,
+            strength: v,
+            dexterity: v,
+            agility: v,
+            intelligence: v,
+            wisdom: v,
+            charisma: v,
+            constitution: v,
         }
     }
 
@@ -78,74 +83,195 @@ fn races() -> &'static HashMap<&'static str, StatBlock> {
     static RACES: OnceLock<HashMap<&'static str, StatBlock>> = OnceLock::new();
     RACES.get_or_init(|| {
         let mut m = HashMap::new();
-        m.insert("Human", StatBlock {
-            strength: 2, dexterity: 2, agility: 2, intelligence: 2,
-            wisdom: 2, charisma: 2, constitution: 2,
-        });
-        m.insert("Elf", StatBlock {
-            dexterity: 10, agility: 10, intelligence: 10, wisdom: 5,
-            strength: -5, constitution: -5, ..Default::default()
-        });
-        m.insert("Dark Elf", StatBlock {
-            intelligence: 15, dexterity: 10, agility: 5, wisdom: -5,
-            charisma: -10, ..Default::default()
-        });
-        m.insert("Gnome", StatBlock {
-            intelligence: 15, wisdom: 5, strength: -5, constitution: -5,
-            ..Default::default()
-        });
-        m.insert("Halfling", StatBlock {
-            dexterity: 10, agility: 10, charisma: 5, strength: -5,
-            constitution: -5, ..Default::default()
-        });
-        m.insert("Dwarf", StatBlock {
-            constitution: 15, strength: 5, wisdom: 5, charisma: -5,
-            agility: -5, ..Default::default()
-        });
-        m.insert("Wood Elf", StatBlock {
-            dexterity: 10, agility: 10, wisdom: 5, intelligence: -5,
-            charisma: -5, ..Default::default()
-        });
-        m.insert("Half-Elf", StatBlock {
-            dexterity: 5, agility: 5, intelligence: 5, wisdom: 5,
-            ..Default::default()
-        });
-        m.insert("Ogre", StatBlock {
-            strength: 20, constitution: 10, charisma: -15, intelligence: -5,
-            wisdom: -5, ..Default::default()
-        });
-        m.insert("Troll", StatBlock {
-            constitution: 20, strength: 10, charisma: -15, wisdom: -10,
-            intelligence: -5, ..Default::default()
-        });
-        m.insert("Kel`varath", StatBlock {
-            constitution: 15, strength: 8, charisma: -15, wisdom: -5,
-            ..Default::default()
-        });
-        m.insert("Minotaur", StatBlock {
-            strength: 20, constitution: 10, charisma: -10, intelligence: -8,
-            agility: -5, ..Default::default()
-        });
-        m.insert("Revenant", StatBlock {
-            intelligence: 10, constitution: 10, strength: 5, charisma: -15,
-            wisdom: -5, ..Default::default()
-        });
-        m.insert("Fae", StatBlock {
-            intelligence: 20, wisdom: 10, agility: 15, charisma: 5,
-            strength: -15, constitution: -10, ..Default::default()
-        });
-        m.insert("Felhari", StatBlock {
-            dexterity: 12, agility: 12, constitution: 5, wisdom: -5,
-            intelligence: -5, charisma: -5, ..Default::default()
-        });
-        m.insert("Kobold", StatBlock {
-            dexterity: 10, intelligence: 8, agility: 5, strength: -8,
-            constitution: -5, charisma: -10, ..Default::default()
-        });
-        m.insert("Half-Ogre", StatBlock {
-            strength: 15, constitution: 8, charisma: -8, intelligence: -3,
-            wisdom: -3, ..Default::default()
-        });
+        m.insert(
+            "Human",
+            StatBlock {
+                strength: 2,
+                dexterity: 2,
+                agility: 2,
+                intelligence: 2,
+                wisdom: 2,
+                charisma: 2,
+                constitution: 2,
+            },
+        );
+        m.insert(
+            "Elf",
+            StatBlock {
+                dexterity: 10,
+                agility: 10,
+                intelligence: 10,
+                wisdom: 5,
+                strength: -5,
+                constitution: -5,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "Dark Elf",
+            StatBlock {
+                intelligence: 15,
+                dexterity: 10,
+                agility: 5,
+                wisdom: -5,
+                charisma: -10,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "Gnome",
+            StatBlock {
+                intelligence: 15,
+                wisdom: 5,
+                strength: -5,
+                constitution: -5,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "Halfling",
+            StatBlock {
+                dexterity: 10,
+                agility: 10,
+                charisma: 5,
+                strength: -5,
+                constitution: -5,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "Dwarf",
+            StatBlock {
+                constitution: 15,
+                strength: 5,
+                wisdom: 5,
+                charisma: -5,
+                agility: -5,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "Wood Elf",
+            StatBlock {
+                dexterity: 10,
+                agility: 10,
+                wisdom: 5,
+                intelligence: -5,
+                charisma: -5,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "Half-Elf",
+            StatBlock {
+                dexterity: 5,
+                agility: 5,
+                intelligence: 5,
+                wisdom: 5,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "Ogre",
+            StatBlock {
+                strength: 20,
+                constitution: 10,
+                charisma: -15,
+                intelligence: -5,
+                wisdom: -5,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "Troll",
+            StatBlock {
+                constitution: 20,
+                strength: 10,
+                charisma: -15,
+                wisdom: -10,
+                intelligence: -5,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "Kel`varath",
+            StatBlock {
+                constitution: 15,
+                strength: 8,
+                charisma: -15,
+                wisdom: -5,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "Minotaur",
+            StatBlock {
+                strength: 20,
+                constitution: 10,
+                charisma: -10,
+                intelligence: -8,
+                agility: -5,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "Revenant",
+            StatBlock {
+                intelligence: 10,
+                constitution: 10,
+                strength: 5,
+                charisma: -15,
+                wisdom: -5,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "Fae",
+            StatBlock {
+                intelligence: 20,
+                wisdom: 10,
+                agility: 15,
+                charisma: 5,
+                strength: -15,
+                constitution: -10,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "Felhari",
+            StatBlock {
+                dexterity: 12,
+                agility: 12,
+                constitution: 5,
+                wisdom: -5,
+                intelligence: -5,
+                charisma: -5,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "Kobold",
+            StatBlock {
+                dexterity: 10,
+                intelligence: 8,
+                agility: 5,
+                strength: -8,
+                constitution: -5,
+                charisma: -10,
+                ..Default::default()
+            },
+        );
+        m.insert(
+            "Half-Ogre",
+            StatBlock {
+                strength: 15,
+                constitution: 8,
+                charisma: -8,
+                intelligence: -3,
+                wisdom: -3,
+                ..Default::default()
+            },
+        );
         m
     })
 }
@@ -154,78 +280,215 @@ fn classes() -> &'static HashMap<&'static str, ClassData> {
     static CLASSES: OnceLock<HashMap<&'static str, ClassData>> = OnceLock::new();
     CLASSES.get_or_init(|| {
         let mut m = HashMap::new();
-        m.insert("Warrior", ClassData {
-            bonuses: StatBlock { strength: 10, constitution: 8, ..Default::default() },
-            stamina_bonus: 20.0,
-        });
-        m.insert("Magician", ClassData {
-            bonuses: StatBlock { intelligence: 15, wisdom: 10, ..Default::default() },
-            stamina_bonus: 0.0,
-        });
-        m.insert("Wizard", ClassData {
-            bonuses: StatBlock { intelligence: 18, wisdom: 5, ..Default::default() },
-            stamina_bonus: 0.0,
-        });
-        m.insert("Sorcerer", ClassData {
-            bonuses: StatBlock { intelligence: 10, charisma: 15, wisdom: 5, ..Default::default() },
-            stamina_bonus: 0.0,
-        });
-        m.insert("Rogue", ClassData {
-            bonuses: StatBlock { dexterity: 15, agility: 10, ..Default::default() },
-            stamina_bonus: 20.0,
-        });
-        m.insert("Cleric", ClassData {
-            bonuses: StatBlock { wisdom: 12, constitution: 8, ..Default::default() },
-            stamina_bonus: 0.0,
-        });
-        m.insert("Druid", ClassData {
-            bonuses: StatBlock { wisdom: 10, intelligence: 8, ..Default::default() },
-            stamina_bonus: 0.0,
-        });
-        m.insert("Shaman", ClassData {
-            bonuses: StatBlock { wisdom: 10, constitution: 8, strength: 5, ..Default::default() },
-            stamina_bonus: 15.0,
-        });
-        m.insert("Beast Master", ClassData {
-            bonuses: StatBlock { strength: 8, constitution: 8, agility: 5, wisdom: 5, ..Default::default() },
-            stamina_bonus: 20.0,
-        });
-        m.insert("Blood Mage", ClassData {
-            bonuses: StatBlock { intelligence: 15, constitution: 5, ..Default::default() },
-            stamina_bonus: 0.0,
-        });
-        m.insert("Paladin", ClassData {
-            bonuses: StatBlock { strength: 10, wisdom: 8, constitution: 5, ..Default::default() },
-            stamina_bonus: 15.0,
-        });
-        m.insert("Shadow Knight", ClassData {
-            bonuses: StatBlock { strength: 10, intelligence: 8, constitution: 5, ..Default::default() },
-            stamina_bonus: 10.0,
-        });
-        m.insert("Necromancer", ClassData {
-            bonuses: StatBlock { intelligence: 15, wisdom: 5, ..Default::default() },
-            stamina_bonus: 0.0,
-        });
-        m.insert("Enchanter", ClassData {
-            bonuses: StatBlock { intelligence: 12, charisma: 12, wisdom: 5, ..Default::default() },
-            stamina_bonus: 0.0,
-        });
-        m.insert("Bard", ClassData {
-            bonuses: StatBlock { dexterity: 8, charisma: 12, agility: 5, ..Default::default() },
-            stamina_bonus: 20.0,
-        });
-        m.insert("Ranger", ClassData {
-            bonuses: StatBlock { dexterity: 12, agility: 8, wisdom: 5, ..Default::default() },
-            stamina_bonus: 20.0,
-        });
-        m.insert("Monk", ClassData {
-            bonuses: StatBlock { strength: 8, dexterity: 8, agility: 8, ..Default::default() },
-            stamina_bonus: 30.0,
-        });
-        m.insert("Witch Hunter", ClassData {
-            bonuses: StatBlock { intelligence: 8, constitution: 8, wisdom: 8, ..Default::default() },
-            stamina_bonus: 10.0,
-        });
+        m.insert(
+            "Warrior",
+            ClassData {
+                bonuses: StatBlock {
+                    strength: 10,
+                    constitution: 8,
+                    ..Default::default()
+                },
+                stamina_bonus: 20.0,
+            },
+        );
+        m.insert(
+            "Magician",
+            ClassData {
+                bonuses: StatBlock {
+                    intelligence: 15,
+                    wisdom: 10,
+                    ..Default::default()
+                },
+                stamina_bonus: 0.0,
+            },
+        );
+        m.insert(
+            "Wizard",
+            ClassData {
+                bonuses: StatBlock {
+                    intelligence: 18,
+                    wisdom: 5,
+                    ..Default::default()
+                },
+                stamina_bonus: 0.0,
+            },
+        );
+        m.insert(
+            "Sorcerer",
+            ClassData {
+                bonuses: StatBlock {
+                    intelligence: 10,
+                    charisma: 15,
+                    wisdom: 5,
+                    ..Default::default()
+                },
+                stamina_bonus: 0.0,
+            },
+        );
+        m.insert(
+            "Rogue",
+            ClassData {
+                bonuses: StatBlock {
+                    dexterity: 15,
+                    agility: 10,
+                    ..Default::default()
+                },
+                stamina_bonus: 20.0,
+            },
+        );
+        m.insert(
+            "Cleric",
+            ClassData {
+                bonuses: StatBlock {
+                    wisdom: 12,
+                    constitution: 8,
+                    ..Default::default()
+                },
+                stamina_bonus: 0.0,
+            },
+        );
+        m.insert(
+            "Druid",
+            ClassData {
+                bonuses: StatBlock {
+                    wisdom: 10,
+                    intelligence: 8,
+                    ..Default::default()
+                },
+                stamina_bonus: 0.0,
+            },
+        );
+        m.insert(
+            "Shaman",
+            ClassData {
+                bonuses: StatBlock {
+                    wisdom: 10,
+                    constitution: 8,
+                    strength: 5,
+                    ..Default::default()
+                },
+                stamina_bonus: 15.0,
+            },
+        );
+        m.insert(
+            "Beast Master",
+            ClassData {
+                bonuses: StatBlock {
+                    strength: 8,
+                    constitution: 8,
+                    agility: 5,
+                    wisdom: 5,
+                    ..Default::default()
+                },
+                stamina_bonus: 20.0,
+            },
+        );
+        m.insert(
+            "Blood Mage",
+            ClassData {
+                bonuses: StatBlock {
+                    intelligence: 15,
+                    constitution: 5,
+                    ..Default::default()
+                },
+                stamina_bonus: 0.0,
+            },
+        );
+        m.insert(
+            "Paladin",
+            ClassData {
+                bonuses: StatBlock {
+                    strength: 10,
+                    wisdom: 8,
+                    constitution: 5,
+                    ..Default::default()
+                },
+                stamina_bonus: 15.0,
+            },
+        );
+        m.insert(
+            "Shadow Knight",
+            ClassData {
+                bonuses: StatBlock {
+                    strength: 10,
+                    intelligence: 8,
+                    constitution: 5,
+                    ..Default::default()
+                },
+                stamina_bonus: 10.0,
+            },
+        );
+        m.insert(
+            "Necromancer",
+            ClassData {
+                bonuses: StatBlock {
+                    intelligence: 15,
+                    wisdom: 5,
+                    ..Default::default()
+                },
+                stamina_bonus: 0.0,
+            },
+        );
+        m.insert(
+            "Enchanter",
+            ClassData {
+                bonuses: StatBlock {
+                    intelligence: 12,
+                    charisma: 12,
+                    wisdom: 5,
+                    ..Default::default()
+                },
+                stamina_bonus: 0.0,
+            },
+        );
+        m.insert(
+            "Bard",
+            ClassData {
+                bonuses: StatBlock {
+                    dexterity: 8,
+                    charisma: 12,
+                    agility: 5,
+                    ..Default::default()
+                },
+                stamina_bonus: 20.0,
+            },
+        );
+        m.insert(
+            "Ranger",
+            ClassData {
+                bonuses: StatBlock {
+                    dexterity: 12,
+                    agility: 8,
+                    wisdom: 5,
+                    ..Default::default()
+                },
+                stamina_bonus: 20.0,
+            },
+        );
+        m.insert(
+            "Monk",
+            ClassData {
+                bonuses: StatBlock {
+                    strength: 8,
+                    dexterity: 8,
+                    agility: 8,
+                    ..Default::default()
+                },
+                stamina_bonus: 30.0,
+            },
+        );
+        m.insert(
+            "Witch Hunter",
+            ClassData {
+                bonuses: StatBlock {
+                    intelligence: 8,
+                    constitution: 8,
+                    wisdom: 8,
+                    ..Default::default()
+                },
+                stamina_bonus: 10.0,
+            },
+        );
         m
     })
 }
@@ -234,78 +497,213 @@ fn level_gains() -> &'static HashMap<&'static str, LevelGain> {
     static GAINS: OnceLock<HashMap<&'static str, LevelGain>> = OnceLock::new();
     GAINS.get_or_init(|| {
         let mut m = HashMap::new();
-        m.insert("Warrior", LevelGain {
-            stats: StatBlock { strength: 2, constitution: 2, ..Default::default() },
-            max_stamina: 8.0,
-        });
-        m.insert("Magician", LevelGain {
-            stats: StatBlock { intelligence: 3, wisdom: 2, ..Default::default() },
-            max_stamina: 2.0,
-        });
-        m.insert("Wizard", LevelGain {
-            stats: StatBlock { intelligence: 4, wisdom: 1, ..Default::default() },
-            max_stamina: 1.0,
-        });
-        m.insert("Sorcerer", LevelGain {
-            stats: StatBlock { charisma: 2, intelligence: 2, ..Default::default() },
-            max_stamina: 2.0,
-        });
-        m.insert("Rogue", LevelGain {
-            stats: StatBlock { dexterity: 2, agility: 2, ..Default::default() },
-            max_stamina: 10.0,
-        });
-        m.insert("Cleric", LevelGain {
-            stats: StatBlock { wisdom: 3, constitution: 1, ..Default::default() },
-            max_stamina: 2.0,
-        });
-        m.insert("Druid", LevelGain {
-            stats: StatBlock { wisdom: 2, intelligence: 2, ..Default::default() },
-            max_stamina: 2.0,
-        });
-        m.insert("Shaman", LevelGain {
-            stats: StatBlock { wisdom: 2, constitution: 1, strength: 1, ..Default::default() },
-            max_stamina: 5.0,
-        });
-        m.insert("Beast Master", LevelGain {
-            stats: StatBlock { strength: 2, constitution: 1, agility: 1, wisdom: 1, ..Default::default() },
-            max_stamina: 6.0,
-        });
-        m.insert("Blood Mage", LevelGain {
-            stats: StatBlock { intelligence: 3, constitution: 1, ..Default::default() },
-            max_stamina: 2.0,
-        });
-        m.insert("Paladin", LevelGain {
-            stats: StatBlock { strength: 2, wisdom: 2, constitution: 1, ..Default::default() },
-            max_stamina: 5.0,
-        });
-        m.insert("Shadow Knight", LevelGain {
-            stats: StatBlock { strength: 2, intelligence: 2, constitution: 1, ..Default::default() },
-            max_stamina: 4.0,
-        });
-        m.insert("Necromancer", LevelGain {
-            stats: StatBlock { intelligence: 3, wisdom: 2, ..Default::default() },
-            max_stamina: 1.0,
-        });
-        m.insert("Enchanter", LevelGain {
-            stats: StatBlock { intelligence: 3, charisma: 2, ..Default::default() },
-            max_stamina: 1.0,
-        });
-        m.insert("Bard", LevelGain {
-            stats: StatBlock { dexterity: 2, charisma: 2, agility: 1, ..Default::default() },
-            max_stamina: 8.0,
-        });
-        m.insert("Ranger", LevelGain {
-            stats: StatBlock { dexterity: 2, agility: 2, wisdom: 1, ..Default::default() },
-            max_stamina: 8.0,
-        });
-        m.insert("Monk", LevelGain {
-            stats: StatBlock { strength: 2, dexterity: 2, agility: 1, ..Default::default() },
-            max_stamina: 10.0,
-        });
-        m.insert("Witch Hunter", LevelGain {
-            stats: StatBlock { intelligence: 2, wisdom: 2, constitution: 1, ..Default::default() },
-            max_stamina: 4.0,
-        });
+        m.insert(
+            "Warrior",
+            LevelGain {
+                stats: StatBlock {
+                    strength: 2,
+                    constitution: 2,
+                    ..Default::default()
+                },
+                max_stamina: 8.0,
+            },
+        );
+        m.insert(
+            "Magician",
+            LevelGain {
+                stats: StatBlock {
+                    intelligence: 3,
+                    wisdom: 2,
+                    ..Default::default()
+                },
+                max_stamina: 2.0,
+            },
+        );
+        m.insert(
+            "Wizard",
+            LevelGain {
+                stats: StatBlock {
+                    intelligence: 4,
+                    wisdom: 1,
+                    ..Default::default()
+                },
+                max_stamina: 1.0,
+            },
+        );
+        m.insert(
+            "Sorcerer",
+            LevelGain {
+                stats: StatBlock {
+                    charisma: 2,
+                    intelligence: 2,
+                    ..Default::default()
+                },
+                max_stamina: 2.0,
+            },
+        );
+        m.insert(
+            "Rogue",
+            LevelGain {
+                stats: StatBlock {
+                    dexterity: 2,
+                    agility: 2,
+                    ..Default::default()
+                },
+                max_stamina: 10.0,
+            },
+        );
+        m.insert(
+            "Cleric",
+            LevelGain {
+                stats: StatBlock {
+                    wisdom: 3,
+                    constitution: 1,
+                    ..Default::default()
+                },
+                max_stamina: 2.0,
+            },
+        );
+        m.insert(
+            "Druid",
+            LevelGain {
+                stats: StatBlock {
+                    wisdom: 2,
+                    intelligence: 2,
+                    ..Default::default()
+                },
+                max_stamina: 2.0,
+            },
+        );
+        m.insert(
+            "Shaman",
+            LevelGain {
+                stats: StatBlock {
+                    wisdom: 2,
+                    constitution: 1,
+                    strength: 1,
+                    ..Default::default()
+                },
+                max_stamina: 5.0,
+            },
+        );
+        m.insert(
+            "Beast Master",
+            LevelGain {
+                stats: StatBlock {
+                    strength: 2,
+                    constitution: 1,
+                    agility: 1,
+                    wisdom: 1,
+                    ..Default::default()
+                },
+                max_stamina: 6.0,
+            },
+        );
+        m.insert(
+            "Blood Mage",
+            LevelGain {
+                stats: StatBlock {
+                    intelligence: 3,
+                    constitution: 1,
+                    ..Default::default()
+                },
+                max_stamina: 2.0,
+            },
+        );
+        m.insert(
+            "Paladin",
+            LevelGain {
+                stats: StatBlock {
+                    strength: 2,
+                    wisdom: 2,
+                    constitution: 1,
+                    ..Default::default()
+                },
+                max_stamina: 5.0,
+            },
+        );
+        m.insert(
+            "Shadow Knight",
+            LevelGain {
+                stats: StatBlock {
+                    strength: 2,
+                    intelligence: 2,
+                    constitution: 1,
+                    ..Default::default()
+                },
+                max_stamina: 4.0,
+            },
+        );
+        m.insert(
+            "Necromancer",
+            LevelGain {
+                stats: StatBlock {
+                    intelligence: 3,
+                    wisdom: 2,
+                    ..Default::default()
+                },
+                max_stamina: 1.0,
+            },
+        );
+        m.insert(
+            "Enchanter",
+            LevelGain {
+                stats: StatBlock {
+                    intelligence: 3,
+                    charisma: 2,
+                    ..Default::default()
+                },
+                max_stamina: 1.0,
+            },
+        );
+        m.insert(
+            "Bard",
+            LevelGain {
+                stats: StatBlock {
+                    dexterity: 2,
+                    charisma: 2,
+                    agility: 1,
+                    ..Default::default()
+                },
+                max_stamina: 8.0,
+            },
+        );
+        m.insert(
+            "Ranger",
+            LevelGain {
+                stats: StatBlock {
+                    dexterity: 2,
+                    agility: 2,
+                    wisdom: 1,
+                    ..Default::default()
+                },
+                max_stamina: 8.0,
+            },
+        );
+        m.insert(
+            "Monk",
+            LevelGain {
+                stats: StatBlock {
+                    strength: 2,
+                    dexterity: 2,
+                    agility: 1,
+                    ..Default::default()
+                },
+                max_stamina: 10.0,
+            },
+        );
+        m.insert(
+            "Witch Hunter",
+            LevelGain {
+                stats: StatBlock {
+                    intelligence: 2,
+                    wisdom: 2,
+                    constitution: 1,
+                    ..Default::default()
+                },
+                max_stamina: 4.0,
+            },
+        );
         m
     })
 }
@@ -334,7 +732,13 @@ pub fn hp_level_factor(class: &str, level: i32) -> i32 {
             l if l < 70 => 300,
             _ => 311,
         },
-        "Cleric" | "Druid" | "Shaman" => if level < 70 { 150 } else { 157 },
+        "Cleric" | "Druid" | "Shaman" => {
+            if level < 70 {
+                150
+            } else {
+                157
+            }
+        }
         "Paladin" | "Shadow Knight" => match level {
             l if l < 35 => 210,
             l if l < 45 => 220,
@@ -356,7 +760,11 @@ pub fn hp_level_factor(class: &str, level: i32) -> i32 {
             _ => 220,
         },
         "Magician" | "Wizard" | "Necromancer" | "Enchanter" | "Sorcerer" | "Blood Mage" => {
-            if level < 70 { 120 } else { 127 }
+            if level < 70 {
+                120
+            } else {
+                127
+            }
         }
         _ => match level {
             l if l < 35 => 210,
@@ -382,7 +790,9 @@ pub fn mana_stat(class: &str) -> Option<ManaStat> {
     match class {
         "Wizard" | "Magician" | "Necromancer" | "Enchanter" | "Shadow Knight" | "Bard"
         | "Sorcerer" | "Blood Mage" | "Witch Hunter" => Some(ManaStat::Int),
-        "Cleric" | "Druid" | "Shaman" | "Paladin" | "Ranger" | "Beast Master" => Some(ManaStat::Wis),
+        "Cleric" | "Druid" | "Shaman" | "Paladin" | "Ranger" | "Beast Master" => {
+            Some(ManaStat::Wis)
+        }
         _ => None,
     }
 }
@@ -432,16 +842,45 @@ pub fn base_mana(class: &str, level: i32, intelligence: i32, wisdom: i32) -> i32
 /// launcher cannot pick a block the creation screen never offers (the review
 /// of 2026-10-13 found the Revenant's starvation immunity reachable that way).
 pub const CREATION_RACES: [&str; 16] = [
-    "Human", "Elf", "Dark Elf", "Wood Elf", "Gnome", "Halfling", "Dwarf", "Half-Elf",
-    "Ogre", "Troll", "Kel`varath", "Minotaur", "Fae", "Felhari", "Kobold", "Half-Ogre",
+    "Human",
+    "Elf",
+    "Dark Elf",
+    "Wood Elf",
+    "Gnome",
+    "Halfling",
+    "Dwarf",
+    "Half-Elf",
+    "Ogre",
+    "Troll",
+    "Kel`varath",
+    "Minotaur",
+    "Fae",
+    "Felhari",
+    "Kobold",
+    "Half-Ogre",
 ];
 
 /// The classes a character may be created as (the eighteen; Assassin and
 /// Warlock are planned, not here).
 pub const PLAYABLE_CLASSES: [&str; 18] = [
-    "Warrior", "Paladin", "Shadow Knight", "Cleric", "Druid", "Shaman", "Beast Master",
-    "Rogue", "Monk", "Ranger", "Witch Hunter", "Bard", "Magician", "Wizard", "Sorcerer",
-    "Enchanter", "Necromancer", "Blood Mage",
+    "Warrior",
+    "Paladin",
+    "Shadow Knight",
+    "Cleric",
+    "Druid",
+    "Shaman",
+    "Beast Master",
+    "Rogue",
+    "Monk",
+    "Ranger",
+    "Witch Hunter",
+    "Bard",
+    "Magician",
+    "Wizard",
+    "Sorcerer",
+    "Enchanter",
+    "Necromancer",
+    "Blood Mage",
 ];
 
 pub fn is_creation_race(race: &str) -> bool {
@@ -462,7 +901,10 @@ pub fn compute(race: &str, class: &str, level: i32) -> ComputedCharacter {
 
     let mut max_stamina = (BASE_ST + cls.stamina_bonus).max(20.0);
 
-    let gain = level_gains().get(class).copied().unwrap_or_else(default_level_gain);
+    let gain = level_gains()
+        .get(class)
+        .copied()
+        .unwrap_or_else(default_level_gain);
     let lvl = level.clamp(1, 99);
     for _ in 1..lvl {
         stats = stats.add(gain.stats);
@@ -478,7 +920,13 @@ pub fn compute(race: &str, class: &str, level: i32) -> ComputedCharacter {
 
     let xp_to_next = xp_to_next_for(level);
 
-    ComputedCharacter { stats, max_hp, max_mp, max_stamina, xp_to_next }
+    ComputedCharacter {
+        stats,
+        max_hp,
+        max_mp,
+        max_stamina,
+        xp_to_next,
+    }
 }
 
 /// EverQuest "hell level" modifier. The per-level XP cost is cubic, and this
@@ -544,7 +992,7 @@ mod tests {
         // STR: BASE(10) + Human(2) + Warrior(10) = 22
         assert_eq!(c.stats.strength, 22);
         assert_eq!(c.stats.constitution, 20); // 10 + 2 + 8
-        // EQ's formula: 5 + 1 x 220 / 10 + 20 x 1 x 220 / 3000 = 5 + 22 + 1
+                                              // EQ's formula: 5 + 1 x 220 / 10 + 20 x 1 x 220 / 3000 = 5 + 22 + 1
         assert!((c.max_hp - 28.0).abs() < 0.01, "max_hp = {}", c.max_hp);
         // A Warrior has no mana stat: the token minimum.
         assert!((c.max_mp - MIN_MANA).abs() < 0.01);
@@ -582,11 +1030,23 @@ mod tests {
     fn pools_follow_eq_at_both_ends() {
         let w50 = compute("Human", "Warrior", 50);
         // CON 118, factor 270: 5 + 1350 + 118 x 50 x 270 / 3000 (= 531)
-        assert!((w50.max_hp - 1886.0).abs() < 0.01, "max_hp = {}", w50.max_hp);
+        assert!(
+            (w50.max_hp - 1886.0).abs() < 0.01,
+            "max_hp = {}",
+            w50.max_hp
+        );
         let wiz1 = compute("Human", "Wizard", 1);
         // CON 12, factor 120: 5 + 12 + 0; INT 30: (5 x 230) / 2 x 3 / 100 = 17
-        assert!((wiz1.max_hp - 17.0).abs() < 0.01, "max_hp = {}", wiz1.max_hp);
-        assert!((wiz1.max_mp - 17.0).abs() < 0.01, "max_mp = {}", wiz1.max_mp);
+        assert!(
+            (wiz1.max_hp - 17.0).abs() < 0.01,
+            "max_hp = {}",
+            wiz1.max_hp
+        );
+        assert!(
+            (wiz1.max_mp - 17.0).abs() < 0.01,
+            "max_mp = {}",
+            wiz1.max_mp
+        );
         // At a stat of exactly 100 the classic branch is 22.5 x level.
         assert_eq!(base_mana("Wizard", 50, 100, 10), 1125);
         assert_eq!(base_mana("Cleric", 40, 10, 100), 900);
@@ -597,7 +1057,11 @@ mod tests {
         assert_eq!(base_mana("Rogue", 50, 200, 200), 0, "no mana stat");
         assert_eq!(hp_level_factor("Warrior", 19), 220);
         assert_eq!(hp_level_factor("Warrior", 50), 270);
-        assert_eq!(hp_level_factor("Witch Hunter", 10), 200, "the Ranger's band");
+        assert_eq!(
+            hp_level_factor("Witch Hunter", 10),
+            200,
+            "the Ranger's band"
+        );
     }
 
     #[test]
@@ -624,9 +1088,14 @@ mod tests {
             assert!(is_playable_class(class));
             assert!(classes().contains_key(class), "{class} has no class block");
         }
-        assert!(races().contains_key("Revenant") && !is_creation_race("Revenant"),
-            "the Revenant has a block for the transformation and is not a birth race");
-        assert!(!is_creation_race("revenant") && !is_playable_class("warrior"), "exact names only");
+        assert!(
+            races().contains_key("Revenant") && !is_creation_race("Revenant"),
+            "the Revenant has a block for the transformation and is not a birth race"
+        );
+        assert!(
+            !is_creation_race("revenant") && !is_playable_class("warrior"),
+            "exact names only"
+        );
     }
 
     #[test]

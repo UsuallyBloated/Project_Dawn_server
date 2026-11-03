@@ -95,7 +95,10 @@ async fn list(pool: &sqlx::SqlitePool) -> Result<()> {
         let id: i64 = r.get("id");
         let username: String = r.get("username");
         let is_gm: bool = r.get("is_gm");
-        println!("  #{id:<3} {username}{}", if is_gm { "   [GM]" } else { "" });
+        println!(
+            "  #{id:<3} {username}{}",
+            if is_gm { "   [GM]" } else { "" }
+        );
     }
     Ok(())
 }

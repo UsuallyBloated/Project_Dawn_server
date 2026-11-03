@@ -142,7 +142,9 @@ async fn full_auth_flow() {
 #[tokio::test]
 async fn rejects_old_client_version() {
     let (url, _tmp) = start_server().await;
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
 
     rpc(
         &mut ws,
@@ -171,7 +173,9 @@ async fn rejects_old_client_version() {
 #[tokio::test]
 async fn rejects_duplicate_username() {
     let (url, _tmp) = start_server().await;
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
 
     rpc(
         &mut ws,
@@ -202,10 +206,16 @@ async fn rejects_duplicate_username() {
 #[tokio::test]
 async fn character_creation_accepts_only_the_creation_lists() {
     let (url, _tmp) = start_server().await;
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
-    let resp = rpc(&mut ws, serde_json::json!({
-        "type": "Register", "username": "picker", "password": "hunter2!",
-    })).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "Register", "username": "picker", "password": "hunter2!",
+        }),
+    )
+    .await;
     assert_eq!(resp["type"], "RegisterOk", "{resp}");
     let resp = rpc(&mut ws, serde_json::json!({
         "type": "Login", "username": "picker", "password": "hunter2!", "client_version": "0.1.0",
@@ -214,11 +224,17 @@ async fn character_creation_accepts_only_the_creation_lists() {
     let resp = rpc(&mut ws, serde_json::json!({
         "type": "CharCreate", "session_token": session, "name": "Revvy", "race": "Revenant", "class": "Warrior",
     })).await;
-    assert_eq!(resp["code"], "invalid_input", "a transformation is not a birth race: {resp}");
+    assert_eq!(
+        resp["code"], "invalid_input",
+        "a transformation is not a birth race: {resp}"
+    );
     let resp = rpc(&mut ws, serde_json::json!({
         "type": "CharCreate", "session_token": session, "name": "Wardy", "race": "Human", "class": "Warlock",
     })).await;
-    assert_eq!(resp["code"], "invalid_input", "a planned class is not playable yet: {resp}");
+    assert_eq!(
+        resp["code"], "invalid_input",
+        "a planned class is not playable yet: {resp}"
+    );
     let resp = rpc(&mut ws, serde_json::json!({
         "type": "CharCreate", "session_token": session, "name": "Halfy", "race": "Halfling", "class": "Rogue",
     })).await;

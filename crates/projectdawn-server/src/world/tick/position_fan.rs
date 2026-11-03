@@ -4,8 +4,21 @@
 
 use super::*;
 
-pub(super) fn fan_out_positions(world: &mut WorldState, _q: &mut Intents, now: Instant, in_world_ids: &[ClientId]) {
-    let WorldState { server, connections, aoi, enemy_pos_sent, last_fan_report, enemies, .. } = world;
+pub(super) fn fan_out_positions(
+    world: &mut WorldState,
+    _q: &mut Intents,
+    now: Instant,
+    in_world_ids: &[ClientId],
+) {
+    let WorldState {
+        server,
+        connections,
+        aoi,
+        enemy_pos_sent,
+        last_fan_report,
+        enemies,
+        ..
+    } = world;
     // 6. Position fan-out. Track 7: AOI-filtered. Each sender's
     //    position goes only to in_world players whose AOI cell is
     //    within the 3×3 neighbourhood of the sender's cell.

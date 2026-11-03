@@ -41,7 +41,9 @@ async fn split_stack_carves_off_count() {
     // connects to the world server. This bypasses needing a real
     // loot-drop flow to populate items in test time.
     let db_url = h.db_url.clone();
-    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&db_url)
+        .await
+        .expect("open pool");
     projectdawn_server::db::save_inventory(
         &pool,
         a_char_id,
@@ -88,7 +90,13 @@ async fn split_stack_carves_off_count() {
             })
             .await
         {
-            if let ServerWorldMsg::InventoryDelta { slot, item_path, count, .. } = msg {
+            if let ServerWorldMsg::InventoryDelta {
+                slot,
+                item_path,
+                count,
+                ..
+            } = msg
+            {
                 let path = item_path.unwrap_or_default();
                 if slot == 0 && path == "res://items/cloth.tres" && count == 7 {
                     saw_src = true;
@@ -99,7 +107,10 @@ async fn split_stack_carves_off_count() {
             }
         }
     }
-    assert!(saw_src && saw_dst, "expected both src and dst Deltas (src={saw_src}, dst={saw_dst})");
+    assert!(
+        saw_src && saw_dst,
+        "expected both src and dst Deltas (src={saw_src}, dst={saw_dst})"
+    );
 }
 
 /// Track 13.2.b â€” DropItem removes from inventory and spawns a
@@ -112,7 +123,9 @@ async fn drop_item_creates_loot_bag_at_player_pos() {
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "drp", "Dropper", "Human", "Warrior").await;
     let db_url = h.db_url.clone();
-    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&db_url)
+        .await
+        .expect("open pool");
     projectdawn_server::db::save_inventory(
         &pool,
         a_char_id,
@@ -172,7 +185,9 @@ async fn equip_item_moves_base_to_paperdoll() {
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "eq1", "Equipper", "Human", "Warrior").await;
     let db_url = h.db_url.clone();
-    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&db_url)
+        .await
+        .expect("open pool");
     projectdawn_server::db::save_inventory(
         &pool,
         a_char_id,
@@ -209,14 +224,17 @@ async fn equip_item_moves_base_to_paperdoll() {
             })
             .await
         {
-            if let ServerWorldMsg::InventoryDelta { location, slot, item_path, .. } = msg {
+            if let ServerWorldMsg::InventoryDelta {
+                location,
+                slot,
+                item_path,
+                ..
+            } = msg
+            {
                 if location == "base" && slot == 0 && item_path.is_none() {
                     saw_base_clear = true;
                 }
-                if location == "equip"
-                    && slot == 0
-                    && item_path.as_deref() == Some(WEAPON)
-                {
+                if location == "equip" && slot == 0 && item_path.as_deref() == Some(WEAPON) {
                     saw_equip_set = true;
                 }
             }
@@ -239,7 +257,9 @@ async fn buy_item_charges_coins_and_grants_stack() {
     let h = start_both().await;
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "buy1", "Buyer", "Human", "Warrior").await;
-    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&h.db_url)
+        .await
+        .expect("open pool");
     sqlx::query("UPDATE characters SET copper = 100 WHERE id = ?1")
         .bind(a_char_id)
         .execute(&pool)
@@ -278,9 +298,11 @@ async fn buy_item_charges_coins_and_grants_stack() {
 
     // Coins update: 100 - (12 * 3) = 64.
     let coins = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.total_copper() == 64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.total_copper() == 64),
+        )
         .await
         .expect("CoinsUpdate at 64");
     let _ = coins;
@@ -297,7 +319,9 @@ async fn buy_item_rejected_when_no_vendor_in_range() {
     let h = start_both().await;
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "farbuy", "Wanderer", "Human", "Warrior").await;
-    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&h.db_url)
+        .await
+        .expect("open pool");
     // Plenty of coin, but stranded 200 m out â€” well beyond the 15 m service range.
     sqlx::query("UPDATE characters SET copper = 1000, pos_x = 200.0, pos_z = 200.0 WHERE id = ?1")
         .bind(a_char_id)
@@ -329,7 +353,10 @@ async fn buy_item_rejected_when_no_vendor_in_range() {
             matches!(m, ServerWorldMsg::CoinsUpdate { .. })
         })
         .await;
-    assert!(coins.is_none(), "a buy with no vendor in range must not charge coin");
+    assert!(
+        coins.is_none(),
+        "a buy with no vendor in range must not charge coin"
+    );
 }
 
 /// The same character, moved to the town spawn (origin, in range of Brom the
@@ -340,7 +367,9 @@ async fn buy_item_succeeds_at_the_town_vendor() {
     let h = start_both().await;
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "nearbuy", "Townie", "Human", "Warrior").await;
-    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&h.db_url)
+        .await
+        .expect("open pool");
     // At spawn (0,0,0), ~8 m from Brom â€” inside service range.
     sqlx::query("UPDATE characters SET copper = 1000, pos_x = 0.0, pos_z = 0.0 WHERE id = ?1")
         .bind(a_char_id)
@@ -372,7 +401,9 @@ async fn buy_item_rejects_insufficient_coins() {
     let h = start_both().await;
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "buy2", "Poorguy", "Human", "Warrior").await;
-    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&h.db_url)
+        .await
+        .expect("open pool");
     sqlx::query("UPDATE characters SET coins = 5 WHERE id = ?1")
         .bind(a_char_id)
         .execute(&pool)
@@ -420,7 +451,9 @@ async fn sell_item_credits_coins_and_removes_stack() {
     let h = start_both().await;
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "sell1", "Seller", "Human", "Warrior").await;
-    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&h.db_url)
+        .await
+        .expect("open pool");
     // Seed inventory: 4 potions in base[0].
     projectdawn_server::db::save_inventory(
         &pool,
@@ -468,9 +501,11 @@ async fn sell_item_credits_coins_and_removes_stack() {
     let _ = delta;
 
     let coins = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.total_copper() == 24)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.total_copper() == 24),
+        )
         .await
         .expect("CoinsUpdate at 24");
     let _ = coins;
@@ -495,7 +530,9 @@ async fn equip_increases_max_hp() {
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "eq4", "Vestguy", "Human", "Warrior").await;
     let db_url = h.db_url.clone();
-    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&db_url)
+        .await
+        .expect("open pool");
     projectdawn_server::db::save_inventory(
         &pool,
         a_char_id,
@@ -567,7 +604,10 @@ async fn equip_item_empty_source_drops_silently() {
             matches!(m, ServerWorldMsg::InventoryDelta { .. })
         })
         .await;
-    assert!(stray.is_none(), "EquipItem on empty source must not fan a Delta");
+    assert!(
+        stray.is_none(),
+        "EquipItem on empty source must not fan a Delta"
+    );
 }
 
 /// A rejected `MoveItem` must TELL the client the truth about the slots it
@@ -671,7 +711,10 @@ async fn dead_players_cannot_loot_or_touch_inventory() {
                 if text.contains("while dead"))
         })
         .await;
-    assert!(refusal.is_some(), "dead MoveItem must be refused with a chat line");
+    assert!(
+        refusal.is_some(),
+        "dead MoveItem must be refused with a chat line"
+    );
 
     // A second refused intent in the same death draws no second line.
     a.send_loot_all(999_999);
@@ -707,7 +750,10 @@ async fn dead_players_cannot_loot_or_touch_inventory() {
                 if text.contains("while dead"))
         })
         .await;
-    assert!(refusal2.is_some(), "dead LootAll must be refused with a chat line");
+    assert!(
+        refusal2.is_some(),
+        "dead LootAll must be refused with a chat line"
+    );
 
     // Respawn again; a subsequent inventory intent is no longer dead-refused.
     a.send_respawn();
@@ -716,7 +762,10 @@ async fn dead_players_cannot_loot_or_touch_inventory() {
             matches!(m, ServerWorldMsg::Teleport { .. })
         })
         .await;
-    assert!(tp.is_some(), "Respawn must still work after the second death");
+    assert!(
+        tp.is_some(),
+        "Respawn must still work after the second death"
+    );
 
     a.send_move_item("base", 0, "base", 1);
     let post = a
@@ -737,7 +786,9 @@ async fn a_priced_item_no_merchant_stocks_cannot_be_bought() {
     let (session, char_id, token) =
         provision_client(&h.auth_url, "stockgate", "Shopper", "Human", "Warrior").await;
     {
-        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        let pool = projectdawn_server::db::open(&h.db_url)
+            .await
+            .expect("open pool");
         sqlx::query("UPDATE characters SET platinum = 10 WHERE id = ?1")
             .bind(char_id)
             .execute(&pool)
@@ -787,7 +838,9 @@ async fn the_bank_and_the_merchant_take_what_you_hold() {
     give_char_item(&h.db_url, char_id, "base", 1, POUCH, 1).await;
     give_char_item(&h.db_url, char_id, "bag_1", 0, POTION, 1).await;
     {
-        let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+        let pool = projectdawn_server::db::open(&h.db_url)
+            .await
+            .expect("open pool");
         sqlx::query("UPDATE characters SET copper = 0, pos_x = 0.0, pos_z = 0.0 WHERE id = ?1")
             .bind(char_id)
             .execute(&pool)
@@ -832,7 +885,12 @@ async fn the_bank_and_the_merchant_take_what_you_hold() {
         })
         .await
         .expect("the loaves come back to the bags");
-    let ServerWorldMsg::InventoryDelta { slot: bread_slot, .. } = back else { unreachable!() };
+    let ServerWorldMsg::InventoryDelta {
+        slot: bread_slot, ..
+    } = back
+    else {
+        unreachable!()
+    };
     a.send_move_item("base", bread_slot, "cursor", 0);
     a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
         matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), count: 3, .. }
@@ -847,9 +905,11 @@ async fn the_bank_and_the_merchant_take_what_you_hold() {
     })
     .await
     .expect("one loaf stays in the hand");
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.copper == 4)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.copper == 4),
+    )
     .await
     .expect("two loaves at half of 4 each");
     a.send_move_item("cursor", 0, "base", bread_slot);
@@ -893,5 +953,8 @@ async fn the_bank_and_the_merchant_take_what_you_hold() {
         ],
         "the vault moves and the sale from the hand, nothing for the refusals"
     );
-    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "the books balance with the pouch still in hand");
+    assert!(
+        ledger_mismatches(&h.db_url).await.is_empty(),
+        "the books balance with the pouch still in hand"
+    );
 }

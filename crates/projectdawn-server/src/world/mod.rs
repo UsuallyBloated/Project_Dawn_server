@@ -49,6 +49,7 @@ mod spell_gems;
 mod spell_power;
 mod spawn_points;
 mod spells;
+pub mod starter_kit;
 mod tick;
 mod trade;
 mod zones;

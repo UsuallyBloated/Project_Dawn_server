@@ -159,7 +159,22 @@ pub struct Item {
     // login). Conjured food and water.
     #[serde(default)]
     pub no_rent: bool,
+
+    // NO DROP (EverQuest's tag; user 2026-11-03): bound to the character that
+    // holds it. It never leaves that character's own holdings: no ground drop,
+    // no trade, no account-shared vault. Destroying it is allowed. The
+    // starting kit (world/starter_kit.rs).
+    #[serde(default)]
+    pub no_drop: bool,
 }
+
+/// Whether the item at `path` is NO DROP. An unknown path is not.
+pub fn is_no_drop(path: &str) -> bool {
+    lookup(path).is_some_and(|i| i.no_drop)
+}
+
+/// The one line every NO DROP refusal answers with.
+pub const NO_DROP_REFUSAL: &str = "That item is NO DROP: it cannot leave you.";
 
 /// How long a character may be logged out before its NO RENT items go:
 /// thirty minutes, EverQuest's rule (Allakhazam's item-tag reference), so a

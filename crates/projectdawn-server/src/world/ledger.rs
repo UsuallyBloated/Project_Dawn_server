@@ -91,6 +91,8 @@ pub enum ItemAction {
     DeathCoins,
     /// A NO RENT item gone at a login after thirty minutes away.
     NoRent,
+    /// The starting kit, worn from birth (`db::create_character`).
+    Starter,
 }
 
 impl ItemAction {
@@ -122,6 +124,7 @@ impl ItemAction {
             ItemAction::Death => "death",
             ItemAction::DeathCoins => "death_coins",
             ItemAction::NoRent => "no_rent",
+            ItemAction::Starter => "starter",
         }
     }
 }
@@ -223,7 +226,7 @@ mod tests {
             ItemAction::Buy, ItemAction::Sell, ItemAction::BankIn, ItemAction::BankOut,
             ItemAction::BankCoinIn, ItemAction::BankCoinOut, ItemAction::BankExchange,
             ItemAction::QuestReward, ItemAction::Summon, ItemAction::GmGive, ItemAction::GmCoins,
-            ItemAction::Death, ItemAction::DeathCoins, ItemAction::NoRent,
+            ItemAction::Death, ItemAction::DeathCoins, ItemAction::NoRent, ItemAction::Starter,
         ];
         let names: std::collections::HashSet<&str> = all.iter().map(|a| a.as_str()).collect();
         assert_eq!(names.len(), all.len());

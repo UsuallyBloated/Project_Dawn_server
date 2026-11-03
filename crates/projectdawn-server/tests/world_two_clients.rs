@@ -134,7 +134,27 @@ async fn forget_all_spells(db_url: &str, char_id: i64) {
     db::save_spell_gems(&pool, char_id, &[], false).await.expect("forget all spells");
 }
 
-/// Register + login + char-create + request-token for one client. Returns
+/// Take a new character's starting kit back off it (its worn rows and their
+/// `starter` ledger rows together, so the books still balance). Every test
+/// written before the kit (2026-11-03) assumes a character born with nothing
+/// (bare fists, empty slots, exact ledger rows); `provision_client` keeps that
+/// fixture, and `provision_client_dressed` keeps the kit.
+async fn strip_starter_kit(db_url: &str, char_id: i64) {
+    let pool = db::open(db_url).await.expect("open pool");
+    sqlx::query("DELETE FROM character_items WHERE char_id = ?1 AND location = 'equip'")
+        .bind(char_id)
+        .execute(&pool)
+        .await
+        .expect("strip the kit");
+    sqlx::query("DELETE FROM item_events WHERE char_id = ?1 AND action = 'starter'")
+        .bind(char_id)
+        .execute(&pool)
+        .await
+        .expect("strip the kit's ledger rows");
+}
+
+/// Register + login + char-create + request-token for one client, the
+/// character born bare (the kit stripped). Returns
 /// (session_token_hex, char_id, world_token_bytes).
 async fn provision_client(
     auth_url: &str,
@@ -142,6 +162,28 @@ async fn provision_client(
     char_name: &str,
     race: &str,
     class: &str,
+) -> (String, i64, Vec<u8>) {
+    provision_client_with(auth_url, username, char_name, race, class, false).await
+}
+
+/// As `provision_client`, the character wearing its starting kit.
+async fn provision_client_dressed(
+    auth_url: &str,
+    username: &str,
+    char_name: &str,
+    race: &str,
+    class: &str,
+) -> (String, i64, Vec<u8>) {
+    provision_client_with(auth_url, username, char_name, race, class, true).await
+}
+
+async fn provision_client_with(
+    auth_url: &str,
+    username: &str,
+    char_name: &str,
+    race: &str,
+    class: &str,
+    dressed: bool,
 ) -> (String, i64, Vec<u8>) {
     let (mut ws, _) = tokio_tungstenite::connect_async(auth_url)
         .await
@@ -175,6 +217,9 @@ async fn provision_client(
     let db_url = DB_FOR_AUTH.lock().unwrap().get(auth_url).cloned();
     if let Some(db_url) = db_url {
         memorize_whole_class(&db_url, char_id, class).await;
+        if !dressed {
+            strip_starter_kit(&db_url, char_id).await;
+        }
     }
 
     let resp = rpc(&mut ws, serde_json::json!({
@@ -11924,4 +11969,201 @@ async fn a_trade_writes_both_sides_of_the_ledger_and_balances() {
     b.send_disconnect();
     a.pump_for(Duration::from_millis(200)).await;
     b.pump_for(Duration::from_millis(200)).await;
+}
+
+/// The starting kit (user, 2026-11-03): a new character is born wearing its
+/// class's Trainee's weapon, the Ragged Shirt and the Ragged Pants, written
+/// with the character (the ledger balanced from the first login), and none of
+/// it can leave: it cannot be sold (and is worth nothing anyway), dropped,
+/// offered in a trade or put in the account's shared vault, each
+/// refusal moving nothing. The character's own vault takes it, and a destroy
+/// is allowed (the kit is made to be thrown away for something better).
+/// Fails on the previous server at the snapshot: characters were born bare.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_character_is_born_dressed_and_the_kit_cannot_leave() {
+    const STAFF: &str = "res://data/loot/items/trainees_staff.tres";
+    const SHIRT: &str = "res://data/loot/items/ragged_shirt.tres";
+    const PANTS: &str = "res://data/loot/items/ragged_pants.tres";
+    let h = start_both().await;
+    let (a_session, a_char, a_token) =
+        provision_client_dressed(&h.auth_url, "kita", "Kitwiz", "Human", "Wizard").await;
+    let (b_session, b_char, b_token) =
+        provision_client(&h.auth_url, "kitb", "Kitbee", "Elf", "Cleric").await;
+    {
+        // At the spawn, in reach of the merchant and the banker.
+        let pool = db::open(&h.db_url).await.expect("open pool");
+        sqlx::query("UPDATE characters SET pos_x = 0.0, pos_z = 0.0 WHERE id IN (?1, ?2)")
+            .bind(a_char)
+            .bind(b_char)
+            .execute(&pool)
+            .await
+            .expect("seed positions");
+    }
+    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "the kit's ledger rows balance at birth");
+
+    let mut a = WorldClient::start(a_token, &a_session, a_char).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char).await;
+    let snap = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::InventorySnapshot { .. })
+        })
+        .await
+        .expect("snapshot");
+    let ServerWorldMsg::InventorySnapshot { entries } = snap else { unreachable!() };
+    for (slot, path) in [(0u32, STAFF), (3, SHIRT), (4, PANTS)] {
+        assert!(
+            entries.iter().any(|(loc, s, p, c)| loc == "equip" && *s == slot && p == path && *c == 1),
+            "born wearing {path} in slot {slot}: {entries:?}"
+        );
+    }
+    b.pump_for(Duration::from_millis(200)).await;
+
+    // The staff into the bags, where the refusals can be tried on it.
+    a.send_unequip_item(0, "base", 0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, slot: 0, item_path: Some(p), .. }
+            if location == "base" && p == STAFF)
+    })
+    .await
+    .expect("the staff comes off");
+
+    a.send_sell_item(SlotRef::BaseSlot { idx: 0 }, 1);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("NO DROP"))
+    })
+    .await
+    .expect("the merchant is refused a NO DROP thing, whatever it is worth");
+
+    a.send_drop_item("base", 0, 1);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("NO DROP"))
+    })
+    .await
+    .expect("the drop is refused");
+    let bag = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(600), |m| {
+            matches!(m, ServerWorldMsg::LootBagSpawn { .. })
+        })
+        .await;
+    assert!(bag.is_none(), "nothing reaches the ground: {bag:?}");
+
+    send_msg(
+        &mut a.client,
+        CHANNEL_SYSTEM,
+        &ClientWorldMsg::BankStoreItem { src_location: "base".into(), src_slot: 0, shared: true },
+    );
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::BankRejected { reason } if reason.contains("NO DROP"))
+    })
+    .await
+    .expect("the shared vault refuses it");
+
+    a.send_trade_request(b_char as u64);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::TradeOpened { .. })
+    })
+    .await
+    .expect("the trade opens");
+    a.send_trade_offer_item(0, "base", 0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("NO DROP"))
+    })
+    .await
+    .expect("the offer is refused");
+    let offer = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(600), |m| {
+            matches!(m, ServerWorldMsg::TradeOfferUpdate { slots, .. }
+                if slots.iter().any(|(p, _)| p == STAFF))
+        })
+        .await;
+    assert!(offer.is_none(), "the partner never sees the staff offered: {offer:?}");
+
+    // The character's own vault is fine.
+    a.send_bank_store_item("base", 0);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::BankItemSnapshot { shared: false, entries }
+            if entries.iter().any(|(_, p, _)| p == STAFF))
+    })
+    .await
+    .expect("its own vault takes the staff");
+
+    // And a destroy is allowed: the shirt off and thrown away.
+    a.send_unequip_item(3, "base", 1);
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, slot: 1, item_path: Some(p), .. }
+            if location == "base" && p == SHIRT)
+    })
+    .await
+    .expect("the shirt comes off");
+    send_msg(
+        &mut a.client,
+        CHANNEL_SYSTEM,
+        &ClientWorldMsg::DestroyItem { location: "base".into(), slot: 1, count: 1 },
+    );
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+        matches!(m, ServerWorldMsg::InventoryDelta { location, slot: 1, item_path: None, .. }
+            if location == "base")
+    })
+    .await
+    .expect("the shirt is destroyed");
+
+    a.send_disconnect();
+    b.send_disconnect();
+    a.pump_for(Duration::from_millis(600)).await;
+    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "the books balance after");
+}
+
+/// The starting kit and death (rule I5's other half): NO DROP never leaves its
+/// holder, but it does go onto the holder's own corpse like any worn gear, and
+/// looting that corpse puts the sword, shirt and pants back on their slots.
+/// The books balance through the death and the loot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_starting_kit_comes_back_off_its_owners_corpse() {
+    const SWORD: &str = "res://data/loot/items/trainees_sword.tres";
+    const SHIRT: &str = "res://data/loot/items/ragged_shirt.tres";
+    const PANTS: &str = "res://data/loot/items/ragged_pants.tres";
+    let h = start_both().await;
+    let (session, char_id, _) =
+        provision_client_dressed(&h.auth_url, "kitdie", "Kitdie", "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "kitdie", true).await.expect("set is_gm");
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    a.send_damage_self(1_000_000);
+    let contents = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::CorpseContents { .. })
+        })
+        .await
+        .expect("dying leaves a corpse");
+    let ServerWorldMsg::CorpseContents { corpse_id, items, .. } = contents else {
+        unreachable!()
+    };
+    let on_corpse: Vec<&str> = items.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(on_corpse, vec![SWORD, SHIRT, PANTS], "the kit is on the corpse, in paperdoll order");
+
+    a.send_respawn();
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| matches!(m, ServerWorldMsg::Teleport { .. }))
+        .await
+        .expect("respawned beside the corpse");
+    a.send_loot_all(corpse_id);
+    a.pump_for(Duration::from_secs(2)).await;
+
+    let worn: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT slot, item_path FROM character_items WHERE char_id = ?1 AND location = 'equip' ORDER BY slot",
+    )
+    .bind(char_id)
+    .fetch_all(&pool)
+    .await
+    .expect("read worn rows");
+    assert_eq!(
+        worn,
+        vec![(0, SWORD.to_string()), (3, SHIRT.to_string()), (4, PANTS.to_string())],
+        "the kit is worn again"
+    );
+    a.send_disconnect();
+    a.pump_for(Duration::from_millis(300)).await;
+    assert!(ledger_mismatches(&h.db_url).await.is_empty(), "the books balance through the death and the loot");
 }

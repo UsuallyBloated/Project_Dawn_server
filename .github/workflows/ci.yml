@@ -2,11 +2,11 @@
 # `gh workflow run CI --ref <branch>`). On demand by the user's choice
 # (2026-10-23): the repo is private, so every run spends free Actions minutes.
 #
-# Blocking: the test suite and cargo-deny (RustSec advisories, banned crates,
-# crate sources). Report-only for now: rustfmt and clippy, because the code is
-# not yet rustfmt-clean and clippy still warns; they become blocking after the
-# one-time reformat that follows the tick.rs split (housekeeping audit, Phase 2
-# and 3).
+# Blocking, all of it: rustfmt, clippy with every warning an error (the lint
+# table is `[workspace.lints]` in Cargo.toml, with a reason beside each allow),
+# the test suite, and cargo-deny (RustSec advisories, banned crates, crate
+# sources). rustfmt and clippy were report-only until the one-time reformat
+# after the tick.rs split (housekeeping audit F13, 2026-11-02).
 #
 # Every third-party action is pinned to a commit SHA (the tag it was taken
 # from is in the comment), so a moved tag or branch cannot change what runs.
@@ -40,13 +40,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
-      - name: rustfmt (report only)
-        continue-on-error: true
+      - name: rustfmt
         run: cargo fmt --check
 
-      - name: clippy (report only)
-        continue-on-error: true
-        run: cargo clippy --locked --all-targets
+      - name: clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       # The default members only: the gdext-net crate builds against Godot
       # and is built by hand on the dev box. --locked: test exactly the

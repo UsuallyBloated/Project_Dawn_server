@@ -75,6 +75,24 @@ chrono = { version = "0.4.38", features = ["serde"] }
 protocol = { path = "crates/protocol" }
 shared   = { path = "crates/shared" }
 
+# Lints every crate inherits (each crate's Cargo.toml has `[lints] workspace =
+# true`). CI runs clippy with `-D warnings`, so anything clippy warns about
+# by default fails the run unless it is allowed here with its reason.
+[workspace.lints.clippy]
+# A byte slice of a String panics when the cut lands inside a multi-byte
+# character: one chat line with an accented letter at byte 512 crashed the
+# whole server on 2026-10-23 (housekeeping audit H1). Cut on a char boundary.
+string_slice = "deny"
+# The tick's step functions take the pieces of world state they touch as
+# separate arguments, and the queues they share are tuples; both are the shape
+# of the 2026-11-01 split, not mistakes. Revisit if a step grows a struct.
+too_many_arguments = "allow"
+type_complexity = "allow"
+# Range checks are written `if !(dist <= range) { refuse }` on purpose: a NaN
+# distance makes every comparison false, so this form refuses it where
+# `dist > range` would let it through (the 2026-09-25 NaN Move hole).
+neg_cmp_op_on_partial_ord = "allow"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

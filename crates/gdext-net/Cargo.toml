@@ -32,3 +32,6 @@ serde   = { workspace = true }
 # Wire-format types — shared verbatim with the server. This is the entire
 # point of having a Rust workspace: no hand-mirrored protocol drift.
 protocol = { workspace = true }
+
+[lints]
+workspace = true

@@ -290,266 +290,122 @@ pub fn roll_coin_for_mob(mob_name: &str, level: u32) -> Coins {
 
 // ── Authored tables (mirror of MobLootTables.TABLES) ──────────────────
 
+#[rustfmt::skip]
 const T_WOLF: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 0.5,
     entries: &[
-        LootEntry {
-            item_path: "res://data/loot/items/wolf_meat.tres",
-            weight: 3.0,
-            min_count: 1,
-            max_count: 2,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/damaged_wolf_pelt.tres",
-            weight: 2.0,
-            min_count: 1,
-            max_count: 1,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/fresh_wolf_pelt.tres",
-            weight: 1.0,
-            min_count: 1,
-            max_count: 1,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/sinew.tres",
-            weight: 2.0,
-            min_count: 1,
-            max_count: 2,
-        },
+        LootEntry { item_path: "res://data/loot/items/wolf_meat.tres",         weight: 3.0, min_count: 1, max_count: 2 },
+        LootEntry { item_path: "res://data/loot/items/damaged_wolf_pelt.tres", weight: 2.0, min_count: 1, max_count: 1 },
+        LootEntry { item_path: "res://data/loot/items/fresh_wolf_pelt.tres",   weight: 1.0, min_count: 1, max_count: 1 },
+        LootEntry { item_path: "res://data/loot/items/sinew.tres",             weight: 2.0, min_count: 1, max_count: 2 },
     ],
 };
 
+#[rustfmt::skip]
 const T_SKELETON: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 1.0,
     entries: &[
-        LootEntry {
-            item_path: "res://data/loot/items/bone_fragment.tres",
-            weight: 3.0,
-            min_count: 1,
-            max_count: 2,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/cloth_scraps.tres",
-            weight: 1.5,
-            min_count: 1,
-            max_count: 2,
-        },
+        LootEntry { item_path: "res://data/loot/items/bone_fragment.tres", weight: 3.0, min_count: 1, max_count: 2 },
+        LootEntry { item_path: "res://data/loot/items/cloth_scraps.tres",  weight: 1.5, min_count: 1, max_count: 2 },
     ],
 };
 
+#[rustfmt::skip]
 const T_GNOLL: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 0.5,
     entries: &[
-        LootEntry {
-            item_path: "res://data/loot/items/cloth_scraps.tres",
-            weight: 3.0,
-            min_count: 1,
-            max_count: 3,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/gnoll_meat.tres",
-            weight: 2.0,
-            min_count: 1,
-            max_count: 1,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/gnoll_tooth.tres",
-            weight: 1.5,
-            min_count: 1,
-            max_count: 2,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/sinew.tres",
-            weight: 1.0,
-            min_count: 1,
-            max_count: 1,
-        },
+        LootEntry { item_path: "res://data/loot/items/cloth_scraps.tres", weight: 3.0, min_count: 1, max_count: 3 },
+        LootEntry { item_path: "res://data/loot/items/gnoll_meat.tres",   weight: 2.0, min_count: 1, max_count: 1 },
+        LootEntry { item_path: "res://data/loot/items/gnoll_tooth.tres",  weight: 1.5, min_count: 1, max_count: 2 },
+        LootEntry { item_path: "res://data/loot/items/sinew.tres",        weight: 1.0, min_count: 1, max_count: 1 },
     ],
 };
 
+#[rustfmt::skip]
 const T_RAT: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 1.0,
     entries: &[
-        LootEntry {
-            item_path: "res://data/loot/items/rat_meat.tres",
-            weight: 3.0,
-            min_count: 1,
-            max_count: 1,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/bone_fragment.tres",
-            weight: 1.0,
-            min_count: 1,
-            max_count: 1,
-        },
+        LootEntry { item_path: "res://data/loot/items/rat_meat.tres",      weight: 3.0, min_count: 1, max_count: 1 },
+        LootEntry { item_path: "res://data/loot/items/bone_fragment.tres", weight: 1.0, min_count: 1, max_count: 1 },
     ],
 };
 
+#[rustfmt::skip]
 const T_BOAR: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 0.5,
     entries: &[
-        LootEntry {
-            item_path: "res://data/loot/items/boar_hide.tres",
-            weight: 2.5,
-            min_count: 1,
-            max_count: 1,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/wolf_meat.tres",
-            weight: 2.0,
-            min_count: 1,
-            max_count: 2,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/sinew.tres",
-            weight: 1.5,
-            min_count: 1,
-            max_count: 2,
-        },
+        LootEntry { item_path: "res://data/loot/items/boar_hide.tres", weight: 2.5, min_count: 1, max_count: 1 },
+        LootEntry { item_path: "res://data/loot/items/wolf_meat.tres", weight: 2.0, min_count: 1, max_count: 2 },
+        LootEntry { item_path: "res://data/loot/items/sinew.tres",     weight: 1.5, min_count: 1, max_count: 2 },
     ],
 };
 
+#[rustfmt::skip]
 const T_SNAKE: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 0.5,
     entries: &[
-        LootEntry {
-            item_path: "res://data/loot/items/snake_skin.tres",
-            weight: 2.5,
-            min_count: 1,
-            max_count: 1,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/snake_meat.tres",
-            weight: 2.0,
-            min_count: 1,
-            max_count: 1,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/snake_venom_sac.tres",
-            weight: 0.8,
-            min_count: 1,
-            max_count: 1,
-        },
+        LootEntry { item_path: "res://data/loot/items/snake_skin.tres",      weight: 2.5, min_count: 1, max_count: 1 },
+        LootEntry { item_path: "res://data/loot/items/snake_meat.tres",      weight: 2.0, min_count: 1, max_count: 1 },
+        LootEntry { item_path: "res://data/loot/items/snake_venom_sac.tres", weight: 0.8, min_count: 1, max_count: 1 },
     ],
 };
 
+#[rustfmt::skip]
 const T_BEAR: MobLootTable = MobLootTable {
     rolls: 2,
     empty_weight: 0.3,
     entries: &[
-        LootEntry {
-            item_path: "res://data/loot/items/bear_hide.tres",
-            weight: 2.5,
-            min_count: 1,
-            max_count: 1,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/wolf_meat.tres",
-            weight: 2.5,
-            min_count: 2,
-            max_count: 3,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/sinew.tres",
-            weight: 2.0,
-            min_count: 2,
-            max_count: 3,
-        },
+        LootEntry { item_path: "res://data/loot/items/bear_hide.tres", weight: 2.5, min_count: 1, max_count: 1 },
+        LootEntry { item_path: "res://data/loot/items/wolf_meat.tres", weight: 2.5, min_count: 2, max_count: 3 },
+        LootEntry { item_path: "res://data/loot/items/sinew.tres",     weight: 2.0, min_count: 2, max_count: 3 },
     ],
 };
 
+#[rustfmt::skip]
 const T_SPIDER: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 0.5,
     entries: &[
-        LootEntry {
-            item_path: "res://data/loot/items/spiderling_silk.tres",
-            weight: 2.5,
-            min_count: 1,
-            max_count: 2,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/spider_venom_sac.tres",
-            weight: 1.0,
-            min_count: 1,
-            max_count: 1,
-        },
+        LootEntry { item_path: "res://data/loot/items/spiderling_silk.tres",  weight: 2.5, min_count: 1, max_count: 2 },
+        LootEntry { item_path: "res://data/loot/items/spider_venom_sac.tres", weight: 1.0, min_count: 1, max_count: 1 },
     ],
 };
 
+#[rustfmt::skip]
 const T_BAT: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 1.0,
     entries: &[
-        LootEntry {
-            item_path: "res://data/loot/items/bat_blood.tres",
-            weight: 2.0,
-            min_count: 1,
-            max_count: 1,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/bat_wing.tres",
-            weight: 1.5,
-            min_count: 1,
-            max_count: 2,
-        },
+        LootEntry { item_path: "res://data/loot/items/bat_blood.tres", weight: 2.0, min_count: 1, max_count: 1 },
+        LootEntry { item_path: "res://data/loot/items/bat_wing.tres",  weight: 1.5, min_count: 1, max_count: 2 },
     ],
 };
 
+#[rustfmt::skip]
 const T_ZOMBIE: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 1.0,
     entries: &[
-        LootEntry {
-            item_path: "res://data/loot/items/cloth_scraps.tres",
-            weight: 3.0,
-            min_count: 1,
-            max_count: 3,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/bone_fragment.tres",
-            weight: 2.0,
-            min_count: 1,
-            max_count: 2,
-        },
+        LootEntry { item_path: "res://data/loot/items/cloth_scraps.tres",  weight: 3.0, min_count: 1, max_count: 3 },
+        LootEntry { item_path: "res://data/loot/items/bone_fragment.tres", weight: 2.0, min_count: 1, max_count: 2 },
     ],
 };
 
+#[rustfmt::skip]
 const T_BANDIT: MobLootTable = MobLootTable {
     rolls: 2,
     empty_weight: 0.5,
     entries: &[
-        LootEntry {
-            item_path: "res://data/loot/items/cloth_scraps.tres",
-            weight: 3.0,
-            min_count: 1,
-            max_count: 3,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/copper_ore.tres",
-            weight: 1.0,
-            min_count: 1,
-            max_count: 2,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/metal_bits.tres",
-            weight: 1.5,
-            min_count: 1,
-            max_count: 3,
-        },
-        LootEntry {
-            item_path: "res://data/loot/items/coal.tres",
-            weight: 1.0,
-            min_count: 1,
-            max_count: 2,
-        },
+        LootEntry { item_path: "res://data/loot/items/cloth_scraps.tres", weight: 3.0, min_count: 1, max_count: 3 },
+        LootEntry { item_path: "res://data/loot/items/copper_ore.tres",   weight: 1.0, min_count: 1, max_count: 2 },
+        LootEntry { item_path: "res://data/loot/items/metal_bits.tres",   weight: 1.5, min_count: 1, max_count: 3 },
+        LootEntry { item_path: "res://data/loot/items/coal.tres",         weight: 1.0, min_count: 1, max_count: 2 },
     ],
 };
 

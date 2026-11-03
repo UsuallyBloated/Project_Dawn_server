@@ -83,6 +83,13 @@ shared   = { path = "crates/shared" }
 # character: one chat line with an accented letter at byte 512 crashed the
 # whole server on 2026-10-23 (housekeeping audit H1). Cut on a char boundary.
 string_slice = "deny"
+# An unwrap or expect in live code turns a surprise into a crash, and in the
+# middle of an item move a crash or a hasty early return can leave the move
+# half done. Live code checks before it moves; a true invariant says why with
+# `#[expect(clippy::expect_used, reason = "...")]`. Tests are exempt
+# (clippy.toml).
+unwrap_used = "deny"
+expect_used = "deny"
 # The tick's step functions take the pieces of world state they touch as
 # separate arguments, and the queues they share are tuples; both are the shape
 # of the 2026-11-01 split, not mistakes. Revisit if a step grows a struct.

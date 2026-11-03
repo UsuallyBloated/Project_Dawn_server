@@ -99,8 +99,7 @@ pub struct CampSpawn {
 /// authored spawn position. Order is preserved from the file so spawn
 /// ids are deterministic across server restarts.
 pub fn load_camps() -> Vec<CampSpawn> {
-    let parsed: ZoneCampsFile = toml::from_str(ZONE_CAMPS_TOML)
-        .expect("zone_camps.toml failed to parse — fix the embedded file");
+    let parsed: ZoneCampsFile = crate::world::parse_embedded("zone_camps.toml", ZONE_CAMPS_TOML);
     let mut out = Vec::new();
     for camp in parsed.camps {
         let radius = camp.radius.unwrap_or(parsed.default_radius);

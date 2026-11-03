@@ -68,8 +68,7 @@ struct NpcsFile {
 fn table() -> &'static Vec<Npc> {
     static NPCS: OnceLock<Vec<Npc>> = OnceLock::new();
     NPCS.get_or_init(|| {
-        let parsed: NpcsFile =
-            toml::from_str(NPCS_TOML).expect("npcs.toml must parse — fix the embedded file");
+        let parsed: NpcsFile = crate::world::parse_embedded("npcs.toml", NPCS_TOML);
         for n in &parsed.npc {
             for k in &n.kinds {
                 assert!(

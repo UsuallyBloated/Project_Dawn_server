@@ -108,6 +108,10 @@ struct AccountAuthRow {
 /// password verify when the username doesn't exist (see `verify_login`).
 /// Computed once with the server's Argon2 params so its verify cost matches
 /// production. The password it hashes is irrelevant — the verify always fails.
+#[expect(
+    clippy::expect_used,
+    reason = "a fixed input under the default parameters; Argon2 refuses only bad parameters"
+)]
 fn dummy_login_hash() -> &'static str {
     static H: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     H.get_or_init(|| {
@@ -148,6 +152,10 @@ pub async fn verify_login(
             // letting an attacker distinguish "user exists" by response time. Burn
             // one dummy verify against a fixed valid hash, discard it, then fail
             // with the SAME error as a wrong password.
+            #[expect(
+                clippy::expect_used,
+                reason = "dummy_login_hash is the server's own Argon2 output, always valid PHC"
+            )]
             let _ = Argon2::default().verify_password(
                 password.as_bytes(),
                 &PasswordHash::new(dummy_login_hash()).expect("dummy hash is valid PHC"),
@@ -1055,7 +1063,7 @@ pub async fn save_quest_progress(
     quest_id: &str,
     progress: &[i32],
 ) -> DbResult<()> {
-    let json = serde_json::to_string(progress).expect("Vec<i32> serializes");
+    let json = serde_json::to_string(progress).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
     sqlx::query(
         "INSERT INTO active_quests (char_id, quest_id, progress) VALUES (?1, ?2, ?3)
          ON CONFLICT (char_id, quest_id) DO UPDATE SET progress = excluded.progress",

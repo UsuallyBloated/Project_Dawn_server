@@ -5,6 +5,9 @@
 //! the full Register → Login → CharCreate → CharList → CharDelete
 //! → Logout flow. No external test client (wscat/websocat) required.
 
+// Test code may unwrap and expect: a panic is the test failing.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use futures_util::{SinkExt, StreamExt};
 use projectdawn_server::{auth, db, Config};
 use std::sync::Arc;

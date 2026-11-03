@@ -14,7 +14,7 @@ use protocol::auth::{ClientAuthMsg, ServerAuthMsg};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
@@ -94,7 +94,9 @@ impl LoginRateLimiter {
         if rate_limit_disabled() {
             return true;
         }
-        let mut map = self.inner.lock().expect("login limiter poisoned");
+        // A poisoned lock still holds a usable map of counters; recover it
+        // rather than turn one panic into a refusal of every login.
+        let mut map = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         if map.len() >= RATE_LIMIT_PRUNE_AT {
             map.retain(|_, w| now.duration_since(w.start) < LOGIN_WINDOW);
         }
@@ -120,7 +122,7 @@ impl LoginRateLimiter {
     fn clear(&self, ip: IpAddr, kind: AuthKind) {
         self.inner
             .lock()
-            .expect("login limiter poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .remove(&(ip, kind));
     }
 }

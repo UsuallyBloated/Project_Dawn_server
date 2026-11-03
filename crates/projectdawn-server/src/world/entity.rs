@@ -1013,16 +1013,16 @@ impl Entity {
             return;
         }
         let owner_pos_opt = target_pos(targets, owner_id);
-        let target_info: Option<(Vec3f, bool)> = self.target.and_then(|tid| {
+        let target_info: Option<(EntityId, Vec3f, bool)> = self.target.and_then(|tid| {
             enemy_targets
                 .iter()
                 .find(|(id, _, _)| *id == tid)
-                .map(|(_, pos, alive)| (*pos, *alive))
+                .map(|(id, pos, alive)| (*id, *pos, *alive))
         });
         // If we have a live target, engage it; otherwise follow owner
         // (Follow stance) or hold position (Guard stance).
         match target_info {
-            Some((target_pos, true)) => {
+            Some((target_id, target_pos, true)) => {
                 let dist = self.pos.distance_to(target_pos);
                 let melee = self.melee_range();
                 if dist <= melee {
@@ -1035,7 +1035,7 @@ impl Entity {
                     if due {
                         self.last_attack_at = Some(now);
                         events.hit = Some(HitIntent {
-                            target: self.target.expect("had target_info"),
+                            target: target_id,
                             amount: self.melee_swing_damage(),
                         });
                     }

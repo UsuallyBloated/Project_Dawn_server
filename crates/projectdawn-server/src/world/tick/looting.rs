@@ -70,8 +70,10 @@ pub(super) async fn apply_loot_intents(
                 let looter_cid = intent.looter as ClientId;
                 // Range + owner gate (read-only).
                 {
-                    let corpse = corpses.get(&corpse_id).unwrap();
-                    if corpse.pos.distance_to(looter_pos) > LOOT_PICKUP_RANGE {
+                    let Some(corpse) = corpses.get(&corpse_id) else {
+                        continue;
+                    };
+                    if !(corpse.pos.distance_to(looter_pos) <= LOOT_PICKUP_RANGE) {
                         continue;
                     }
                     if corpse.owner_char != intent.looter as i64 {
@@ -100,6 +102,11 @@ pub(super) async fn apply_loot_intents(
                         continue;
                     }
                 }
+                // Nothing below removes the corpse from the map before the
+                // persist, so one borrow serves the whole take.
+                let Some(corpse) = corpses.get_mut(&corpse_id) else {
+                    continue;
+                };
                 // Pre-loot snapshot. The take mutates in-memory BEFORE it is
                 // persisted; if the atomic persist fails we roll the in-memory
                 // side back to exactly this so it matches the rolled-back DB
@@ -108,15 +115,12 @@ pub(super) async fn apply_loot_intents(
                 // un-send. `had_content` decides linger-vs-despawn: only a
                 // corpse that HELD something and is now empty is "looted clean";
                 // a born-empty corpse (naked-death res anchor) lingers.
-                let corpse_items_before: Vec<(String, u32, Option<u8>)> = {
-                    let corpse = corpses.get(&corpse_id).unwrap();
-                    corpse
-                        .items
-                        .iter()
-                        .map(|s| (s.item_path.clone(), s.count, s.equip_slot))
-                        .collect()
-                };
-                let corpse_coins_before = corpses.get(&corpse_id).unwrap().coins;
+                let corpse_items_before: Vec<(String, u32, Option<u8>)> = corpse
+                    .items
+                    .iter()
+                    .map(|s| (s.item_path.clone(), s.count, s.equip_slot))
+                    .collect();
+                let corpse_coins_before = corpse.coins;
                 let had_content = !corpse_items_before.is_empty()
                     || corpse_coins_before != protocol::world::Coins::ZERO;
                 let (inv_before, coins_before, ledger_before) = match connections.get(&looter_cid) {
@@ -138,7 +142,6 @@ pub(super) async fn apply_loot_intents(
                 // deliberately independent stacks, so what went onto the corpse
                 // is what comes back off it.
                 let corpse_coins = {
-                    let corpse = corpses.get_mut(&corpse_id).unwrap();
                     let c = corpse.coins;
                     corpse.coins = protocol::world::Coins::ZERO;
                     c
@@ -158,7 +161,6 @@ pub(super) async fn apply_loot_intents(
                 // Items: take one (slot) or all (None) off the corpse.
                 let mut granted: Vec<(String, u32, Option<u8>)> = Vec::new();
                 {
-                    let corpse = corpses.get_mut(&corpse_id).unwrap();
                     match intent.slot {
                         Some(idx) => {
                             let i = idx as usize;
@@ -243,15 +245,11 @@ pub(super) async fn apply_loot_intents(
                     }
                     if leftover_count > 0 {
                         left_on_corpse += 1;
-                        corpses
-                            .get_mut(&corpse_id)
-                            .unwrap()
-                            .items
-                            .push(loot::LootItemStack {
-                                item_path: path,
-                                count: leftover_count,
-                                equip_slot: worn,
-                            });
+                        corpse.items.push(loot::LootItemStack {
+                            item_path: path,
+                            count: leftover_count,
+                            equip_slot: worn,
+                        });
                     }
                 }
                 // Gear went back on: the gear bonuses and max resources change
@@ -270,20 +268,18 @@ pub(super) async fn apply_loot_intents(
                     );
                 }
                 // Post-drain corpse state for the atomic persist + the despawn
-                // decision (corpse borrow dropped before the await below).
-                let (corpse_items_now, corpse_coins_now, corpse_pos, corpse_empty) = {
-                    let corpse = corpses.get(&corpse_id).unwrap();
-                    (
-                        corpse
-                            .items
-                            .iter()
-                            .map(|s| (s.item_path.clone(), s.count, s.equip_slot))
-                            .collect::<Vec<(String, u32, Option<u8>)>>(),
-                        corpse.coins,
-                        corpse.pos,
-                        corpse.items.is_empty() && corpse.coins == protocol::world::Coins::ZERO,
-                    )
-                };
+                // decision; this is the take's last use of the corpse borrow,
+                // so nothing holds it across the await below.
+                let (corpse_items_now, corpse_coins_now, corpse_pos, corpse_empty) = (
+                    corpse
+                        .items
+                        .iter()
+                        .map(|s| (s.item_path.clone(), s.count, s.equip_slot))
+                        .collect::<Vec<(String, u32, Option<u8>)>>(),
+                    corpse.coins,
+                    corpse.pos,
+                    corpse.items.is_empty() && corpse.coins == protocol::world::Coins::ZERO,
+                );
                 let delete_now = corpse_emptied_by_loot(had_content, corpse_empty);
                 // Persist ATOMICALLY: looter inventory + wallet AND the corpse
                 // (rewritten, or DELETED when looted empty) in ONE tx, so a
@@ -423,7 +419,7 @@ pub(super) async fn apply_loot_intents(
             let Some(bag) = loot_bags.get_mut(&intent.bag_id) else {
                 continue;
             };
-            if bag.pos.distance_to(looter_pos) > LOOT_PICKUP_RANGE {
+            if !(bag.pos.distance_to(looter_pos) <= LOOT_PICKUP_RANGE) {
                 continue;
             }
             // Loot rights: only the kill-creditor and their group may
@@ -728,7 +724,7 @@ pub(super) async fn apply_loot_intents(
                     handlers::send_refusal(&mut *server, looter_cid, "That isn't there any more.");
                     continue;
                 };
-                if bag.pos.distance_to(looter_pos) > LOOT_PICKUP_RANGE {
+                if !(bag.pos.distance_to(looter_pos) <= LOOT_PICKUP_RANGE) {
                     continue;
                 }
                 if !bag.can_loot(looter_cid, group_manager) {
@@ -795,7 +791,12 @@ pub(super) async fn apply_loot_intents(
                 );
                 continue;
             }
-            // Commit: cursor in, bag out, world told. All in this tick.
+            // Commit: bag out, cursor in, world told. All in this tick. The
+            // bag leaves the map first, so a bag that is somehow gone moves
+            // nothing.
+            let Some(bag) = loot_bags.remove(&bag_id) else {
+                continue;
+            };
             conn.inventory.cursor = Some(crate::world::inventory::InventoryEntry {
                 item_path: stack.item_path.clone(),
                 count: stack.count,
@@ -828,9 +829,6 @@ pub(super) async fn apply_loot_intents(
                 looter_cid,
                 &format!("You pick up {}.", item_name),
             );
-            let bag = loot_bags
-                .remove(&bag_id)
-                .expect("bag existed under the borrow above");
             let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
             let bag_visible = aoi.entities_visible_from(bag_cell);
             aoi.remove(bag_id, bag_cell);

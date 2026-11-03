@@ -118,7 +118,10 @@ pub(super) fn run_enemy_ai(
                 if current_alive.is_some() {
                     return (*pet_id, current_alive);
                 }
-                let owner_id = pet.owner.expect("pet must have owner");
+                let Some(owner_id) = pet.owner else {
+                    tracing::error!(pet = *pet_id, "a pet with no owner; it inherits no target");
+                    return (*pet_id, None);
+                };
                 let owner_cid = owner_id as ClientId;
                 let owner = connections.get(&owner_cid);
                 let inherited = owner.and_then(|c| {

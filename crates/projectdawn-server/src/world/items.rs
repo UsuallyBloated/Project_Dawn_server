@@ -174,8 +174,7 @@ pub fn is_no_rent(path: &str) -> bool {
 fn items() -> &'static HashMap<String, Item> {
     static ITEMS: OnceLock<HashMap<String, Item>> = OnceLock::new();
     ITEMS.get_or_init(|| {
-        let parsed: ItemsFile = toml::from_str(ITEMS_TOML)
-            .expect("items.toml must parse — re-run export_items_oneshot.py if it's stale");
+        let parsed: ItemsFile = crate::world::parse_embedded("items.toml", ITEMS_TOML);
         parsed
             .items
             .into_iter()

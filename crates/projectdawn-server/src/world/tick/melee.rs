@@ -615,7 +615,14 @@ pub(super) fn apply_attacks(
                 let shield_name_pvp: Option<String>;
                 let mut absorb_strip_pvp: Option<usize> = None;
                 let (new_hp, max_hp, amount, target_armor) = {
-                    let target_conn = connections.get_mut(&target_cid).expect("checked");
+                    let Some(target_conn) = connections.get_mut(&target_cid) else {
+                        tracing::error!(
+                            char_id = intent.attacker,
+                            target = target_cid,
+                            "PvP swing target missing after its checks; swing dropped"
+                        );
+                        continue;
+                    };
                     let mut amount =
                         combat::mitigated(swing.amount, target_conn.equipped_armor, target_seated);
                     let (after_absorb, exhausted) =

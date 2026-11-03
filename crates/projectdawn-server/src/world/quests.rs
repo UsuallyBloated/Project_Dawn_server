@@ -122,7 +122,7 @@ fn tier_fraction(tier: &str) -> Option<f64> {
 /// compile-time-embedded, so a data bug should fail the very first test run,
 /// never limp into a live server that silently miscounts.
 fn parse(toml_str: &str) -> HashMap<String, Quest> {
-    let file: QuestsFile = toml::from_str(toml_str).expect("data/quests.toml must parse");
+    let file: QuestsFile = crate::world::parse_embedded("quests.toml", toml_str);
     for q in &file.quests {
         assert!(
             !q.objectives.is_empty(),

@@ -50,7 +50,7 @@ impl SafeArea {
 pub fn areas() -> &'static [SafeArea] {
     static AREAS: OnceLock<Vec<SafeArea>> = OnceLock::new();
     AREAS.get_or_init(|| {
-        let parsed: Parsed = toml::from_str(SAFE_AREAS_TOML).expect("safe_areas.toml parses");
+        let parsed: Parsed = crate::world::parse_embedded("safe_areas.toml", SAFE_AREAS_TOML);
         parsed.area
     })
 }

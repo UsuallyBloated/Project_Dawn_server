@@ -213,9 +213,7 @@ fn default_min_level() -> i32 {
 fn spells() -> &'static HashMap<String, Spell> {
     static SPELLS: OnceLock<HashMap<String, Spell>> = OnceLock::new();
     SPELLS.get_or_init(|| {
-        let parsed: SpellsFile = toml::from_str(SPELLS_TOML).expect(
-            "spells.toml must parse — fix the embedded file or re-run tools/export_spells.gd",
-        );
+        let parsed: SpellsFile = crate::world::parse_embedded("spells.toml", SPELLS_TOML);
         parsed
             .spells
             .into_iter()

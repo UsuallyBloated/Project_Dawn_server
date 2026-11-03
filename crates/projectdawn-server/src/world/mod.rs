@@ -64,6 +64,17 @@ use sqlx::SqlitePool;
 use std::{net::UdpSocket, sync::Arc, time::Duration};
 use tokio::task::JoinHandle;
 
+/// Parses one of the data files compiled into the server (`include_str!`).
+/// A parse failure is a bug in the shipped data, not a runtime condition, so
+/// it stops the boot (or the first test that reads the table) rather than run
+/// a world with half its data: each table's unit tests parse it, so CI meets
+/// a broken file before any server does. This is the one panic live code
+/// keeps on purpose under the `expect_used` rule: it is spelled `panic!` only
+/// because `expect` cannot put the file's name in the message.
+pub(crate) fn parse_embedded<T: serde::de::DeserializeOwned>(file: &str, text: &str) -> T {
+    toml::from_str(text).unwrap_or_else(|e| panic!("{file} must parse; fix the embedded file: {e}"))
+}
+
 /// 20 Hz simulation tick.
 pub const TICK_DT: Duration = Duration::from_millis(50);
 /// Cap on simultaneous world connections. Pre-Steam alpha is friends-tier;

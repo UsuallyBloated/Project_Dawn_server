@@ -52,7 +52,7 @@ pub struct StartTable {
 pub fn table() -> &'static [Faction] {
     static TABLE: OnceLock<Vec<Faction>> = OnceLock::new();
     TABLE.get_or_init(|| {
-        let parsed: FactionsFile = toml::from_str(FACTIONS_TOML).expect("factions.toml parses");
+        let parsed: FactionsFile = crate::world::parse_embedded("factions.toml", FACTIONS_TOML);
         for f in &parsed.faction {
             for link in f.allies.iter().chain(f.enemies.iter()) {
                 assert!(

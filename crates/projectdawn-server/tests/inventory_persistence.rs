@@ -7,6 +7,9 @@
 //! integration tests cover the dispatch + fan-out. This file is
 //! about "does it survive a process restart."
 
+// Test code may unwrap and expect: a panic is the test failing.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use projectdawn_server::{db, db::InventoryRow};
 use tempfile::TempDir;
 

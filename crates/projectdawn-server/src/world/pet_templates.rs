@@ -106,11 +106,13 @@ const CURVE: &[(u32, f32, f32)] = &[
     (12, 265.0, 26.0),
     (14, 365.0, 35.0),
 ];
+// `curve_at` reads the last anchor; an empty ladder fails the build.
+const _: () = assert!(!CURVE.is_empty());
 
 /// (hp, dmg) the camp ladder pays at `level`, interpolated.
 fn curve_at(level: u32) -> (f32, f32) {
     let l = level.max(1);
-    let (last_level, last_hp, last_dmg) = *CURVE.last().expect("curve non-empty");
+    let (last_level, last_hp, last_dmg) = CURVE[CURVE.len() - 1];
     if l >= last_level {
         // Continue the 12-to-14 slope: +50 hp, +4.5 dmg per level.
         let over = (l - last_level) as f32;

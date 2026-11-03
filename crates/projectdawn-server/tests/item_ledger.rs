@@ -5,6 +5,9 @@
 //! sites that queue the rows; this file is about the table and its queries.
 //! Every test here fails on a database without the table.
 
+// Test code may unwrap and expect: a panic is the test failing.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use projectdawn_server::db::{self, InventoryRow, ItemEventRow};
 use tempfile::TempDir;
 

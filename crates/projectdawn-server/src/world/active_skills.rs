@@ -114,8 +114,8 @@ impl ActiveSkill {
 fn skills() -> &'static HashMap<String, ActiveSkill> {
     static SKILLS: OnceLock<HashMap<String, ActiveSkill>> = OnceLock::new();
     SKILLS.get_or_init(|| {
-        let parsed: SkillsFile = toml::from_str(ACTIVE_SKILLS_TOML)
-            .expect("active_skills.toml must parse; fix the embedded file");
+        let parsed: SkillsFile =
+            crate::world::parse_embedded("active_skills.toml", ACTIVE_SKILLS_TOML);
         parsed
             .skills
             .into_iter()

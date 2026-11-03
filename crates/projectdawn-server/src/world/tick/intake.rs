@@ -17,7 +17,7 @@ pub(super) fn drain_messages(world: &mut WorldState, q: &mut Intents, now: Insta
         // Skip clients whose Connected event is in the queue but whose
         // PerConnection row hasn't been built yet (load_character failed
         // and we already queued the kick).
-        let Some(conn) = connections.get(&client_id) else {
+        let Some(conn) = connections.get_mut(&client_id) else {
             continue;
         };
         // Every line logged while this client's messages are handled (and
@@ -34,7 +34,6 @@ pub(super) fn drain_messages(world: &mut WorldState, q: &mut Intents, now: Insta
         // drops the client as a cut connection (the body lingers and is saved
         // at the reap, as for any unclean drop).
         let msgs = receive_batch(&mut *server, client_id);
-        let conn = connections.get_mut(&client_id).expect("checked above");
         let Some(outcomes) = handle_batch(conn, client_id, msgs, |conn, msg| {
             handlers::handle_message(&mut *server, conn, client_id, msg, now)
         }) else {

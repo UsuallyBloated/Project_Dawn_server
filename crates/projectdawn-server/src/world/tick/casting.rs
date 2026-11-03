@@ -460,7 +460,10 @@ pub(super) fn apply_casts(
                 && crate::world::cast_gate::roll_fizzle(caster_conn, spell)
             {
                 let (mp_after, max_mp) = {
-                    let cc = connections.get_mut(&caster_cid).expect("checked");
+                    let Some(cc) = connections.get_mut(&caster_cid) else {
+                        tracing::error!(char_id = intent.caster, spell = %spell.name, "caster missing mid-cast; intent dropped");
+                        continue;
+                    };
                     let burned = crate::world::cast_gate::fizzle_mana(spell.mana_cost, cc.mp);
                     cc.mp -= burned;
                     cc.gcd_until = Some(now + crate::world::GLOBAL_COOLDOWN);
@@ -498,7 +501,10 @@ pub(super) fn apply_casts(
             // expires. Skipped when cooldown == 0 (most damage
             // spells; cooldown matters mainly for utility / heals).
             let (new_mp, new_hp_after_cost, max_hp) = {
-                let cc = connections.get_mut(&caster_cid).expect("checked");
+                let Some(cc) = connections.get_mut(&caster_cid) else {
+                    tracing::error!(char_id = intent.caster, spell = %spell.name, "caster missing mid-cast; intent dropped");
+                    continue;
+                };
                 cc.mp = (cc.mp - mana_cost).max(0.0);
                 // Alignment (2026-10-23): a cast leans its school's way by
                 // a hundred-thousandth of its mana, through the momentum
@@ -776,7 +782,10 @@ pub(super) fn apply_casts(
                     let dmg = spell.base_damage;
                     if heal > 0.0 || dmg > 0.0 {
                         let (final_hp, max_hp) = {
-                            let cc = connections.get_mut(&caster_cid).expect("checked");
+                            let Some(cc) = connections.get_mut(&caster_cid) else {
+                                tracing::error!(char_id = intent.caster, spell = %spell.name, "caster missing mid-cast; intent dropped");
+                                continue;
+                            };
                             cc.hp = (cc.hp + heal - dmg).clamp(0.0, cc.max_hp);
                             regen::mark_dirty(cc);
                             (cc.hp, cc.max_hp)
@@ -806,7 +815,10 @@ pub(super) fn apply_casts(
                     let mut buff_changed = false;
                     if spell.is_lich_form {
                         // Toggle semantics — second cast clears.
-                        let cc = connections.get_mut(&caster_cid).expect("checked");
+                        let Some(cc) = connections.get_mut(&caster_cid) else {
+                            tracing::error!(char_id = intent.caster, spell = %spell.name, "caster missing mid-cast; intent dropped");
+                            continue;
+                        };
                         let was_active = buffs::is_lich_form_active(&cc.active_buffs);
                         cc.active_buffs
                             .retain(|b| !matches!(b.effect, buffs::BuffEffect::LichForm { .. }));
@@ -819,11 +831,11 @@ pub(super) fn apply_casts(
                         }
                         buff_changed = true;
                     }
-                    if apply_player_spell_buffs(
-                        connections.get_mut(&caster_cid).expect("checked"),
-                        spell,
-                        now,
-                    ) {
+                    let Some(cc) = connections.get_mut(&caster_cid) else {
+                        tracing::error!(char_id = intent.caster, spell = %spell.name, "caster missing mid-cast; intent dropped");
+                        continue;
+                    };
+                    if apply_player_spell_buffs(cc, spell, now) {
                         buff_changed = true;
                     }
                     if buff_changed {
@@ -921,7 +933,20 @@ pub(super) fn apply_casts(
                     let heal = spell.heal_amount;
                     if heal > 0.0 {
                         let (final_hp, max_hp) = {
-                            let tc = connections.get_mut(&target_cid).expect("checked");
+                            let Some(tc) = connections.get_mut(&target_cid) else {
+                                cast_resolution_lost(
+                                    &mut *server,
+                                    &mut *connections,
+                                    in_world_recipients_now,
+                                    caster_cid,
+                                    intent.caster,
+                                    mana_cost,
+                                    hp_cost,
+                                    &spell.name,
+                                    "ally",
+                                );
+                                continue;
+                            };
                             tc.hp = (tc.hp + heal).min(tc.max_hp);
                             regen::mark_dirty(tc);
                             (tc.hp, tc.max_hp)
@@ -947,11 +972,21 @@ pub(super) fn apply_casts(
                     // (combat math reads them); the fanned BuffSnapshot
                     // lets the target's client reconstruct the buff
                     // locally (BuffManager.reconcile_with_server_snapshot).
-                    let ally_buff_changed = apply_player_spell_buffs(
-                        connections.get_mut(&target_cid).expect("checked"),
-                        spell,
-                        now,
-                    );
+                    let Some(tc) = connections.get_mut(&target_cid) else {
+                        cast_resolution_lost(
+                            &mut *server,
+                            &mut *connections,
+                            in_world_recipients_now,
+                            caster_cid,
+                            intent.caster,
+                            mana_cost,
+                            hp_cost,
+                            &spell.name,
+                            "ally",
+                        );
+                        continue;
+                    };
+                    let ally_buff_changed = apply_player_spell_buffs(tc, spell, now);
                     if ally_buff_changed {
                         if let Some(tc) = connections.get(&target_cid) {
                             handlers::fan_out_buff_snapshot(
@@ -1012,7 +1047,20 @@ pub(super) fn apply_casts(
                             (0, false)
                         };
                         let (final_hp, max_hp, applied) = {
-                            let tc = connections.get_mut(&target_cid).expect("checked");
+                            let Some(tc) = connections.get_mut(&target_cid) else {
+                                cast_resolution_lost(
+                                    &mut *server,
+                                    &mut *connections,
+                                    in_world_recipients_now,
+                                    caster_cid,
+                                    intent.caster,
+                                    mana_cost,
+                                    hp_cost,
+                                    &spell.name,
+                                    "enemy",
+                                );
+                                continue;
+                            };
                             let mut dmg = rolled;
                             let (after_absorb, exhausted) =
                                 buffs::consume_absorb(&mut tc.active_buffs, dmg);

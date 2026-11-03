@@ -520,13 +520,10 @@ pub struct PerConnection {
     /// CastSpell (an instant one).
     pub gcd_until: Option<Instant>,
 
-    /// Track 4 sub-task 3 — last buff snapshot the client broadcast.
-    /// Used to seed new joiners; live updates fan out via the
-    /// BuffSnapshotFanOut outcome. Empty Vec = "no active buffs".
-    /// Track 6 sub-task 4a: this becomes a SERVER-DERIVED cache —
-    /// rebuilt from `active_buffs` whenever buff state changes.
-    /// Clients no longer originate the snapshot (BuffSnapshotBroadcast
-    /// is deprecated; sub-task 4b removes it after the full lift).
+    /// The player's active buffs as (name, seconds left), derived from
+    /// `active_buffs` by the server whenever buff state changes. Seeds
+    /// new joiners; each step that changes a buff fans the new snapshot. Clients never
+    /// originate it. Empty Vec = "no active buffs".
     pub buff_snapshot: Vec<(String, f32)>,
     pub buff_snapshot_set: bool,
 
@@ -978,9 +975,9 @@ impl PerConnection {
         if !rising {
             return false;
         }
-        let due = self.last_jump_relayed_at.map_or(true, |t| {
-            now.duration_since(t) >= super::JUMP_RELAY_MIN_INTERVAL
-        });
+        let due = self
+            .last_jump_relayed_at
+            .is_none_or(|t| now.duration_since(t) >= super::JUMP_RELAY_MIN_INTERVAL);
         if !due {
             return false;
         }

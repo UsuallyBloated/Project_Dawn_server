@@ -221,18 +221,18 @@ pub fn is_equippable_in_slot(path: &str, slot: u8) -> bool {
     let Some(item) = lookup(path) else {
         return false;
     };
-    match (item.item_type, slot) {
-        (ItemType::Weapon, 0) | (ItemType::Weapon, 1) => true,
-        (ItemType::Offhand, 1) => true,
-        (ItemType::Head, 2) => true,
-        (ItemType::Chest, 3) => true,
-        (ItemType::Legs, 4) => true,
-        (ItemType::Feet, 5) => true,
-        (ItemType::Hands, 6) => true,
-        (ItemType::Ring, 7) => true,
-        (ItemType::Neck, 8) => true,
-        _ => false,
-    }
+    matches!(
+        (item.item_type, slot),
+        (ItemType::Weapon, 0 | 1)
+            | (ItemType::Offhand, 1)
+            | (ItemType::Head, 2)
+            | (ItemType::Chest, 3)
+            | (ItemType::Legs, 4)
+            | (ItemType::Feet, 5)
+            | (ItemType::Hands, 6)
+            | (ItemType::Ring, 7)
+            | (ItemType::Neck, 8)
+    )
 }
 
 /// Track 14.1 — max stack size for a path. Returns `u32::MAX` for

@@ -840,10 +840,8 @@ pub fn equip_refusal(
                     return Some("You cannot hold that with a two-handed weapon.".to_string());
                 }
             }
-            0 => {
-                if item.is_two_handed && !other_hand.is_empty() {
-                    return Some("Empty your off hand first.".to_string());
-                }
+            0 if item.is_two_handed && !other_hand.is_empty() => {
+                return Some("Empty your off hand first.".to_string());
             }
             _ => {}
         }

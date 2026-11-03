@@ -13,7 +13,7 @@ pub(super) async fn persist_binds(world: &mut WorldState, q: &mut Intents, _now:
     //      respawn the player somewhere they explicitly chose not to be —
     //      the exact failure this feature exists to prevent.
     for (char_id, zone, pos) in bind_intents.drain(..) {
-        if let Err(e) = db::set_bind_point(&pool, char_id, zone.as_deref(), pos).await {
+        if let Err(e) = db::set_bind_point(pool, char_id, zone.as_deref(), pos).await {
             tracing::warn!(char_id, error = %e, "set_bind_point failed; bind is live in memory but not persisted");
         }
     }
@@ -103,8 +103,7 @@ pub(super) async fn apply_res_accepts(world: &mut WorldState, q: &mut Intents, n
             continue;
         };
         if let Err(e) =
-            db::set_corpse_resurrected(&pool, corpse_id as i64, responder as i64, after_refund)
-                .await
+            db::set_corpse_resurrected(pool, corpse_id as i64, responder as i64, after_refund).await
         {
             tracing::error!(corpse_id, error = %e, "set_corpse_resurrected failed — res not granted");
             // Transient, and NOT decisive: the offer stays live so the player

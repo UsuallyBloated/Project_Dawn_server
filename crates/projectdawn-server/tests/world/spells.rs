@@ -268,8 +268,7 @@ async fn a_mob_nuked_from_beyond_its_old_leash_turns_on_the_caster() {
     // Moves at RUN_SPEED, plus the 3 m and the ~2.5 m the server keeps
     // integrating after the last Move (STALE_MOVE_THRESHOLD).
     let moves = (14.5 / (world::RUN_SPEED * 0.05)).ceil() as u32;
-    let mut seq: u32 = 1;
-    for _ in 0..moves {
+    for seq in 1..=moves {
         a.send_move(
             seq,
             Vec3 {
@@ -278,7 +277,6 @@ async fn a_mob_nuked_from_beyond_its_old_leash_turns_on_the_caster() {
                 z: 1.0,
             },
         );
-        seq += 1;
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
@@ -542,8 +540,7 @@ async fn heals_reach_30_m_and_not_past_it() {
 
     // B walks 6 m further east: about 34 m. Healing Light's own cooldown is
     // 5 s, so the second cast waits it out.
-    let mut seq: u32 = 1;
-    for _ in 0..16 {
+    for seq in 1..=16u32 {
         b.send_move(
             seq,
             Vec3 {
@@ -552,7 +549,6 @@ async fn heals_reach_30_m_and_not_past_it() {
                 z: 0.0,
             },
         );
-        seq += 1;
         tick_one(&mut b.client, &mut b.transport);
         tokio::time::sleep(TICK_DT).await;
     }
@@ -2128,7 +2124,7 @@ async fn a_heal_is_its_listed_number() {
     // old server's 10 + WIS x 0.3 (WIS 24: 17) sits above the window.
     let gained = healed_hp - hurt_hp;
     assert!(
-        gained >= 10.0 - 0.01 && gained <= 12.01,
+        (10.0 - 0.01..=12.01).contains(&gained),
         "healed {gained}; Healing Light's listed 10 and nothing more"
     );
 }

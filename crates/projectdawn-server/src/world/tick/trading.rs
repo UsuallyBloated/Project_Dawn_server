@@ -48,12 +48,7 @@ pub(super) fn close_trade(
         for c in [session.a.cid, session.b.cid] {
             handlers::send_trade_closed(server, c, false, reason);
         }
-        tracing::info!(
-            a = session.a.cid as u64,
-            b = session.b.cid as u64,
-            reason,
-            "trade closed"
-        );
+        tracing::info!(a = session.a.cid, b = session.b.cid, reason, "trade closed");
     }
 }
 
@@ -481,7 +476,7 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                         }
                         for (_, _, path, count) in receives {
                             match sim.add_item_locating(path, *count) {
-                                Ok((_, leftover)) if leftover == 0 => {}
+                                Ok((_, 0)) => {}
                                 _ => return false,
                             }
                         }
@@ -515,7 +510,7 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                     let mut flushed = true;
                     for cid in [acid, bcid] {
                         if let Some(c) = connections.get_mut(&cid) {
-                            if let Err(e) = persistence::persist_dirty_stores(&pool, c).await {
+                            if let Err(e) = persistence::persist_dirty_stores(pool, c).await {
                                 tracing::error!(trader = cid, error = %e, "pre-trade store flush failed; trade closed");
                                 flushed = false;
                                 break;
@@ -535,7 +530,7 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                             .map(|c| (c.inventory.clone(), c.coins))
                     };
                     let (Some(a_before), Some(b_before)) =
-                        (revert(&connections, acid), revert(&connections, bcid))
+                        (revert(connections, acid), revert(connections, bcid))
                     else {
                         close_trade(&mut *server, &mut *trade_manager, acid, "Trade failed.");
                         continue;
@@ -631,7 +626,7 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                             .map(|c| (c.inventory.to_rows(), c.coins, c.item_events.clone()));
                         match (rows_a, rows_b) {
                             (Some((ra, ca, ea)), Some((rb, cb, eb))) => match db::commit_trade(
-                                &pool,
+                                pool,
                                 acid as i64,
                                 &ra,
                                 ca,
@@ -646,8 +641,8 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                                 Ok(()) => true,
                                 Err(e) => {
                                     tracing::error!(
-                                        a = acid as u64,
-                                        b = bcid as u64,
+                                        a = acid,
+                                        b = bcid,
                                         error = %e,
                                         "commit_trade persist failed"
                                     );
@@ -705,8 +700,8 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                         handlers::send_trade_closed(&mut *server, c, true, "Trade complete.");
                     }
                     tracing::info!(
-                        a = acid as u64,
-                        b = bcid as u64,
+                        a = acid,
+                        b = bcid,
                         a_stacks = a_gives.len(),
                         b_stacks = b_gives.len(),
                         a_coins = session.a.coins.total_copper(),

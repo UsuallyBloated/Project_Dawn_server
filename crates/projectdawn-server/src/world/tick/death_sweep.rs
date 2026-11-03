@@ -58,11 +58,11 @@ pub(super) async fn run_death_sweep(
     // someone else finishes.
     if !newly_dead.is_empty() {
         for mob_id in wipe_hate(&mut *enemies, &newly_dead) {
-            handlers::fan_out_entity_target(&mut *server, &in_world_recipients_now, mob_id, None);
+            handlers::fan_out_entity_target(&mut *server, in_world_recipients_now, mob_id, None);
         }
         for bearer in clear_player_dots_from(&mut *connections, &newly_dead) {
             if let Some(conn) = connections.get(&bearer) {
-                handlers::fan_out_buff_snapshot(&mut *server, &in_world_recipients_now, conn);
+                handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, conn);
             }
         }
     }
@@ -114,7 +114,7 @@ pub(super) async fn run_death_sweep(
         //    the next one (corpse_pending is set again), so a passing
         //    database error cannot let a death skip its corpse.
         if let Some(c) = connections.get_mut(&client_id) {
-            if let Err(e) = persistence::persist_dirty_stores(&pool, c).await {
+            if let Err(e) = persistence::persist_dirty_stores(pool, c).await {
                 tracing::error!(char_id = cid, error = %e, "pre-corpse store flush failed; corpse retried next tick");
                 c.corpse_pending = true;
                 continue;
@@ -156,7 +156,7 @@ pub(super) async fn run_death_sweep(
             None => continue,
         };
         if let Err(e) = db::save_corpse(
-            &pool,
+            pool,
             corpse_id as i64,
             cid,
             &owner_name,

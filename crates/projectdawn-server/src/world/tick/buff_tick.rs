@@ -38,7 +38,7 @@ pub(super) fn run_buff_tick(
         }
         song_pulse(
             &mut *server,
-            &in_world_recipients_now,
+            in_world_recipients_now,
             &mut *connections,
             &mut *enemies,
             cid,

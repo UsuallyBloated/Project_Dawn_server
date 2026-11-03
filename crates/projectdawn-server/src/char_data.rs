@@ -41,8 +41,12 @@ impl StatBlock {
             constitution: v,
         }
     }
+}
 
-    pub fn add(self, other: Self) -> Self {
+impl std::ops::Add for StatBlock {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
         Self {
             strength: self.strength + other.strength,
             dexterity: self.dexterity + other.dexterity,
@@ -894,10 +898,10 @@ pub fn is_playable_class(class: &str) -> bool {
 pub fn compute(race: &str, class: &str, level: i32) -> ComputedCharacter {
     let mut stats = StatBlock::flat(BASE);
     if let Some(r) = races().get(race) {
-        stats = stats.add(*r);
+        stats = stats + *r;
     }
     let cls = classes().get(class).copied().unwrap_or_default();
-    stats = stats.add(cls.bonuses);
+    stats = stats + cls.bonuses;
 
     let mut max_stamina = (BASE_ST + cls.stamina_bonus).max(20.0);
 
@@ -907,7 +911,7 @@ pub fn compute(race: &str, class: &str, level: i32) -> ComputedCharacter {
         .unwrap_or_else(default_level_gain);
     let lvl = level.clamp(1, 99);
     for _ in 1..lvl {
-        stats = stats.add(gain.stats);
+        stats = stats + gain.stats;
         max_stamina += gain.max_stamina;
     }
     // Hit points and mana are EQ's formulas over the level and the grown

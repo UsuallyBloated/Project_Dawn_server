@@ -121,7 +121,7 @@ pub(super) fn award_kill(
     // the solo killer too — they may have disconnected (or died to a last
     // exchange of blows) between dealing top damage and the mob dying.
     let group_members: Vec<ClientId> = match group_manager.group_of(credit_cid) {
-        Some(g) => g.members.iter().copied().collect(),
+        Some(g) => g.members.to_vec(),
         None => vec![credit_cid],
     };
     let xp_members: Vec<ClientId> = group_members

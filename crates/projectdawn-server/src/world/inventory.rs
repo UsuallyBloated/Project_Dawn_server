@@ -307,7 +307,7 @@ fn merge_capped(
         item_path: existing.item_path,
         count: existing.count.saturating_add(moved),
     };
-    let back = (leftover > 0).then(|| InventoryEntry {
+    let back = (leftover > 0).then_some(InventoryEntry {
         item_path: incoming.item_path,
         count: leftover,
     });
@@ -973,11 +973,11 @@ impl PlayerInventory {
                 break;
             }
             let arr = self.bags.get_mut(b).expect("key from keys()");
-            for si in 0..arr.len() {
+            for (si, slot) in arr.iter_mut().enumerate() {
                 if remaining == 0 {
                     break;
                 }
-                if let Some(entry) = arr[si].as_mut() {
+                if let Some(entry) = slot.as_mut() {
                     if entry.item_path == item_path && entry.count < cap {
                         let space = cap - entry.count;
                         let put = remaining.min(space);
@@ -1015,13 +1015,13 @@ impl PlayerInventory {
                     break;
                 }
                 let arr = self.bags.get_mut(b).expect("key from keys()");
-                for si in 0..arr.len() {
+                for (si, slot) in arr.iter_mut().enumerate() {
                     if remaining == 0 {
                         break;
                     }
-                    if arr[si].is_none() {
+                    if slot.is_none() {
                         let put = remaining.min(cap);
-                        arr[si] = Some(InventoryEntry {
+                        *slot = Some(InventoryEntry {
                             item_path: item_path.to_string(),
                             count: put,
                         });
@@ -1112,6 +1112,11 @@ impl PlayerInventory {
         }
         let src_path = src_entry.item_path.clone();
         // Validate dst before mutating either slot.
+        // Not collapsible, whatever clippy says: folding the stack check into
+        // the guard sends a same-item stack under the cap to the `Some(_)` arm,
+        // refusing every merge as a different item (clippy's own autofix did
+        // exactly that on 2026-11-02; `split_base_into_same_path_merges`).
+        #[allow(clippy::collapsible_match)]
         match self.base.get(dst).and_then(|s| s.as_ref()) {
             None => {} // empty dst — clean transfer.
             Some(existing) if existing.item_path == src_path => {
@@ -2377,7 +2382,7 @@ mod tests {
             "source unchanged on reject"
         );
         assert!(
-            inv.equipment.get(&0).is_none(),
+            !inv.equipment.contains_key(&0),
             "paperdoll unchanged on reject"
         );
     }
@@ -2710,7 +2715,7 @@ mod tests {
         );
         let touched = inv.unequip_to_base(0, 3).expect("unequip");
         assert_eq!(touched, vec![("base", 3u32), ("equip", 0u32)]);
-        assert!(inv.equipment.get(&0).is_none());
+        assert!(!inv.equipment.contains_key(&0));
         assert_eq!(
             inv.base[3].as_ref().unwrap().item_path,
             "res://items/sword.tres"
@@ -3374,7 +3379,7 @@ mod tests {
         );
         let touched = inv.unequip_to_cursor(0).expect("lift off the doll");
         assert_eq!(touched.len(), 2);
-        assert!(inv.equipment.get(&0).is_none(), "slot emptied");
+        assert!(!inv.equipment.contains_key(&0), "slot emptied");
         assert_eq!(inv.cursor.as_ref().unwrap().item_path, SWORD);
     }
 
@@ -3394,7 +3399,7 @@ mod tests {
         });
         let err = inv.unequip_to_cursor(0).unwrap_err();
         assert_eq!(err, MoveError::CursorOccupied);
-        assert!(inv.equipment.get(&0).is_some(), "nothing moved on refusal");
+        assert!(inv.equipment.contains_key(&0), "nothing moved on refusal");
     }
 
     #[test]

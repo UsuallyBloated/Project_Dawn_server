@@ -340,9 +340,6 @@ pub(super) struct Intents {
     // Jumps begun this tick (the rising edge of a Move's `jumping`),
     // relayed below to the players who can see each jumper.
     pub(super) jump_fanouts: Vec<ClientId>,
-    // Track 4 sub-task 3 — like resources, dedup per sender so a burst
-    // of buff changes inside one tick produces a single fan-out.
-    pub(super) buff_fanouts: Vec<ClientId>,
     // Track 4 sub-task 4 combat events. Verbatim queue (Hit/Miss/Evade
     // are one-shot visuals, ordered).
     pub(super) combat_fanouts: Vec<(ClientId, CombatEvent)>,

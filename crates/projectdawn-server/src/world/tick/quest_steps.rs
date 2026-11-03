@@ -200,7 +200,7 @@ pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents
         // award_xp below lands on these same numbers in memory.
         let after_reward = crate::world::progression::progress_after(conn_ro, reward);
         if let Err(e) =
-            db::record_quest_completion(&pool, responder as i64, &quest_id, after_reward).await
+            db::record_quest_completion(pool, responder as i64, &quest_id, after_reward).await
         {
             tracing::error!(char_id = responder, quest_id = %quest_id, error = %e, "record_quest_completion failed — reward not granted");
             handlers::send_quest_rejected(
@@ -215,7 +215,7 @@ pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents
         // The active row is now redundant (completed_quests is the
         // permanent record). A failed delete self-heals: the login
         // normalization drops actives that are already completed.
-        if let Err(e) = db::delete_active_quest(&pool, responder as i64, &quest_id).await {
+        if let Err(e) = db::delete_active_quest(pool, responder as i64, &quest_id).await {
             tracing::warn!(char_id = responder, quest_id = %quest_id, error = %e, "delete_active_quest after completion failed");
         }
         if let Some(conn) = connections.get_mut(&responder_cid) {
@@ -291,7 +291,7 @@ pub(super) async fn apply_quest_turn_ins(world: &mut WorldState, q: &mut Intents
         // crash. Rare path; a failed save falls back to the checkpoint.
         if !rewards.is_empty() {
             if let Some(conn) = connections.get_mut(&responder_cid) {
-                if let Err(e) = persistence::persist_dirty_stores(&pool, conn).await {
+                if let Err(e) = persistence::persist_dirty_stores(pool, conn).await {
                     tracing::warn!(char_id = responder, quest_id = %quest_id, error = %e, "quest reward store save failed (will retry on checkpoint)");
                 }
             }

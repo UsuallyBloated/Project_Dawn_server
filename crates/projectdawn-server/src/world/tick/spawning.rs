@@ -161,7 +161,7 @@ pub(super) fn run_spawning(
             // owner - 1, no variance on a free auto-summon.
             let Some((pet_id, pet_level)) = summon_scaled_pet(
                 &mut *server,
-                &in_world_recipients_now,
+                in_world_recipients_now,
                 &mut *enemies,
                 &mut *aoi,
                 owner_id,
@@ -190,8 +190,8 @@ pub(super) fn run_spawning(
     //      `connections` borrow with the `enemies` mutation in
     //      the helper.
     let due_warder_respawns: Vec<(EntityId, Vec3f, u32)> = connections
-        .iter()
-        .filter_map(|(_, c)| {
+        .values()
+        .filter_map(|c| {
             if !c.in_world {
                 return None;
             }
@@ -213,7 +213,7 @@ pub(super) fn run_spawning(
         // is the same free ritual, so no variance here either.
         let Some((pet_id, pet_level)) = summon_scaled_pet(
             &mut *server,
-            &in_world_recipients_now,
+            in_world_recipients_now,
             &mut *enemies,
             &mut *aoi,
             owner_id,
@@ -274,7 +274,7 @@ pub(super) fn run_spawning(
             &mut *server,
             &mut *aoi,
             &mut *enemies,
-            &in_world_recipients_now,
+            in_world_recipients_now,
             pet,
             charmer,
             now,

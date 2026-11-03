@@ -54,6 +54,7 @@ pub struct MobTemplate {
     /// constant. Kept (defaulted) so existing `zone_camps.toml` entries still
     /// parse; safe to drop from the data in a later content pass.
     #[serde(default)]
+    #[allow(dead_code)]
     pub xp: i32,
     pub speed: f32,
     pub aggro: f32,

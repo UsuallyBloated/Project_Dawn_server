@@ -263,7 +263,7 @@ pub(super) fn apply_active_skills(
                         for mob_id in wipe_hate(&mut *enemies, &[intent.user]) {
                             handlers::fan_out_entity_target(
                                 &mut *server,
-                                &in_world_recipients_now,
+                                in_world_recipients_now,
                                 mob_id,
                                 None,
                             );
@@ -301,7 +301,7 @@ pub(super) fn apply_active_skills(
             }
             if snapshot_changed {
                 if let Some(u) = connections.get(&user_cid) {
-                    handlers::fan_out_buff_snapshot(&mut *server, &in_world_recipients_now, u);
+                    handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, u);
                 }
             }
         }
@@ -467,7 +467,7 @@ pub(super) fn apply_attacks(
                 .is_some_and(|a| buffs::break_stealth(&mut a.active_buffs));
             if stealth_broken {
                 if let Some(a) = connections.get(&attacker_cid) {
-                    handlers::fan_out_buff_snapshot(&mut *server, &in_world_recipients_now, a);
+                    handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, a);
                 }
             }
 
@@ -536,7 +536,7 @@ pub(super) fn apply_attacks(
                 if !target_in_range_alive {
                     handlers::fan_out_miss(
                         &mut *server,
-                        &in_world_recipients_now,
+                        in_world_recipients_now,
                         intent.attacker,
                         intent.target_id,
                     );
@@ -554,7 +554,7 @@ pub(super) fn apply_attacks(
                 if target_evading && !truesight {
                     handlers::fan_out_evade(
                         &mut *server,
-                        &in_world_recipients_now,
+                        in_world_recipients_now,
                         intent.attacker,
                         intent.target_id,
                     );
@@ -597,7 +597,7 @@ pub(super) fn apply_attacks(
                 if swing.missed {
                     handlers::fan_out_miss(
                         &mut *server,
-                        &in_world_recipients_now,
+                        in_world_recipients_now,
                         intent.attacker,
                         intent.target_id,
                     );
@@ -648,7 +648,7 @@ pub(super) fn apply_attacks(
                         }
                     }
                     if let Some(tc) = connections.get(&target_cid) {
-                        handlers::fan_out_buff_snapshot(&mut *server, &in_world_recipients_now, tc);
+                        handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, tc);
                     }
                 }
                 // Damage shield reflects damage to the attacker
@@ -666,7 +666,7 @@ pub(super) fn apply_attacks(
                             let att_max = att.max_hp;
                             handlers::fan_out_health_update(
                                 &mut *server,
-                                &in_world_recipients_now,
+                                in_world_recipients_now,
                                 intent.attacker,
                                 new_att_hp,
                                 att_max,
@@ -674,7 +674,7 @@ pub(super) fn apply_attacks(
                             if let Some(name) = shield_name_pvp.as_ref() {
                                 handlers::fan_out_damage_shield_trigger(
                                     &mut *server,
-                                    &in_world_recipients_now,
+                                    in_world_recipients_now,
                                     intent.target_id,
                                     intent.attacker,
                                     reflect_dmg,
@@ -694,7 +694,7 @@ pub(super) fn apply_attacks(
                                 } => {
                                     handlers::fan_out_cast_fail(
                                         &mut *server,
-                                        &in_world_recipients_now,
+                                        in_world_recipients_now,
                                         intent.attacker,
                                         "interrupted (hit during cast)".to_string(),
                                     );
@@ -743,7 +743,7 @@ pub(super) fn apply_attacks(
                 // Re-borrow target_conn now that the damage block
                 // has released it; same helper as the enemy arm.
                 if let Some(tc) = connections.get_mut(&target_cid) {
-                    let interrupt_outcome = roll_cast_interrupt(tc, now, amount as i32);
+                    let interrupt_outcome = roll_cast_interrupt(tc, now, amount);
                     let (tc_mp, tc_max_mp) = (tc.mp, tc.max_mp);
                     match &interrupt_outcome {
                         InterruptOutcome::Interrupted {
@@ -752,7 +752,7 @@ pub(super) fn apply_attacks(
                         } => {
                             handlers::fan_out_cast_fail(
                                 &mut *server,
-                                &in_world_recipients_now,
+                                in_world_recipients_now,
                                 intent.target_id,
                                 "interrupted (hit during cast)".to_string(),
                             );
@@ -788,7 +788,7 @@ pub(super) fn apply_attacks(
                 }
                 handlers::fan_out_hit(
                     &mut *server,
-                    &in_world_recipients_now,
+                    in_world_recipients_now,
                     intent.attacker,
                     intent.target_id,
                     amount,
@@ -797,7 +797,7 @@ pub(super) fn apply_attacks(
                 );
                 handlers::fan_out_health_update(
                     &mut *server,
-                    &in_world_recipients_now,
+                    in_world_recipients_now,
                     intent.target_id,
                     new_hp,
                     max_hp,
@@ -831,7 +831,7 @@ pub(super) fn apply_attacks(
                         if let Some(spell) = interrupted {
                             handlers::fan_out_cast_fail(
                                 &mut *server,
-                                &in_world_recipients_now,
+                                in_world_recipients_now,
                                 intent.target_id,
                                 "interrupted (stunned)".to_string(),
                             );
@@ -840,7 +840,7 @@ pub(super) fn apply_attacks(
                         if let Some(tc) = connections.get(&target_cid) {
                             handlers::fan_out_buff_snapshot(
                                 &mut *server,
-                                &in_world_recipients_now,
+                                in_world_recipients_now,
                                 tc,
                             );
                         }
@@ -914,7 +914,7 @@ pub(super) fn apply_attacks(
             let Some(entity) = enemies.get_mut(&intent.target_id) else {
                 handlers::fan_out_miss(
                     &mut *server,
-                    &in_world_recipients_now,
+                    in_world_recipients_now,
                     intent.attacker,
                     intent.target_id,
                 );
@@ -923,7 +923,7 @@ pub(super) fn apply_attacks(
             if !entity.is_alive() {
                 handlers::fan_out_miss(
                     &mut *server,
-                    &in_world_recipients_now,
+                    in_world_recipients_now,
                     intent.attacker,
                     intent.target_id,
                 );
@@ -950,7 +950,7 @@ pub(super) fn apply_attacks(
                 );
                 handlers::fan_out_miss(
                     &mut *server,
-                    &in_world_recipients_now,
+                    in_world_recipients_now,
                     intent.attacker,
                     intent.target_id,
                 );
@@ -978,7 +978,7 @@ pub(super) fn apply_attacks(
                 *entity.threat.entry(intent.attacker).or_insert(0.0) += 1.0;
                 handlers::fan_out_miss(
                     &mut *server,
-                    &in_world_recipients_now,
+                    in_world_recipients_now,
                     intent.attacker,
                     intent.target_id,
                 );
@@ -1081,7 +1081,7 @@ pub(super) fn apply_attacks(
             }
             handlers::fan_out_hit(
                 &mut *server,
-                &in_world_recipients_now,
+                in_world_recipients_now,
                 intent.attacker,
                 intent.target_id,
                 amount,
@@ -1090,14 +1090,14 @@ pub(super) fn apply_attacks(
             );
             handlers::fan_out_health_update(
                 &mut *server,
-                &in_world_recipients_now,
+                in_world_recipients_now,
                 entity.id,
                 entity.hp,
                 entity.max_hp,
             );
             if entity.hp <= 0.0 {
                 entity.transition(EnemyState::Dead, now);
-                handlers::fan_out_entity_died(&mut *server, &in_world_recipients_now, entity.id);
+                handlers::fan_out_entity_died(&mut *server, in_world_recipients_now, entity.id);
                 // Warder respawn — if a player kill (PvP or
                 // accidental) drops a Beast Master warder, schedule
                 // the same retreat-and-respawn the enemy-kill path
@@ -1149,7 +1149,7 @@ pub(super) fn apply_attacks(
                     award_kill(
                         &mut *server,
                         &mut *connections,
-                        &group_manager,
+                        group_manager,
                         credit_id,
                         base_xp,
                         &mob_name,

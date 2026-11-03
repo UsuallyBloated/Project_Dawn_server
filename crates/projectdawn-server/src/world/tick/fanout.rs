@@ -222,7 +222,7 @@ pub(super) fn seed_joiners(world: &mut WorldState, q: &mut Intents, now: Instant
             }
             handlers::fan_out_pet_spawn(&mut *server, std::slice::from_ref(new_id), entity, None);
             tracing::debug!(
-                new_client = *new_id as u64,
+                new_client = *new_id,
                 pet_id = *entity_id,
                 owner = owner_id,
                 "EnterWorld seeded existing pet to new client"
@@ -385,7 +385,6 @@ pub(super) fn fan_out_events(
         to_disconnect,
         cast_fanouts,
         jump_fanouts,
-        buff_fanouts,
         combat_fanouts,
         death_fanouts,
         player_target_fanouts,
@@ -400,23 +399,6 @@ pub(super) fn fan_out_events(
     //     in_world clients including the owner. Step 4a still uses
     //     `fan_out_resources` to seed new joiners with the current
     //     value.)
-    // 4d. Buff snapshot fan-out — owning client → every other in_world
-    //     peer.
-    for sender_id in buff_fanouts.iter() {
-        if to_disconnect.contains(sender_id) {
-            continue;
-        }
-        let Some(sender) = connections.get(sender_id) else {
-            continue;
-        };
-        let recipients: Vec<ClientId> = in_world_recipients
-            .iter()
-            .filter(|id| *id != sender_id)
-            .copied()
-            .collect();
-        handlers::fan_out_buff_snapshot(&mut *server, &recipients, sender);
-    }
-
     // 4b-jump. The jump relay: one PlayerJumped per jump begun this tick,
     //     to the in-world players who can see the jumper (the AOI view,
     //     the same audience as the jumper's Position fan in step 6; a
@@ -581,7 +563,7 @@ pub(super) fn fan_out_events(
         use protocol::world::ChatChannel;
         match channel {
             ChatChannel::Say => {
-                let recipients = say_recipients(sender_id, &connections);
+                let recipients = say_recipients(sender_id, connections);
                 handlers::fan_out_chat_message(&mut *server, &recipients, &speaker, channel, &text);
             }
             ChatChannel::Shout | ChatChannel::Ooc => {
@@ -602,7 +584,7 @@ pub(super) fn fan_out_events(
                     .members
                     .iter()
                     .filter(|id| {
-                        **id != sender_id && connections.get(*id).map_or(false, |c| c.in_world)
+                        **id != sender_id && connections.get(*id).is_some_and(|c| c.in_world)
                     })
                     .copied()
                     .collect();

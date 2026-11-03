@@ -2,13 +2,6 @@
 
 use super::*;
 
-/// Track 12 Piece B — spawn a player-owned pet at `spawn_pos`,
-/// despawning the owner's existing pet first. Used by the
-/// PET_SUMMON CastSpell arm, the Beast Master auto-summon on
-/// EnterWorld, and the warder death-respawn sweep. `hp_fraction`
-/// is 1.0 for fresh summons and 0.3 for the warder return.
-/// Returns the new pet's id.
-#[allow(clippy::too_many_arguments)]
 /// Owner-derived summon wrapper (pet interim A): resolves the scaled
 /// template for `pet_type` at the owner's level, applies the standard
 /// +1.5 m east spawn offset, and delegates to `summon_pet_for_owner`.
@@ -53,6 +46,12 @@ pub(super) fn summon_scaled_pet(
     Some((pet_id, pet_level))
 }
 
+/// Spawns a player-owned pet at `spawn_pos`, despawning the owner's
+/// existing pet first. Used by the PET_SUMMON CastSpell arm, the Beast
+/// Master auto-summon on EnterWorld, and the warder death-respawn sweep,
+/// all through `summon_scaled_pet`. `hp_fraction` is 1.0 for fresh
+/// summons and 0.3 for the warder return. Returns the new pet's id.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn summon_pet_for_owner(
     server: &mut RenetServer,
     in_world_recipients: &[ClientId],

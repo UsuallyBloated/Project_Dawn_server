@@ -869,7 +869,6 @@ struct SpawnRow {
     class: String,
     level: i32,
     xp: i32,
-    xp_to_next: i32,
     base_strength: i32,
     base_dexterity: i32,
     base_agility: i32,
@@ -896,7 +895,6 @@ struct SpawnRow {
     pos_y: Option<f32>,
     pos_z: Option<f32>,
     yaw: Option<f32>,
-    bind_zone: Option<String>,
     bind_x: Option<f32>,
     bind_y: Option<f32>,
     bind_z: Option<f32>,
@@ -904,7 +902,7 @@ struct SpawnRow {
 
 pub async fn load_character(pool: &SqlitePool, char_id: i64) -> DbResult<CharacterSpawn> {
     let row: Option<SpawnRow> = sqlx::query_as(
-        "SELECT id, account_id, name, race, class, level, xp, xp_to_next,
+        "SELECT id, account_id, name, race, class, level, xp,
                 base_strength, base_dexterity, base_agility,
                 base_intelligence, base_wisdom, base_charisma,
                 base_constitution,
@@ -912,7 +910,7 @@ pub async fn load_character(pool: &SqlitePool, char_id: i64) -> DbResult<Charact
                 hp, mp, stamina, platinum, gold, silver, copper,
                 bank_platinum, bank_gold, bank_silver, bank_copper,
                 zone, pos_x, pos_y, pos_z, yaw,
-                bind_zone, bind_x, bind_y, bind_z,
+                bind_x, bind_y, bind_z,
                 hunger, thirst,
                 CAST(alignment_score AS REAL) AS alignment_score, alignment_seeded
          FROM characters

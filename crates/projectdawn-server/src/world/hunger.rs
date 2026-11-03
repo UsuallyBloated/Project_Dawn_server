@@ -184,7 +184,7 @@ pub fn update_due(conn: &PerConnection, now: std::time::Instant) -> bool {
         || (conn.hunger_rate_sent - drain_rate_now(conn)).abs() > f32::EPSILON
         || conn
             .hunger_sent_at
-            .map_or(true, |t| now.duration_since(t) >= UPDATE_INTERVAL)
+            .is_none_or(|t| now.duration_since(t) >= UPDATE_INTERVAL)
 }
 
 /// Record a send, so `update_due` waits for the next reason.

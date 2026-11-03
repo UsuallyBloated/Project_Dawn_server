@@ -47,10 +47,6 @@ pub enum Outcome {
     /// (`PerConnection::note_move_jump`). The tick loop fans one
     /// `PlayerJumped` to the players who can see the jumper.
     JumpFanOut,
-    /// Track 4 sub-task 3 — owning client broadcast a fresh buff snapshot.
-    /// Cache updated on `conn`; tick loop fans out to in_world peers in
-    /// a post-dispatch sweep, deduped per sender like resources.
-    BuffSnapshotFanOut,
     /// Track 4 sub-task 4 — combat outcome from the attacker's POV. Pure
     /// visual fan-out; payload travels verbatim in the matching server
     /// variant.

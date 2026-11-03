@@ -38,7 +38,7 @@ pub(super) async fn run_upkeep(
     //    re-queues for next tick.
     for conn in connections.values_mut() {
         if !conn.quests_dirty.is_empty() {
-            persistence::flush_quests(&pool, conn, "tick").await;
+            persistence::flush_quests(pool, conn, "tick").await;
         }
     }
 
@@ -47,7 +47,7 @@ pub(super) async fn run_upkeep(
         let started = Instant::now();
         let mut dirty: Vec<&mut PerConnection> = connections.values_mut().collect();
         let walked = dirty.len();
-        persistence::checkpoint_dirty(&pool, &mut dirty).await;
+        persistence::checkpoint_dirty(pool, &mut dirty).await;
         tick_health.record_checkpoint(started.elapsed(), walked);
         *last_checkpoint = now;
     }
@@ -83,7 +83,7 @@ pub(super) async fn run_upkeep(
         *last_pending_retry = now;
         let mut still_pending = Vec::new();
         for mut pending in pending_saves.drain(..) {
-            if persistence::flush_connection(&pool, &mut pending.conn, "logout retry").await {
+            if persistence::flush_connection(pool, &mut pending.conn, "logout retry").await {
                 tracing::info!(
                     char_id = pending.conn.char_id,
                     "queued logout save landed; relogin open"
@@ -107,7 +107,7 @@ pub(super) async fn run_upkeep(
     //    EnterWorld. Reliable channel: a lost update would leave one
     //    client's sky wrong for a whole interval.
     if now.duration_since(*last_time_broadcast) >= clock::BROADCAST_INTERVAL {
-        handlers::fan_out_time_of_day(&mut *server, &in_world_ids, clock::current_hour());
+        handlers::fan_out_time_of_day(&mut *server, in_world_ids, clock::current_hour());
         *last_time_broadcast = now;
     }
 

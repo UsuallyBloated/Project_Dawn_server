@@ -646,7 +646,7 @@ async fn aoi_approaching_client_triggers_entity_spawn() {
         // A sends a Heartbeat every ~4 s (80 ticks) to satisfy the
         // server's 10 s app-layer idle timeout while B walks.
         heartbeat_tick += 1;
-        if heartbeat_tick % 80 == 0 {
+        if heartbeat_tick.is_multiple_of(80) {
             a.send_heartbeat();
         }
         tick_one(&mut b.client, &mut b.transport);
@@ -1140,7 +1140,7 @@ async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
         b.send_move(seq, west);
         seq += 1;
         ticks += 1;
-        if ticks % 80 == 0 {
+        if ticks.is_multiple_of(80) {
             a.send_heartbeat();
         }
         tick_one(&mut a.client, &mut a.transport);
@@ -1200,7 +1200,7 @@ async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
             break;
         }
         t += 1;
-        if t % 80 == 0 {
+        if t.is_multiple_of(80) {
             a.send_heartbeat();
             b.send_heartbeat();
         }

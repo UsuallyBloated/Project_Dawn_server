@@ -936,8 +936,9 @@ impl Entity {
     ///
     /// Caster kiting and healer flee are not wired here; the starter zone
     /// has no caster or healer mobs (all 9 archetypes are melee). When
-    /// those land, branch on `mob.spell_damage > 0` / `mob.healer_flee_hp
-    /// > 0.0` here.
+    /// those land, branch here on `mob.spell_damage > 0` and
+    /// `mob.healer_flee_hp > 0.0`.
+    ///
     /// `hidden` names the players a Hide holds: an idle mob's proximity scan
     /// passes over them (a mob already provoked still finds them through its
     /// threat table, and the first swing ends the hide anyway).
@@ -1666,10 +1667,13 @@ mod tests {
         small.leash = None;
         let e = Entity::from_spawn(0, Vec3f::ZERO, small, now);
         assert!((e.leash_range() - super::super::MIN_LEASH_RANGE).abs() < 1e-6);
-        assert!(
-            super::super::MIN_LEASH_RANGE > super::super::RANGED_ATTACK_RANGE,
-            "the floor must sit past bow reach or the hole stays open"
-        );
+        // Both are constants, so this one is checked at compile time.
+        const {
+            assert!(
+                super::super::MIN_LEASH_RANGE > super::super::RANGED_ATTACK_RANGE,
+                "the floor must sit past bow reach or the hole stays open"
+            )
+        };
         for spell in super::super::spells::all() {
             assert!(
                 super::super::MIN_LEASH_RANGE > spell.reach(),

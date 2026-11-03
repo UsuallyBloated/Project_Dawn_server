@@ -67,7 +67,7 @@ pub(super) fn apply_casts(
             // and Gate would have moved the corpse.
             if connections
                 .get(&caster_cid)
-                .map_or(true, |c| c.hp <= 0.0 || c.death_processed)
+                .is_none_or(|c| c.hp <= 0.0 || c.death_processed)
             {
                 tracing::info!(
                     char_id = intent.caster,
@@ -76,7 +76,7 @@ pub(super) fn apply_casts(
                 );
                 refuse_cast(
                     &mut *server,
-                    &connections,
+                    connections,
                     caster_cid,
                     intent.caster,
                     "You are dead.",
@@ -123,13 +123,7 @@ pub(super) fn apply_casts(
                         class_ok,
                         "CastSpell rejected — class/level not eligible"
                     );
-                    refuse_cast(
-                        &mut *server,
-                        &connections,
-                        caster_cid,
-                        intent.caster,
-                        reason,
-                    );
+                    refuse_cast(&mut *server, connections, caster_cid, intent.caster, reason);
                     continue;
                 }
             }
@@ -147,7 +141,7 @@ pub(super) fn apply_casts(
                 );
                 refuse_cast(
                     &mut *server,
-                    &connections,
+                    connections,
                     caster_cid,
                     intent.caster,
                     "You have not memorized that spell.",
@@ -185,7 +179,7 @@ pub(super) fn apply_casts(
                         );
                         refuse_cast(
                             &mut *server,
-                            &connections,
+                            connections,
                             caster_cid,
                             intent.caster,
                             "cast not ready",
@@ -210,7 +204,7 @@ pub(super) fn apply_casts(
                         }
                         refuse_cast(
                             &mut *server,
-                            &connections,
+                            connections,
                             caster_cid,
                             intent.caster,
                             "That cast has lapsed.",
@@ -235,7 +229,7 @@ pub(super) fn apply_casts(
                     );
                     refuse_cast(
                         &mut *server,
-                        &connections,
+                        connections,
                         caster_cid,
                         intent.caster,
                         "interrupted (hit during cast)",
@@ -288,7 +282,7 @@ pub(super) fn apply_casts(
                         }
                         refuse_cast(
                             &mut *server,
-                            &connections,
+                            connections,
                             caster_cid,
                             intent.caster,
                             "interrupted (moved)",
@@ -313,7 +307,7 @@ pub(super) fn apply_casts(
                         );
                         refuse_cast(
                             &mut *server,
-                            &connections,
+                            connections,
                             caster_cid,
                             intent.caster,
                             "Spell is on cooldown.",
@@ -336,7 +330,7 @@ pub(super) fn apply_casts(
                             );
                             refuse_cast(
                                 &mut *server,
-                                &connections,
+                                connections,
                                 caster_cid,
                                 intent.caster,
                                 "You cannot cast again yet.",
@@ -365,7 +359,7 @@ pub(super) fn apply_casts(
                 // local "You cast X" line, with the mana they really have.
                 refuse_cast(
                     &mut *server,
-                    &connections,
+                    connections,
                     caster_cid,
                     intent.caster,
                     "Not enough mana.",
@@ -412,10 +406,10 @@ pub(super) fn apply_casts(
                 intent.caster,
                 caster_cid,
                 caster_pos,
-                &connections,
-                &enemies,
-                &corpses,
-                &group_manager,
+                connections,
+                enemies,
+                corpses,
+                group_manager,
             ) {
                 Ok(resolved) => resolved,
                 Err(line) => {
@@ -541,7 +535,7 @@ pub(super) fn apply_casts(
             };
             handlers::fan_out_mana_update(
                 &mut *server,
-                &in_world_recipients_now,
+                in_world_recipients_now,
                 intent.caster,
                 new_mp,
                 caster_max_mp,
@@ -554,14 +548,14 @@ pub(super) fn apply_casts(
                     .is_some_and(|c| buffs::break_stealth(&mut c.active_buffs));
                 if stealth_broken {
                     if let Some(c) = connections.get(&caster_cid) {
-                        handlers::fan_out_buff_snapshot(&mut *server, &in_world_recipients_now, c);
+                        handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, c);
                     }
                 }
             }
             if hp_cost > 0.0 {
                 handlers::fan_out_health_update(
                     &mut *server,
-                    &in_world_recipients_now,
+                    in_world_recipients_now,
                     intent.caster,
                     new_hp_after_cost,
                     max_hp,
@@ -615,7 +609,7 @@ pub(super) fn apply_casts(
                     tracing::info!(singer = intent.caster, song = %spell.name, "song started");
                     song_pulse(
                         &mut *server,
-                        &in_world_recipients_now,
+                        in_world_recipients_now,
                         &mut *connections,
                         &mut *enemies,
                         caster_cid,
@@ -642,7 +636,7 @@ pub(super) fn apply_casts(
                         cast_resolution_lost(
                             &mut *server,
                             &mut *connections,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             caster_cid,
                             intent.caster,
                             mana_cost,
@@ -757,7 +751,7 @@ pub(super) fn apply_casts(
                             refund_spell_cost(
                                 &mut *server,
                                 &mut *connections,
-                                &in_world_recipients_now,
+                                in_world_recipients_now,
                                 caster_cid,
                                 intent.caster,
                                 mana_cost,
@@ -789,7 +783,7 @@ pub(super) fn apply_casts(
                         };
                         handlers::fan_out_health_update(
                             &mut *server,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             intent.caster,
                             final_hp,
                             max_hp,
@@ -836,7 +830,7 @@ pub(super) fn apply_casts(
                         if let Some(cc) = connections.get(&caster_cid) {
                             handlers::fan_out_buff_snapshot(
                                 &mut *server,
-                                &in_world_recipients_now,
+                                in_world_recipients_now,
                                 cc,
                             );
                         }
@@ -853,7 +847,7 @@ pub(super) fn apply_casts(
                             cast_resolution_lost(
                                 &mut *server,
                                 &mut *connections,
-                                &in_world_recipients_now,
+                                in_world_recipients_now,
                                 caster_cid,
                                 intent.caster,
                                 mana_cost,
@@ -873,7 +867,7 @@ pub(super) fn apply_casts(
                                 let max_hp = pet.max_hp;
                                 handlers::fan_out_health_update(
                                     &mut *server,
-                                    &in_world_recipients_now,
+                                    in_world_recipients_now,
                                     raw_target,
                                     new_hp,
                                     max_hp,
@@ -902,7 +896,7 @@ pub(super) fn apply_casts(
                                 if spell.max_hp_buff != 0.0 {
                                     handlers::fan_out_health_update(
                                         &mut *server,
-                                        &in_world_recipients_now,
+                                        in_world_recipients_now,
                                         raw_target,
                                         pet.hp,
                                         pet.max_hp,
@@ -910,7 +904,7 @@ pub(super) fn apply_casts(
                                 }
                                 fan_out_pet_buff_snapshot(
                                     &mut *server,
-                                    &in_world_recipients_now,
+                                    in_world_recipients_now,
                                     pet,
                                 );
                                 tracing::info!(
@@ -923,7 +917,7 @@ pub(super) fn apply_casts(
                         }
                         continue;
                     }
-                    let target_entity_id = target_cid as u64;
+                    let target_entity_id = target_cid;
                     let heal = spell.heal_amount;
                     if heal > 0.0 {
                         let (final_hp, max_hp) = {
@@ -934,7 +928,7 @@ pub(super) fn apply_casts(
                         };
                         handlers::fan_out_health_update(
                             &mut *server,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             target_entity_id,
                             final_hp,
                             max_hp,
@@ -962,7 +956,7 @@ pub(super) fn apply_casts(
                         if let Some(tc) = connections.get(&target_cid) {
                             handlers::fan_out_buff_snapshot(
                                 &mut *server,
-                                &in_world_recipients_now,
+                                in_world_recipients_now,
                                 tc,
                             );
                         }
@@ -980,13 +974,13 @@ pub(super) fn apply_casts(
                     // player, and for another player's pet); the arm only
                     // applies.
                     let (target_id, pvp_target) = match resolved {
-                        ResolvedTarget::Player(cid) => (cid as u64, Some(cid)),
+                        ResolvedTarget::Player(cid) => (cid, Some(cid)),
                         ResolvedTarget::Mob(id) | ResolvedTarget::Pet(id) => (id, None),
                         _ => {
                             cast_resolution_lost(
                                 &mut *server,
                                 &mut *connections,
-                                &in_world_recipients_now,
+                                in_world_recipients_now,
                                 caster_cid,
                                 intent.caster,
                                 mana_cost,
@@ -1045,14 +1039,14 @@ pub(super) fn apply_casts(
                             if let Some(tc) = connections.get(&target_cid) {
                                 handlers::fan_out_buff_snapshot(
                                     &mut *server,
-                                    &in_world_recipients_now,
+                                    in_world_recipients_now,
                                     tc,
                                 );
                             }
                         }
                         handlers::fan_out_hit(
                             &mut *server,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             intent.caster,
                             target_id,
                             applied,
@@ -1061,7 +1055,7 @@ pub(super) fn apply_casts(
                         );
                         handlers::fan_out_health_update(
                             &mut *server,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             target_id,
                             final_hp,
                             max_hp,
@@ -1086,7 +1080,7 @@ pub(super) fn apply_casts(
                                 } => {
                                     handlers::fan_out_cast_fail(
                                         &mut *server,
-                                        &in_world_recipients_now,
+                                        in_world_recipients_now,
                                         target_id,
                                         "interrupted (hit during cast)".to_string(),
                                     );
@@ -1132,7 +1126,7 @@ pub(super) fn apply_casts(
                                     let att_max = att.max_hp;
                                     handlers::fan_out_health_update(
                                         &mut *server,
-                                        &in_world_recipients_now,
+                                        in_world_recipients_now,
                                         intent.caster,
                                         new_att_hp,
                                         att_max,
@@ -1140,7 +1134,7 @@ pub(super) fn apply_casts(
                                     if let Some(name) = shield_back_name.as_ref() {
                                         handlers::fan_out_damage_shield_trigger(
                                             &mut *server,
-                                            &in_world_recipients_now,
+                                            in_world_recipients_now,
                                             target_id,
                                             intent.caster,
                                             reflect_dmg,
@@ -1167,7 +1161,7 @@ pub(super) fn apply_casts(
                                     {
                                         handlers::fan_out_cast_fail(
                                             &mut *server,
-                                            &in_world_recipients_now,
+                                            in_world_recipients_now,
                                             intent.caster,
                                             "interrupted (hit during cast)".to_string(),
                                         );
@@ -1315,7 +1309,7 @@ pub(super) fn apply_casts(
                             if let Some(tc) = connections.get(&target_cid) {
                                 handlers::fan_out_buff_snapshot(
                                     &mut *server,
-                                    &in_world_recipients_now,
+                                    in_world_recipients_now,
                                     tc,
                                 );
                             }
@@ -1327,12 +1321,12 @@ pub(super) fn apply_casts(
                     // (Track 9; the same path AOE uses per victim).
                     apply_spell_damage_to_enemy(
                         &mut *server,
-                        &in_world_recipients_now,
+                        in_world_recipients_now,
                         &mut *connections,
                         &mut *enemies,
                         &mut *loot_bags,
                         &mut *aoi,
-                        &group_manager,
+                        group_manager,
                         intent.caster,
                         target_id,
                         spell,
@@ -1426,12 +1420,12 @@ pub(super) fn apply_casts(
                     for victim in victims {
                         if apply_spell_damage_to_enemy(
                             &mut *server,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             &mut *connections,
                             &mut *enemies,
                             &mut *loot_bags,
                             &mut *aoi,
-                            &group_manager,
+                            group_manager,
                             intent.caster,
                             victim,
                             spell,
@@ -1483,7 +1477,7 @@ pub(super) fn apply_casts(
                     // insert. None = unknown pet_type.
                     let Some((pet_id, pet_level)) = summon_scaled_pet(
                         &mut *server,
-                        &in_world_recipients_now,
+                        in_world_recipients_now,
                         &mut *enemies,
                         &mut *aoi,
                         owner_id,
@@ -1500,7 +1494,7 @@ pub(super) fn apply_casts(
                         cast_resolution_lost(
                             &mut *server,
                             &mut *connections,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             caster_cid,
                             intent.caster,
                             mana_cost,
@@ -1535,7 +1529,7 @@ pub(super) fn apply_casts(
                         cast_resolution_lost(
                             &mut *server,
                             &mut *connections,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             caster_cid,
                             intent.caster,
                             mana_cost,
@@ -1574,7 +1568,7 @@ pub(super) fn apply_casts(
                         cast_resolution_lost(
                             &mut *server,
                             &mut *connections,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             caster_cid,
                             intent.caster,
                             mana_cost,
@@ -1657,7 +1651,7 @@ pub(super) fn apply_casts(
                         cast_resolution_lost(
                             &mut *server,
                             &mut *connections,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             caster_cid,
                             intent.caster,
                             mana_cost,
@@ -1673,7 +1667,7 @@ pub(super) fn apply_casts(
                         let (new_hp, max_hp) = (pet.hp, pet.max_hp);
                         handlers::fan_out_health_update(
                             &mut *server,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             pet_id,
                             new_hp,
                             max_hp,
@@ -1695,7 +1689,7 @@ pub(super) fn apply_casts(
                         cast_resolution_lost(
                             &mut *server,
                             &mut *connections,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             caster_cid,
                             intent.caster,
                             mana_cost,
@@ -1709,7 +1703,7 @@ pub(super) fn apply_casts(
                         cast_resolution_lost(
                             &mut *server,
                             &mut *connections,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             caster_cid,
                             intent.caster,
                             mana_cost,
@@ -1724,7 +1718,7 @@ pub(super) fn apply_casts(
                     bind_intents.push((bc.char_id, bc.zone.clone(), pos));
                     tracing::info!(
                         char_id = intent.caster,
-                        bound = bound_cid as u64,
+                        bound = bound_cid,
                         x = pos.0,
                         y = pos.1,
                         z = pos.2,
@@ -1788,7 +1782,7 @@ pub(super) fn apply_casts(
                     for mob_id in wipe_hate(&mut *enemies, &mover_ids) {
                         handlers::fan_out_entity_target(
                             &mut *server,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             mob_id,
                             None,
                         );
@@ -1797,7 +1791,7 @@ pub(super) fn apply_casts(
                         if let Some(conn) = connections.get(&bearer) {
                             handlers::fan_out_buff_snapshot(
                                 &mut *server,
-                                &in_world_recipients_now,
+                                in_world_recipients_now,
                                 conn,
                             );
                         }
@@ -1839,7 +1833,7 @@ pub(super) fn apply_casts(
                                         &mut *server,
                                         &mut *aoi,
                                         &mut *enemies,
-                                        &in_world_recipients_now,
+                                        in_world_recipients_now,
                                         pet,
                                         None,
                                         now,
@@ -1875,8 +1869,8 @@ pub(super) fn apply_casts(
                                 if let Some(pet) = enemies.get(&pet_id) {
                                     fan_entity_cell_crossing(
                                         &mut *server,
-                                        &aoi,
-                                        &connections,
+                                        aoi,
+                                        connections,
                                         pet,
                                         &gained,
                                         &lost,
@@ -1894,7 +1888,7 @@ pub(super) fn apply_casts(
                         "PORT applied"
                     );
                 }
-                "NONE" | _ => {
+                _ => {
                     // A target type with no arm. Every type in today's
                     // spells.toml has one (BIND and PORT gained theirs in
                     // spell batch step 2), and the pre-flight refuses an
@@ -1914,7 +1908,7 @@ pub(super) fn apply_casts(
                     refund_spell_cost(
                         &mut *server,
                         &mut *connections,
-                        &in_world_recipients_now,
+                        in_world_recipients_now,
                         caster_cid,
                         intent.caster,
                         mana_cost,

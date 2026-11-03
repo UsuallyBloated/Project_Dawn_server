@@ -293,11 +293,11 @@ pub(super) fn run_enemy_ai(
         for (id, old_cell, new_cell) in enemy_cell_changes {
             let (gained, lost) = aoi.update(id, old_cell, new_cell);
             if let Some(entity) = enemies.get(&id) {
-                fan_entity_cell_crossing(&mut *server, &aoi, &connections, entity, &gained, &lost);
+                fan_entity_cell_crossing(&mut *server, aoi, connections, entity, &gained, &lost);
             }
         }
         for (id, target) in target_changes {
-            handlers::fan_out_entity_target(&mut *server, &in_world_recipients_now, id, target);
+            handlers::fan_out_entity_target(&mut *server, in_world_recipients_now, id, target);
         }
         // DoT ticks (spell batch step 5): everyone sees the hit and the
         // bar; the caster alone gets the named "<spell> for N" line (the
@@ -307,7 +307,7 @@ pub(super) fn run_enemy_ai(
         for (entity_id, tick, hp_after, max_hp, died) in dot_ticks {
             handlers::fan_out_hit(
                 &mut *server,
-                &in_world_recipients_now,
+                in_world_recipients_now,
                 tick.caster,
                 entity_id,
                 tick.amount,
@@ -316,7 +316,7 @@ pub(super) fn run_enemy_ai(
             );
             handlers::fan_out_health_update(
                 &mut *server,
-                &in_world_recipients_now,
+                in_world_recipients_now,
                 entity_id,
                 hp_after,
                 max_hp,
@@ -343,12 +343,12 @@ pub(super) fn run_enemy_ai(
                 );
                 kill_enemy(
                     &mut *server,
-                    &in_world_recipients_now,
+                    in_world_recipients_now,
                     &mut *connections,
                     &mut *enemies,
                     &mut *loot_bags,
                     &mut *aoi,
-                    &group_manager,
+                    group_manager,
                     entity_id,
                     "damage-over-time kill",
                     now,
@@ -361,12 +361,12 @@ pub(super) fn run_enemy_ai(
         for entity_id in zero_hp_strays {
             kill_enemy(
                 &mut *server,
-                &in_world_recipients_now,
+                in_world_recipients_now,
                 &mut *connections,
                 &mut *enemies,
                 &mut *loot_bags,
                 &mut *aoi,
-                &group_manager,
+                group_manager,
                 entity_id,
                 "stray kill",
                 now,
@@ -428,7 +428,7 @@ pub(super) fn run_enemy_ai(
                     }
                     handlers::fan_out_hit(
                         &mut *server,
-                        &in_world_recipients_now,
+                        in_world_recipients_now,
                         attacker,
                         hit.target,
                         amount,
@@ -437,7 +437,7 @@ pub(super) fn run_enemy_ai(
                     );
                     handlers::fan_out_health_update(
                         &mut *server,
-                        &in_world_recipients_now,
+                        in_world_recipients_now,
                         hit.target,
                         new_hp,
                         max_hp,
@@ -462,7 +462,7 @@ pub(super) fn run_enemy_ai(
                             if let Some(conn) = connections.get_mut(&cid) {
                                 conn.warder_respawn_at = Some(due);
                                 tracing::info!(
-                                    owner = cid as u64,
+                                    owner = cid,
                                     retreat_secs = WARDER_RETREAT_SECS,
                                     "warder retreating; respawn scheduled",
                                 );
@@ -470,7 +470,7 @@ pub(super) fn run_enemy_ai(
                         }
                         handlers::fan_out_entity_died(
                             &mut *server,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             hit.target,
                         );
                         tracing::info!(
@@ -499,7 +499,7 @@ pub(super) fn run_enemy_ai(
                             }
                             handlers::fan_out_health_update(
                                 &mut *server,
-                                &in_world_recipients_now,
+                                in_world_recipients_now,
                                 attacker,
                                 att_entity.hp,
                                 att_entity.max_hp,
@@ -507,7 +507,7 @@ pub(super) fn run_enemy_ai(
                             if let Some(name) = pet_shield_name.as_ref() {
                                 handlers::fan_out_damage_shield_trigger(
                                     &mut *server,
-                                    &in_world_recipients_now,
+                                    in_world_recipients_now,
                                     hit.target,
                                     attacker,
                                     dmg,
@@ -520,12 +520,12 @@ pub(super) fn run_enemy_ai(
                     if reflect_killed {
                         kill_enemy(
                             &mut *server,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             &mut *connections,
                             &mut *enemies,
                             &mut *loot_bags,
                             &mut *aoi,
-                            &group_manager,
+                            group_manager,
                             attacker,
                             "reflect kill",
                             now,
@@ -608,7 +608,7 @@ pub(super) fn run_enemy_ai(
                     }
                     handlers::fan_out_hit(
                         &mut *server,
-                        &in_world_recipients_now,
+                        in_world_recipients_now,
                         attacker,
                         hit.target,
                         amount,
@@ -617,7 +617,7 @@ pub(super) fn run_enemy_ai(
                     );
                     handlers::fan_out_health_update(
                         &mut *server,
-                        &in_world_recipients_now,
+                        in_world_recipients_now,
                         hit.target,
                         new_hp,
                         max_hp,
@@ -625,7 +625,7 @@ pub(super) fn run_enemy_ai(
                     if died {
                         handlers::fan_out_entity_died(
                             &mut *server,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             hit.target,
                         );
                         // Warder respawn — if a pet kills another
@@ -661,7 +661,7 @@ pub(super) fn run_enemy_ai(
                                 award_kill(
                                     &mut *server,
                                     &mut *connections,
-                                    &group_manager,
+                                    group_manager,
                                     credit_id,
                                     mob_xp,
                                     name,
@@ -848,7 +848,7 @@ pub(super) fn run_enemy_ai(
                             } => {
                                 handlers::fan_out_cast_fail(
                                     &mut *server,
-                                    &in_world_recipients_now,
+                                    in_world_recipients_now,
                                     hit.target,
                                     "interrupted (hit during cast)".to_string(),
                                 );
@@ -911,7 +911,7 @@ pub(super) fn run_enemy_ai(
                     }
                 }
                 if let Some(tc) = connections.get(&target_cid) {
-                    handlers::fan_out_buff_snapshot(&mut *server, &in_world_recipients_now, tc);
+                    handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, tc);
                 }
             }
             // Apply damage shield to attacker (the enemy entity).
@@ -932,7 +932,7 @@ pub(super) fn run_enemy_ai(
                         }
                         handlers::fan_out_health_update(
                             &mut *server,
-                            &in_world_recipients_now,
+                            in_world_recipients_now,
                             attacker,
                             att_entity.hp,
                             att_entity.max_hp,
@@ -942,7 +942,7 @@ pub(super) fn run_enemy_ai(
                         {
                             handlers::fan_out_damage_shield_trigger(
                                 &mut *server,
-                                &in_world_recipients_now,
+                                in_world_recipients_now,
                                 defender,
                                 attacker,
                                 dmg,
@@ -955,12 +955,12 @@ pub(super) fn run_enemy_ai(
                 if reflect_killed {
                     kill_enemy(
                         &mut *server,
-                        &in_world_recipients_now,
+                        in_world_recipients_now,
                         &mut *connections,
                         &mut *enemies,
                         &mut *loot_bags,
                         &mut *aoi,
-                        &group_manager,
+                        group_manager,
                         attacker,
                         "reflect kill",
                         now,
@@ -970,14 +970,14 @@ pub(super) fn run_enemy_ai(
             if evaded {
                 handlers::fan_out_evade(
                     &mut *server,
-                    &in_world_recipients_now,
+                    in_world_recipients_now,
                     attacker,
                     hit.target,
                 );
             } else {
                 handlers::fan_out_hit(
                     &mut *server,
-                    &in_world_recipients_now,
+                    in_world_recipients_now,
                     attacker,
                     hit.target,
                     final_amount,
@@ -993,7 +993,7 @@ pub(super) fn run_enemy_ai(
                 if let Some(target_conn) = connections.get(&(target_id as ClientId)) {
                     handlers::fan_out_health_update(
                         &mut *server,
-                        &in_world_recipients_now,
+                        in_world_recipients_now,
                         target_id,
                         target_conn.hp,
                         target_conn.max_hp,
@@ -1047,7 +1047,7 @@ pub(super) async fn clean_up_enemy_corpses(
         let enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
         aoi.remove(entity.id, enemy_cell);
         let visible = aoi.entities_visible_from(enemy_cell);
-        for recipient in despawn_recipients(&visible, &in_world_recipients_now, &entity) {
+        for recipient in despawn_recipients(&visible, in_world_recipients_now, &entity) {
             handlers::send_entity_despawn(&mut *server, recipient, entity.id);
         }
         spawner.on_enemy_died(entity.spawn_point_idx, now);
@@ -1056,7 +1056,7 @@ pub(super) async fn clean_up_enemy_corpses(
     // The spell bar, written as soon as it changes (a memorize is
     // deliberate and rare; the 60 s checkpoint would lose one to a crash).
     for (char_id, gems, seeded) in spell_gem_saves.drain(..) {
-        if let Err(e) = db::save_spell_gems(&pool, char_id, &gems, seeded).await {
+        if let Err(e) = db::save_spell_gems(pool, char_id, &gems, seeded).await {
             tracing::warn!(char_id, error = %e, "save_spell_gems failed; the bar is live in memory but not persisted");
         }
     }

@@ -126,7 +126,7 @@ pub(super) fn run_regen(world: &mut WorldState, q: &mut Intents, now: Instant, d
         {
             let due = conn
                 .last_meditate_at
-                .map_or(true, |t| now.duration_since(t) >= Duration::from_secs(6));
+                .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(6));
             if due {
                 conn.last_meditate_at = Some(now);
                 if let Some(new_score) =
@@ -147,7 +147,7 @@ pub(super) fn run_regen(world: &mut WorldState, q: &mut Intents, now: Instant, d
     // EQ's eating emote, to the people who could hear the eater say
     // something (the say channel's reach), never to the eater.
     for (eater_cid, text) in eat_emotes.drain(..) {
-        let recipients = say_recipients(eater_cid, &connections);
+        let recipients = say_recipients(eater_cid, connections);
         handlers::fan_out_chat_message(
             &mut *server,
             &recipients,

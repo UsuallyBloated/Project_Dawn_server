@@ -74,7 +74,7 @@ pub(super) fn fan_out_positions(
                         .get(cid)
                         .is_some_and(|c| aoi.can_see(c.aoi_cell, enemy_cell))
             };
-            if !in_world_ids.iter().any(|cid| can_see(cid)) {
+            if !in_world_ids.iter().any(&can_see) {
                 continue;
             }
             // Mark before building: the message carries the advanced

@@ -132,7 +132,7 @@ mod tests {
                 };
                 let reach = camp.mob.aggro + camp.radius.max(SPAWN_JITTER);
                 let margin = spawn.distance_to(area.center()) - reach - area.radius;
-                if tightest.as_ref().map_or(true, |t| margin < t.2) {
+                if tightest.as_ref().is_none_or(|t| margin < t.2) {
                     tightest = Some((area.name.clone(), camp.mob.name.clone(), margin));
                 }
                 assert!(

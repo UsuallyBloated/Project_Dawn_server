@@ -140,7 +140,8 @@ pub fn resolve_for_dev_spawn(name: &str) -> Option<&'static NamedMob> {
         .find(|m| m.display_name == name || m.full_name() == name)
 }
 
-/// Every named id, for dev tooling and tests.
+/// Every named id, for the tests that walk the whole table.
+#[cfg(test)]
 pub fn all_ids() -> Vec<&'static str> {
     table().keys().map(|s| s.as_str()).collect()
 }

@@ -2,6 +2,10 @@
 //! through the whole handshake, one module per domain. The harness is `common`.
 //! (Until 2026-11-01 this was one file, world_two_clients.rs.)
 
+// The readers decode a message, then match the one variant they want, as two
+// steps; folding the match into the decode's pattern reads worse here.
+#![allow(clippy::collapsible_match)]
+
 mod common;
 
 mod admin;

@@ -237,7 +237,7 @@ pub(super) fn apply_item_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
         // also the death-penalty-void slot, so the lock matters twice).
         if trade_locked(
             &mut *server,
-            &trade_manager,
+            trade_manager,
             cid,
             &intent.src_location,
             intent.src_slot,

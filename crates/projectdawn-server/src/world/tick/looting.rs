@@ -90,7 +90,7 @@ pub(super) async fn apply_loot_intents(
                 // item: a crash then leaves it in both. Flushed beforehand,
                 // each commit records a state that was whole in memory.
                 if let Some(c) = connections.get_mut(&looter_cid) {
-                    if let Err(e) = persistence::persist_dirty_stores(&pool, c).await {
+                    if let Err(e) = persistence::persist_dirty_stores(pool, c).await {
                         tracing::error!(corpse_id, error = %e, "pre-loot store flush failed; corpse loot refused");
                         handlers::send_loot_rejected(
                             &mut *server,
@@ -294,7 +294,7 @@ pub(super) async fn apply_loot_intents(
                     .map(|c| (c.inventory.to_rows(), c.coins, c.item_events.clone()));
                 let persist_ok = if let Some((inv_rows, looter_coins, events)) = persist_data {
                     match db::apply_corpse_loot(
-                        &pool,
+                        pool,
                         intent.looter as i64,
                         &inv_rows,
                         looter_coins,
@@ -345,7 +345,7 @@ pub(super) async fn apply_loot_intents(
                         if let Some(conn) = connections.get(&looter_cid) {
                             handlers::fan_out_resources(
                                 &mut *server,
-                                &in_world_recipients_now,
+                                in_world_recipients_now,
                                 conn,
                             );
                         }
@@ -431,7 +431,7 @@ pub(super) async fn apply_loot_intents(
             // open to anyone in range. Strangers are rejected; a
             // user-facing "that isn't your loot" message rides in with
             // the wire changes (Layer 4).
-            if !bag.can_loot(intent.looter as ClientId, &group_manager) {
+            if !bag.can_loot(intent.looter as ClientId, group_manager) {
                 tracing::info!(
                     char_id = intent.looter,
                     bag_id = intent.bag_id,
@@ -731,7 +731,7 @@ pub(super) async fn apply_loot_intents(
                 if bag.pos.distance_to(looter_pos) > LOOT_PICKUP_RANGE {
                     continue;
                 }
-                if !bag.can_loot(looter_cid, &group_manager) {
+                if !bag.can_loot(looter_cid, group_manager) {
                     tracing::info!(
                         looter,
                         bag_id,
@@ -855,7 +855,7 @@ pub(super) async fn apply_loot_intents(
     // A failure leaves the stores dirty for the checkpoint to retry.
     for looter_cid in bag_looters {
         if let Some(conn) = connections.get_mut(&looter_cid) {
-            if let Err(e) = persistence::persist_dirty_stores(&pool, conn).await {
+            if let Err(e) = persistence::persist_dirty_stores(pool, conn).await {
                 tracing::warn!(looter = looter_cid, error = %e, "post-loot store save failed; the checkpoint will retry");
             }
         }
@@ -925,7 +925,7 @@ pub(super) async fn expire_bags_and_corpses(
                     handlers::send_entity_despawn(&mut *server, recipient, id);
                 }
             }
-            if let Err(e) = db::delete_corpse(&pool, id as i64).await {
+            if let Err(e) = db::delete_corpse(pool, id as i64).await {
                 tracing::error!(corpse_id = id, error = %e, "delete_corpse on decay failed");
             }
             tracing::info!(

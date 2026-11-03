@@ -405,9 +405,9 @@ fn render_html(
     // Header + stat tiles.
     h.push_str("<header class=\"top\">\n");
     h.push_str("<h1>Project Dawn <span class=\"sub\">server data</span></h1>\n");
-    let _ = write!(
+    let _ = writeln!(
         h,
-        "<p class=\"meta\">Read-only snapshot of <code>{}</code> &middot; generated {}</p>\n",
+        "<p class=\"meta\">Read-only snapshot of <code>{}</code> &middot; generated {}</p>",
         esc(db_path),
         esc(generated)
     );
@@ -434,15 +434,15 @@ fn render_html(
 
     for a in accounts {
         let filter_key = a.username.to_lowercase();
-        let _ = write!(
+        let _ = writeln!(
             h,
-            "<section class=\"card\" data-name=\"{}\">\n",
+            "<section class=\"card\" data-name=\"{}\">",
             esc(&filter_key)
         );
         h.push_str("<div class=\"card-head\">\n");
-        let _ = write!(
+        let _ = writeln!(
             h,
-            "<span class=\"acc-id\">#{}</span><span class=\"acc-name\">{}</span>\n",
+            "<span class=\"acc-id\">#{}</span><span class=\"acc-name\">{}</span>",
             a.id,
             esc(&a.username)
         );
@@ -455,26 +455,26 @@ fn render_html(
         h.push_str("</div>\n");
 
         h.push_str("<div class=\"acc-meta\">\n");
-        let _ = write!(
+        let _ = writeln!(
             h,
-            "<span>email: {}</span>\n",
+            "<span>email: {}</span>",
             cell(a.email.as_deref(), "none")
         );
-        let _ = write!(
+        let _ = writeln!(
             h,
-            "<span>created: {}</span>\n",
+            "<span>created: {}</span>",
             cell(a.created_at.as_deref(), "?")
         );
-        let _ = write!(
+        let _ = writeln!(
             h,
-            "<span>last login: {}</span>\n",
+            "<span>last login: {}</span>",
             cell(a.last_login.as_deref(), "never")
         );
         h.push_str("</div>\n");
         if let Some(reason) = a.ban_reason.as_deref().filter(|r| !r.is_empty()) {
-            let _ = write!(
+            let _ = writeln!(
                 h,
-                "<div class=\"ban-reason\">ban reason: {}</div>\n",
+                "<div class=\"ban-reason\">ban reason: {}</div>",
                 esc(reason)
             );
         }
@@ -529,11 +529,11 @@ fn render_gm_actions(h: &mut String, actions: &[GmAction], total: i64) {
     } else {
         format!("{total} recorded")
     };
-    let _ = write!(
+    let _ = writeln!(
         h,
         "<p class=\"acc-meta\"><span>{shown}. Every authorized dev/GM command as issued. \
          On a hosted server each row should end <code>via=gm</code>; <code>via=dev</code> \
-         means the process ran with PD_DEV_CMDS on.</span></p>\n"
+         means the process ran with PD_DEV_CMDS on.</span></p>"
     );
     h.push_str("<div class=\"table-wrap\">\n<table class=\"chars\">\n<thead><tr>");
     for col in ["When (UTC)", "Account", "Character", "Command", "Args"] {
@@ -652,9 +652,9 @@ fn render_ledger(
     } else {
         h.push_str("<section class=\"card orphan\" data-name=\"item ledger check\">\n");
         h.push_str("<div class=\"card-head\"><span class=\"acc-name\">Item ledger check</span>");
-        let _ = write!(
+        let _ = writeln!(
             h,
-            "<span class=\"badge ban\">{} MISMATCH{}</span></div>\n",
+            "<span class=\"badge ban\">{} MISMATCH{}</span></div>",
             mismatches.len(),
             if mismatches.len() == 1 { "" } else { "ES" }
         );
@@ -698,11 +698,11 @@ fn render_ledger(
     } else {
         format!("{total} rows")
     };
-    let _ = write!(
+    let _ = writeln!(
         h,
         "<p class=\"acc-meta\"><span>{shown}. One row per movement of items or coin into or out of a \
          character's holdings, written by the server with the move. <code>delta</code> is the change \
-         to the account's holdings of the item (0 for a vault move), <code>copper</code> the same for coin.</span></p>\n"
+         to the account's holdings of the item (0 for a vault move), <code>copper</code> the same for coin.</span></p>"
     );
     h.push_str("<div class=\"table-wrap\">\n<table class=\"chars\">\n<thead><tr>");
     for col in [
@@ -753,9 +753,9 @@ fn render_ledger(
 }
 
 fn tile(h: &mut String, label: &str, value: &str, kind: &str) {
-    let _ = write!(
+    let _ = writeln!(
         h,
-        "<div class=\"tile {kind}\"><div class=\"tile-val\">{value}</div><div class=\"tile-label\">{label}</div></div>\n"
+        "<div class=\"tile {kind}\"><div class=\"tile-val\">{value}</div><div class=\"tile-label\">{label}</div></div>"
     );
 }
 

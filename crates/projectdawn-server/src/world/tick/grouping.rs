@@ -93,7 +93,7 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
             );
             continue;
         };
-        if target_cid as u64 == intent.inviter {
+        if target_cid == intent.inviter {
             continue; // can't invite self
         }
         let from_name = connections
@@ -104,7 +104,7 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
         handlers::send_group_invited(&mut *server, target_cid, intent.inviter, from_name);
         tracing::info!(
             inviter = intent.inviter,
-            invitee = target_cid as u64,
+            invitee = target_cid,
             "GroupInvite recorded; GroupInvited forwarded"
         );
     }
@@ -119,7 +119,7 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
                 gid,
                 "GroupAccept — invitee joined"
             );
-            fan_roster(&mut *server, &connections, &group_manager, gid, None);
+            fan_roster(&mut *server, connections, group_manager, gid, None);
         } else {
             tracing::debug!(
                 invitee = intent.invitee,
@@ -162,7 +162,7 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
                     );
                 }
             } else {
-                fan_roster(&mut *server, &connections, &group_manager, gid, None);
+                fan_roster(&mut *server, connections, group_manager, gid, None);
             }
         }
     }
@@ -219,7 +219,7 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
         if let Some((_gid, remaining, dissolved)) = group_manager.leave(target_cid) {
             tracing::info!(
                 leader = intent.leader,
-                kicked = target_cid as u64,
+                kicked = target_cid,
                 gid,
                 remaining = remaining.len(),
                 dissolved,
@@ -247,7 +247,7 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
                     );
                 }
             } else {
-                fan_roster(&mut *server, &connections, &group_manager, gid, None);
+                fan_roster(&mut *server, connections, group_manager, gid, None);
             }
         }
     }
@@ -270,7 +270,7 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
             mode = intent.mode,
             "group loot mode set"
         );
-        fan_roster(&mut *server, &connections, &group_manager, gid, None);
+        fan_roster(&mut *server, connections, group_manager, gid, None);
     }
 
     // 4hbb-bis. PD_W0014 — a player toggled /autosplit. Fan a one-line
@@ -301,7 +301,7 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
             if member_cid == toggler_cid {
                 continue; // toggler echoed locally already
             }
-            if connections.get(&member_cid).map_or(false, |c| c.in_world) {
+            if connections.get(&member_cid).is_some_and(|c| c.in_world) {
                 handlers::send_group_notice(&mut *server, member_cid, text.clone());
             }
         }
@@ -321,7 +321,7 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
                 gid,
                 "group leadership passed"
             );
-            fan_roster(&mut *server, &connections, &group_manager, gid, None);
+            fan_roster(&mut *server, connections, group_manager, gid, None);
         }
     }
 }

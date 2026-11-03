@@ -1,8 +1,8 @@
 //! World-channel messages (bincode over UDP/renet).
 //!
-//! These types compile but the world server is not yet wired up. They're
-//! the source of truth for the wire format whenever it lands. Adding,
-//! removing, or reordering variants is a protocol-version bump.
+//! These types are the source of truth for the wire format, shared by the
+//! server and the client's wire layer (gdext-net). Adding, removing, or
+//! reordering variants is a protocol-version bump.
 //!
 //! Sessions: world packets carry the same 32-byte token issued by the
 //! auth service, but as raw bytes instead of hex (saves 50%).
@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 /// Auth-minted ConnectTokens are signed with this; mismatch ⇒ token rejected.
 ///
 /// PD_W0005 covers the Track 6 batch: server-authoritative player stats. The
-/// server now owns HP/MP/Stamina (loaded from DB at spawn, mutated by regen
-/// + combat + PvP, fanned out as `HealthUpdate` / `ManaUpdate` /
+/// server now owns HP/MP/Stamina (loaded from DB at spawn, mutated by regen,
+/// combat and PvP, fanned out as `HealthUpdate` / `ManaUpdate` /
 /// `StaminaUpdate`); `ClientWorldMsg::ResourceUpdate` is removed because the
 /// authority flips and the client no longer broadcasts resources. One bump
 /// per track; individual sub-task commits append new variants under this id.

@@ -1465,7 +1465,7 @@ pub async fn wait_on_a_pumping_b(
         tick_one(&mut b.client, &mut b.transport);
         assert_both_connected(a, b, "wait_on_a_pumping_b");
         ticks += 1;
-        if ticks % 80 == 0 {
+        if ticks.is_multiple_of(80) {
             a.send_heartbeat();
             b.send_heartbeat();
         }
@@ -1632,6 +1632,9 @@ pub fn hunger_cap() -> f32 {
 /// renet handshake that never completed. Netcode ignores a connect request
 /// for a client id that is still connected and sends nothing back, so the
 /// third is a real answer and not a harness failure.
+// A test harness value, made a handful of times per test: its size does not
+// matter, and boxing the client would only add noise at every call site.
+#[allow(clippy::large_enum_variant)]
 pub enum ConnectOutcome {
     Connected(WorldClient),
     Kicked {
@@ -1971,7 +1974,7 @@ pub fn last_standing(msgs: &[ServerWorldMsg], faction_id: &str) -> Option<(f32, 
         .into_iter()
         .filter(|(id, _, _)| id == faction_id)
         .map(|(_, s, l)| (s, l))
-        .last()
+        .next_back()
 }
 
 pub fn system_lines(msgs: &[ServerWorldMsg]) -> Vec<String> {

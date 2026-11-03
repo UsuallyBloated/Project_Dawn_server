@@ -95,13 +95,13 @@ pub(super) fn apply_moves(world: &mut WorldState, q: &mut Intents, _now: Instant
             // out of (src) and not merged/swapped into (dst).
             if trade_locked(
                 &mut *server,
-                &trade_manager,
+                trade_manager,
                 owner_cid,
                 &intent.src_location,
                 intent.src_slot,
             ) || trade_locked(
                 &mut *server,
-                &trade_manager,
+                trade_manager,
                 owner_cid,
                 &intent.dst_location,
                 intent.dst_slot,
@@ -222,13 +222,13 @@ pub(super) fn apply_splits(world: &mut WorldState, q: &mut Intents, _now: Instan
             // receives a split.
             if trade_locked(
                 &mut *server,
-                &trade_manager,
+                trade_manager,
                 owner_cid,
                 "base",
                 intent.src_slot,
             ) || trade_locked(
                 &mut *server,
-                &trade_manager,
+                trade_manager,
                 owner_cid,
                 "base",
                 intent.dst_slot,
@@ -348,7 +348,7 @@ pub(super) async fn apply_drops(
             // PD_W0028 escrow: an offered slot cannot be dropped.
             if trade_locked(
                 &mut *server,
-                &trade_manager,
+                trade_manager,
                 owner_cid,
                 &intent.location,
                 intent.slot,
@@ -419,7 +419,7 @@ pub(super) async fn apply_drops(
             let Some(conn) = connections.get_mut(&owner_cid) else {
                 continue;
             };
-            if let Err(e) = persistence::persist_dirty_stores(&pool, conn).await {
+            if let Err(e) = persistence::persist_dirty_stores(pool, conn).await {
                 // Nothing was written: put every stack back and refuse.
                 // The client was told nothing yet.
                 conn.inventory = inventory_before;
@@ -524,7 +524,7 @@ pub(super) fn apply_equips(
             // PD_W0028 escrow: an offered slot cannot be equipped from.
             if trade_locked(
                 &mut *server,
-                &trade_manager,
+                trade_manager,
                 owner_cid,
                 &intent.src_location,
                 intent.src_slot,
@@ -614,7 +614,7 @@ pub(super) fn apply_equips(
                 handlers::send_slot_delta(&mut *server, owner_cid, loc, slot, payload);
             }
             if recompute.any_resource_max_changed() {
-                handlers::fan_out_resources(&mut *server, &in_world_recipients_now, conn);
+                handlers::fan_out_resources(&mut *server, in_world_recipients_now, conn);
             }
             tracing::info!(
                 char_id = intent.owner,
@@ -671,7 +671,7 @@ pub(super) fn apply_unequips(
             if intent.dst_location == "base"
                 && trade_locked(
                     &mut *server,
-                    &trade_manager,
+                    trade_manager,
                     owner_cid,
                     "base",
                     intent.dst_slot,
@@ -741,7 +741,7 @@ pub(super) fn apply_unequips(
                 handlers::send_slot_delta(&mut *server, owner_cid, loc, slot, payload);
             }
             if recompute.any_resource_max_changed() {
-                handlers::fan_out_resources(&mut *server, &in_world_recipients_now, conn);
+                handlers::fan_out_resources(&mut *server, in_world_recipients_now, conn);
             }
             tracing::info!(
                 char_id = intent.owner,
@@ -779,7 +779,7 @@ pub(super) fn apply_destroys(world: &mut WorldState, q: &mut Intents, _now: Inst
             // PD_W0028 escrow: an offered slot cannot be destroyed.
             if trade_locked(
                 &mut *server,
-                &trade_manager,
+                trade_manager,
                 owner_cid,
                 &intent.location,
                 intent.slot,
@@ -865,7 +865,7 @@ pub(super) fn apply_consumables(
             // PD_W0028 escrow: an offered slot cannot be eaten from.
             if trade_locked(
                 &mut *server,
-                &trade_manager,
+                trade_manager,
                 owner_cid,
                 &intent.location,
                 intent.slot,
@@ -979,7 +979,7 @@ pub(super) fn apply_consumables(
                 if conn.hp != before {
                     handlers::fan_out_health_update(
                         &mut *server,
-                        &in_world_recipients_now,
+                        in_world_recipients_now,
                         conn.char_id as u64,
                         conn.hp,
                         conn.max_hp,
@@ -992,7 +992,7 @@ pub(super) fn apply_consumables(
                 if conn.mp != before {
                     handlers::fan_out_mana_update(
                         &mut *server,
-                        &in_world_recipients_now,
+                        in_world_recipients_now,
                         conn.char_id as u64,
                         conn.mp,
                         conn.max_mp,

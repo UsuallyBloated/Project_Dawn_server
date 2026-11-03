@@ -359,7 +359,7 @@ pub(super) async fn handle_transport_events(
                 let char_id = client_id_to_char(client_id);
                 tracing::info!(%client_id, char_id, account_id, "client connected (transport)");
 
-                match db::load_character(&pool, char_id).await {
+                match db::load_character(pool, char_id).await {
                     Ok(spawn) => {
                         if spawn.account_id != account_id {
                             tracing::warn!(
@@ -471,7 +471,7 @@ pub(super) async fn handle_transport_events(
                         // Fails closed: if the flag cannot be read, refuse.
                         // Same no-disconnect kick as the refusal above, so
                         // the reliable Kick reaches the client.
-                        let banned = match db::account_is_banned(&pool, account_id).await {
+                        let banned = match db::account_is_banned(pool, account_id).await {
                             Ok(banned) => banned,
                             Err(e) => {
                                 tracing::error!(account_id, char_id, error = %e,
@@ -507,12 +507,12 @@ pub(super) async fn handle_transport_events(
                         // memorize. Same no-disconnect kick as the ban
                         // refusal, so the reason arrives.
                         let loaded = async {
-                            let inv = db::load_inventory(&pool, char_id).await?;
-                            let skills = db::load_skills(&pool, char_id).await?;
-                            let bank = db::load_bank_items(&pool, char_id).await?;
-                            let acct = db::load_account_bank_items(&pool, account_id).await?;
-                            let gems = db::load_spell_gems(&pool, char_id).await?;
-                            let logged_out_at = db::load_logged_out_at(&pool, char_id).await?;
+                            let inv = db::load_inventory(pool, char_id).await?;
+                            let skills = db::load_skills(pool, char_id).await?;
+                            let bank = db::load_bank_items(pool, char_id).await?;
+                            let acct = db::load_account_bank_items(pool, account_id).await?;
+                            let gems = db::load_spell_gems(pool, char_id).await?;
+                            let logged_out_at = db::load_logged_out_at(pool, char_id).await?;
                             Ok::<_, crate::error::DbError>((
                                 inv,
                                 skills,
@@ -700,7 +700,7 @@ pub(super) async fn handle_transport_events(
                         &mut *aoi,
                         &mut *enemies,
                         &mut *group_manager,
-                        &pool,
+                        pool,
                         client_id,
                         now,
                         &mut *pending_saves,
@@ -828,7 +828,7 @@ pub(super) async fn flush_gm_audit(world: &mut WorldState, _q: &mut Intents, now
     for conn in connections.values_mut() {
         collect_gm_audit(conn, now, false, &mut audit_rows);
     }
-    write_gm_audit(&pool, &audit_rows).await;
+    write_gm_audit(pool, &audit_rows).await;
 }
 
 pub(super) fn reap_timed_out(world: &mut WorldState, q: &mut Intents, now: Instant) {
@@ -901,7 +901,7 @@ pub(super) async fn reap_linkdead(world: &mut WorldState, _q: &mut Intents, now:
             &mut *aoi,
             &mut *enemies,
             &mut *group_manager,
-            &pool,
+            pool,
             client_id,
             now,
             &mut *pending_saves,

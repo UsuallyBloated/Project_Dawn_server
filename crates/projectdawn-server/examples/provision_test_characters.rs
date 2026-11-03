@@ -175,8 +175,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn rpc(ws: &mut Ws, msg: ClientAuthMsg) -> anyhow::Result<ServerAuthMsg> {
-    ws.send(Message::Text(serde_json::to_string(&msg)?.into()))
-        .await?;
+    ws.send(Message::Text(serde_json::to_string(&msg)?)).await?;
     loop {
         let frame = ws
             .next()

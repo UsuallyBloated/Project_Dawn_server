@@ -220,13 +220,7 @@ pub(super) fn apply_sells(world: &mut WorldState, q: &mut Intents, _now: Instant
                 protocol::world::SlotRef::EquipSlot(_) => (String::new(), 0),
             };
             if !lock_loc.is_empty()
-                && trade_locked(
-                    &mut *server,
-                    &trade_manager,
-                    owner_cid,
-                    &lock_loc,
-                    lock_slot,
-                )
+                && trade_locked(&mut *server, trade_manager, owner_cid, &lock_loc, lock_slot)
             {
                 continue;
             }

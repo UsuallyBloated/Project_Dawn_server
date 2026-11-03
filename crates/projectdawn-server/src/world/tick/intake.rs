@@ -134,7 +134,6 @@ fn route_outcome(
         newly_in_world,
         cast_fanouts,
         jump_fanouts,
-        buff_fanouts,
         combat_fanouts,
         death_fanouts,
         player_target_fanouts,
@@ -201,11 +200,6 @@ fn route_outcome(
         }
         Outcome::CastFailFanOut { reason } => {
             cast_fanouts.push((client_id, CastEvent::Fail { reason }));
-        }
-        Outcome::BuffSnapshotFanOut => {
-            if !buff_fanouts.contains(&client_id) {
-                buff_fanouts.push(client_id);
-            }
         }
         Outcome::HitFanOut {
             target,

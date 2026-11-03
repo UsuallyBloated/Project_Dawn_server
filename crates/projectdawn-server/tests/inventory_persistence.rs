@@ -113,7 +113,7 @@ async fn save_overwrites_previous_snapshot() {
 }
 
 #[tokio::test]
-async fn load_for_fresh_character_is_empty() {
+async fn a_fresh_character_holds_only_its_starting_kit() {
     let (pool, _tmp) = fresh_pool().await;
     let account_id = db::create_account(&pool, "fresh", "hunter2!", None)
         .await
@@ -122,11 +122,40 @@ async fn load_for_fresh_character_is_empty() {
         .await
         .unwrap();
 
-    let loaded = db::load_inventory(&pool, char_id).await.unwrap();
-    assert!(
-        loaded.is_empty(),
-        "freshly-created characters have no inventory rows"
+    // Born wearing the kit (world/starter_kit.rs), nothing else.
+    let mut loaded: Vec<(String, i32, String, i32)> = db::load_inventory(&pool, char_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.location, r.slot, r.item_path, r.count))
+        .collect();
+    loaded.sort();
+    assert_eq!(
+        loaded,
+        vec![
+            (
+                "equip".into(),
+                0,
+                "res://data/loot/items/trainees_sword.tres".into(),
+                1
+            ),
+            (
+                "equip".into(),
+                3,
+                "res://data/loot/items/ragged_shirt.tres".into(),
+                1
+            ),
+            (
+                "equip".into(),
+                4,
+                "res://data/loot/items/ragged_pants.tres".into(),
+                1
+            ),
+        ],
+        "a Warrior is born with the sword, the shirt and the pants"
     );
+    // The kit's ledger rows came with it: the books balance at birth.
+    assert!(db::ledger_mismatches(&pool).await.unwrap().is_empty());
 }
 
 #[tokio::test]

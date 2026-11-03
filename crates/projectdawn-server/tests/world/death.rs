@@ -525,3 +525,76 @@ async fn an_accepted_resurrection_leaves_its_sickness() {
     a.pump_for(Duration::from_millis(200)).await;
     b.pump_for(Duration::from_millis(200)).await;
 }
+
+/// The starting kit and death (rule I5's other half): NO DROP never leaves its
+/// holder, but it does go onto the holder's own corpse like any worn gear, and
+/// looting that corpse puts the sword, shirt and pants back on their slots.
+/// The books balance through the death and the loot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_starting_kit_comes_back_off_its_owners_corpse() {
+    const SWORD: &str = "res://data/loot/items/trainees_sword.tres";
+    const SHIRT: &str = "res://data/loot/items/ragged_shirt.tres";
+    const PANTS: &str = "res://data/loot/items/ragged_pants.tres";
+    let h = start_both().await;
+    let (session, char_id, _) =
+        provision_client_dressed(&h.auth_url, "kitdie", "Kitdie", "Human", "Warrior").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "kitdie", true)
+        .await
+        .expect("set is_gm");
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut a = WorldClient::start(token, &session, char_id).await;
+    a.pump_for(Duration::from_millis(300)).await;
+
+    a.send_damage_self(1_000_000);
+    let contents = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::CorpseContents { .. })
+        })
+        .await
+        .expect("dying leaves a corpse");
+    let ServerWorldMsg::CorpseContents {
+        corpse_id, items, ..
+    } = contents
+    else {
+        unreachable!()
+    };
+    let on_corpse: Vec<&str> = items.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(
+        on_corpse,
+        vec![SWORD, SHIRT, PANTS],
+        "the kit is on the corpse, in paperdoll order"
+    );
+
+    a.send_respawn();
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::Teleport { .. })
+    })
+    .await
+    .expect("respawned beside the corpse");
+    a.send_loot_all(corpse_id);
+    a.pump_for(Duration::from_secs(2)).await;
+
+    let worn: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT slot, item_path FROM character_items WHERE char_id = ?1 AND location = 'equip' ORDER BY slot",
+    )
+    .bind(char_id)
+    .fetch_all(&pool)
+    .await
+    .expect("read worn rows");
+    assert_eq!(
+        worn,
+        vec![
+            (0, SWORD.to_string()),
+            (3, SHIRT.to_string()),
+            (4, PANTS.to_string())
+        ],
+        "the kit is worn again"
+    );
+    a.send_disconnect();
+    a.pump_for(Duration::from_millis(300)).await;
+    assert!(
+        ledger_mismatches(&h.db_url).await.is_empty(),
+        "the books balance through the death and the loot"
+    );
+}

@@ -363,6 +363,16 @@ pub(super) fn apply_sells(world: &mut WorldState, q: &mut Intents, _now: Instant
                 handlers::send_refusal(&mut *server, owner_cid, "The merchant won't take that.");
                 continue;
             };
+            // NO DROP never leaves its holder, whatever it is worth.
+            if item.no_drop {
+                tracing::info!(
+                    char_id = intent.owner,
+                    item_path = %item_path,
+                    "SellItem refused — NO DROP"
+                );
+                handlers::send_refusal(&mut *server, owner_cid, items::NO_DROP_REFUSAL);
+                continue;
+            }
             let unit_price = (item.vendor_price as i64) / 2;
             if unit_price <= 0 {
                 tracing::info!(

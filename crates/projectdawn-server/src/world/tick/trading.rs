@@ -158,6 +158,17 @@ pub(super) async fn apply_trade_intents(world: &mut WorldState, q: &mut Intents,
                     if from_location == format!("bag_{}", inventory::CURSOR_BAG_KEY) {
                         continue; // forged-only
                     }
+                    // NO DROP is bound to its holder: refused before a held
+                    // stack is parked, so a refusal moves nothing.
+                    if connections
+                        .get(&cid)
+                        .and_then(|c| c.inventory.peek_at(&from_location, from_slot))
+                        .is_some_and(|(path, _)| items::is_no_drop(&path))
+                    {
+                        tracing::info!(char_id = owner, "TradeOfferItem refused — NO DROP");
+                        handlers::send_refusal(&mut *server, cid, items::NO_DROP_REFUSAL);
+                        continue;
+                    }
                     // Resolve the source. "cursor" parks the held stack
                     // into an empty inventory slot first (no merging, so
                     // the offer stays one discrete referenced stack) and

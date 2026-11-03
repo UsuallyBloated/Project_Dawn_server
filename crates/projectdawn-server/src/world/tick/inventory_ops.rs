@@ -359,6 +359,16 @@ pub(super) async fn apply_drops(
                 handlers::send_refusal(&mut *server, owner_cid, "You can't drop that.");
                 continue;
             };
+            // NO DROP never reaches the ground, where anyone could pick it up.
+            if conn
+                .inventory
+                .peek_at(&intent.location, intent.slot)
+                .is_some_and(|(path, _)| items::is_no_drop(&path))
+            {
+                tracing::info!(char_id = intent.owner, "DropItem refused — NO DROP");
+                handlers::send_refusal(&mut *server, owner_cid, items::NO_DROP_REFUSAL);
+                continue;
+            }
             // An honest client drops one stack per click; anything past
             // the cap in one tick is a flood and is ignored.
             let seen = drops_seen.entry(owner_cid).or_insert(0);

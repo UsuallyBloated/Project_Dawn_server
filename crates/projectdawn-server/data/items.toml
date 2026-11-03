@@ -1636,3 +1636,93 @@ is_drink = true
 food_duration = 2160.0
 weight = 0.1
 no_rent = true
+
+# The starting kit (user, 2026-11-03): every new character is born wearing the
+# Ragged Shirt, the Ragged Pants and one Trainee's weapon for its class
+# (world/starter_kit.rs). All seven are NO DROP and worth nothing, so a fresh
+# character has nothing to sell, trade or hand on before it is deleted and
+# remade. The weapons sit a step under the cheapest shop weapon of their kind,
+# to be destroyed when a replacement turns up. Mirrored in
+# data/loot/items/{ragged_*,trainees_*}.tres on the client.
+[[item]]
+path = "res://data/loot/items/ragged_shirt.tres"
+name = "Ragged Shirt"
+item_type = "chest"
+stack_size = 1
+armor = 1
+armor_type = "cloth"
+vendor_price = 0
+weight = 0.5
+no_drop = true
+
+[[item]]
+path = "res://data/loot/items/ragged_pants.tres"
+name = "Ragged Pants"
+item_type = "legs"
+stack_size = 1
+armor = 1
+armor_type = "cloth"
+vendor_price = 0
+weight = 0.5
+no_drop = true
+
+[[item]]
+path = "res://data/loot/items/trainees_sword.tres"
+name = "Trainee's Sword"
+item_type = "weapon"
+stack_size = 1
+damage_min = 3
+damage_max = 7
+skill = "1h_slashing"
+vendor_price = 0
+weight = 2.5
+no_drop = true
+
+[[item]]
+path = "res://data/loot/items/trainees_knife.tres"
+name = "Trainee's Knife"
+item_type = "weapon"
+stack_size = 1
+damage_min = 2
+damage_max = 5
+skill = "piercing"
+vendor_price = 0
+weight = 1.0
+no_drop = true
+
+[[item]]
+path = "res://data/loot/items/trainees_club.tres"
+name = "Trainee's Club"
+item_type = "weapon"
+stack_size = 1
+damage_min = 3
+damage_max = 7
+skill = "1h_blunt"
+vendor_price = 0
+weight = 2.5
+no_drop = true
+
+[[item]]
+path = "res://data/loot/items/trainees_spear.tres"
+name = "Trainee's Spear"
+item_type = "weapon"
+stack_size = 1
+damage_min = 3
+damage_max = 6
+skill = "piercing"
+vendor_price = 0
+weight = 2.5
+no_drop = true
+
+[[item]]
+path = "res://data/loot/items/trainees_staff.tres"
+name = "Trainee's Staff"
+item_type = "weapon"
+stack_size = 1
+damage_min = 3
+damage_max = 9
+skill = "2h_blunt"
+is_two_handed = true
+vendor_price = 0
+weight = 2.5
+no_drop = true

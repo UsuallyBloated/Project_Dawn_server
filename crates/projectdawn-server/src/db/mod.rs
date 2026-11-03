@@ -353,6 +353,14 @@ pub async fn create_character(
     // character starts bound at the starter spawn, so Gate always has
     // somewhere to go and a bind is only ever replaced, never absent.
     let birth_bind = crate::world::STARTER_SPAWN;
+    // The starting kit (world/starter_kit.rs) is written with the character,
+    // in one transaction: a character never exists without it, and the item
+    // ledger's `starter` rows land with the items so the books balance from
+    // the first login.
+    let Some(kit) = crate::world::starter_kit::starter_kit(class) else {
+        return Err(AuthError::InvalidInput("unknown class".into()));
+    };
+    let mut tx = pool.begin().await?;
     let res = sqlx::query(
         "INSERT INTO characters (
             account_id, name, race, class, level, xp_to_next,
@@ -396,14 +404,42 @@ pub async fn create_character(
     // Alignment is the server's from birth (migration 0016): the class's
     // starting score, as the client's creation screen used to seed it.
     .bind(crate::world::alignment::starting_score(class))
-    .execute(pool)
+    .execute(&mut *tx)
     .await;
 
-    match res {
-        Ok(out) => Ok(out.last_insert_rowid()),
-        Err(sqlx::Error::Database(dbe)) if dbe.is_unique_violation() => Err(AuthError::NameTaken),
-        Err(e) => Err(AuthError::from(e)),
+    let char_id = match res {
+        Ok(out) => out.last_insert_rowid(),
+        Err(sqlx::Error::Database(dbe)) if dbe.is_unique_violation() => {
+            return Err(AuthError::NameTaken)
+        }
+        Err(e) => return Err(AuthError::from(e)),
+    };
+    let now = crate::world::ledger::unix_now_secs();
+    let mut rows = Vec::with_capacity(kit.len());
+    for (slot, item_path) in kit {
+        sqlx::query(
+            "INSERT INTO character_items (char_id, location, slot, item_path, count)
+             VALUES (?1, 'equip', ?2, ?3, 1)",
+        )
+        .bind(char_id)
+        .bind(i64::from(slot))
+        .bind(item_path)
+        .execute(&mut *tx)
+        .await?;
+        let mut row = crate::world::ledger::item_event(
+            crate::world::ledger::ItemAction::Starter,
+            item_path,
+            1,
+            1,
+            Some("starting kit".to_string()),
+        );
+        row.at = now;
+        row.char_id = char_id;
+        rows.push(row);
     }
+    write_item_events(&mut tx, &rows).await?;
+    tx.commit().await?;
+    Ok(char_id)
 }
 
 pub async fn delete_character(pool: &SqlitePool, account_id: i64, char_id: i64) -> AuthResult<()> {

@@ -288,6 +288,16 @@ pub(super) fn apply_item_bank(world: &mut WorldState, q: &mut Intents, _now: Ins
             );
             continue;
         }
+        // The shared vault is how items pass between an account's characters;
+        // NO DROP stays with its own (the character's own vault is fine).
+        if intent.shared && items::is_no_drop(&path) {
+            tracing::info!(
+                char_id = intent.owner,
+                "BankStoreItem refused — NO DROP to the shared vault"
+            );
+            handlers::send_bank_rejected(&mut *server, cid, items::NO_DROP_REFUSAL.to_string());
+            continue;
+        }
         let room = if intent.shared {
             conn.account_bank_items.capacity_for(&path)
         } else {

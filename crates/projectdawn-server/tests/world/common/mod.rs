@@ -143,7 +143,27 @@ pub async fn forget_all_spells(db_url: &str, char_id: i64) {
         .expect("forget all spells");
 }
 
-/// Register + login + char-create + request-token for one client. Returns
+/// Take a new character's starting kit back off it (its worn rows and their
+/// `starter` ledger rows together, so the books still balance). Every test
+/// written before the kit (2026-11-03) assumes a character born with nothing
+/// (bare fists, empty slots, exact ledger rows); `provision_client` keeps that
+/// fixture, and `provision_client_dressed` keeps the kit.
+pub async fn strip_starter_kit(db_url: &str, char_id: i64) {
+    let pool = db::open(db_url).await.expect("open pool");
+    sqlx::query("DELETE FROM character_items WHERE char_id = ?1 AND location = 'equip'")
+        .bind(char_id)
+        .execute(&pool)
+        .await
+        .expect("strip the kit");
+    sqlx::query("DELETE FROM item_events WHERE char_id = ?1 AND action = 'starter'")
+        .bind(char_id)
+        .execute(&pool)
+        .await
+        .expect("strip the kit's ledger rows");
+}
+
+/// Register + login + char-create + request-token for one client, the
+/// character born bare (the kit stripped). Returns
 /// (session_token_hex, char_id, world_token_bytes).
 pub async fn provision_client(
     auth_url: &str,
@@ -151,6 +171,28 @@ pub async fn provision_client(
     char_name: &str,
     race: &str,
     class: &str,
+) -> (String, i64, Vec<u8>) {
+    provision_client_with(auth_url, username, char_name, race, class, false).await
+}
+
+/// As `provision_client`, the character wearing its starting kit.
+pub async fn provision_client_dressed(
+    auth_url: &str,
+    username: &str,
+    char_name: &str,
+    race: &str,
+    class: &str,
+) -> (String, i64, Vec<u8>) {
+    provision_client_with(auth_url, username, char_name, race, class, true).await
+}
+
+async fn provision_client_with(
+    auth_url: &str,
+    username: &str,
+    char_name: &str,
+    race: &str,
+    class: &str,
+    dressed: bool,
 ) -> (String, i64, Vec<u8>) {
     let (mut ws, _) = tokio_tungstenite::connect_async(auth_url)
         .await
@@ -199,6 +241,9 @@ pub async fn provision_client(
     let db_url = DB_FOR_AUTH.lock().unwrap().get(auth_url).cloned();
     if let Some(db_url) = db_url {
         memorize_whole_class(&db_url, char_id, class).await;
+        if !dressed {
+            strip_starter_kit(&db_url, char_id).await;
+        }
     }
 
     let resp = rpc(

@@ -45,6 +45,7 @@ async fn run() -> anyhow::Result<()> {
         min_client = %cfg.min_client_version,
         dev_cmds,
         rate_limit,
+        terrain = %world::terrain::compiled().describe(),
         "starting projectdawn-server"
     );
     if dev_cmds {

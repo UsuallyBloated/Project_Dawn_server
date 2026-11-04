@@ -1344,6 +1344,7 @@ dependencies = [
  "renet_netcode",
  "serde",
  "serde_json",
+ "sha2",
  "shared",
  "sqlx",
  "tempfile",

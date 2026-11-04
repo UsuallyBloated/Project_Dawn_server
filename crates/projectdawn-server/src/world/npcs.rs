@@ -96,6 +96,13 @@ fn table() -> &'static Vec<Npc> {
     })
 }
 
+/// Every NPC, for the tests that hold the zone's ground to them
+/// (`terrain_content.rs`).
+#[cfg(test)]
+pub fn all() -> &'static [Npc] {
+    table()
+}
+
 pub fn lookup(id: &str) -> Option<&'static Npc> {
     table().iter().find(|n| n.id == id)
 }

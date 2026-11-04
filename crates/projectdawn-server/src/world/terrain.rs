@@ -698,12 +698,22 @@ mod tests {
     #[test]
     fn the_compiled_terrain_parses_and_its_hash_matches() {
         let t = compiled();
-        assert_eq!(t.grid_size(), 20);
-        assert_eq!(t.cell_size(), 20.0);
+        assert_eq!(t.grid_size(), 40);
+        assert_eq!(t.cell_size(), 10.0);
+        // The first hills (the client's data/terrain_features.toml): the town
+        // flat at the floor, the Wraith Gate plateau's top, the rim at the
+        // plate's edge (its outer vertices, which nothing else reaches).
         assert_eq!(t.ground(0.0, 0.0), t.floor_y());
-        // Today's world: flat at the floor, everywhere.
-        for (x, z) in [(-199.0, -199.0), (199.0, 199.0), (12.5, -70.0), (0.0, 0.0)] {
-            assert_eq!(t.mesh_height(x, z), Some(0.0), "({x}, {z})");
+        assert_eq!(t.mesh_height(12.5, 5.0), Some(0.0));
+        assert_eq!(t.mesh_height(170.0, 0.0), Some(18.0));
+        for (x, z) in [
+            (-200.0, 0.0),
+            (200.0, 0.0),
+            (0.0, -200.0),
+            (0.0, 200.0),
+            (200.0, 200.0),
+        ] {
+            assert_eq!(t.mesh_height(x, z), Some(40.0), "({x}, {z})");
         }
     }
 
@@ -937,7 +947,7 @@ mod tests {
 
     #[test]
     fn the_flat_world_allows_every_step_and_a_non_finite_one_none() {
-        let t = compiled();
+        let t = Terrain::flat(20, 20.0, 0.0);
         assert!(t.slope_ok(at(0.0, 0.0), at(0.41, 0.0)));
         assert!(t.slope_ok(at(-199.0, 50.0), at(-199.4, 50.3)));
         assert!(!t.slope_ok(at(0.0, 0.0), at(f32::NAN, 0.0)));
@@ -956,7 +966,7 @@ mod tests {
 
     #[test]
     fn the_flat_world_sees_everywhere() {
-        let t = compiled();
+        let t = Terrain::flat(20, 20.0, 0.0);
         assert!(t.can_see(at(-150.0, -150.0), at(150.0, 150.0)));
         assert!(t.can_see(at(0.0, 0.0), at(30.0, 0.0)));
         assert!(t.can_see(at(-250.0, 0.0), at(250.0, 0.0)));

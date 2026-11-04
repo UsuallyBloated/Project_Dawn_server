@@ -52,8 +52,8 @@ pub async fn start_with_panic_probe(line: &str) -> Harness {
 }
 
 /// A server on a ground of the test's own (`Config::terrain`, the height
-/// model): a ramp or a ridge in place of the compiled flat terrain. Fizzles
-/// off, as `start_both`.
+/// model): a ramp or a ridge in place of the flat default. Fizzles off, as
+/// `start_both`.
 pub async fn start_with_terrain(terrain: projectdawn_server::world::terrain::Terrain) -> Harness {
     start_with(false, None, Some(Arc::new(terrain))).await
 }
@@ -95,7 +95,16 @@ async fn start_with(
         netcode_private_key: projectdawn_server::config::NetcodeKey(netcode_key),
         fizzles,
         panic_probe,
-        terrain,
+        // Every test that brings no ground of its own runs on the flat world
+        // it was written for (the 400 m plate at the floor), not the zone's
+        // compiled hills, which have their own tests (`height.rs`, and
+        // `world/terrain_content.rs` in the crate). The NPC and safe-area
+        // tables still stand on the compiled ground, whose town is flat.
+        terrain: Some(terrain.unwrap_or_else(|| {
+            Arc::new(projectdawn_server::world::terrain::Terrain::flat(
+                20, 20.0, 0.0,
+            ))
+        })),
     });
 
     let pool = db::open(&url).await.expect("open pool");

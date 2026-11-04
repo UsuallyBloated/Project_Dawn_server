@@ -158,7 +158,8 @@ use serde::{Deserialize, Serialize};
 /// sides deploy together. Riding the same bump (2026-10-30): `SlotRef` gains
 /// a `Cursor` variant, appended last, so `SellItem` and `UseConsumable` can
 /// name what the player holds (sell-from-cursor); `BankStoreItem` already
-/// took `"cursor"` as a location string.
+/// took `"cursor"` as a location string. The first hills (2026-11-04) append
+/// the dev-gated `DevFling` after `DevSetFaction`.
 pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3239; // "PD_W0029"
 
 pub type EntityId = u64;
@@ -1124,6 +1125,15 @@ pub enum ClientWorldMsg {
     DevSetFaction {
         faction_id: String,
         standing: f32,
+    },
+    /// Dev-gated (GM only, audited like `DevSpawnMob`): lift this character
+    /// `height` metres straight up and let it fall, so a landing can be seen
+    /// anywhere, the flat world included. The fall is the ordinary one
+    /// (`fall.rs`): the landing costs what a fall from that height costs. A
+    /// plain account's request, and a height that is not finite or not in
+    /// (0, `MAX_FLING_HEIGHT`], is ignored silently.
+    DevFling {
+        height: f32,
     },
 }
 

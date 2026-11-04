@@ -1007,6 +1007,19 @@ impl NetClient {
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
+    /// Dev-only, gated and audited like `send_dev_spawn_mob`: lift ourselves
+    /// `height` metres and fall (the Test Panel's Fling buttons). The server
+    /// ignores a height outside (0, 100] and a plain account's request.
+    #[func]
+    fn send_dev_fling(&mut self, height: f64) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::DevFling {
+                height: height as f32,
+            },
+        )
+    }
+
     /// The server-held spell bar (client-authority audit fix 5): begin
     /// memorizing `spell_name` into `gem` (0-based).
     #[func]

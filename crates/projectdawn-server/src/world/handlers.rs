@@ -408,6 +408,12 @@ pub enum Outcome {
         requester: ClientId,
         pos: super::connection::Vec3f,
     },
+    /// Dev-gated fling (Test Panel): the tick loop lifts `requester` by
+    /// `height` and sets it falling, since it holds the fan.
+    DevFlingIntent {
+        requester: ClientId,
+        height: f32,
+    },
     /// A `Consider` of a mob (factions, 2026-10-23): answered in the tick
     /// loop, which holds the enemies map.
     ConsiderIntent {
@@ -492,6 +498,11 @@ pub const MAX_CHAT_CHARS: usize = 250;
 /// bar it drew), so the relay carries this one word rather than whatever a
 /// client wrote.
 pub const CAST_CANCELLED_RELAY: &str = "cancelled";
+
+/// The highest a GM may fling themselves (`DevFling`): past
+/// `fall::LETHAL_DROP`, so a lethal fall can be tested, and bounded, so no
+/// height a client sends puts a body wherever it likes.
+pub const MAX_FLING_HEIGHT: f32 = 100.0;
 
 /// Cut `text` to at most `max_chars` characters. Counting characters, never
 /// slicing by byte: `&text[..n]` panics when `n` falls inside a multibyte
@@ -1348,6 +1359,36 @@ pub fn handle_message(
             Outcome::DevDespawnEnemiesIntent {
                 requester: client_id,
                 pos,
+            }
+        }
+
+        ClientWorldMsg::DevFling { height } => {
+            // The same gate and audit as the other dev commands. The height is
+            // checked before anything is recorded or moved: only a finite one
+            // in (0, MAX_FLING_HEIGHT] reaches a position (rule A3), and the
+            // dead are not flung (no row for a command that would do nothing).
+            if !conn.in_world || !conn.can_use_dev_cmds() {
+                return Outcome::Continue;
+            }
+            if !(height.is_finite() && height > 0.0 && height <= MAX_FLING_HEIGHT)
+                || conn.hp <= 0.0
+                || conn.death_processed
+            {
+                return Outcome::Continue;
+            }
+            if !dev_cmd_allowed(
+                server,
+                conn,
+                client_id,
+                now,
+                "dev_fling",
+                format!("height={height:.1}"),
+            ) {
+                return Outcome::Continue;
+            }
+            Outcome::DevFlingIntent {
+                requester: client_id,
+                height,
             }
         }
 

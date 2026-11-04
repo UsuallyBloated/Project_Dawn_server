@@ -893,6 +893,16 @@ impl WorldClient {
         );
     }
 
+    /// Dev-gated fling (the Test Panel's Fling buttons): straight up `height`
+    /// metres, then the ordinary fall.
+    pub fn send_dev_fling(&mut self, height: f32) {
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::DevFling { height },
+        );
+    }
+
     pub fn send_pet_command(&mut self, command: u8, target_id: Option<u64>) {
         let msg = ClientWorldMsg::PetCommand { command, target_id };
         send_msg(&mut self.client, CHANNEL_SYSTEM, &msg);

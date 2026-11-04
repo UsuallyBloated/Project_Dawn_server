@@ -207,3 +207,104 @@ async fn a_fall_to_zero_leaves_the_corpse_where_the_body_landed() {
         "the corpse lies on the floor where the body landed: {pos:?}"
     );
 }
+
+/// The GM fling tool: a GM flung 20 m on flat ground is put in the air by a Teleport,
+/// falls and lands for the formula's damage (45% of max HP) with the line, and one audit
+/// row records it. A forged NaN from the GM, and a plain account's fling, move nobody and
+/// record nothing. On the server before the tool, nobody was ever flung.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_flung_gm_lands_for_the_formulas_damage() {
+    let h = start_both().await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    let fling_rows = |pool: sqlx::SqlitePool| async move {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM gm_actions WHERE command = 'dev_fling'")
+            .fetch_one(&pool)
+            .await
+            .expect("count dev_fling rows")
+    };
+    let (session, char_id, _stale) =
+        provision_client(&h.auth_url, "flinger", "Flinga", "Human", "Warrior").await;
+    db::set_account_gm(&pool, "flinger", true)
+        .await
+        .expect("set is_gm");
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut gm = WorldClient::start(token, &session, char_id).await;
+    let health = gm
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == char_id as u64),
+        )
+        .await
+        .expect("a joiner is told its own HP");
+    let ServerWorldMsg::HealthUpdate { max_hp, .. } = health else {
+        unreachable!()
+    };
+    let is_teleport = |m: &ServerWorldMsg| matches!(m, ServerWorldMsg::Teleport { .. });
+
+    // A forged NaN: nothing moves, nothing is recorded.
+    gm.send_dev_fling(f32::NAN);
+    let msgs = system_messages(&mut gm, Duration::from_millis(600)).await;
+    assert!(
+        !msgs.iter().any(is_teleport),
+        "a NaN flings nobody: {msgs:?}"
+    );
+    let still = own_position_now(&mut gm, char_id).await;
+    assert!(still.y.is_finite() && still.y.abs() < 0.05, "{still:?}");
+    assert_eq!(
+        fling_rows(pool.clone()).await,
+        0,
+        "a refused fling writes no row"
+    );
+
+    gm.send_dev_fling(20.0);
+    let msgs = system_messages(&mut gm, Duration::from_secs(3)).await;
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, ServerWorldMsg::Teleport { pos } if (pos.y - 20.0).abs() < 0.05)),
+        "the GM is put 20 m up; got {msgs:?}"
+    );
+    let expected = fall::damage(20.0, max_hp);
+    let line = format!("You hit the ground hard for {} damage.", expected as i64);
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if *text == line)),
+        "the landing is announced ({line}); got {msgs:?}"
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. }
+            if *id == char_id as u64 && (hp - (max_hp - expected)).abs() < 0.01)),
+        "the HP bar drops by the formula's {expected} of {max_hp}; got {msgs:?}"
+    );
+    let landed = own_position_now(&mut gm, char_id).await;
+    assert!(
+        landed.y.abs() < 0.05,
+        "the GM ends on the ground: {landed:?}"
+    );
+    assert_eq!(fling_rows(pool.clone()).await, 1, "the fling is audited");
+
+    // A plain account's fling is ignored silently. Only meaningful when the
+    // process is not in dev mode, where every connection may use dev commands.
+    if std::env::var("PD_DEV_CMDS").as_deref() != Ok("1") {
+        let (pl_session, pl_char, pl_token) =
+            provision_client(&h.auth_url, "flingplain", "Grounda", "Human", "Warrior").await;
+        let mut plain = WorldClient::start(pl_token, &pl_session, pl_char).await;
+        plain.pump_for(Duration::from_millis(300)).await;
+        plain.send_dev_fling(20.0);
+        let msgs = system_messages(&mut plain, Duration::from_secs(2)).await;
+        assert!(
+            !msgs.iter().any(is_teleport),
+            "a plain account is not flung: {msgs:?}"
+        );
+        assert!(
+            !msgs.iter().any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.starts_with("You hit the ground"))),
+            "no landing for a plain account: {msgs:?}"
+        );
+        assert_eq!(
+            fling_rows(pool.clone()).await,
+            1,
+            "a plain account's fling writes no row"
+        );
+    }
+}

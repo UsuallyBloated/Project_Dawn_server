@@ -619,6 +619,30 @@ fn route_outcome(
         Outcome::DevDespawnEnemiesIntent { requester, pos } => {
             dev_despawn_intents.push((requester, pos));
         }
+        Outcome::DevFlingIntent { requester, height } => {
+            // Straight up from where the GM is, then the ordinary fall: the
+            // movement step runs every ready connection each tick, Move or
+            // none, so the body falls from the next tick and `land` charges
+            // the landing. The Teleport puts the client's own body in the air,
+            // where its own gravity takes it down as the server's does. A GM
+            // already falling keeps the height it left the ground at, if higher.
+            if let Some(conn) = connections.get_mut(&requester) {
+                if conn.hp > 0.0 && !conn.death_processed {
+                    conn.pos.y += height;
+                    let from_y = if conn.vertical.airborne {
+                        conn.vertical.from_y.max(conn.pos.y)
+                    } else {
+                        conn.pos.y
+                    };
+                    conn.vertical = crate::world::fall::Vertical {
+                        airborne: true,
+                        vy: 0.0,
+                        from_y,
+                    };
+                    handlers::send_teleport(&mut *server, requester, conn.pos);
+                }
+            }
+        }
         Outcome::ConsiderIntent {
             requester,
             target_id,

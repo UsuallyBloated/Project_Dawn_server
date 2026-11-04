@@ -312,16 +312,31 @@ impl Terrain {
 
     /// Whether a player may step from `from` to `to` in one tick: the rise
     /// between the two grounds is at most the run times `tan(SLOPE_LIMIT_DEG)`,
-    /// with `SLOPE_SLACK` of that for rounding. An angle, whatever the step's
-    /// length, so a step too short to measure climbs nothing. Downhill is
-    /// always allowed; a non-finite step never is.
+    /// with `SLOPE_SLACK` of that for rounding, and a step that rises does not
+    /// land on ground steeper than that. An angle, whatever the step's length,
+    /// so a step too short to measure climbs nothing. Downhill is always
+    /// allowed; a non-finite step never is.
+    ///
+    /// The second half is the face itself: a step's own grade on a face of
+    /// gradient g is g times the cosine of its angle to straight uphill, so a
+    /// diagonal climbs a 63 degree face at 55 and zigzags up any face at all.
+    /// The client's body cannot (it slides off ground steeper than its floor
+    /// limit whichever way it faces), so neither may a modified client.
     pub fn slope_ok(&self, from: Vec3f, to: Vec3f) -> bool {
         if !(from.x.is_finite() && from.z.is_finite() && to.x.is_finite() && to.z.is_finite()) {
             return false;
         }
         let rise = self.ground(to.x, to.z) - self.ground(from.x, from.z);
+        if rise <= 0.0 {
+            return true;
+        }
+        let limit = slope_limit_tan() * (1.0 + SLOPE_SLACK);
         let run = ((to.x - from.x).powi(2) + (to.z - from.z).powi(2)).sqrt();
-        rise <= run * slope_limit_tan() * (1.0 + SLOPE_SLACK)
+        if rise > run * limit {
+            return false;
+        }
+        let (gx, gz) = self.gradient(to.x, to.z);
+        (gx * gx + gz * gz).sqrt() <= limit
     }
 
     /// The slope of the ground under a point, as (dh/dx, dh/dz): the plane of
@@ -765,6 +780,47 @@ mod tests {
             p = step.pos;
         }
         assert_eq!((p.x, p.y, p.z), (start.x, start.y, start.z), "{p:?}");
+    }
+
+    /// A step at an angle to straight uphill climbs a face at less than the
+    /// face's own slope: on this 63 degree face a 45 degree diagonal climbs
+    /// at 55, and the slope rule judged the step alone. A walker zigzagging
+    /// from the flat ground at its foot never gets onto it.
+    #[test]
+    fn a_diagonal_climbs_no_face() {
+        // Two 10 m cells along x: flat from x = -10 to 0, then a face rising
+        // 20 m over the cell from x = 0 to 10 (63.4 degrees).
+        let face = Terrain::from_heights(
+            2,
+            10.0,
+            [0.0; 3],
+            -100.0,
+            vec![0.0, 0.0, 20.0, 0.0, 0.0, 20.0, 0.0, 0.0, 20.0],
+        )
+        .unwrap();
+        let on_face = face.ground_vec(at(5.0, 0.0));
+        let d = 0.25 / 2f32.sqrt();
+        let diagonal = Vec3f {
+            x: on_face.x + d,
+            y: on_face.y,
+            z: on_face.z + d,
+        };
+        assert!(
+            !face.slope_ok(on_face, diagonal),
+            "a 45 degree diagonal up the face"
+        );
+        // Along the face's contour: no rise, still a step (the body then
+        // leaves the ground it cannot stand on, fall.rs).
+        assert!(face.slope_ok(on_face, at(5.0, 0.25)));
+        // Down it: always.
+        assert!(face.slope_ok(on_face, at(4.75, 0.0)));
+        let mut p = face.ground_vec(at(-2.0, -9.0));
+        for i in 0..200 {
+            // Zigzag: north-east, then south-east.
+            let dz = if (i / 20) % 2 == 0 { d } else { -d };
+            p = face.player_step(p, d, dz).pos;
+            assert!(p.y < 0.01, "step {i}: the walker is {p:?}, up the face");
+        }
     }
 
     #[test]

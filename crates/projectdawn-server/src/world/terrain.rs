@@ -19,10 +19,14 @@ const TERRAIN_TOML: &str = include_str!("../../data/terrain.toml");
 /// `floor_max_angle` (55) plus a margin, so an honest body, which its own
 /// collider stopped first, is never refused.
 pub const SLOPE_LIMIT_DEG: f32 = 60.0;
-/// Rise allowed on top of the slope rule per step, for float rounding. NOT the
-/// client's 0.5 m floor snap: snapping keeps a body on the ground going down,
-/// and half a metre allowed on every tick would be a vertical wall at 10 m/s.
-pub const SNAP_ALLOWANCE: f32 = 0.01;
+/// Slack on the slope rule, as a fraction of the allowed rise, for float
+/// rounding. Relative, never a fixed height per step: a fixed centimetre a
+/// tick would let a forged client climb any face at 20 cm/s with steps too
+/// short to be measured against it (the review of 2026-11-04). NOT the
+/// client's 0.5 m floor snap either: snapping keeps a body on the ground going
+/// down, and half a metre allowed on every tick would be a vertical wall at
+/// 10 m/s.
+pub const SLOPE_SLACK: f32 = 0.001;
 /// How high above the ground both ends of a sight line are taken: chest height
 /// for a human, head height for a gnome, above a rat entirely. One constant for
 /// everything until creatures carry a height; the same at both ends, so sight
@@ -209,7 +213,11 @@ impl Terrain {
         self.grid_size as f32 * self.cell_size
     }
 
-    fn mesh_height_local(&self, lx: f32, lz: f32) -> Option<f32> {
+    /// The cell a grid-local point is in and where it sits inside it, or
+    /// `None` outside the grid (and for a non-finite point). The one place
+    /// that decides which triangle a point belongs to: the height and the
+    /// slope are both read off it.
+    fn cell(&self, lx: f32, lz: f32) -> Option<Cell> {
         let extent = self.extent();
         if !(lx >= 0.0 && lx <= extent && lz >= 0.0 && lz <= extent) {
             return None;
@@ -219,16 +227,22 @@ impl Terrain {
         // The far edge belongs to the last cell.
         let cx = (fx.floor() as usize).min(self.grid_size - 1);
         let cz = (fz.floor() as usize).min(self.grid_size - 1);
-        let u = fx - cx as f32;
-        let v = fz - cz as f32;
-        let h00 = self.vertex(cx, cz);
-        let h10 = self.vertex(cx + 1, cz);
-        let h01 = self.vertex(cx, cz + 1);
-        let h11 = self.vertex(cx + 1, cz + 1);
-        let h = if u + v <= 1.0 {
-            h00 + u * (h10 - h00) + v * (h01 - h00)
+        Some(Cell {
+            u: fx - cx as f32,
+            v: fz - cz as f32,
+            h00: self.vertex(cx, cz),
+            h10: self.vertex(cx + 1, cz),
+            h01: self.vertex(cx, cz + 1),
+            h11: self.vertex(cx + 1, cz + 1),
+        })
+    }
+
+    fn mesh_height_local(&self, lx: f32, lz: f32) -> Option<f32> {
+        let c = self.cell(lx, lz)?;
+        let h = if c.lower() {
+            c.h00 + c.u * (c.h10 - c.h00) + c.v * (c.h01 - c.h00)
         } else {
-            h11 + (1.0 - u) * (h01 - h11) + (1.0 - v) * (h10 - h11)
+            c.h11 + (1.0 - c.u) * (c.h01 - c.h11) + (1.0 - c.v) * (c.h10 - c.h11)
         };
         Some(self.origin.y + h)
     }
@@ -276,16 +290,17 @@ impl Terrain {
     }
 
     /// Whether a player may step from `from` to `to` in one tick: the rise
-    /// between the two grounds is at most the run times `tan(SLOPE_LIMIT_DEG)`
-    /// plus `SNAP_ALLOWANCE`. Downhill is always allowed; a non-finite step
-    /// never is.
+    /// between the two grounds is at most the run times `tan(SLOPE_LIMIT_DEG)`,
+    /// with `SLOPE_SLACK` of that for rounding. An angle, whatever the step's
+    /// length, so a step too short to measure climbs nothing. Downhill is
+    /// always allowed; a non-finite step never is.
     pub fn slope_ok(&self, from: Vec3f, to: Vec3f) -> bool {
         if !(from.x.is_finite() && from.z.is_finite() && to.x.is_finite() && to.z.is_finite()) {
             return false;
         }
         let rise = self.ground(to.x, to.z) - self.ground(from.x, from.z);
         let run = ((to.x - from.x).powi(2) + (to.z - from.z).powi(2)).sqrt();
-        rise <= run * slope_limit_tan() + SNAP_ALLOWANCE
+        rise <= run * slope_limit_tan() * (1.0 + SLOPE_SLACK)
     }
 
     /// The slope of the ground under a point, as (dh/dx, dh/dz): the plane of
@@ -293,26 +308,19 @@ impl Terrain {
     /// or where the mesh dips under the floor) and for a non-finite point.
     pub fn gradient(&self, x: f32, z: f32) -> (f32, f32) {
         let (lx, lz) = self.local(x, z);
+        let Some(c) = self.cell(lx, lz) else {
+            return (0.0, 0.0);
+        };
         let Some(h) = self.mesh_height_local(lx, lz) else {
             return (0.0, 0.0);
         };
         if h < self.floor_y {
             return (0.0, 0.0);
         }
-        let fx = lx / self.cell_size;
-        let fz = lz / self.cell_size;
-        let cx = (fx.floor() as usize).min(self.grid_size - 1);
-        let cz = (fz.floor() as usize).min(self.grid_size - 1);
-        let u = fx - cx as f32;
-        let v = fz - cz as f32;
-        let h00 = self.vertex(cx, cz);
-        let h10 = self.vertex(cx + 1, cz);
-        let h01 = self.vertex(cx, cz + 1);
-        let h11 = self.vertex(cx + 1, cz + 1);
-        let (dx, dz) = if u + v <= 1.0 {
-            (h10 - h00, h01 - h00)
+        let (dx, dz) = if c.lower() {
+            (c.h10 - c.h00, c.h01 - c.h00)
         } else {
-            (h11 - h01, h11 - h10)
+            (c.h11 - c.h01, c.h11 - c.h10)
         };
         (dx / self.cell_size, dz / self.cell_size)
     }
@@ -414,6 +422,25 @@ impl Terrain {
 
 fn slope_limit_tan() -> f32 {
     SLOPE_LIMIT_DEG.to_radians().tan()
+}
+
+/// A point's cell: its fraction across the cell (`u` along x, `v` along z)
+/// and the four corner heights, `h<x><z>`.
+struct Cell {
+    u: f32,
+    v: f32,
+    h00: f32,
+    h10: f32,
+    h01: f32,
+    h11: f32,
+}
+
+impl Cell {
+    /// On the lower triangle, the one with the (x0, z0) corner: the cell is
+    /// split on the diagonal from (x1, z0) to (x0, z1), the client's own.
+    fn lower(&self) -> bool {
+        self.u + self.v <= 1.0
+    }
 }
 
 /// The parameters in (0, 1) at which a coordinate moving from `s0` to `s1`
@@ -659,9 +686,27 @@ mod tests {
     #[test]
     fn a_steep_face_is_refused_at_every_speed() {
         let cliff = ramp(20.0 * 70f32.to_radians().tan());
-        for run in [0.01, 0.25, 0.41, 2.0, 10.0] {
+        for run in [0.000_025, 0.001, 0.01, 0.25, 0.41, 2.0, 10.0] {
             assert!(!cliff.slope_ok(at(0.0, 0.0), at(run, 0.0)), "run {run}");
         }
+        // The client's own limit, 55°, at full speed: taken, with room.
+        let steep_but_fair = ramp(20.0 * 55f32.to_radians().tan());
+        assert!(steep_but_fair.slope_ok(at(0.0, 0.0), at(0.41, 0.0)));
+    }
+
+    /// The review's find (2026-11-04): a fixed allowance per step let a forged
+    /// client climb any face with steps too short to measure. Ten thousand
+    /// micro-steps (a direction of length 1e-4, 25 µm each) up a 70° face go
+    /// nowhere.
+    #[test]
+    fn micro_steps_climb_no_face() {
+        let cliff = ramp(20.0 * 70f32.to_radians().tan());
+        let start = cliff.ground_vec(at(0.0, 0.0));
+        let mut p = start;
+        for _ in 0..10_000 {
+            p = cliff.player_step(p, 0.000_025, 0.0);
+        }
+        assert_eq!((p.x, p.y, p.z), (start.x, start.y, start.z), "{p:?}");
     }
 
     #[test]

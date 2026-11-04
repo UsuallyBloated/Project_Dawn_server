@@ -3,6 +3,27 @@
 
 use super::*;
 
+/// A player's own melee envelope, before the tolerance (a mob's is its template's
+/// `melee_range`).
+const PLAYER_MELEE_REACH: f32 = 3.0;
+
+/// Whether the weapon at `weapon_path` shoots (a bow); an empty or unknown path
+/// is a melee swing.
+fn is_ranged_weapon(weapon_path: &str) -> bool {
+    items::lookup(weapon_path).is_some_and(|w| w.is_ranged)
+}
+
+/// How far a swing or a shot reaches: a ranged weapon's own range (it carries
+/// its headroom), else the target's melee envelope with the tolerance. The one
+/// place the reach rule lives for skills, PvP swings and swings at mobs.
+fn attack_reach(ranged: bool, melee_reach: f32) -> f32 {
+    if ranged {
+        RANGED_ATTACK_RANGE
+    } else {
+        melee_reach * ATTACK_RANGE_TOLERANCE
+    }
+}
+
 pub(super) fn apply_active_skills(
     world: &mut WorldState,
     q: &mut Intents,
@@ -71,7 +92,7 @@ pub(super) fn apply_active_skills(
                 // becomes will check again (step 4h fans a Miss for a
                 // target out of reach; the skill refuses before any cost).
                 let weapon_path = user.equipped_weapon_path(false);
-                let ranged = items::lookup(&weapon_path).is_some_and(|w| w.is_ranged);
+                let ranged = is_ranged_weapon(&weapon_path);
                 let Some(target_id) = intent.target_id else {
                     handlers::send_skill_fail(
                         &mut *server,
@@ -92,11 +113,7 @@ pub(super) fn apply_active_skills(
                     if target_id == intent.user {
                         Err("You cannot use that on yourself.")
                     } else {
-                        let allowed = if ranged {
-                            RANGED_ATTACK_RANGE
-                        } else {
-                            3.0 * ATTACK_RANGE_TOLERANCE
-                        };
+                        let allowed = attack_reach(ranged, PLAYER_MELEE_REACH);
                         match connections.get(&(target_id as ClientId)) {
                             Some(t)
                                 if t.in_world
@@ -125,11 +142,7 @@ pub(super) fn apply_active_skills(
                 } else {
                     match enemies.get(&target_id) {
                         Some(e) if e.is_alive() => {
-                            let allowed = if ranged {
-                                RANGED_ATTACK_RANGE
-                            } else {
-                                e.melee_range() * ATTACK_RANGE_TOLERANCE
-                            };
+                            let allowed = attack_reach(ranged, e.melee_range());
                             if e.pos.distance_to(user_pos) > allowed {
                                 Err(NOT_HERE)
                             } else if ranged && !terrain.can_see(user_pos, e.pos) {
@@ -509,13 +522,8 @@ pub(super) fn apply_attacks(
                 let target_in_range_alive = connections
                     .get(&target_cid)
                     .map(|t| {
-                        let ranged =
-                            items::lookup(&server_weapon_path).is_some_and(|w| w.is_ranged);
-                        let allowed = if ranged {
-                            RANGED_ATTACK_RANGE
-                        } else {
-                            3.0 * ATTACK_RANGE_TOLERANCE
-                        };
+                        let ranged = is_ranged_weapon(&server_weapon_path);
+                        let allowed = attack_reach(ranged, PLAYER_MELEE_REACH);
                         t.in_world
                             && t.hp > 0.0
                             && t.pos.distance_to(attacker_pos) <= allowed
@@ -958,12 +966,8 @@ pub(super) fn apply_attacks(
             // produce silent Miss broadcasts even though the swing
             // visually fired. Lookup is by weapon_path; an empty or
             // unknown path uses the melee envelope.
-            let ranged = items::lookup(&server_weapon_path).is_some_and(|w| w.is_ranged);
-            let allowed = if ranged {
-                RANGED_ATTACK_RANGE
-            } else {
-                entity.melee_range() * ATTACK_RANGE_TOLERANCE
-            };
+            let ranged = is_ranged_weapon(&server_weapon_path);
+            let allowed = attack_reach(ranged, entity.melee_range());
             if dist > allowed {
                 tracing::debug!(
                     attacker = intent.attacker,

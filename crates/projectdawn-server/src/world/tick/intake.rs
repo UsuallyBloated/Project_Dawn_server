@@ -602,9 +602,9 @@ fn route_outcome(
             // client keeps rendering the death site until the next
             // Position broadcast drags it back — the teleport IS
             // the respawn from the player's point of view. The bind is
-            // re-pinned to the ground at use (the handler stored its
-            // stored y; the movement step pins the server's copy this
-            // same tick).
+            // re-pinned to the ground at use: the handler set `conn.pos`
+            // to the bind as saved, the teleport carries the ground's y,
+            // and the movement step pins the server's copy this same tick.
             handlers::send_teleport(&mut *server, client_id, terrain.ground_vec(pos));
         }
         Outcome::DevSpawnMobIntent { pos, mob } => {

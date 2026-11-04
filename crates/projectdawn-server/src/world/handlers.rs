@@ -748,8 +748,10 @@ pub fn handle_message(
             {
                 Vec3f::ZERO
             } else {
-                // Y is zeroed — server does not simulate gravity or jumping.
-                // Only XZ is authoritative; vertical position stays at spawn height.
+                // Only the XZ direction is the client's. Nothing vertical is ever
+                // read from it: the ground decides height (the height model,
+                // `terrain::player_step` pins every player each tick), and there
+                // is no gravity or jumping to simulate.
                 let v = Vec3f {
                     x: direction.x,
                     y: 0.0,
@@ -775,7 +777,7 @@ pub fn handle_message(
                 - std::f32::consts::PI;
             // The jump is cosmetic and separate from the direction: it is
             // relayed as a one-shot for peers to animate, and nothing here
-            // reads it into `pos` (Y stays the server's zero).
+            // reads it into `pos` (the ground alone decides Y).
             if conn.note_move_jump(jumping, now) {
                 Outcome::JumpFanOut
             } else {

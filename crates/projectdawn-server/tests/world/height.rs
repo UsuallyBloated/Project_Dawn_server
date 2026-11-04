@@ -29,7 +29,19 @@ fn test_ground() -> Terrain {
         heights[iz * 21 + 6] = 20.0 * 30f32.to_radians().tan();
         heights[iz * 21 + 8] = RIDGE_HEIGHT;
     }
-    Terrain::from_heights(20, 20.0, [0.0; 3], 0.0, heights).expect("a valid test terrain")
+    let t = Terrain::from_heights(20, 20.0, [0.0; 3], 0.0, heights).expect("a valid test terrain");
+    // The NPC and safe-area tables stand on the COMPILED ground (process-wide
+    // tables, one per binary), so a test ground must keep the town flat or
+    // the banker and the square would be measured against a height the
+    // world does not use. The features begin 20 m west of the last NPC.
+    for x in [-2.0, 0.0, 5.0, 8.0, 11.0, 14.0] {
+        assert_eq!(
+            t.ground(x, 5.0),
+            0.0,
+            "the town must stay flat under a test ground"
+        );
+    }
+    t
 }
 
 /// The ridge's ground at `x` (the slopes are planar).

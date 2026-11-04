@@ -42,16 +42,27 @@ pub async fn start_both() -> Harness {
 }
 
 pub async fn start_both_opts(fizzles: bool) -> Harness {
-    start_with(fizzles, None).await
+    start_with(fizzles, None, None).await
 }
 
 /// A server where saying `line` panics the speaker's message handler
 /// (`Config::panic_probe`), for the panic containment test.
 pub async fn start_with_panic_probe(line: &str) -> Harness {
-    start_with(false, Some(line.to_string())).await
+    start_with(false, Some(line.to_string()), None).await
 }
 
-async fn start_with(fizzles: bool, panic_probe: Option<String>) -> Harness {
+/// A server on a ground of the test's own (`Config::terrain`, the height
+/// model): a ramp or a ridge in place of the compiled flat terrain. Fizzles
+/// off, as `start_both`.
+pub async fn start_with_terrain(terrain: projectdawn_server::world::terrain::Terrain) -> Harness {
+    start_with(false, None, Some(Arc::new(terrain))).await
+}
+
+async fn start_with(
+    fizzles: bool,
+    panic_probe: Option<String>,
+    terrain: Option<Arc<projectdawn_server::world::terrain::Terrain>>,
+) -> Harness {
     // Opt-in server tracing for triage: RUST_LOG=info cargo test ... --nocapture
     // makes the in-process server's tracing lines visible. try_init so the
     // second test in the process doesn't panic on double-init.
@@ -84,6 +95,7 @@ async fn start_with(fizzles: bool, panic_probe: Option<String>) -> Harness {
         netcode_private_key: projectdawn_server::config::NetcodeKey(netcode_key),
         fizzles,
         panic_probe,
+        terrain,
     });
 
     let pool = db::open(&url).await.expect("open pool");

@@ -15,6 +15,7 @@ pub(super) fn run_buff_tick(
         server,
         connections,
         enemies,
+        terrain,
         ..
     } = world;
     // 4s. Bard song pulses (the rework of 2026-10-20): every singer whose
@@ -44,6 +45,7 @@ pub(super) fn run_buff_tick(
             cid,
             spell,
             now,
+            terrain,
         );
     }
 

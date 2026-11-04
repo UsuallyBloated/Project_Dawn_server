@@ -29,6 +29,10 @@ pub struct Config {
     /// sets it, to prove that a panic while handling one client's message
     /// drops that client and leaves the world running for everyone else.
     pub panic_probe: Option<String>,
+    /// The ground the world runs on (`world::terrain`). None, the compiled
+    /// `terrain.toml`, for a running server; only the integration harness
+    /// hands in a ramp or a ridge to prove the pinning and the sight rules.
+    pub terrain: Option<std::sync::Arc<crate::world::terrain::Terrain>>,
 }
 
 /// The 32-byte renet netcode private key. A newtype so its `Debug` can never
@@ -106,6 +110,7 @@ impl Config {
             netcode_private_key: NetcodeKey(netcode_private_key),
             fizzles: true,
             panic_probe: None,
+            terrain: None,
         })
     }
 }
@@ -152,6 +157,7 @@ mod tests {
             netcode_private_key: NetcodeKey([0xAB; 32]),
             fizzles: true,
             panic_probe: None,
+            terrain: None,
         };
         let shown = format!("{cfg:?}");
         assert!(shown.contains("<redacted>"), "{shown}");

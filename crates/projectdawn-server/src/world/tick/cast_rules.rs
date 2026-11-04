@@ -153,8 +153,59 @@ pub(super) enum ResolvedTarget {
 /// arm. The arms carry NO copy of these checks (the 2026-10-02 review found
 /// two homes for one rule): they consume the `ResolvedTarget` and treat a
 /// target gone between here and there as the bug it would be.
+///
+/// 3. **Sight.** Last, once the target is resolved: the caster must see it
+///    across the terrain (`Terrain::can_see`, the height model's 3.8), heals
+///    and buffs included (the user's call of 2026-11-03; EQEmu exempts them).
+///    Decided at the release, as EQEmu's `SpellFinished` does; a target that
+///    steps behind a crest during the bar breaks the spell here, as one that
+///    walks out of reach does, at no cost.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn cast_target_refusal(
+    spell: &spells::Spell,
+    target_id: Option<EntityId>,
+    caster_id: EntityId,
+    caster_cid: ClientId,
+    caster_pos: Vec3f,
+    connections: &HashMap<ClientId, PerConnection>,
+    enemies: &HashMap<EntityId, Entity>,
+    corpses: &HashMap<EntityId, crate::world::corpses::Corpse>,
+    group_manager: &GroupManager,
+    terrain: &crate::world::terrain::Terrain,
+) -> Result<ResolvedTarget, String> {
+    let resolved = resolve_cast_target(
+        spell,
+        target_id,
+        caster_id,
+        caster_cid,
+        caster_pos,
+        connections,
+        enemies,
+        corpses,
+        group_manager,
+    )?;
+    let target_pos = match resolved {
+        ResolvedTarget::Nothing => None,
+        ResolvedTarget::Player(cid) if cid == caster_cid => None,
+        ResolvedTarget::Player(cid) => connections.get(&cid).map(|c| c.pos),
+        ResolvedTarget::Mob(id) | ResolvedTarget::Pet(id) => enemies.get(&id).map(|e| e.pos),
+        ResolvedTarget::Corpse(id, _) => corpses.get(&id).map(|c| c.pos),
+    };
+    if let Some(p) = target_pos {
+        if !terrain.can_see(caster_pos, p) {
+            return Err(CANNOT_SEE_TARGET.to_string());
+        }
+    }
+    Ok(resolved)
+}
+
+/// EQ's line for a target the terrain hides (EQEmu's `CANT_SEE_TARGET`).
+pub(super) const CANNOT_SEE_TARGET: &str = "You cannot see your target.";
+
+/// The pre-flight's first two parts: presence, reach, liveness and the gates,
+/// by target type. Sight is `cast_target_refusal`'s.
+#[allow(clippy::too_many_arguments)]
+fn resolve_cast_target(
     spell: &spells::Spell,
     target_id: Option<EntityId>,
     caster_id: EntityId,
@@ -480,6 +531,7 @@ pub(super) fn stop_song(
 /// current target while it is a live mob in reach (out of reach, the pulse
 /// is skipped; dead or gone, the song stops: EQ's invalid-target rule). A
 /// PvP target is not a mob, so the song stops on one too (flagged).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn song_pulse(
     server: &mut RenetServer,
     recipients: &[ClientId],
@@ -488,6 +540,7 @@ pub(super) fn song_pulse(
     cid: ClientId,
     spell: &spells::Spell,
     now: Instant,
+    terrain: &crate::world::terrain::Terrain,
 ) {
     let linger = crate::world::SONG_LINGER_SECS;
     let (effects, target, singer_pos) = {
@@ -553,7 +606,11 @@ pub(super) fn song_pulse(
     if effects.attack_slow > 0.0 {
         let target_stands = match target.and_then(|t| enemies.get_mut(&t)) {
             Some(e) if e.is_alive() => {
-                if e.pos.distance_to(singer_pos) <= spell.reach() {
+                // A pulse out of reach or out of sight is skipped, the
+                // song goes on (a targeted effect, the spell rule).
+                if e.pos.distance_to(singer_pos) <= spell.reach()
+                    && terrain.can_see(singer_pos, e.pos)
+                {
                     e.apply_cc(ActiveCc::new_attack_slow(effects.attack_slow, linger));
                 }
                 true
@@ -759,6 +816,7 @@ mod tests {
                     &enemies,
                     &corpses,
                     &groups,
+                    crate::world::terrain::compiled(),
                 )
             };
             let refused = |line: &str| Err(line.to_string());

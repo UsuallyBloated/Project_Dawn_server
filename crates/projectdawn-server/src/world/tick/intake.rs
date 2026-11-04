@@ -9,6 +9,7 @@ pub(super) fn drain_messages(world: &mut WorldState, q: &mut Intents, now: Insta
     let WorldState {
         server,
         connections,
+        terrain,
         ..
     } = world;
     // 3. Drain incoming application messages on each channel for each client.
@@ -41,7 +42,7 @@ pub(super) fn drain_messages(world: &mut WorldState, q: &mut Intents, now: Insta
             continue;
         };
         for outcome in outcomes {
-            route_outcome(&mut *server, connections, q, client_id, outcome);
+            route_outcome(&mut *server, connections, q, client_id, outcome, terrain);
         }
     }
 }
@@ -127,6 +128,7 @@ fn route_outcome(
     q: &mut Intents,
     client_id: ClientId,
     outcome: Outcome,
+    terrain: &crate::world::terrain::Terrain,
 ) {
     let Intents {
         to_disconnect,
@@ -599,8 +601,11 @@ fn route_outcome(
             // Snap the client to the bind point. Without this the
             // client keeps rendering the death site until the next
             // Position broadcast drags it back — the teleport IS
-            // the respawn from the player's point of view.
-            handlers::send_teleport(&mut *server, client_id, pos);
+            // the respawn from the player's point of view. The bind is
+            // re-pinned to the ground at use (the handler stored its
+            // stored y; the movement step pins the server's copy this
+            // same tick).
+            handlers::send_teleport(&mut *server, client_id, terrain.ground_vec(pos));
         }
         Outcome::DevSpawnMobIntent { pos, mob } => {
             dev_spawn_intents.push((pos, mob));

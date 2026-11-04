@@ -164,6 +164,13 @@ pub async fn run(
     // world/trade.rs). Ephemeral like groups: a crash or restart drops every
     // session and every item is exactly where it always was.
     let trade_manager = super::trade::TradeManager::new();
+    // The ground (the height model, world/terrain.rs): the compiled terrain,
+    // or the ramp or ridge the integration harness hands in through the
+    // config. Everything that stands or moves is pinned to it from here on.
+    let terrain: Arc<super::terrain::Terrain> = cfg
+        .terrain
+        .clone()
+        .unwrap_or_else(|| Arc::new(super::terrain::compiled().clone()));
 
     // Corpse / resurrection Slice 1 — server-owned player corpses (persisted
     // LootBags). Load every persisted corpse BEFORE the loop (so before any login
@@ -177,7 +184,10 @@ pub async fn run(
             let mut max_id: EntityId = 0;
             for r in rows {
                 let id = r.corpse_id as EntityId;
-                let pos = super::connection::Vec3f::from_tuple(r.pos);
+                // Re-pinned at load: the ground may have changed since the
+                // corpse was saved, and a corpse in the air or underground
+                // would be out of every reach.
+                let pos = terrain.ground_vec(super::connection::Vec3f::from_tuple(r.pos));
                 let items: Vec<super::loot::LootItemStack> = r
                     .items
                     .into_iter()
@@ -240,6 +250,7 @@ pub async fn run(
         group_manager,
         trade_manager,
         corpses,
+        terrain,
     };
 
     loop {

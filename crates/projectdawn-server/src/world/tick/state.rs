@@ -121,6 +121,9 @@ pub(super) struct WorldState {
     pub(super) group_manager: GroupManager,
     pub(super) trade_manager: crate::world::trade::TradeManager,
     pub(super) corpses: HashMap<EntityId, crate::world::corpses::Corpse>,
+    /// The ground (world/terrain.rs): what every body stands on and every
+    /// sight line is checked against.
+    pub(super) terrain: std::sync::Arc<crate::world::terrain::Terrain>,
 }
 
 // Track 6 sub-task 5 — group intents buffered for the

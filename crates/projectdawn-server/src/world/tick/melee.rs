@@ -13,6 +13,7 @@ pub(super) fn apply_active_skills(
         server,
         connections,
         enemies,
+        terrain,
         ..
     } = world;
     let Intents {
@@ -102,7 +103,12 @@ pub(super) fn apply_active_skills(
                                     && t.hp > 0.0
                                     && t.pos.distance_to(user_pos) <= allowed =>
                             {
-                                if combat::can_attack(
+                                // A ranged skill needs sight of its target
+                                // (the height model, 3.8); a melee one
+                                // cannot have a crest inside its reach.
+                                if ranged && !terrain.can_see(user_pos, t.pos) {
+                                    Err(cast_rules::CANNOT_SEE_TARGET)
+                                } else if combat::can_attack(
                                     user,
                                     t,
                                     user_zone.as_deref(),
@@ -126,6 +132,8 @@ pub(super) fn apply_active_skills(
                             };
                             if e.pos.distance_to(user_pos) > allowed {
                                 Err(NOT_HERE)
+                            } else if ranged && !terrain.can_see(user_pos, e.pos) {
+                                Err(cast_rules::CANNOT_SEE_TARGET)
                             } else {
                                 match e.owner {
                                     None => Ok(()),
@@ -321,6 +329,7 @@ pub(super) fn apply_attacks(
         enemies,
         loot_bags,
         group_manager,
+        terrain,
         ..
     } = world;
     let Intents {
@@ -500,13 +509,20 @@ pub(super) fn apply_attacks(
                 let target_in_range_alive = connections
                     .get(&target_cid)
                     .map(|t| {
+                        let ranged =
+                            items::lookup(&server_weapon_path).is_some_and(|w| w.is_ranged);
+                        let allowed = if ranged {
+                            RANGED_ATTACK_RANGE
+                        } else {
+                            3.0 * ATTACK_RANGE_TOLERANCE
+                        };
                         t.in_world
                             && t.hp > 0.0
-                            && t.pos.distance_to(attacker_pos)
-                                <= match items::lookup(&server_weapon_path) {
-                                    Some(w) if w.is_ranged => RANGED_ATTACK_RANGE,
-                                    _ => 3.0 * ATTACK_RANGE_TOLERANCE,
-                                }
+                            && t.pos.distance_to(attacker_pos) <= allowed
+                            // A bow needs sight of its target (the height
+                            // model, 3.8); the swing then misses as one out
+                            // of reach does.
+                            && (!ranged || terrain.can_see(attacker_pos, t.pos))
                     })
                     .unwrap_or(false);
                 if !allowed_pvp {
@@ -942,9 +958,11 @@ pub(super) fn apply_attacks(
             // produce silent Miss broadcasts even though the swing
             // visually fired. Lookup is by weapon_path; an empty or
             // unknown path uses the melee envelope.
-            let allowed = match items::lookup(&server_weapon_path) {
-                Some(w) if w.is_ranged => RANGED_ATTACK_RANGE,
-                _ => entity.melee_range() * ATTACK_RANGE_TOLERANCE,
+            let ranged = items::lookup(&server_weapon_path).is_some_and(|w| w.is_ranged);
+            let allowed = if ranged {
+                RANGED_ATTACK_RANGE
+            } else {
+                entity.melee_range() * ATTACK_RANGE_TOLERANCE
             };
             if dist > allowed {
                 tracing::debug!(
@@ -954,6 +972,24 @@ pub(super) fn apply_attacks(
                     allowed,
                     weapon = %server_weapon_path,
                     "attack out of range, fanning Miss"
+                );
+                handlers::fan_out_miss(
+                    &mut *server,
+                    in_world_recipients_now,
+                    intent.attacker,
+                    intent.target_id,
+                );
+                continue;
+            }
+            // A bow needs sight of its target (the height model, 3.8): an
+            // arrow over a crest is the nuke's exploit with a string. It
+            // misses as a shot out of reach does.
+            if ranged && !terrain.can_see(attacker_pos, entity.pos) {
+                tracing::debug!(
+                    attacker = intent.attacker,
+                    target = intent.target_id,
+                    weapon = %server_weapon_path,
+                    "ranged attack with no sight of the target, fanning Miss"
                 );
                 handlers::fan_out_miss(
                     &mut *server,

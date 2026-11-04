@@ -17,6 +17,7 @@ pub(super) async fn run_death_sweep(
         aoi,
         enemies,
         corpses,
+        terrain,
         ..
     } = world;
     // 5a-bis. Corpse / resurrection Slice 0 — server-authoritative death
@@ -216,8 +217,19 @@ pub(super) async fn run_death_sweep(
                 equip_slot: *worn,
             })
             .collect();
+        // On the ground where they fell (the body is pinned each tick, so
+        // this is the same point; it stays so if a pin is ever missed).
         let corpse = crate::world::corpses::Corpse::new(
-            corpse_id, cid, owner_name, zone, pos, stacks, coins, lost_xp, false, now,
+            corpse_id,
+            cid,
+            owner_name,
+            zone,
+            terrain.ground_vec(pos),
+            stacks,
+            coins,
+            lost_xp,
+            false,
+            now,
         );
         handlers::fan_out_corpse_spawn(&mut *server, &recipients, &corpse);
         // Slice 2 — privately seed the owner with the corpse contents so they

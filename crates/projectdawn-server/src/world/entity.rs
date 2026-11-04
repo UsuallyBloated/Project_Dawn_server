@@ -942,6 +942,10 @@ impl Entity {
     /// `hidden` names the players a Hide holds: an idle mob's proximity scan
     /// passes over them (a mob already provoked still finds them through its
     /// threat table, and the first swing ends the hide anyway).
+    ///
+    /// `terrain` is the ground (the height model): every step a mob or pet
+    /// takes ends standing on it, and an idle mob notices only what it can
+    /// see across it.
     pub fn tick_ai(
         &mut self,
         targets: &[(EntityId, Vec3f)],
@@ -949,6 +953,7 @@ impl Entity {
         hidden: &[EntityId],
         dt: f32,
         now: Instant,
+        terrain: &crate::world::terrain::Terrain,
     ) -> AiEvents {
         self.tick_cc(dt);
         let prev_target = self.target;
@@ -962,13 +967,13 @@ impl Entity {
         // owner's last melee/spell hit (set by the tick loop before
         // this AI pass runs).
         if self.is_pet() {
-            self.tick_pet_ai(targets, enemy_targets, dt, now, &mut events);
+            self.tick_pet_ai(targets, enemy_targets, dt, now, &mut events, terrain);
         } else {
             match self.state {
-                EnemyState::Idle => self.tick_idle(targets, hidden, now),
-                EnemyState::Chase => self.tick_chase(targets, dt, now),
+                EnemyState::Idle => self.tick_idle(targets, hidden, now, terrain),
+                EnemyState::Chase => self.tick_chase(targets, dt, now, terrain),
                 EnemyState::Attack => self.tick_attack(targets, now, &mut events),
-                EnemyState::Leash => self.tick_leash(dt, now),
+                EnemyState::Leash => self.tick_leash(dt, now, terrain),
                 EnemyState::Dead => {}
             }
         }
@@ -995,6 +1000,7 @@ impl Entity {
         dt: f32,
         now: Instant,
         events: &mut AiEvents,
+        terrain: &crate::world::terrain::Terrain,
     ) {
         const PET_FOLLOW_DISTANCE: f32 = 3.0;
         let Some(owner_id) = self.owner else {
@@ -1043,7 +1049,7 @@ impl Entity {
                     let snare = self.snare_factor();
                     let step = self.move_speed() * (1.0 - snare) * dt;
                     self.face_toward(target_pos);
-                    self.pos = self.pos.step_toward(target_pos, step);
+                    self.pos = terrain.ground_vec(self.pos.step_toward(target_pos, step));
                 }
             }
             _ => {
@@ -1068,14 +1074,22 @@ impl Entity {
                     let snare = self.snare_factor();
                     let step = self.move_speed() * (1.0 - snare) * dt;
                     self.face_toward(owner_pos);
-                    self.pos = self.pos.step_toward(owner_pos, step);
+                    self.pos = terrain.ground_vec(self.pos.step_toward(owner_pos, step));
                 }
             }
         }
     }
 
-    fn tick_idle(&mut self, targets: &[(EntityId, Vec3f)], hidden: &[EntityId], now: Instant) {
-        if let Some((id, _)) = nearest_target_within(self.pos, targets, self.mob.aggro, hidden) {
+    fn tick_idle(
+        &mut self,
+        targets: &[(EntityId, Vec3f)],
+        hidden: &[EntityId],
+        now: Instant,
+        terrain: &crate::world::terrain::Terrain,
+    ) {
+        if let Some((id, _)) =
+            nearest_target_within(self.pos, targets, self.mob.aggro, hidden, terrain)
+        {
             self.target = Some(id);
             self.transition(EnemyState::Chase, now);
             return;
@@ -1111,7 +1125,13 @@ impl Entity {
         }
     }
 
-    fn tick_chase(&mut self, targets: &[(EntityId, Vec3f)], dt: f32, now: Instant) {
+    fn tick_chase(
+        &mut self,
+        targets: &[(EntityId, Vec3f)],
+        dt: f32,
+        now: Instant,
+        terrain: &crate::world::terrain::Terrain,
+    ) {
         self.maybe_switch_target_by_threat(targets);
         let Some(target_id) = self.target else {
             self.transition(EnemyState::Leash, now);
@@ -1140,7 +1160,7 @@ impl Entity {
         let snare = self.snare_factor();
         let step = self.enraged_speed() * (1.0 - snare) * dt;
         self.face_toward(target_pos);
-        self.pos = self.pos.step_toward(target_pos, step);
+        self.pos = terrain.ground_vec(self.pos.step_toward(target_pos, step));
     }
 
     fn tick_attack(&mut self, targets: &[(EntityId, Vec3f)], now: Instant, events: &mut AiEvents) {
@@ -1175,7 +1195,7 @@ impl Entity {
         }
     }
 
-    fn tick_leash(&mut self, dt: f32, now: Instant) {
+    fn tick_leash(&mut self, dt: f32, now: Instant, terrain: &crate::world::terrain::Terrain) {
         let dist = self.pos.distance_to(self.spawn_pos);
         if dist < LEASH_HOME_TOLERANCE {
             self.hp = self.max_hp;
@@ -1193,7 +1213,7 @@ impl Entity {
         }
         let step = self.enraged_speed() * dt;
         self.face_toward(self.spawn_pos);
-        self.pos = self.pos.step_toward(self.spawn_pos, step);
+        self.pos = terrain.ground_vec(self.pos.step_toward(self.spawn_pos, step));
     }
 
     /// Track 12 Piece A2 — pet-induced threat redirect. If any
@@ -1238,12 +1258,16 @@ impl Entity {
     }
 }
 
-/// The nearest target inside `radius`, passing over the `hidden` ones.
+/// The nearest target inside `radius` that can be seen from `origin` across
+/// the terrain (EQEmu's `CheckWillAggro`: an idle mob notices only what it has
+/// line of sight to; once provoked, the threat table finds the attacker
+/// without it), passing over the `hidden` ones.
 fn nearest_target_within(
     origin: Vec3f,
     targets: &[(EntityId, Vec3f)],
     radius: f32,
     hidden: &[EntityId],
+    terrain: &crate::world::terrain::Terrain,
 ) -> Option<(EntityId, f32)> {
     let mut best: Option<(EntityId, f32)> = None;
     for &(id, pos) in targets {
@@ -1252,6 +1276,9 @@ fn nearest_target_within(
         }
         let d = origin.distance_to(pos);
         if d > radius {
+            continue;
+        }
+        if !terrain.can_see(origin, pos) {
             continue;
         }
         match best {
@@ -1547,7 +1574,14 @@ mod tests {
             },
         )];
         let enemy_targets: Vec<(EntityId, Vec3f, bool)> = vec![];
-        let _events = e.tick_ai(&targets, &enemy_targets, &[], 0.05, now);
+        let _events = e.tick_ai(
+            &targets,
+            &enemy_targets,
+            &[],
+            0.05,
+            now,
+            crate::world::terrain::compiled(),
+        );
         assert_eq!(
             e.target,
             Some(pet_id),
@@ -1578,7 +1612,14 @@ mod tests {
         e.threat.insert(attacker, 12.0);
         let targets = vec![(attacker, pos)];
         let enemy_targets: Vec<(EntityId, Vec3f, bool)> = vec![];
-        let _ = e.tick_ai(&targets, &enemy_targets, &[], 0.05, now);
+        let _ = e.tick_ai(
+            &targets,
+            &enemy_targets,
+            &[],
+            0.05,
+            now,
+            crate::world::terrain::compiled(),
+        );
         assert_eq!(e.target, Some(attacker), "damage must provoke the mob");
         assert!(matches!(e.state, EnemyState::Chase));
     }
@@ -1600,14 +1641,28 @@ mod tests {
             },
         )];
         let enemy_targets: Vec<(EntityId, Vec3f, bool)> = vec![];
-        let _ = e.tick_ai(&targets, &enemy_targets, &[rogue], 0.05, now);
+        let _ = e.tick_ai(
+            &targets,
+            &enemy_targets,
+            &[rogue],
+            0.05,
+            now,
+            crate::world::terrain::compiled(),
+        );
         assert_eq!(
             e.target, None,
             "a hidden rogue two metres away goes unnoticed"
         );
         assert!(matches!(e.state, EnemyState::Idle));
         e.threat.insert(rogue, 5.0);
-        let _ = e.tick_ai(&targets, &enemy_targets, &[rogue], 0.05, now);
+        let _ = e.tick_ai(
+            &targets,
+            &enemy_targets,
+            &[rogue],
+            0.05,
+            now,
+            crate::world::terrain::compiled(),
+        );
         assert_eq!(
             e.target,
             Some(rogue),
@@ -1631,7 +1686,14 @@ mod tests {
             },
         )];
         let enemy_targets: Vec<(EntityId, Vec3f, bool)> = vec![];
-        let _ = e.tick_ai(&targets, &enemy_targets, &[], 0.05, now);
+        let _ = e.tick_ai(
+            &targets,
+            &enemy_targets,
+            &[],
+            0.05,
+            now,
+            crate::world::terrain::compiled(),
+        );
         assert_eq!(e.target, Some(player));
         e.apply_cc(ActiveCc::new_stun(3.0));
         e.clear_mez();
@@ -1642,14 +1704,28 @@ mod tests {
         );
         let mut swung = false;
         for _ in 0..55 {
-            let ev = e.tick_ai(&targets, &enemy_targets, &[], 0.05, now);
+            let ev = e.tick_ai(
+                &targets,
+                &enemy_targets,
+                &[],
+                0.05,
+                now,
+                crate::world::terrain::compiled(),
+            );
             swung |= ev.hit.is_some();
         }
         assert!(!swung, "2.75 s of ticks inside the 3 s stun: no swing");
         assert!(e.pos.distance_to(Vec3f::ZERO) < 1e-3, "and it did not move");
         let mut swung_after = false;
         for _ in 0..30 {
-            let ev = e.tick_ai(&targets, &enemy_targets, &[], 0.05, now);
+            let ev = e.tick_ai(
+                &targets,
+                &enemy_targets,
+                &[],
+                0.05,
+                now,
+                crate::world::terrain::compiled(),
+            );
             swung_after |= ev.hit.is_some();
         }
         assert!(swung_after, "once the stun runs out the mob swings again");
@@ -1717,7 +1793,14 @@ mod tests {
         e.threat.insert(attacker, 12.0);
         let targets = vec![(attacker, pos)];
         let enemy_targets: Vec<(EntityId, Vec3f, bool)> = vec![];
-        let _ = e.tick_ai(&targets, &enemy_targets, &[], 0.05, now);
+        let _ = e.tick_ai(
+            &targets,
+            &enemy_targets,
+            &[],
+            0.05,
+            now,
+            crate::world::terrain::compiled(),
+        );
         assert_eq!(e.target, None, "beyond leash: stand and wait, don't flap");
         assert!(matches!(e.state, EnemyState::Idle));
     }

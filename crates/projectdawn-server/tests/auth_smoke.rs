@@ -34,6 +34,7 @@ async fn start_server() -> (String, TempDir) {
         netcode_private_key: projectdawn_server::config::NetcodeKey([0xA5; 32]),
         fizzles: true,
         panic_probe: None,
+        terrain: None,
     };
 
     let pool = db::open(&url).await.expect("open pool");

@@ -18,6 +18,7 @@ pub(super) fn apply_casts(
         loot_bags,
         group_manager,
         corpses,
+        terrain,
         ..
     } = world;
     let Intents {
@@ -410,6 +411,7 @@ pub(super) fn apply_casts(
                 enemies,
                 corpses,
                 group_manager,
+                terrain,
             ) {
                 Ok(resolved) => resolved,
                 Err(line) => {
@@ -621,6 +623,7 @@ pub(super) fn apply_casts(
                         caster_cid,
                         spell,
                         now,
+                        terrain,
                     );
                 }
                 continue;
@@ -1459,7 +1462,12 @@ pub(super) fn apply_casts(
                             let dx = entity.pos.x - caster_pos.x;
                             let dy = entity.pos.y - caster_pos.y;
                             let dz = entity.pos.z - caster_pos.z;
-                            if dx * dx + dy * dy + dz * dz <= radius_sq {
+                            // Inside the radius and in sight: an AoE on a
+                            // crest hits the near side of the ridge, not
+                            // the far one (the height model, 3.8).
+                            if dx * dx + dy * dy + dz * dz <= radius_sq
+                                && terrain.can_see(caster_pos, entity.pos)
+                            {
                                 victims.push(id);
                             }
                         }
@@ -1535,6 +1543,7 @@ pub(super) fn apply_casts(
                         variance,
                         1.0,
                         now,
+                        terrain,
                     ) else {
                         // The pre-flight checked the pet type is known
                         // (`pet_templates::scaled` at variance 0), so a
@@ -1806,6 +1815,9 @@ pub(super) fn apply_casts(
                         _ => crate::world::safe_areas::nearest_arrival(caster_pos_now)
                             .unwrap_or(crate::world::STARTER_SPAWN),
                     };
+                    // Every arrival stands on the ground, whatever the bind
+                    // or the arrival point was saved with.
+                    let dest = terrain.ground_vec(dest);
                     let mut movers: Vec<ClientId> = vec![caster_cid];
                     if spell.port_group {
                         if let Some(g) = group_manager.group_of(caster_cid) {

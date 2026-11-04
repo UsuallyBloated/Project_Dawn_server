@@ -16,6 +16,7 @@ pub(super) fn run_spawning(
         aoi,
         spawner,
         enemies,
+        terrain,
         ..
     } = world;
     let Intents {
@@ -33,7 +34,7 @@ pub(super) fn run_spawning(
     //     spawn — no duplicate seeds because the seed loop above ran
     //     against the pre-spawn map.
     {
-        let newly_spawned = spawner.tick(now);
+        let newly_spawned = spawner.tick(now, terrain);
         if !newly_spawned.is_empty() {
             let spawn_recipients: Vec<ClientId> = connections
                 .iter()
@@ -73,7 +74,13 @@ pub(super) fn run_spawning(
             .map(|(id, _)| *id)
             .collect();
         for (pos, mob) in dev_spawn_intents.drain(..) {
-            let entity = crate::world::entity::Entity::from_spawn(usize::MAX, pos, mob, now);
+            // On the ground in front of the GM, like a camp spawn.
+            let entity = crate::world::entity::Entity::from_spawn(
+                usize::MAX,
+                terrain.ground_vec(pos),
+                mob,
+                now,
+            );
             let enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
             aoi.insert(entity.id, enemy_cell);
             if !spawn_recipients.is_empty() {
@@ -171,6 +178,7 @@ pub(super) fn run_spawning(
                 0,
                 1.0,
                 now,
+                terrain,
             ) else {
                 continue;
             };
@@ -223,6 +231,7 @@ pub(super) fn run_spawning(
             0,
             0.3,
             now,
+            terrain,
         ) else {
             continue;
         };

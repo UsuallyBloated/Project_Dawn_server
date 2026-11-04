@@ -61,10 +61,15 @@ impl Terrain {
     pub fn from_heights(
         grid_size: usize,
         cell_size: f32,
-        origin: Vec3f,
+        origin: [f32; 3],
         floor_y: f32,
         heights: Vec<f32>,
     ) -> Result<Self, String> {
+        let origin = Vec3f {
+            x: origin[0],
+            y: origin[1],
+            z: origin[2],
+        };
         if grid_size == 0 {
             return Err("grid_size must be at least 1".into());
         }
@@ -103,7 +108,7 @@ impl Terrain {
         Self::from_heights(
             grid_size,
             cell_size,
-            Vec3f::ZERO,
+            [0.0; 3],
             floor_y,
             vec![floor_y; (grid_size + 1) * (grid_size + 1)],
         )
@@ -116,11 +121,7 @@ impl Terrain {
         let terrain = Self::from_heights(
             parsed.grid_size,
             parsed.cell_size,
-            Vec3f {
-                x: parsed.origin[0],
-                y: parsed.origin[1],
-                z: parsed.origin[2],
-            },
+            parsed.origin,
             parsed.floor_y,
             parsed.heights,
         )?;
@@ -287,6 +288,75 @@ impl Terrain {
         rise <= run * slope_limit_tan() + SNAP_ALLOWANCE
     }
 
+    /// The slope of the ground under a point, as (dh/dx, dh/dz): the plane of
+    /// the triangle there; flat where the ground is the floor (past the mesh,
+    /// or where the mesh dips under the floor) and for a non-finite point.
+    pub fn gradient(&self, x: f32, z: f32) -> (f32, f32) {
+        let (lx, lz) = self.local(x, z);
+        let Some(h) = self.mesh_height_local(lx, lz) else {
+            return (0.0, 0.0);
+        };
+        if h < self.floor_y {
+            return (0.0, 0.0);
+        }
+        let fx = lx / self.cell_size;
+        let fz = lz / self.cell_size;
+        let cx = (fx.floor() as usize).min(self.grid_size - 1);
+        let cz = (fz.floor() as usize).min(self.grid_size - 1);
+        let u = fx - cx as f32;
+        let v = fz - cz as f32;
+        let h00 = self.vertex(cx, cz);
+        let h10 = self.vertex(cx + 1, cz);
+        let h01 = self.vertex(cx, cz + 1);
+        let h11 = self.vertex(cx + 1, cz + 1);
+        let (dx, dz) = if u + v <= 1.0 {
+            (h10 - h00, h01 - h00)
+        } else {
+            (h11 - h01, h11 - h10)
+        };
+        (dx / self.cell_size, dz / self.cell_size)
+    }
+
+    /// One tick of a player's movement: the horizontal step `(dx, dz)` from
+    /// `from`, taken as the client's body takes it. Uphill the step shrinks
+    /// exactly as `move_and_slide` shrinks it: the motion loses `sin²θ` of
+    /// its part up the slope, so straight uphill it covers `cos²θ` of the
+    /// flat distance (measured 2026-11-03 with the client's
+    /// `tools/probe_ramp_speed.gd`: 3.75 m/s of 5 at 30°). Downhill and
+    /// across it keeps its length, as the body does with its floor snap. A
+    /// step whose rise breaks the slope rule is refused and the player stays.
+    /// The result stands on the ground, a zero step included, so a teleport
+    /// or a load never leaves a player in the air.
+    pub fn player_step(&self, from: Vec3f, dx: f32, dz: f32) -> Vec3f {
+        let here = self.ground_vec(from);
+        if !(dx.is_finite() && dz.is_finite()) || (dx == 0.0 && dz == 0.0) {
+            return here;
+        }
+        let (gx, gz) = self.gradient(from.x, from.z);
+        let up = dx * gx + dz * gz;
+        let (dx, dz) = if up > 0.0 {
+            // tan²θ, then sin²θ; the unit direction of steepest ascent and
+            // the step's part along it.
+            let s2 = gx * gx + gz * gz;
+            let sin2 = s2 / (1.0 + s2);
+            let g = s2.sqrt();
+            let (ux, uz) = (gx / g, gz / g);
+            let along = dx * ux + dz * uz;
+            (dx - sin2 * along * ux, dz - sin2 * along * uz)
+        } else {
+            (dx, dz)
+        };
+        let to = Vec3f {
+            x: from.x + dx,
+            y: here.y,
+            z: from.z + dz,
+        };
+        if !self.slope_ok(here, to) {
+            return here;
+        }
+        self.ground_vec(to)
+    }
+
     /// Whether `a` and `b`, each raised by `LOS_HEIGHT`, see each other over
     /// the terrain. Inside one triangle the ground is a plane and the sight
     /// line is a line, so their difference is linear there: the clearance is
@@ -392,7 +462,7 @@ mod tests {
     fn bumpy(seed: u64) -> Terrain {
         let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
         let heights = (0..25).map(|_| rng.gen_range(0.0..5.0)).collect();
-        Terrain::from_heights(4, 2.0, Vec3f::ZERO, -10.0, heights).unwrap()
+        Terrain::from_heights(4, 2.0, [0.0; 3], -10.0, heights).unwrap()
     }
 
     /// The client's own triangle list for a terrain (`TerrainMesh._rebuild`),
@@ -456,8 +526,7 @@ mod tests {
     fn inside_each_triangle_is_the_plane_through_its_corners() {
         // One cell, corners h00 = 0, h10 = 4, h01 = 2, h11 = 10, on a 1x1 grid
         // of 2 m cells centred on the origin: local (0, 0) is world (-1, -1).
-        let t =
-            Terrain::from_heights(1, 2.0, Vec3f::ZERO, -100.0, vec![0.0, 4.0, 2.0, 10.0]).unwrap();
+        let t = Terrain::from_heights(1, 2.0, [0.0; 3], -100.0, vec![0.0, 4.0, 2.0, 10.0]).unwrap();
         // Lower triangle, u = 0.25, v = 0.25: 0 + 0.25 * 4 + 0.25 * 2 = 1.5.
         assert!((t.ground(-0.5, -0.5) - 1.5).abs() < 1e-5);
         // Upper triangle, u = 0.75, v = 0.75: 10 + 0.25 * (2 - 10) + 0.25 * (4 - 10) = 6.5.
@@ -508,8 +577,7 @@ mod tests {
 
     #[test]
     fn a_valley_below_the_floor_is_the_floor() {
-        let t =
-            Terrain::from_heights(1, 2.0, Vec3f::ZERO, 0.0, vec![-3.0, -3.0, -3.0, -3.0]).unwrap();
+        let t = Terrain::from_heights(1, 2.0, [0.0; 3], 0.0, vec![-3.0, -3.0, -3.0, -3.0]).unwrap();
         assert_eq!(t.ground(0.0, 0.0), 0.0);
         assert_eq!(t.mesh_height(0.0, 0.0), Some(-3.0));
     }
@@ -524,12 +592,7 @@ mod tests {
 
     #[test]
     fn the_origin_moves_the_grid() {
-        let origin = Vec3f {
-            x: 100.0,
-            y: 5.0,
-            z: -50.0,
-        };
-        let t = Terrain::from_heights(1, 2.0, origin, -100.0, vec![1.0, 1.0, 1.0, 1.0]).unwrap();
+        let t = Terrain::from_heights(1, 2.0, [100.0, 5.0, -50.0], -100.0, vec![1.0; 4]).unwrap();
         assert!((t.ground(100.0, -50.0) - 6.0).abs() < 1e-5);
         assert_eq!(t.mesh_height(0.0, 0.0), None);
     }
@@ -577,7 +640,7 @@ mod tests {
 
     // Slopes: a 1x1 grid of 20 m cells, the far edge raised to make a ramp.
     fn ramp(rise: f32) -> Terrain {
-        Terrain::from_heights(1, 20.0, Vec3f::ZERO, -100.0, vec![0.0, rise, 0.0, rise]).unwrap()
+        Terrain::from_heights(1, 20.0, [0.0; 3], -100.0, vec![0.0, rise, 0.0, rise]).unwrap()
     }
 
     #[test]
@@ -602,6 +665,79 @@ mod tests {
     }
 
     #[test]
+    fn the_gradient_is_the_triangles_slope_and_flat_off_the_mesh() {
+        // Rising 10 m over the 20 m cell along +x.
+        let t = ramp(10.0);
+        let (gx, gz) = t.gradient(1.0, 1.0);
+        assert!((gx - 0.5).abs() < 1e-6 && gz.abs() < 1e-6, "{gx} {gz}");
+        assert_eq!(t.gradient(100.0, 0.0), (0.0, 0.0));
+        assert_eq!(t.gradient(f32::NAN, 0.0), (0.0, 0.0));
+        // Where the mesh is under the floor, the ground is the flat floor.
+        let valley =
+            Terrain::from_heights(1, 2.0, [0.0; 3], 0.0, vec![-3.0, -1.0, -3.0, -1.0]).unwrap();
+        assert_eq!(valley.gradient(0.0, 0.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_step_up_a_slope_covers_cos_squared_of_the_flat_distance() {
+        // The 30° ramp rising along +x: the client's measured 3.75 m/s of 5.
+        let t = ramp(20.0 * 30f32.to_radians().tan());
+        let from = t.ground_vec(at(2.0, 1.0));
+        let to = t.player_step(from, 0.25, 0.0);
+        assert!((to.x - from.x - 0.25 * 0.75).abs() < 1e-4, "{to:?}");
+        assert!((to.z - from.z).abs() < 1e-6);
+        assert!((to.y - t.ground(to.x, to.z)).abs() < 1e-5);
+        assert!(to.y > from.y);
+        // Across the slope and downhill: the full step.
+        let across = t.player_step(from, 0.0, 0.25);
+        assert!((across.z - from.z - 0.25).abs() < 1e-5);
+        let down = t.player_step(t.ground_vec(at(5.0, 1.0)), -0.25, 0.0);
+        assert!((down.x - 4.75).abs() < 1e-5, "{down:?}");
+        // Diagonally: only the part up the slope shrinks.
+        let diag = t.player_step(from, 0.2, 0.2);
+        assert!((diag.x - from.x - 0.2 * 0.75).abs() < 1e-4, "{diag:?}");
+        assert!((diag.z - from.z - 0.2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_step_into_a_steep_face_is_refused_and_a_zero_step_still_pins() {
+        let cliff = ramp(20.0 * 70f32.to_radians().tan());
+        let from = cliff.ground_vec(at(1.0, 0.0));
+        let stayed = cliff.player_step(from, 0.25, 0.0);
+        assert_eq!((stayed.x, stayed.z), (from.x, from.z));
+        let t = compiled();
+        let p = t.player_step(at(3.0, 4.0), f32::NAN, 0.0);
+        assert_eq!((p.x, p.y, p.z), (3.0, 0.0, 4.0));
+        let floating = Vec3f {
+            x: 3.0,
+            y: 9.0,
+            z: 4.0,
+        };
+        assert_eq!(t.player_step(floating, 0.0, 0.0).y, 0.0);
+    }
+
+    #[test]
+    fn step_toward_steps_by_the_horizontal_delta() {
+        let here = at(0.0, 0.0);
+        let above = Vec3f {
+            x: 0.0,
+            y: 50.0,
+            z: 1.0,
+        };
+        // Directly below its target it arrives; the old 3D rule never did.
+        let p = here.step_toward(above, 2.0);
+        assert_eq!((p.x, p.y, p.z), (0.0, 0.0, 1.0));
+        // The step's length is horizontal, whatever the height difference.
+        let far = Vec3f {
+            x: 10.0,
+            y: 50.0,
+            z: 0.0,
+        };
+        let p = here.step_toward(far, 0.3);
+        assert!((p.x - 0.3).abs() < 1e-6 && p.z == 0.0 && p.y == 0.0);
+    }
+
+    #[test]
     fn the_flat_world_allows_every_step_and_a_non_finite_one_none() {
         let t = compiled();
         assert!(t.slope_ok(at(0.0, 0.0), at(0.41, 0.0)));
@@ -617,7 +753,7 @@ mod tests {
         for iz in 0..=4 {
             heights[iz * 5 + 2] = height;
         }
-        Terrain::from_heights(4, 10.0, Vec3f::ZERO, 0.0, heights).unwrap()
+        Terrain::from_heights(4, 10.0, [0.0; 3], 0.0, heights).unwrap()
     }
 
     #[test]
@@ -743,12 +879,12 @@ mod tests {
 
     #[test]
     fn an_invalid_terrain_is_refused_with_a_reason() {
-        assert!(Terrain::from_heights(0, 2.0, Vec3f::ZERO, 0.0, vec![0.0]).is_err());
-        assert!(Terrain::from_heights(1, 0.0, Vec3f::ZERO, 0.0, vec![0.0; 4]).is_err());
-        assert!(Terrain::from_heights(1, 2.0, Vec3f::ZERO, 0.0, vec![0.0; 3]).is_err());
+        assert!(Terrain::from_heights(0, 2.0, [0.0; 3], 0.0, vec![0.0]).is_err());
+        assert!(Terrain::from_heights(1, 0.0, [0.0; 3], 0.0, vec![0.0; 4]).is_err());
+        assert!(Terrain::from_heights(1, 2.0, [0.0; 3], 0.0, vec![0.0; 3]).is_err());
         assert!(
-            Terrain::from_heights(1, 2.0, Vec3f::ZERO, 0.0, vec![0.0, f32::NAN, 0.0, 0.0]).is_err()
+            Terrain::from_heights(1, 2.0, [0.0; 3], 0.0, vec![0.0, f32::NAN, 0.0, 0.0]).is_err()
         );
-        assert!(Terrain::from_heights(1, 2.0, Vec3f::ZERO, f32::NAN, vec![0.0; 4]).is_err());
+        assert!(Terrain::from_heights(1, 2.0, [0.0; 3], f32::NAN, vec![0.0; 4]).is_err());
     }
 }

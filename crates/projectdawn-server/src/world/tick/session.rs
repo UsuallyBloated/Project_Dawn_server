@@ -345,6 +345,7 @@ pub(super) async fn handle_transport_events(
         pending_saves,
         enemies,
         group_manager,
+        terrain,
         ..
     } = world;
     // 2. Drain transport-level events (Connected/Disconnected).
@@ -545,6 +546,9 @@ pub(super) async fn handle_transport_events(
                             }
                         };
                         let mut fresh = PerConnection::from_spawn(spawn, now);
+                        // Standing on the ground as it is now, whatever the
+                        // save holds (the terrain may have changed since).
+                        fresh.pos = terrain.ground_vec(fresh.pos);
                         fresh.fizzles = cfg.fizzles;
                         fresh.panic_probe = cfg.panic_probe.clone();
                         connections.insert(client_id, fresh);

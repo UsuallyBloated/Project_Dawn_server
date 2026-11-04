@@ -65,9 +65,10 @@ impl Spawner {
     }
 
     /// Drive respawn timers and instantiate any enemies that are due to
-    /// spawn this tick. Returns the freshly-spawned entities for the
-    /// caller to insert into the world's enemy map and broadcast.
-    pub fn tick(&mut self, now: Instant) -> Vec<Entity> {
+    /// spawn this tick, each standing on `terrain`'s ground at its jittered
+    /// spot. Returns the freshly-spawned entities for the caller to insert
+    /// into the world's enemy map and broadcast.
+    pub fn tick(&mut self, now: Instant, terrain: &super::terrain::Terrain) -> Vec<Entity> {
         let mut out = Vec::new();
         let mut rng = rand::thread_rng();
         for (idx, point) in self.points.iter_mut().enumerate() {
@@ -83,10 +84,14 @@ impl Spawner {
             let r = point.camp.radius;
             let jitter_x: f32 = rng.gen_range(-r..=r);
             let jitter_z: f32 = rng.gen_range(-r..=r);
+            // The camp's authored y is never read: the ground decides (the
+            // height model's decision 4).
+            let x = point.camp.pos[0] + jitter_x;
+            let z = point.camp.pos[2] + jitter_z;
             let spawn_pos = Vec3f {
-                x: point.camp.pos[0] + jitter_x,
-                y: point.camp.pos[1],
-                z: point.camp.pos[2] + jitter_z,
+                x,
+                y: terrain.ground(x, z),
+                z,
             };
             let entity = Entity::from_spawn(idx, spawn_pos, point.camp.mob.clone(), now);
             point.due_at = None;
@@ -112,7 +117,7 @@ mod tests {
     fn first_tick_spawns_everything() {
         let now = Instant::now();
         let mut sp = Spawner::new(now);
-        let spawned = sp.tick(now);
+        let spawned = sp.tick(now, super::super::terrain::compiled());
         // 54 spawn points in the starter zone TOML (phase 4 layout,
         // 2026-09-10) → first tick fires all. This must hold regardless of
         // machine uptime: the old backdating implementation failed here for
@@ -127,9 +132,9 @@ mod tests {
     fn second_tick_after_no_deaths_spawns_nothing() {
         let now = Instant::now();
         let mut sp = Spawner::new(now);
-        let _ = sp.tick(now);
+        let _ = sp.tick(now, super::super::terrain::compiled());
         let next = now + Duration::from_millis(50);
-        let spawned = sp.tick(next);
+        let spawned = sp.tick(next, super::super::terrain::compiled());
         assert!(spawned.is_empty());
     }
 
@@ -137,15 +142,15 @@ mod tests {
     fn death_notification_arms_respawn_timer() {
         let now = Instant::now();
         let mut sp = Spawner::new(now);
-        let _ = sp.tick(now);
+        let _ = sp.tick(now, super::super::terrain::compiled());
         sp.on_enemy_died(0, now);
         // Before respawn_secs elapses, nothing happens.
         let early = now + Duration::from_secs_f32(1.0);
-        assert!(sp.tick(early).is_empty());
+        assert!(sp.tick(early, super::super::terrain::compiled()).is_empty());
         // After respawn_secs elapses, the point fires again.
         let respawn = sp.points[0].camp.respawn_secs;
         let late = now + Duration::from_secs_f32(respawn + 0.1);
-        let spawned = sp.tick(late);
+        let spawned = sp.tick(late, super::super::terrain::compiled());
         assert_eq!(spawned.len(), 1);
         assert_eq!(spawned[0].spawn_point_idx, 0);
     }

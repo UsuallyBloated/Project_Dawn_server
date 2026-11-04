@@ -69,7 +69,14 @@ fn table() -> &'static Vec<Npc> {
     static NPCS: OnceLock<Vec<Npc>> = OnceLock::new();
     NPCS.get_or_init(|| {
         let parsed: NpcsFile = crate::world::parse_embedded("npcs.toml", NPCS_TOML);
-        for n in &parsed.npc {
+        let mut npcs = parsed.npc;
+        // Every NPC stands on the ground (the height model's decision 4):
+        // the file's y is a placeholder the ground overrides, so an authored
+        // height can never disagree with where the client draws the NPC.
+        for n in &mut npcs {
+            n.pos[1] = super::terrain::compiled().ground(n.pos[0], n.pos[2]);
+        }
+        for n in &npcs {
             for k in &n.kinds {
                 assert!(
                     matches!(k.as_str(), "vendor" | "banker" | "quest" | "soul_binder"),
@@ -85,7 +92,7 @@ fn table() -> &'static Vec<Npc> {
                 );
             }
         }
-        parsed.npc
+        npcs
     })
 }
 

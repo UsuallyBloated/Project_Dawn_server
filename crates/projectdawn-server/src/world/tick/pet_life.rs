@@ -22,16 +22,17 @@ pub(super) fn summon_scaled_pet(
     variance: u32,
     hp_fraction: f32,
     now: Instant,
+    terrain: &crate::world::terrain::Terrain,
 ) -> Option<(EntityId, u32)> {
     let template = pet_templates::scaled(pet_type, owner_level, variance)?;
     let pet_level = template.level;
     // Spawn at the owner's pos + 1.5 m east so the pet doesn't clip the
-    // player capsule.
-    let spawn_pos = Vec3f {
+    // player capsule, standing on the ground there (the height model).
+    let spawn_pos = terrain.ground_vec(Vec3f {
         x: owner_pos.x + 1.5,
         y: owner_pos.y,
         z: owner_pos.z,
-    };
+    });
     let pet_id = summon_pet_for_owner(
         server,
         in_world_recipients,

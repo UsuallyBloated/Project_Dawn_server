@@ -17,6 +17,7 @@ pub(super) fn run_enemy_ai(
         enemies,
         loot_bags,
         group_manager,
+        terrain,
         ..
     } = world;
     // 4i. Enemy AI tick. Each alive enemy evaluates its state machine
@@ -267,6 +268,7 @@ pub(super) fn run_enemy_ai(
                 &hidden_players,
                 dt,
                 now,
+                terrain,
             );
             if let Some(new_target) = events.target_changed {
                 target_changes.push((entity.id, new_target));

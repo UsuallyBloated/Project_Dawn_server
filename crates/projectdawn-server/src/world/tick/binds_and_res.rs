@@ -25,6 +25,7 @@ pub(super) async fn apply_res_accepts(world: &mut WorldState, q: &mut Intents, n
         server,
         connections,
         corpses,
+        terrain,
         ..
     } = world;
     let Intents {
@@ -126,6 +127,8 @@ pub(super) async fn apply_res_accepts(world: &mut WorldState, q: &mut Intents, n
         // Summon the living player to their corpse + refund the xp (award_xp
         // re-levels + fans XpGained/LevelUp, landing on `after_refund`).
         if let Some(conn) = connections.get_mut(&responder_cid) {
+            // Beside the corpse, on the ground.
+            let corpse_pos = terrain.ground_vec(corpse_pos);
             conn.pos = corpse_pos;
             handlers::send_teleport(&mut *server, responder_cid, corpse_pos);
             if refund > 0 {

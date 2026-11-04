@@ -124,12 +124,15 @@ impl Vec3f {
         }
     }
 
-    /// Step `self` toward `target` by at most `step` units. The y axis is
-    /// preserved on `self` (enemies don't fly toward a player who's on a
-    /// raised mesh; matches the GDScript `_move_at_speed` behaviour).
+    /// Step `self` toward `target` by at most `step` units, horizontally: the
+    /// direction and the arrival test are the XZ delta, and `y` is kept for
+    /// the caller to pin to the ground (the height model). Taking them from
+    /// the 3D delta used to slow a mob below its target and strand one
+    /// directly below it.
     pub fn step_toward(self, target: Self, step: f32) -> Self {
-        let delta = target.sub(self);
-        let dist = delta.length();
+        let dx = target.x - self.x;
+        let dz = target.z - self.z;
+        let dist = (dx * dx + dz * dz).sqrt();
         if dist <= step || dist <= f32::EPSILON {
             Self {
                 x: target.x,
@@ -137,11 +140,10 @@ impl Vec3f {
                 z: target.z,
             }
         } else {
-            let dir = delta.normalize_or_zero();
             Self {
-                x: self.x + dir.x * step,
+                x: self.x + dx / dist * step,
                 y: self.y,
-                z: self.z + dir.z * step,
+                z: self.z + dz / dist * step,
             }
         }
     }

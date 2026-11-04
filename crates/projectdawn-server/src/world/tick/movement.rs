@@ -17,6 +17,7 @@ pub(super) fn run_movement(
         enemies,
         loot_bags,
         corpses,
+        terrain,
         ..
     } = world;
     // 5. Integrate movement intent exactly once per tick. The Move
@@ -72,9 +73,11 @@ pub(super) fn run_movement(
         } else {
             0.0
         };
-        conn.pos.x += dir.x * speed * dt;
-        conn.pos.z += dir.z * speed * dt;
-        // Y is not integrated — server tracks only XZ; gravity is client-side.
+        // The step as the client's body takes it (the height model): shorter
+        // up a slope, refused up a face too steep to climb, and standing on
+        // the ground at the end. A standing player is pinned too, so a
+        // teleport or a load never leaves one in the air.
+        conn.pos = terrain.player_step(conn.pos, dir.x * speed * dt, dir.z * speed * dt);
 
         // Track 7: detect cell boundary crossing.
         let new_cell = aoi::cell_for(conn.pos.x, conn.pos.z);

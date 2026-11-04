@@ -51,7 +51,15 @@ pub fn areas() -> &'static [SafeArea] {
     static AREAS: OnceLock<Vec<SafeArea>> = OnceLock::new();
     AREAS.get_or_init(|| {
         let parsed: Parsed = crate::world::parse_embedded("safe_areas.toml", SAFE_AREAS_TOML);
-        parsed.area
+        let mut areas = parsed.area;
+        // Centres and arrival points stand on the ground (the height model's
+        // decision 4); the file's y is a placeholder the ground overrides.
+        let ground = crate::world::terrain::compiled();
+        for a in &mut areas {
+            a.center[1] = ground.ground(a.center[0], a.center[2]);
+            a.arrival[1] = ground.ground(a.arrival[0], a.arrival[2]);
+        }
+        areas
     })
 }
 

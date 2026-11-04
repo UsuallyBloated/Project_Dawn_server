@@ -130,8 +130,9 @@ pub async fn run(
     // current report window, logged every ENEMY_FAN_REPORT_INTERVAL.
     let enemy_pos_sent: u64 = 0;
     let last_fan_report = Instant::now();
-    // The loop's own timings (world/health.rs): each tick's work and each
-    // checkpoint, reported as the `world health` line.
+    // The loop's own timings (world/health.rs): each tick's work, each
+    // checkpoint and the steps the slope rule refused, reported as the
+    // `world health` line.
     let tick_health = super::health::TickHealth::default();
     let mut tick_started: Option<Instant> = None;
     let last_health_report = Instant::now();

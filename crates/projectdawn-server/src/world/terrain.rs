@@ -59,6 +59,27 @@ pub struct Terrain {
     heights: Vec<f32>,
 }
 
+/// Where one tick of a player's movement ends (`Terrain::player_step`), and
+/// whether the slope rule refused it.
+#[derive(Debug, Clone, Copy)]
+pub struct Step {
+    /// The player's position after the tick, standing on the ground.
+    pub pos: Vec3f,
+    /// The slope rule refused the step and `pos` is where the player stood.
+    /// An honest client's own collider stops it at such a face first, so a
+    /// refusal is counted on the `world health` line (`health.rs`).
+    pub refused: bool,
+}
+
+impl Step {
+    fn taken(pos: Vec3f) -> Self {
+        Step {
+            pos,
+            refused: false,
+        }
+    }
+}
+
 impl Terrain {
     /// A terrain from its parts, checked: a grid of at least one cell with a
     /// positive cell size, `(grid_size + 1)²` finite heights.
@@ -325,7 +346,7 @@ impl Terrain {
         (dx / self.cell_size, dz / self.cell_size)
     }
 
-    /// One tick of a player's movement: the horizontal step `(dx, dz)` from
+    /// One tick of a player's movement (`Step`): the horizontal step `(dx, dz)` from
     /// `from`, taken as the client's body takes it. Uphill the step shrinks
     /// exactly as `move_and_slide` shrinks it: the motion loses `sin²θ` of
     /// its part up the slope, so straight uphill it covers `cos²θ` of the
@@ -335,10 +356,12 @@ impl Terrain {
     /// step whose rise breaks the slope rule is refused and the player stays.
     /// The result stands on the ground, a zero step included, so a teleport
     /// or a load never leaves a player in the air.
-    pub fn player_step(&self, from: Vec3f, dx: f32, dz: f32) -> Vec3f {
+    pub fn player_step(&self, from: Vec3f, dx: f32, dz: f32) -> Step {
         let here = self.ground_vec(from);
         if !(dx.is_finite() && dz.is_finite()) || (dx == 0.0 && dz == 0.0) {
-            return here;
+            // Nothing to take (the Move handler already dropped a non-finite
+            // direction): not a slope refusal.
+            return Step::taken(here);
         }
         let (gx, gz) = self.gradient(from.x, from.z);
         let up = dx * gx + dz * gz;
@@ -360,9 +383,12 @@ impl Terrain {
             z: from.z + dz,
         };
         if !self.slope_ok(here, to) {
-            return here;
+            return Step {
+                pos: here,
+                refused: true,
+            };
         }
-        self.ground_vec(to)
+        Step::taken(self.ground_vec(to))
     }
 
     /// Whether `a` and `b`, each raised by `LOS_HEIGHT`, see each other over
@@ -704,7 +730,9 @@ mod tests {
         let start = cliff.ground_vec(at(0.0, 0.0));
         let mut p = start;
         for _ in 0..10_000 {
-            p = cliff.player_step(p, 0.000_025, 0.0);
+            let step = cliff.player_step(p, 0.000_025, 0.0);
+            assert!(step.refused, "every micro-step is a refusal: {step:?}");
+            p = step.pos;
         }
         assert_eq!((p.x, p.y, p.z), (start.x, start.y, start.z), "{p:?}");
     }
@@ -728,18 +756,20 @@ mod tests {
         // The 30° ramp rising along +x: the client's measured 3.75 m/s of 5.
         let t = ramp(20.0 * 30f32.to_radians().tan());
         let from = t.ground_vec(at(2.0, 1.0));
-        let to = t.player_step(from, 0.25, 0.0);
+        let step = t.player_step(from, 0.25, 0.0);
+        assert!(!step.refused, "a 30° slope is climbable: {step:?}");
+        let to = step.pos;
         assert!((to.x - from.x - 0.25 * 0.75).abs() < 1e-4, "{to:?}");
         assert!((to.z - from.z).abs() < 1e-6);
         assert!((to.y - t.ground(to.x, to.z)).abs() < 1e-5);
         assert!(to.y > from.y);
         // Across the slope and downhill: the full step.
-        let across = t.player_step(from, 0.0, 0.25);
+        let across = t.player_step(from, 0.0, 0.25).pos;
         assert!((across.z - from.z - 0.25).abs() < 1e-5);
-        let down = t.player_step(t.ground_vec(at(5.0, 1.0)), -0.25, 0.0);
+        let down = t.player_step(t.ground_vec(at(5.0, 1.0)), -0.25, 0.0).pos;
         assert!((down.x - 4.75).abs() < 1e-5, "{down:?}");
         // Diagonally: only the part up the slope shrinks.
-        let diag = t.player_step(from, 0.2, 0.2);
+        let diag = t.player_step(from, 0.2, 0.2).pos;
         assert!((diag.x - from.x - 0.2 * 0.75).abs() < 1e-4, "{diag:?}");
         assert!((diag.z - from.z - 0.2).abs() < 1e-5);
     }
@@ -749,16 +779,22 @@ mod tests {
         let cliff = ramp(20.0 * 70f32.to_radians().tan());
         let from = cliff.ground_vec(at(1.0, 0.0));
         let stayed = cliff.player_step(from, 0.25, 0.0);
-        assert_eq!((stayed.x, stayed.z), (from.x, from.z));
+        assert!(stayed.refused, "{stayed:?}");
+        assert_eq!((stayed.pos.x, stayed.pos.z), (from.x, from.z));
         let t = compiled();
+        // A non-finite step is dropped, not refused: the handler never lets
+        // one this far, and the counter is for the slope rule alone.
         let p = t.player_step(at(3.0, 4.0), f32::NAN, 0.0);
-        assert_eq!((p.x, p.y, p.z), (3.0, 0.0, 4.0));
+        assert!(!p.refused, "{p:?}");
+        assert_eq!((p.pos.x, p.pos.y, p.pos.z), (3.0, 0.0, 4.0));
         let floating = Vec3f {
             x: 3.0,
             y: 9.0,
             z: 4.0,
         };
-        assert_eq!(t.player_step(floating, 0.0, 0.0).y, 0.0);
+        let pinned = t.player_step(floating, 0.0, 0.0);
+        assert!(!pinned.refused);
+        assert_eq!(pinned.pos.y, 0.0);
     }
 
     #[test]

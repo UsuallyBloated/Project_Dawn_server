@@ -53,13 +53,15 @@ pub(super) async fn run_upkeep(
     }
 
     // 7-health. The `world health` line: tick work times (median, 99th
-    //    percentile, worst), the ticks that ran past TICK_DT, and the
-    //    checkpoint's time. Logged while anyone is in the world, and with
-    //    nobody in it only when a tick overran (a slow disk with no
-    //    players still deserves a line); otherwise the window just resets.
+    //    percentile, worst), the ticks that ran past TICK_DT, the
+    //    checkpoint's time, and the player steps the slope rule refused.
+    //    Logged while anyone is in the world, and with nobody in it only
+    //    when a tick overran (a slow disk with no players still deserves a
+    //    line) or a step was refused (its sender may have left since);
+    //    otherwise the window just resets.
     if now.duration_since(*last_health_report) >= ENEMY_FAN_REPORT_INTERVAL {
         let report = tick_health.take_report();
-        if !in_world_ids.is_empty() || report.has_overrun() {
+        if !in_world_ids.is_empty() || report.demands_a_line() {
             tracing::info!(
                 window_secs = now.duration_since(*last_health_report).as_secs(),
                 ticks = report.ticks,
@@ -67,6 +69,7 @@ pub(super) async fn run_upkeep(
                 p99_ms = report.p99_ms,
                 max_ms = report.max_ms,
                 over_budget = report.over_budget,
+                slope_refusals = report.slope_refusals,
                 checkpoints = report.checkpoints,
                 checkpoint_max_ms = report.checkpoint_max_ms,
                 checkpoint_conns = report.checkpoint_conns,

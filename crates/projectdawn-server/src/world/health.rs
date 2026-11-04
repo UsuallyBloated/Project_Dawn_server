@@ -1,12 +1,16 @@
-//! The world loop's own health: how long each tick's work takes and how long
-//! the 60 s checkpoint holds the loop, reported once a minute as the
-//! `world health` log line beside `enemy position fan` and `player link`.
+//! The world loop's own health: how long each tick's work takes, how long
+//! the 60 s checkpoint holds the loop, and how many player steps the slope
+//! rule refused, reported once a minute as the `world health` log line
+//! beside `enemy position fan` and `player link`.
 //!
 //! A tick has `TICK_DT` (50 ms) to do its work. The loop awaits the database
 //! inline (logins, the checkpoint, the per-tick quest and drop saves), so a
 //! slow disk or a crowded world shows up here first, as a tick that ran past
-//! its budget, long before players call it lag. The numbers are for the
-//! operator: nothing in the game reads them.
+//! its budget, long before players call it lag. The slope refusals are the
+//! anti-cheat side of the same line: an honest client never sends a step its
+//! own collider refused, so the count should read 0 (the height model,
+//! `terrain::player_step`). The numbers are for the operator: nothing in the
+//! game reads them.
 
 use std::time::Duration;
 
@@ -21,6 +25,8 @@ pub struct TickHealth {
     checkpoint_us: Vec<u32>,
     /// The connections the window's checkpoints walked, summed.
     checkpoint_conns: usize,
+    /// Player steps the slope rule refused in the window.
+    slope_refusals: u64,
 }
 
 /// What one window of `TickHealth` measured, ready to log.
@@ -36,13 +42,20 @@ pub struct HealthReport {
     pub checkpoints: usize,
     pub checkpoint_max_ms: f64,
     pub checkpoint_conns: usize,
+    /// Player steps the slope rule refused (one per tick per player held at
+    /// a face). An honest client stops at a face its own collider refuses,
+    /// so on ground both sides agree on this reads 0; anything else is a
+    /// modified client pushing at a cliff, or a terrain the client has and
+    /// the server does not (a scene edit nobody exported).
+    pub slope_refusals: u64,
 }
 
 impl HealthReport {
-    /// A window worth a line even with nobody in the world: a tick ran past
-    /// its budget.
-    pub fn has_overrun(&self) -> bool {
-        self.over_budget > 0
+    /// A window worth a line even with nobody left in the world: a tick ran
+    /// past its budget, or a step was refused (its sender may have logged
+    /// out since, and the count must not go unreported).
+    pub fn demands_a_line(&self) -> bool {
+        self.over_budget > 0 || self.slope_refusals > 0
     }
 }
 
@@ -74,11 +87,17 @@ impl TickHealth {
         self.checkpoint_conns += conns;
     }
 
+    /// One player step the slope rule refused (`terrain::player_step`).
+    pub fn record_slope_refusal(&mut self) {
+        self.slope_refusals += 1;
+    }
+
     /// The window's report, and a fresh window.
     pub fn take_report(&mut self) -> HealthReport {
         let mut ticks = std::mem::take(&mut self.tick_us);
         let checkpoints = std::mem::take(&mut self.checkpoint_us);
         let checkpoint_conns = std::mem::take(&mut self.checkpoint_conns);
+        let slope_refusals = std::mem::take(&mut self.slope_refusals);
         ticks.sort_unstable();
         let budget = micros(TICK_DT);
         HealthReport {
@@ -90,6 +109,7 @@ impl TickHealth {
             checkpoints: checkpoints.len(),
             checkpoint_max_ms: ms(checkpoints.iter().copied().max().unwrap_or(0)),
             checkpoint_conns,
+            slope_refusals,
         }
     }
 }
@@ -108,6 +128,8 @@ mod tests {
         }
         health.record_checkpoint(Duration::from_micros(12_340), 3);
         health.record_checkpoint(Duration::from_millis(4), 2);
+        health.record_slope_refusal();
+        health.record_slope_refusal();
         let report = health.take_report();
         assert_eq!(
             report,
@@ -120,15 +142,17 @@ mod tests {
                 checkpoints: 2,
                 checkpoint_max_ms: 12.3,
                 checkpoint_conns: 5,
+                slope_refusals: 2,
             }
         );
-        assert!(report.has_overrun());
+        assert!(report.demands_a_line());
 
         let empty = health.take_report();
         assert_eq!(empty.ticks, 0);
         assert_eq!(empty.max_ms, 0.0);
         assert_eq!(empty.checkpoints, 0);
-        assert!(!empty.has_overrun());
+        assert_eq!(empty.slope_refusals, 0);
+        assert!(!empty.demands_a_line());
     }
 
     #[test]
@@ -140,6 +164,21 @@ mod tests {
         assert_eq!(report.over_budget, 0);
         assert_eq!(report.p50_ms, 0.3);
         assert_eq!(report.max_ms, 50.0);
+        assert!(!report.demands_a_line());
+    }
+
+    /// A refused step must reach the log even when its sender has logged out
+    /// before the minute ends and no tick overran.
+    #[test]
+    fn a_refused_step_alone_demands_a_line() {
+        let mut health = TickHealth::default();
+        health.record_tick(Duration::from_micros(400));
+        health.record_slope_refusal();
+        let report = health.take_report();
+        assert_eq!(report.over_budget, 0);
+        assert_eq!(report.slope_refusals, 1);
+        assert!(report.demands_a_line());
+        assert!(!health.take_report().demands_a_line());
     }
 
     #[test]

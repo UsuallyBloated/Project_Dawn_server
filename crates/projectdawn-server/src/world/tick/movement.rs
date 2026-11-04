@@ -18,6 +18,7 @@ pub(super) fn run_movement(
         loot_bags,
         corpses,
         terrain,
+        tick_health,
         ..
     } = world;
     // 5. Integrate movement intent exactly once per tick. The Move
@@ -76,8 +77,15 @@ pub(super) fn run_movement(
         // The step as the client's body takes it (the height model): shorter
         // up a slope, refused up a face too steep to climb, and standing on
         // the ground at the end. A standing player is pinned too, so a
-        // teleport or a load never leaves one in the air.
-        conn.pos = terrain.player_step(conn.pos, dir.x * speed * dt, dir.z * speed * dt);
+        // teleport or a load never leaves one in the air. A refusal is
+        // counted for the `world health` line: an honest client's own
+        // collider stops it at a face first, so the count is a modified
+        // client pushing at a cliff, or a ground the two sides disagree on.
+        let step = terrain.player_step(conn.pos, dir.x * speed * dt, dir.z * speed * dt);
+        if step.refused {
+            tick_health.record_slope_refusal();
+        }
+        conn.pos = step.pos;
 
         // Track 7: detect cell boundary crossing.
         let new_cell = aoi::cell_for(conn.pos.x, conn.pos.z);

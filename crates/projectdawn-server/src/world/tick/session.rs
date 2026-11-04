@@ -693,10 +693,28 @@ pub(super) async fn handle_transport_events(
                 // The reaper sweep removes it once LINKDEAD_SECS elapse. A
                 // connection not in `connections` (e.g. a refused duplicate login
                 // that never spawned) counts as clean — the reap is then a no-op.
-                let clean = connections
+                // A body still in mid-air is never clean, however it asked to
+                // leave: it lingers until it lands and takes its damage (the
+                // fall design's ledger, row 4), so quitting is no way out of a
+                // fall. Judged here and not at the Disconnect message, because
+                // the movement step runs after that handler and could still
+                // carry the body over an edge in the same tick.
+                let (clean, quit_in_the_air) = connections
                     .get(&client_id)
-                    .map(|c| c.clean_disconnect)
-                    .unwrap_or(true);
+                    .map(|c| {
+                        let airborne = c.vertical.airborne;
+                        (
+                            c.clean_disconnect && !airborne,
+                            c.clean_disconnect && airborne,
+                        )
+                    })
+                    .unwrap_or((true, false));
+                if quit_in_the_air {
+                    tracing::info!(
+                        %client_id,
+                        "clean leave in mid-air: the body lingers to land first"
+                    );
+                }
                 if clean {
                     reap_connection(
                         &mut *server,
@@ -764,8 +782,9 @@ fn go_linkdead(
         conn.camp_since = None;
         // Freeze the body so it doesn't keep drifting on its
         // last movement intent (the movement-integration step
-        // also skips linkdead connections; this is belt-and-
-        // suspenders).
+        // also reads no direction for a linkdead body; this is
+        // belt-and-suspenders). A body dropped in mid-air still
+        // falls and lands (fall.rs): only its heading is frozen.
         conn.latest_direction = Vec3f::ZERO;
         tracing::info!(
             char_id = conn.char_id,

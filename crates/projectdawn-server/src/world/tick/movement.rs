@@ -1,7 +1,45 @@
-//! Movement (steps 5 and 5b): each player's Move integrated once, then the area-of-
-//! interest crossings that spawn and despawn what a mover can see.
+//! Movement (steps 5 and 5b): each player's Move integrated once (the step on the
+//! ground, the fall off an edge and the landing), then the area-of-interest crossings
+//! that spawn and despawn what a mover can see.
 
 use super::*;
+use crate::world::fall;
+
+/// A landing's consequences (`fall.rs`): the damage as a share of max HP, with
+/// no armor, evasion or shield (the user's call of 2026-10-24), no attacker
+/// and no credit to anyone; the player is told, and the ordinary damage marker
+/// stands them and breaks a `/camp`. The HP bar follows on the resource fan,
+/// and a death goes through the death sweep like any other, the corpse where
+/// the body landed. A drop inside the safe height costs nothing and says
+/// nothing.
+pub(super) fn land(
+    server: &mut RenetServer,
+    client_id: ClientId,
+    conn: &mut PerConnection,
+    landing: fall::Landing,
+    now: Instant,
+) {
+    let damage = fall::damage(landing.drop, conn.max_hp);
+    if damage <= 0.0 {
+        return;
+    }
+    conn.hp = (conn.hp - damage).max(0.0);
+    regen::mark_dirty(conn);
+    conn.note_damage_taken(now);
+    handlers::send_system_line(
+        server,
+        client_id,
+        &format!("You hit the ground hard for {} damage.", damage as i64),
+    );
+    tracing::info!(
+        char_id = conn.char_id,
+        drop_m = landing.drop,
+        impact_mps = landing.impact_speed,
+        damage,
+        hp = conn.hp,
+        "fall damage"
+    );
+}
 
 pub(super) fn run_movement(
     world: &mut WorldState,
@@ -37,14 +75,18 @@ pub(super) fn run_movement(
     // the fan-out reads.
     let mut cell_changes: Vec<(ClientId, (i32, i32), (i32, i32))> = Vec::new();
     // Linkdead bodies are frozen: they stay in `connections` (vulnerable)
-    // but must not integrate movement, or a body that dropped mid-run would
-    // keep drifting through the world for the whole linger window.
-    for (client_id, conn) in connections
-        .iter_mut()
-        .filter(|(_, c)| c.ready && c.linkdead_since.is_none())
-    {
+    // but read no direction, or a body that dropped mid-run would keep
+    // drifting through the world for the whole linger window. One that
+    // dropped in mid-air still falls and lands (fall.rs; the fall design's
+    // ledger, row 4): pulling the cable is no way out of a fall.
+    for (client_id, conn) in connections.iter_mut().filter(|(_, c)| c.ready) {
         let dir = match conn.last_move_received {
-            Some(t) if now.duration_since(t) < STALE_MOVE_THRESHOLD => conn.latest_direction,
+            Some(t)
+                if conn.linkdead_since.is_none()
+                    && now.duration_since(t) < STALE_MOVE_THRESHOLD =>
+            {
+                conn.latest_direction
+            }
             _ => Vec3f::ZERO,
         };
         // Track 6: any non-zero move auto-stands the connection. The
@@ -74,18 +116,79 @@ pub(super) fn run_movement(
         } else {
             0.0
         };
-        // The step as the client's body takes it (the height model): shorter
-        // up a slope, refused up a face too steep to climb, and standing on
-        // the ground at the end. A standing player is pinned too, so a
-        // teleport or a load never leaves one in the air. A refusal is
-        // counted for the `world health` line: an honest client's own
-        // collider stops it at a face first, so the count is a modified
-        // client pushing at a cliff, or a ground the two sides disagree on.
-        let step = terrain.player_step(conn.pos, dir.x * speed * dt, dir.z * speed * dt);
-        if step.refused {
-            tick_health.record_slope_refusal();
+        let before = conn.pos;
+        let (dx, dz) = (dir.x * speed * dt, dir.z * speed * dt);
+        if conn.hp <= 0.0 || conn.death_processed {
+            // The dead lie on the ground where they are (the death lock holds
+            // their Moves); a body killed in the air stops falling, its corpse
+            // already on the ground below it.
+            conn.vertical = fall::Vertical::default();
+            conn.pos = terrain.ground_vec(before);
+        } else if conn.vertical.airborne {
+            // In the air the body keeps its heading at its ground speed: no
+            // slope under it to shrink the step or to refuse it. Ground it
+            // would be under by the end of this tick is met two ways. A face
+            // too steep to stand on is a wall: the body slides down it, as the
+            // client's body slides off one, onto the first floor the slide
+            // reaches, so it lands only on ground it can stand on (or rests
+            // against the face for a tick, the fall still open). A floor
+            // above the body blocks the step: the body holds its place and
+            // falls on there.
+            let (mut x, mut z) = (before.x + dx, before.z + dz);
+            let falling_to = fall::next_height(&conn.vertical, before.y, dt);
+            let met = terrain.ground(x, z);
+            if met > falling_to && !fall::is_floor(terrain.gradient(x, z)) {
+                (x, z) = terrain.slide_clear(x, z, falling_to, fall::floor_tan());
+            } else if met > before.y {
+                (x, z) = (before.x, before.z);
+            }
+            let to = Vec3f { x, y: before.y, z };
+            let (y, landing) = fall::vertical_step(
+                &mut conn.vertical,
+                before.y,
+                terrain.ground(x, z),
+                fall::is_floor(terrain.gradient(x, z)),
+                before.xz_distance_to(to),
+                dt,
+            );
+            conn.pos = Vec3f { x, y, z };
+            if let Some(landing) = landing {
+                land(&mut *server, *client_id, conn, landing, now);
+            }
+        } else {
+            // The step as the client's body takes it (the height model):
+            // shorter up a slope, refused up a face too steep to climb. A
+            // refusal is counted for the `world health` line: on flat ground
+            // none can happen, so a count there is a modified client or a
+            // ground the two sides disagree on; on hills a key held into a
+            // cliff counts too (a Move carries the input, not what the body
+            // managed). Then the ground under the new XZ: the body follows it
+            // down as far as its own floor snap reaches, onto a floor only;
+            // past that, or onto a face it cannot stand on, it has left the
+            // ground and begins to fall (fall.rs). A standing player is held
+            // the same way, so a teleport or a load never leaves one in the
+            // air.
+            let step = terrain.player_step(before, dx, dz);
+            if step.refused {
+                tick_health.record_slope_refusal();
+            }
+            let (y, landing) = fall::vertical_step(
+                &mut conn.vertical,
+                before.y,
+                step.pos.y,
+                fall::is_floor(terrain.gradient(step.pos.x, step.pos.z)),
+                before.xz_distance_to(step.pos),
+                dt,
+            );
+            conn.pos = Vec3f {
+                x: step.pos.x,
+                y,
+                z: step.pos.z,
+            };
+            if let Some(landing) = landing {
+                land(&mut *server, *client_id, conn, landing, now);
+            }
         }
-        conn.pos = step.pos;
 
         // Track 7: detect cell boundary crossing.
         let new_cell = aoi::cell_for(conn.pos.x, conn.pos.z);

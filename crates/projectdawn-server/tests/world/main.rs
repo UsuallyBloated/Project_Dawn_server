@@ -13,6 +13,7 @@ mod common;
 mod admin;
 mod death;
 mod durability;
+mod falls;
 mod groups_and_quests;
 mod height;
 mod hunger;

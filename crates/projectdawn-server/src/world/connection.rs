@@ -108,6 +108,12 @@ impl Vec3f {
         self.sub(other).length()
     }
 
+    /// The distance on the ground plane alone: a body's horizontal step,
+    /// whatever its height did.
+    pub fn xz_distance_to(self, other: Self) -> f32 {
+        ((self.x - other.x).powi(2) + (self.z - other.z).powi(2)).sqrt()
+    }
+
     /// Returns `self / length` for non-zero vectors, else `ZERO`. Avoids
     /// NaN propagation when the AI computes a direction to a coincident
     /// target.
@@ -236,6 +242,11 @@ pub struct PerConnection {
     /// application sites in the tick loop; never cleared (it's a monotonic
     /// last-hit marker, only meaningful relative to `camp_since`).
     pub last_damaged_at: Option<Instant>,
+    /// Falls (`fall.rs`): on the ground, or in the air with a vertical
+    /// speed. The movement step moves it; every teleport, port, respawn and
+    /// load lands the body standing (a move onto lower ground is never a
+    /// fall), settling a fall in progress first.
+    pub vertical: super::fall::Vertical,
 
     /// Wall-clock of this connection's most recent melee swing, stamped in the
     /// attack-apply. With `last_damaged_at` it marks "in combat" so the seated
@@ -717,6 +728,7 @@ impl PerConnection {
             linkdead_since: None,
             camp_since: None,
             last_damaged_at: None,
+            vertical: super::fall::Vertical::default(),
             last_attack_at: None,
             bind: spawn.bind,
             last_swing_at: [None, None],

@@ -53,17 +53,6 @@ fn hill_ground(x: f32) -> f32 {
     (20.0 * 30f32.to_radians().tan() * (1.0 - (x - HILL_X).abs() / 20.0)).max(0.0)
 }
 
-async fn seed_position(db_url: &str, char_id: i64, x: f32, z: f32) {
-    let pool = db::open(db_url).await.expect("open pool");
-    sqlx::query("UPDATE characters SET pos_x = ?1, pos_z = ?2 WHERE id = ?3")
-        .bind(x)
-        .bind(z)
-        .bind(char_id)
-        .execute(&pool)
-        .await
-        .expect("seed the position");
-}
-
 /// A GM of `class` at `level`, standing at (x, Z) when it enters.
 async fn gm_at(h: &Harness, user: &str, class: &str, level: i32, x: f32) -> (WorldClient, i64) {
     let (session, char_id, _stale) =
@@ -80,26 +69,6 @@ async fn gm_at(h: &Harness, user: &str, class: &str, level: i32, x: f32) -> (Wor
     let mut c = WorldClient::start(token, &session, char_id).await;
     c.pump_for(Duration::from_millis(300)).await;
     (c, char_id)
-}
-
-/// The newest Position the server has fanned for `char_id` in the next 400 ms.
-async fn own_position(c: &mut WorldClient, char_id: i64) -> Vec3 {
-    let mut own: Option<Vec3> = None;
-    let end = Instant::now() + Duration::from_millis(400);
-    while Instant::now() < end {
-        tick_one(&mut c.client, &mut c.transport);
-        while let Some(bytes) = c.client.receive_message(CHANNEL_POSITION) {
-            if let Ok((ServerWorldMsg::Position { id, pos, .. }, _)) =
-                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
-            {
-                if id == char_id as u64 {
-                    own = Some(pos);
-                }
-            }
-        }
-        tokio::time::sleep(TICK_DT).await;
-    }
-    own.expect("the server fans the player's own position")
 }
 
 fn at(x: f32) -> Vec3 {
@@ -161,7 +130,7 @@ async fn a_walk_up_a_slope_covers_three_quarters_of_the_flat_distance() {
     let start_x = -99.0;
     let (mut a, a_char_id) = gm_at(&h, "climber", "Warrior", 1, start_x).await;
     let mut seq: u32 = 1;
-    let before = own_position(&mut a, a_char_id).await;
+    let before = own_position_now(&mut a, a_char_id).await;
     assert!(
         (before.y - hill_ground(before.x)).abs() < 0.05,
         "entering, the player stands on the slope: {before:?}"
@@ -181,7 +150,7 @@ async fn a_walk_up_a_slope_covers_three_quarters_of_the_flat_distance() {
         10.0,
     )
     .await;
-    let after = own_position(&mut a, a_char_id).await;
+    let after = own_position_now(&mut a, a_char_id).await;
     let advanced = after.x - before.x;
     assert!(
         (6.5..=10.0).contains(&advanced),
@@ -213,7 +182,7 @@ async fn a_step_up_a_face_too_steep_to_climb_is_refused() {
         20.0,
     )
     .await;
-    let after = own_position(&mut a, a_char_id).await;
+    let after = own_position_now(&mut a, a_char_id).await;
     assert!(
         after.x >= FACE_FOOT_X - 0.3 && after.x < FACE_FOOT_X + 1.0,
         "the player is held at the foot of the face (x = {FACE_FOOT_X}), not at {:.2}",

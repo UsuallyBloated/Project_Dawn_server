@@ -690,7 +690,10 @@ pub fn handle_message(
             tracing::info!(char_id = conn.char_id, "client requested disconnect");
             // Mark this leave as CLEAN so the tick loop reaps the body at once
             // instead of letting it linger as linkdead. Quit Game and a
-            // completed `/camp` both route through here.
+            // completed `/camp` both route through here. Whether the body is
+            // in mid-air is judged where the transport drops, not here: the
+            // movement step runs after this handler and could still carry it
+            // over an edge this tick (`session::handle_transport_events`).
             conn.clean_disconnect = true;
             Outcome::Disconnect
         }
@@ -1647,7 +1650,8 @@ pub fn handle_message(
                 .unwrap_or(super::STARTER_SPAWN);
             // Mutating pos makes `is_dirty_for_persist()` true on its own, so the
             // next checkpoint writes the bind location rather than leaving the DB
-            // pointing at the death site.
+            // pointing at the death site. The respawn lands standing (fall.rs).
+            conn.vertical = super::fall::Vertical::default();
             conn.pos = dest;
             Outcome::RespawnTeleport { pos: dest }
         }

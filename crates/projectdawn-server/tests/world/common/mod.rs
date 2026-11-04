@@ -1570,6 +1570,26 @@ pub async fn pump_all_for(clients: &mut [&mut WorldClient], d: Duration) {
     }
 }
 
+/// Put a character at (x, z) in the database before it enters the world
+/// (the terrain tests: no walk across the zone).
+pub async fn seed_position(db_url: &str, char_id: i64, x: f32, z: f32) {
+    let pool = db::open(db_url).await.expect("open pool");
+    sqlx::query("UPDATE characters SET pos_x = ?1, pos_z = ?2 WHERE id = ?3")
+        .bind(x)
+        .bind(z)
+        .bind(char_id)
+        .execute(&pool)
+        .await
+        .expect("seed the position");
+}
+
+/// `own_position`, or a panic: for a test that cannot go on without it.
+pub async fn own_position_now(c: &mut WorldClient, char_id: i64) -> Vec3 {
+    own_position(c, char_id)
+        .await
+        .expect("the server fans the player's own position")
+}
+
 /// The newest Position the server has fanned for the client's own
 /// character, read over about a second of pumping; None if none arrives.
 pub async fn own_position(c: &mut WorldClient, char_id: i64) -> Option<Vec3> {

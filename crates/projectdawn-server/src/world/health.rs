@@ -7,10 +7,11 @@
 //! inline (logins, the checkpoint, the per-tick quest and drop saves), so a
 //! slow disk or a crowded world shows up here first, as a tick that ran past
 //! its budget, long before players call it lag. The slope refusals are the
-//! anti-cheat side of the same line: an honest client never sends a step its
-//! own collider refused, so the count should read 0 (the height model,
-//! `terrain::player_step`). The numbers are for the operator: nothing in the
-//! game reads them.
+//! same line's eye on the height model (`terrain::player_step`): on flat
+//! ground none can happen, so a count there is a modified client or a ground
+//! the two sides disagree on; on hills a Move carries the player's input, not
+//! what their body managed, so a key held into a cliff counts too, honest or
+//! not. The numbers are for the operator: nothing in the game reads them.
 
 use std::time::Duration;
 
@@ -43,10 +44,11 @@ pub struct HealthReport {
     pub checkpoint_max_ms: f64,
     pub checkpoint_conns: usize,
     /// Player steps the slope rule refused (one per tick per player held at
-    /// a face). An honest client stops at a face its own collider refuses,
-    /// so on ground both sides agree on this reads 0; anything else is a
-    /// modified client pushing at a cliff, or a terrain the client has and
-    /// the server does not (a scene edit nobody exported).
+    /// a face). On flat ground this reads 0, and anything else there is a
+    /// modified client, or a terrain the client has and the server does not
+    /// (a scene edit nobody exported). On hills it also counts an honest
+    /// player holding a key into a cliff: a Move carries the input, not what
+    /// the body managed, so there it is a curiosity, not evidence.
     pub slope_refusals: u64,
 }
 

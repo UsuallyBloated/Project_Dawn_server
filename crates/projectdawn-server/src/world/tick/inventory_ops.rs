@@ -305,6 +305,7 @@ pub(super) async fn apply_drops(
         aoi,
         loot_bags,
         trade_manager,
+        terrain,
         ..
     } = world;
     let Intents {
@@ -405,7 +406,10 @@ pub(super) async fn apply_drops(
                         owner_cid,
                         location: intent.location,
                         slot: intent.slot,
-                        pos: conn.pos,
+                        // On the ground under the dropper, as a corpse is: a
+                        // bag let go in mid-air would float where nobody
+                        // could reach it (the pickup range is a 3D distance).
+                        pos: terrain.ground_vec(conn.pos),
                         item_path,
                         count,
                     });

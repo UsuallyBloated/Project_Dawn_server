@@ -1858,6 +1858,19 @@ pub(super) fn apply_casts(
                     }
                     for &m in &movers {
                         if let Some(c) = connections.get_mut(&m) {
+                            // A mover still in the air lands where they are
+                            // first (fall.rs; the fall design's ledger, row
+                            // 6): a port is no way out of a fall, and one it
+                            // kills is not moved.
+                            let ground_here = terrain.ground(c.pos.x, c.pos.z);
+                            if let Some(landing) =
+                                crate::world::fall::settle(&mut c.vertical, ground_here)
+                            {
+                                super::movement::land(&mut *server, m, c, landing, now);
+                                if c.hp <= 0.0 {
+                                    continue;
+                                }
+                            }
                             c.pos = dest;
                             // The fight is over for the mover: without this
                             // the pet pre-pass (step 4i) re-inherits the

@@ -346,6 +346,36 @@ impl Terrain {
         (dx / self.cell_size, dz / self.cell_size)
     }
 
+    /// Move `(x, z)` down the ground's gradient until the ground there is at
+    /// or below `y`, or until the ground is a floor (a gradient no steeper
+    /// than `floor_tan`): a falling body that meets a face too steep to stand
+    /// on slides down it, as the client's body slides off a wall, and lands
+    /// on the first floor the slide reaches (`fall.rs`). Returns where the
+    /// slide got to; a body still inside a face after the passes rests
+    /// against it there.
+    pub fn slide_clear(&self, x: f32, z: f32, y: f32, floor_tan: f32) -> (f32, f32) {
+        let (mut x, mut z) = (x, z);
+        // A face spans a cell or two; each pass clears the plane under the
+        // point, and a crossing into the next cell gets another pass.
+        for _ in 0..8 {
+            let excess = self.ground(x, z) - y;
+            if excess <= 0.0 {
+                break;
+            }
+            let (gx, gz) = self.gradient(x, z);
+            let g = (gx * gx + gz * gz).sqrt();
+            if g <= floor_tan {
+                break;
+            }
+            // Down the gradient the plane drops `g` a metre: a hair past the
+            // distance that clears it.
+            let d = excess / g * 1.001 + 1e-4;
+            x -= d * gx / g;
+            z -= d * gz / g;
+        }
+        (x, z)
+    }
+
     /// One tick of a player's movement (`Step`): the horizontal step `(dx, dz)` from
     /// `from`, taken as the client's body takes it. Uphill the step shrinks
     /// exactly as `move_and_slide` shrinks it: the motion loses `sin²θ` of
@@ -772,6 +802,37 @@ mod tests {
         let diag = t.player_step(from, 0.2, 0.2).pos;
         assert!((diag.x - from.x - 0.2 * 0.75).abs() < 1e-4, "{diag:?}");
         assert!((diag.z - from.z - 0.2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_falling_body_slides_clear_of_a_face_and_not_of_flat_ground() {
+        // A 70° face rising along +x from x = -10 (0 m) to 10 (55 m): at x = 0
+        // the ground is 27.5 m. A body at 20 m there is inside the face and
+        // slides down-gradient (west) to where the face is at 20 m,
+        // x = 20 / tan(70°) - 10 = -2.72.
+        let t55 = 55f32.to_radians().tan();
+        let cliff = ramp(20.0 * 70f32.to_radians().tan());
+        let (x, z) = cliff.slide_clear(0.0, 0.0, 20.0, t55);
+        assert!((x + 2.72).abs() < 0.02 && z.abs() < 1e-6, "({x}, {z})");
+        assert!(cliff.ground(x, z) <= 20.0);
+        // Already clear: unmoved.
+        assert_eq!(cliff.slide_clear(-8.0, 0.0, 20.0, t55), (-8.0, 0.0));
+        // Flat ground above the point is a floor: the slide stops there (the
+        // body lands on it) rather than sliding anywhere.
+        assert_eq!(compiled().slide_clear(3.0, 4.0, -1.0, t55), (3.0, 4.0));
+        // A face with a floor at its foot: a body under the floor's level
+        // slides down the face and stops on the floor, where it lands.
+        let foot = Terrain::from_heights(
+            2,
+            10.0,
+            [0.0; 3],
+            0.0,
+            vec![0.0, 0.0, 30.0, 0.0, 0.0, 30.0, 0.0, 0.0, 30.0],
+        )
+        .unwrap();
+        let (x, z) = foot.slide_clear(5.0, 0.0, -1.0, t55);
+        assert!(x < 0.0 && x > -1.0 && z.abs() < 1e-6, "({x}, {z})");
+        assert_eq!(foot.gradient(x, z), (0.0, 0.0));
     }
 
     #[test]

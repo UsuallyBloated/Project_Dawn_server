@@ -124,7 +124,7 @@ where
 /// Put one handled message's outcome on this tick's queues.
 fn route_outcome(
     server: &mut RenetServer,
-    connections: &HashMap<ClientId, PerConnection>,
+    connections: &mut HashMap<ClientId, PerConnection>,
     q: &mut Intents,
     client_id: ClientId,
     outcome: Outcome,
@@ -603,9 +603,15 @@ fn route_outcome(
             // Position broadcast drags it back — the teleport IS
             // the respawn from the player's point of view. The bind is
             // re-pinned to the ground at use: the handler set `conn.pos`
-            // to the bind as saved, the teleport carries the ground's y,
-            // and the movement step pins the server's copy this same tick.
-            handlers::send_teleport(&mut *server, client_id, terrain.ground_vec(pos));
+            // to the bind as saved (the handler has no terrain), so the
+            // server's copy is grounded here too, standing. Left as saved,
+            // a bind whose ground was since lowered would read to the
+            // movement step as a walk-off, and the respawn would fall.
+            let dest = terrain.ground_vec(pos);
+            if let Some(conn) = connections.get_mut(&client_id) {
+                conn.pos = dest;
+            }
+            handlers::send_teleport(&mut *server, client_id, dest);
         }
         Outcome::DevSpawnMobIntent { pos, mob } => {
             dev_spawn_intents.push((pos, mob));

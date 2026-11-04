@@ -91,6 +91,19 @@ pub(super) async fn apply_res_accepts(world: &mut WorldState, q: &mut Intents, n
                 continue;
             }
         };
+        // A responder still in mid-air lands where they are first (fall.rs;
+        // the fall design's ledger, row 6: a summon is no way out of a fall).
+        // One the landing kills is not summoned; the offer stays pending as
+        // for any accept that did not go through.
+        if let Some(c) = connections.get_mut(&responder_cid) {
+            let ground_here = terrain.ground(c.pos.x, c.pos.z);
+            if let Some(landing) = crate::world::fall::settle(&mut c.vertical, ground_here) {
+                super::movement::land(&mut *server, responder_cid, c, landing, now);
+                if c.hp <= 0.0 {
+                    continue;
+                }
+            }
+        }
         // Persist the rezzed flag FIRST — only grant the res once it's durable,
         // so a write failure can't hand out a refund that a restart would let
         // the player claim a second time. The refunded XP is written in the
@@ -127,8 +140,9 @@ pub(super) async fn apply_res_accepts(world: &mut WorldState, q: &mut Intents, n
         // Summon the living player to their corpse + refund the xp (award_xp
         // re-levels + fans XpGained/LevelUp, landing on `after_refund`).
         if let Some(conn) = connections.get_mut(&responder_cid) {
-            // Beside the corpse, on the ground.
+            // Beside the corpse, on the ground, standing (fall.rs).
             let corpse_pos = terrain.ground_vec(corpse_pos);
+            conn.vertical = crate::world::fall::Vertical::default();
             conn.pos = corpse_pos;
             handlers::send_teleport(&mut *server, responder_cid, corpse_pos);
             if refund > 0 {

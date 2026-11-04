@@ -195,6 +195,7 @@ pub(super) fn run_enemy_ai(
             }
         }
         let mut target_changes: Vec<(EntityId, Option<EntityId>)> = Vec::new();
+        let mut healed_home: Vec<(EntityId, f32, f32)> = Vec::new();
         let mut enemy_hits: Vec<(EntityId, HitIntent)> = Vec::new();
         // DoT ticks dealt this sweep (spell batch step 5): the entity,
         // the tick, its hp and max_hp after, and whether it died of it.
@@ -262,6 +263,7 @@ pub(super) fn run_enemy_ai(
                 continue;
             }
             let old_enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
+            let hp_before = entity.hp;
             let events = entity.tick_ai(
                 &targets_for_enemy_ai,
                 &enemy_target_snapshots,
@@ -275,6 +277,12 @@ pub(super) fn run_enemy_ai(
             }
             if let Some(hit) = events.hit {
                 enemy_hits.push((entity.id, hit));
+            }
+            // The AI changes a mob's HP only by healing it to full at home
+            // after a leash (or after giving up below a face): told to every
+            // player, or their bars keep the HP it left the fight with.
+            if entity.hp != hp_before {
+                healed_home.push((entity.id, entity.hp, entity.max_hp));
             }
             // Re-fan the status snapshot when the set of names on the
             // entity changed (a DoT or CC landing or running out).
@@ -303,6 +311,9 @@ pub(super) fn run_enemy_ai(
         }
         for (id, target) in target_changes {
             handlers::fan_out_entity_target(&mut *server, in_world_recipients_now, id, target);
+        }
+        for (id, hp, max_hp) in healed_home {
+            handlers::fan_out_health_update(&mut *server, in_world_recipients_now, id, hp, max_hp);
         }
         // DoT ticks (spell batch step 5): everyone sees the hit and the
         // bar; the caster alone gets the named "<spell> for N" line (the

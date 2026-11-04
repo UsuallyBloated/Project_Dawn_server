@@ -195,6 +195,14 @@ pub const ATTACK_RANGE_TOLERANCE: f32 = 1.5;
 /// Mobs with an aggro radius of 0 (dev-spawned dummies) are left passive.
 pub const MIN_LEASH_RANGE: f32 = 35.0;
 
+/// How long a mob or pet may be held at ground it cannot climb before it
+/// gives up (the first hills, decision 6, EQ's rule): a chasing mob forgets
+/// everyone and walks home, where it heals to full; a mob walking home warps
+/// there; a pet following its owner warps to them; a pet chasing a target
+/// drops it. No pathfinding exists, so a mob below a face has no way round.
+/// 8 s, a knob.
+pub const MOB_STUCK_SECS: f32 = 8.0;
+
 /// How far a `/say` carries, in metres from the speaker (user, 2026-10-27:
 /// "the volume of a conversation", 50 m). The eating emote and the jump relay
 /// reach the same people: the room. It used to be the speaker's 3x3 AOI

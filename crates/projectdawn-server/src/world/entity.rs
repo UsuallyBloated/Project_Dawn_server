@@ -260,6 +260,11 @@ pub struct Entity {
     /// undo on expire. Pet-irrelevant effects (mp regen, accuracy/crit)
     /// aren't routed here — pets have no mana / crit model.
     pub active_buffs: Vec<ActiveBuff>,
+
+    /// When this entity's last step was first refused by the slope rule
+    /// (a face it cannot climb), `None` while it moves. Read against
+    /// `MOB_STUCK_SECS`; cleared by any step taken and by every state change.
+    pub stuck_since: Option<Instant>,
 }
 
 /// Track 13 — five-stat block carried by an Entity. Used by pets so
@@ -348,6 +353,7 @@ impl Entity {
             stats: PrimaryStats::default(),
             base_stats: PrimaryStats::default(),
             active_buffs: Vec::new(),
+            stuck_since: None,
         };
         // Single choke point for both spawn paths (camp spawner and dev
         // spawn), so a named mob is scaled exactly once no matter how it
@@ -410,6 +416,7 @@ impl Entity {
             stats: base,
             base_stats: base,
             active_buffs: Vec::new(),
+            stuck_since: None,
         }
     }
 
@@ -620,6 +627,30 @@ impl Entity {
         }
         self.state = new_state;
         self.state_entered_at = now;
+        self.stuck_since = None;
+    }
+
+    /// One step toward `to`, standing on the ground, refused up a face the
+    /// slope rule forbids (the player's own rule, `Terrain::slope_ok`, which
+    /// also refuses a diagonal onto a face). Returns whether it moved.
+    fn step_on(&mut self, terrain: &crate::world::terrain::Terrain, to: Vec3f) -> bool {
+        if !terrain.slope_ok(self.pos, to) {
+            return false;
+        }
+        self.pos = terrain.ground_vec(to);
+        true
+    }
+
+    /// The stuck clock after a step was tried: a step taken clears it, a
+    /// refused one starts it (or keeps it running). True once the entity has
+    /// been held for `MOB_STUCK_SECS`.
+    fn stuck_too_long(&mut self, moved: bool, now: Instant) -> bool {
+        if moved {
+            self.stuck_since = None;
+            return false;
+        }
+        let since = *self.stuck_since.get_or_insert(now);
+        now.duration_since(since).as_secs_f32() >= crate::world::MOB_STUCK_SECS
     }
 
     /// How far from itself a mob keeps chasing, and how far out it will
@@ -1033,6 +1064,7 @@ impl Entity {
                 let melee = self.melee_range();
                 if dist <= melee {
                     // In melee range — swing on cadence.
+                    self.stuck_since = None;
                     self.face_toward(target_pos);
                     let due = match self.last_attack_at {
                         None => true,
@@ -1049,7 +1081,14 @@ impl Entity {
                     let snare = self.snare_factor();
                     let step = self.move_speed() * (1.0 - snare) * dt;
                     self.face_toward(target_pos);
-                    self.pos = terrain.ground_vec(self.pos.step_toward(target_pos, step));
+                    let moved = self.step_on(terrain, self.pos.step_toward(target_pos, step));
+                    if self.stuck_too_long(moved, now) {
+                        // A target it cannot reach (above a face): drop it.
+                        // The follow branch takes over, and the inheritance
+                        // pre-pass may hand it back to try again.
+                        self.target = None;
+                        self.stuck_since = None;
+                    }
                 }
             }
             _ => {
@@ -1062,6 +1101,7 @@ impl Entity {
                 // commanded otherwise or the inheritance/damage path
                 // re-targets us.
                 if self.stance == PetStance::Guard {
+                    self.stuck_since = None;
                     return;
                 }
                 let Some(owner_pos) = owner_pos_opt else {
@@ -1074,7 +1114,15 @@ impl Entity {
                     let snare = self.snare_factor();
                     let step = self.move_speed() * (1.0 - snare) * dt;
                     self.face_toward(owner_pos);
-                    self.pos = terrain.ground_vec(self.pos.step_toward(owner_pos, step));
+                    let moved = self.step_on(terrain, self.pos.step_toward(owner_pos, step));
+                    if self.stuck_too_long(moved, now) {
+                        // An owner it cannot reach (on a ledge): EQ's pets warp
+                        // to their owner. Only to where the owner already is.
+                        self.pos = terrain.ground_vec(owner_pos);
+                        self.stuck_since = None;
+                    }
+                } else {
+                    self.stuck_since = None;
                 }
             }
         }
@@ -1153,14 +1201,25 @@ impl Entity {
             self.transition(EnemyState::Attack, now);
             return;
         }
-        // Root and snare block / slow movement.
+        // Root and snare block / slow movement. Rooted is not stuck.
         if self.is_rooted() {
+            self.stuck_since = None;
             return;
         }
         let snare = self.snare_factor();
         let step = self.enraged_speed() * (1.0 - snare) * dt;
         self.face_toward(target_pos);
-        self.pos = terrain.ground_vec(self.pos.step_toward(target_pos, step));
+        let moved = self.step_on(terrain, self.pos.step_toward(target_pos, step));
+        if self.stuck_too_long(moved, now) {
+            // EQ's rule: a mob that cannot reach its target (below a face)
+            // gives up, forgets everyone and walks home, where tick_leash
+            // heals it to full. A player on a lip gets no kill from a mob
+            // held at the foot of the face.
+            self.target = None;
+            self.threat.clear();
+            self.aggro.clear();
+            self.transition(EnemyState::Leash, now);
+        }
     }
 
     fn tick_attack(&mut self, targets: &[(EntityId, Vec3f)], now: Instant, events: &mut AiEvents) {
@@ -1213,7 +1272,13 @@ impl Entity {
         }
         let step = self.enraged_speed() * dt;
         self.face_toward(self.spawn_pos);
-        self.pos = terrain.ground_vec(self.pos.step_toward(self.spawn_pos, step));
+        let moved = self.step_on(terrain, self.pos.step_toward(self.spawn_pos, step));
+        if self.stuck_too_long(moved, now) {
+            // Home is up a face it came down: EQ's mobs warp home. The home
+            // check next tick heals it and resets the fight.
+            self.pos = terrain.ground_vec(self.spawn_pos);
+            self.stuck_since = None;
+        }
     }
 
     /// Track 12 Piece A2 — pet-induced threat redirect. If any
@@ -1981,5 +2046,185 @@ mod tests {
             e.active_dots.is_empty(),
             "and the dot is gone once they are dealt"
         );
+    }
+
+    // ── Mobs at a face (the first hills) ─────────────────────────────────
+
+    /// Three 10 m cells along x, centred on the origin: flat at 0 from
+    /// x = -15 to -5, a face rising 20 m to x = 5 (63 degrees), a flat top at
+    /// 20 m to x = 15.
+    fn foot_and_top() -> crate::world::terrain::Terrain {
+        let row = [0.0, 0.0, 20.0, 20.0];
+        let heights: Vec<f32> = (0..4).flat_map(|_| row).collect();
+        crate::world::terrain::Terrain::from_heights(3, 10.0, [0.0; 3], 0.0, heights).unwrap()
+    }
+
+    const TOP: Vec3f = Vec3f {
+        x: 10.0,
+        y: 20.0,
+        z: 0.0,
+    };
+
+    /// Ticks `e` at 20 Hz for `secs`, checking it never climbs onto the face.
+    fn tick_for(
+        e: &mut Entity,
+        targets: &[(EntityId, Vec3f)],
+        enemy_targets: &[(EntityId, Vec3f, bool)],
+        secs: f32,
+        t: &crate::world::terrain::Terrain,
+        start: Instant,
+    ) -> Instant {
+        let dt = 0.05;
+        let mut now = start;
+        for _ in 0..(secs / dt) as usize {
+            now += Duration::from_millis(50);
+            let _ = e.tick_ai(targets, enemy_targets, &[], dt, now, t);
+            assert!(
+                e.pos.x < -4.99 || e.pos.y > 19.99,
+                "on the face at {:?} ({:?})",
+                e.pos,
+                e.state
+            );
+        }
+        now
+    }
+
+    /// Ticks `e` until its first step is refused (it has reached the foot of
+    /// the face), and returns that instant: the stuck clock starts there.
+    fn until_stuck(
+        e: &mut Entity,
+        targets: &[(EntityId, Vec3f)],
+        enemy_targets: &[(EntityId, Vec3f, bool)],
+        t: &crate::world::terrain::Terrain,
+        start: Instant,
+    ) -> Instant {
+        let mut now = start;
+        for _ in 0..200 {
+            now += Duration::from_millis(50);
+            let _ = e.tick_ai(targets, enemy_targets, &[], 0.05, now, t);
+            if e.stuck_since.is_some() {
+                return now;
+            }
+        }
+        panic!("never reached the face: {:?}", e.pos);
+    }
+
+    #[test]
+    fn a_mob_at_a_face_stops_and_gives_up() {
+        let t = foot_and_top();
+        let start = Instant::now();
+        let player: EntityId = 1;
+        let foot = Vec3f {
+            x: -8.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let mut e = Entity::from_spawn(0, foot, template(), start);
+        e.threat.insert(player, 10.0);
+        e.target = Some(player);
+        e.transition(EnemyState::Chase, start);
+        let targets = vec![(player, TOP)];
+        // Walk to the foot; the clock starts at the first refused step.
+        let at_foot = until_stuck(&mut e, &targets, &[], &t, start);
+        let now = tick_for(
+            &mut e,
+            &targets,
+            &[],
+            crate::world::MOB_STUCK_SECS - 0.5,
+            &t,
+            at_foot,
+        );
+        assert!(
+            matches!(e.state, EnemyState::Chase),
+            "still trying: {:?}",
+            e.state
+        );
+        assert!(
+            e.pos.x > -5.5,
+            "it reached the foot of the face: {:?}",
+            e.pos
+        );
+        tick_for(&mut e, &targets, &[], 1.0, &t, now);
+        assert!(
+            matches!(e.state, EnemyState::Leash | EnemyState::Idle),
+            "gave up: {:?}",
+            e.state
+        );
+        assert_eq!(e.target, None);
+        assert!(e.threat.is_empty() && e.aggro.is_empty());
+
+        // The control: the same chase on flat ground reaches the target.
+        let flat = crate::world::terrain::Terrain::flat(3, 10.0, 0.0);
+        let mut c = Entity::from_spawn(0, foot, template(), start);
+        c.threat.insert(player, 10.0);
+        c.target = Some(player);
+        c.transition(EnemyState::Chase, start);
+        let level = vec![(player, Vec3f { y: 0.0, ..TOP })];
+        let mut now = start;
+        for _ in 0..200 {
+            now += Duration::from_millis(50);
+            let _ = c.tick_ai(&level, &[], &[], 0.05, now, &flat);
+        }
+        assert!(matches!(c.state, EnemyState::Attack), "{:?}", c.state);
+    }
+
+    #[test]
+    fn a_pet_that_cannot_reach_its_owner_warps_to_them() {
+        let t = foot_and_top();
+        let start = Instant::now();
+        let owner: EntityId = 1;
+        let foot = Vec3f {
+            x: -8.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let mut pet = Entity::from_pet_summon(owner, foot, template(), start);
+        let targets = vec![(owner, TOP)];
+        let at_foot = until_stuck(&mut pet, &targets, &[], &t, start);
+        let now = tick_for(
+            &mut pet,
+            &targets,
+            &[],
+            crate::world::MOB_STUCK_SECS - 0.5,
+            &t,
+            at_foot,
+        );
+        assert!(pet.pos.x < -4.99, "held at the foot: {:?}", pet.pos);
+        let _ = tick_for(&mut pet, &targets, &[], 1.0, &t, now);
+        assert!(
+            pet.pos.distance_to(TOP) < 1.0,
+            "beside its owner on top: {:?}",
+            pet.pos
+        );
+    }
+
+    #[test]
+    fn a_pet_drops_a_target_it_cannot_reach() {
+        let t = foot_and_top();
+        let start = Instant::now();
+        let owner: EntityId = 1;
+        let enemy: EntityId = ENEMY_ID_BASE + 5;
+        let foot = Vec3f {
+            x: -8.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let mut pet = Entity::from_pet_summon(owner, foot, template(), start);
+        pet.target = Some(enemy);
+        // The owner stands beside the pet, so the follow branch holds still.
+        let targets = vec![(owner, Vec3f { x: -9.0, ..foot })];
+        let enemies = vec![(enemy, TOP, true)];
+        let at_foot = until_stuck(&mut pet, &targets, &enemies, &t, start);
+        let now = tick_for(
+            &mut pet,
+            &targets,
+            &enemies,
+            crate::world::MOB_STUCK_SECS - 0.5,
+            &t,
+            at_foot,
+        );
+        assert_eq!(pet.target, Some(enemy), "still trying");
+        let _ = tick_for(&mut pet, &targets, &enemies, 1.0, &t, now);
+        assert_eq!(pet.target, None, "dropped the target it cannot reach");
     }
 }

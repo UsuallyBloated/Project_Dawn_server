@@ -494,3 +494,174 @@ async fn a_dot_keeps_ticking_behind_the_ridge() {
         "the DoT ticks on behind the ridge"
     );
 }
+
+// ── Mobs at a face (the first hills, decision 6) ──────────────────────────────
+
+/// A plateau 15 m up for x in [-100, -60] and z in [85, 115]: a ramp up its west side
+/// from x = -130 (26.6 degrees, a floor), one-cell faces on the other three (15 m over
+/// 5 m, 71.6 degrees). 30 x 30 cells of 5 m centred on (-90, 100), clear of the town.
+fn plateau_ground() -> Terrain {
+    let mut heights = vec![0.0f32; 31 * 31];
+    for iz in 0..31 {
+        let z = 25.0 + 5.0 * iz as f32;
+        if !(85.0..=115.0).contains(&z) {
+            continue;
+        }
+        for ix in 0..31 {
+            let x = -165.0 + 5.0 * ix as f32;
+            heights[iz * 31 + ix] = if (-100.0..=-60.0).contains(&x) {
+                15.0
+            } else if (-130.0..-100.0).contains(&x) {
+                15.0 * (x + 130.0) / 30.0
+            } else {
+                0.0
+            };
+        }
+    }
+    let t =
+        Terrain::from_heights(30, 5.0, [-90.0, 0.0, 100.0], 0.0, heights).expect("a valid plateau");
+    for x in [-2.0, 0.0, 5.0, 8.0, 11.0, 14.0] {
+        assert_eq!(
+            t.ground(x, 5.0),
+            0.0,
+            "the town must stay flat under a test ground"
+        );
+    }
+    t
+}
+
+/// A mob at the foot of a face it cannot climb, its target on top, stops at the foot,
+/// gives up after `MOB_STUCK_SECS` and walks home, where it is back at full health for
+/// everyone who watches it (EQ's rule). A GM spawns a passive dummy at the plateau's
+/// east foot; a Cleric half a metre from the lip Smites it (from there the sight line
+/// clears the lip). On the previous server the mob climbed the face pinned to the
+/// ground and reached the Cleric in about three seconds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mob_at_a_face_gives_up_and_walks_home() {
+    let h = start_with_terrain(plateau_ground()).await;
+    let (mut a, _a_char_id) = gm_at(&h, "facewatch", "Warrior", 1, -45.0).await;
+    let (b_session, b_char_id, _stale) =
+        provision_client(&h.auth_url, "facelip", "Lippa", "Human", "Cleric").await;
+    set_char_level(&h.db_url, b_char_id, 5).await;
+    seed_position(&h.db_url, b_char_id, -60.5, Z).await;
+    let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
+    let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
+    b.pump_for(Duration::from_millis(300)).await;
+    let b_id = b_char_id as u64;
+    let on_lip = own_position_now(&mut b, b_char_id).await;
+    assert!(
+        on_lip.y > 14.9,
+        "the Cleric stands on the plateau: {on_lip:?}"
+    );
+
+    a.send_dev_spawn("Face Dummy", 1, 500.0, 0, 3.0, 0.5);
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Face Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let ServerWorldMsg::EnemySpawn {
+        id: dummy,
+        pos: home,
+        ..
+    } = spawn
+    else {
+        unreachable!()
+    };
+    assert!(
+        home.x > -50.0 && home.y.abs() < 0.05,
+        "east of the face: {home:?}"
+    );
+    b.pump_for(Duration::from_millis(300)).await;
+
+    b.send_cast_spell("Smite", Some(dummy));
+
+    // Both clients serviced every tick, with a heartbeat every 2 s (the run
+    // outlasts the server's 10 s heartbeat timeout).
+    let mut positions: Vec<(Instant, Vec3)> = Vec::new();
+    let mut a_msgs: Vec<(Instant, ServerWorldMsg)> = Vec::new();
+    let mut b_msgs: Vec<ServerWorldMsg> = Vec::new();
+    let start = Instant::now();
+    let mut beat = start;
+    while start.elapsed() < Duration::from_secs(26) {
+        let beat_due = beat.elapsed() >= Duration::from_secs(2);
+        for c in [&mut a, &mut b] {
+            if beat_due {
+                c.send_heartbeat();
+            }
+            tick_one(&mut c.client, &mut c.transport);
+        }
+        if beat_due {
+            beat = Instant::now();
+        }
+        let now = Instant::now();
+        while let Some(bytes) = a.client.receive_message(CHANNEL_POSITION) {
+            if let Ok((ServerWorldMsg::Position { id, pos, .. }, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
+                if id == dummy {
+                    positions.push((now, pos));
+                }
+            }
+        }
+        while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
+            if let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
+                a_msgs.push((now, msg));
+            }
+        }
+        while let Some(bytes) = b.client.receive_message(CHANNEL_SYSTEM) {
+            if let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
+                b_msgs.push(msg);
+            }
+        }
+        while b.client.receive_message(CHANNEL_POSITION).is_some() {}
+        tokio::time::sleep(TICK_DT).await;
+    }
+
+    let when = |pred: &dyn Fn(&ServerWorldMsg) -> bool| {
+        a_msgs.iter().find(|(_, m)| pred(m)).map(|(t, _)| *t)
+    };
+    let chased = when(&|m| matches!(m, ServerWorldMsg::EntityTarget { id, target } if *id == dummy && *target == Some(b_id)))
+        .expect("the Smite turns the dummy on the Cleric");
+    let gave_up =
+        when(&|m| matches!(m, ServerWorldMsg::EntityTarget { id, target: None } if *id == dummy))
+            .expect("the dummy gives up on a target it cannot reach");
+    let held = gave_up.duration_since(chased).as_secs_f32();
+    assert!(
+        (projectdawn_server::world::MOB_STUCK_SECS..16.0).contains(&held),
+        "it gave up {held:.1} s after it began the chase"
+    );
+    let highest = positions.iter().map(|(_, p)| p.y).fold(0.0f32, f32::max);
+    let westmost = positions
+        .iter()
+        .map(|(_, p)| p.x)
+        .fold(f32::INFINITY, f32::min);
+    assert!(
+        westmost > -56.0 && highest < 0.5,
+        "the dummy never climbed the face (west to x = {westmost:.2}, up to y = {highest:.2})"
+    );
+    assert!(
+        westmost < -54.0,
+        "the dummy reached the foot of the face: x = {westmost:.2}"
+    );
+    let back = positions.iter().find(|(t, p)| {
+        *t > gave_up && ((p.x - home.x).powi(2) + (p.z - home.z).powi(2)).sqrt() < 1.5
+    });
+    assert!(back.is_some(), "the dummy walked home after giving up");
+    assert!(
+        a_msgs.iter().any(|(t, m)| *t > gave_up
+            && matches!(m, ServerWorldMsg::HealthUpdate { id, hp, max_hp } if *id == dummy && *hp == *max_hp && *max_hp == 500.0)),
+        "the dummy is back at full health at home, and the watcher is told"
+    );
+    assert!(
+        !b_msgs
+            .iter()
+            .any(|m| matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == dummy)),
+        "the dummy never reached the Cleric"
+    );
+}

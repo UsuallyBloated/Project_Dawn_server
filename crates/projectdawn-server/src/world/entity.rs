@@ -1256,19 +1256,23 @@ impl Entity {
     ) {
         self.maybe_switch_target_by_threat(targets);
         let Some(target_id) = self.target else {
-            self.transition(EnemyState::Leash, now);
+            self.next_hater_or_home(targets, now);
             return;
         };
         let Some(target_pos) = target_pos(targets, target_id) else {
-            // Target left the world (disconnect, EnterWorld → out). Drop.
+            // Target left the world, died or is no longer a target.
             self.target = None;
-            self.transition(EnemyState::Leash, now);
+            self.next_hater_or_home(targets, now);
             return;
         };
         let dist = self.pos.distance_to(target_pos);
         if dist > self.leash_range() {
+            // Out past the leash: forget its hate, so the threat switch
+            // cannot hand it straight back, but keep its damage (`aggro`),
+            // which is kill credit.
+            self.threat.remove(&target_id);
             self.target = None;
-            self.transition(EnemyState::Leash, now);
+            self.next_hater_or_home(targets, now);
             return;
         }
         if dist <= self.melee_range() {
@@ -1305,12 +1309,12 @@ impl Entity {
     fn tick_attack(&mut self, targets: &[(EntityId, Vec3f)], now: Instant, events: &mut AiEvents) {
         self.maybe_switch_target_by_threat(targets);
         let Some(target_id) = self.target else {
-            self.transition(EnemyState::Leash, now);
+            self.next_hater_or_home(targets, now);
             return;
         };
         let Some(target_pos) = target_pos(targets, target_id) else {
             self.target = None;
-            self.transition(EnemyState::Leash, now);
+            self.next_hater_or_home(targets, now);
             return;
         };
         let dist = self.pos.distance_to(target_pos);
@@ -1331,6 +1335,22 @@ impl Entity {
                 target: target_id,
                 amount: self.melee_swing_damage(),
             });
+        }
+    }
+
+    /// Its target is gone (dead, ported, out of the world, or past its
+    /// leash): EQ's hate list. It turns on the present attacker with the most
+    /// hate within its leash and chases them; only with nobody left does it
+    /// walk home (where `tick_leash` heals it). Before, it walked home with
+    /// the rest of the group still on it, and since the evade (a mob walking
+    /// home takes no damage) that walk would have healed it out from under
+    /// them.
+    fn next_hater_or_home(&mut self, targets: &[(EntityId, Vec3f)], now: Instant) {
+        self.target = self.best_hater_within_leash(targets);
+        if self.target.is_some() {
+            self.transition(EnemyState::Chase, now);
+        } else {
+            self.transition(EnemyState::Leash, now);
         }
     }
 
@@ -2310,6 +2330,58 @@ mod tests {
         pet.owner = Some(9);
         pet.state = EnemyState::Leash;
         assert!(!pet.is_evading(now), "a pet never evades");
+    }
+
+    /// EQ's hate list (`next_hater_or_home`): when the tank dies, the mob
+    /// turns on the healer who also has hate; when the healer dies too it
+    /// walks home. A target that runs past the leash is forgotten the same
+    /// way, its damage kept as kill credit.
+    #[test]
+    fn a_mob_whose_target_dies_turns_on_the_next_hater() {
+        let t = crate::world::terrain::Terrain::flat(3, 10.0, 0.0);
+        let start = Instant::now();
+        let at = |x: f32| Vec3f { x, y: 0.0, z: 0.0 };
+        let (tank, healer): (EntityId, EntityId) = (1, 2);
+        let mut e = Entity::from_spawn(0, at(0.0), template(), start);
+        e.threat.insert(tank, 50.0);
+        e.threat.insert(healer, 10.0);
+        e.aggro.insert(tank, 50.0);
+        e.target = Some(tank);
+        e.transition(EnemyState::Attack, start);
+        let mut now = start + Duration::from_millis(50);
+
+        // The tank dies: the death sweep (`wipe_hate`) drops its hate and
+        // the mob's target, and a dead player leaves the AI's target list.
+        e.threat.remove(&tank);
+        e.aggro.remove(&tank);
+        e.target = None;
+        let healer_only = vec![(healer, at(6.0))];
+        let _ = e.tick_ai(&healer_only, &[], &[], 0.05, now, &t);
+        assert_eq!(e.target, Some(healer), "it turns on the healer");
+        assert!(matches!(e.state, EnemyState::Chase), "{:?}", e.state);
+
+        // The healer dies too: nobody left, it walks home.
+        e.threat.remove(&healer);
+        e.target = None;
+        now += Duration::from_millis(50);
+        let _ = e.tick_ai(&[], &[], &[], 0.05, now, &t);
+        assert_eq!(e.target, None);
+        assert!(matches!(e.state, EnemyState::Leash), "{:?}", e.state);
+
+        // A target past the leash: forgotten (no hate, its damage kept) and
+        // the mob turns on the attacker still in reach.
+        let mut f = Entity::from_spawn(0, at(0.0), template(), start);
+        f.threat.insert(tank, 50.0);
+        f.threat.insert(healer, 10.0);
+        f.aggro.insert(tank, 50.0);
+        f.target = Some(tank);
+        f.transition(EnemyState::Chase, start);
+        let far = f.leash_range() + 5.0;
+        let both = vec![(tank, at(far)), (healer, at(6.0))];
+        let _ = f.tick_ai(&both, &[], &[], 0.05, now, &t);
+        assert_eq!(f.target, Some(healer), "past the leash, the next hater");
+        assert!(!f.threat.contains_key(&tank), "the runner's hate is gone");
+        assert_eq!(f.aggro.get(&tank), Some(&50.0), "its kill credit stays");
     }
 
     #[test]

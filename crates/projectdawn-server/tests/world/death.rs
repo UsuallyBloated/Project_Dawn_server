@@ -598,3 +598,108 @@ async fn the_starting_kit_comes_back_off_its_owners_corpse() {
         "the books balance through the death and the loot"
     );
 }
+
+/// EQ's hate list: a mob whose target dies turns on the next player with hate on
+/// it instead of walking home (where, since the evade, it would heal out from
+/// under the group). A GM Cleric, the tank, Smites a passive dummy twice, a
+/// second Cleric beside it once (half the hate, so even a crit cannot pull the
+/// dummy: `SPELL_CRIT_MULT_MAX` is 2 and the threat switch needs 1.3x); the tank
+/// dies to a dev `DamageSelf`; the dummy comes for the second Cleric. On the
+/// previous server it dropped its target and walked home.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mob_whose_target_dies_turns_on_the_next_hater() {
+    let h = start_both().await;
+    let (sa, ca, _) =
+        provision_client(&h.auth_url, "hatetank", "Hatetank", "Human", "Cleric").await;
+    set_char_level(&h.db_url, ca, 5).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "hatetank", true)
+        .await
+        .expect("set is_gm");
+    let ta = request_world_token(&h.auth_url, &sa, ca).await;
+    let mut a = WorldClient::start(ta, &sa, ca).await;
+    a.pump_for(Duration::from_millis(300)).await;
+    let (sb, cb, _) =
+        provision_client(&h.auth_url, "hateheal", "Hateheal", "Human", "Cleric").await;
+    set_char_level(&h.db_url, cb, 5).await;
+    seed_position(&h.db_url, cb, 4.0, 4.0).await;
+    let tb = request_world_token(&h.auth_url, &sb, cb).await;
+    let mut b = WorldClient::start(tb, &sb, cb).await;
+    b.pump_for(Duration::from_millis(300)).await;
+    let (tank, healer) = (ca as u64, cb as u64);
+
+    a.send_dev_spawn("Hate Dummy", 1, 500.0, 0, 3.0, 0.5);
+    let spawn = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Hate Dummy")
+        })
+        .await
+        .expect("the dummy spawns");
+    let ServerWorldMsg::EnemySpawn { id: dummy, .. } = spawn else {
+        unreachable!()
+    };
+
+    // The tank's two Smites (Smite's own cooldown is 3 s), then the second
+    // Cleric's one. Both clients serviced through the waits.
+    a.send_cast_spell("Smite", Some(dummy));
+    for _ in 0..2 {
+        a.pump_for(Duration::from_millis(800)).await;
+        b.pump_for(Duration::from_millis(800)).await;
+    }
+    a.send_cast_spell("Smite", Some(dummy));
+    a.pump_for(Duration::from_millis(300)).await;
+    b.send_cast_spell("Smite", Some(dummy));
+
+    // Read the second Cleric's view up to the tank's death: the dummy must be
+    // on the tank, or the test proves nothing.
+    let mut last_target = None;
+    let mut healer_hit = false;
+    let mut refusals: Vec<String> = Vec::new();
+    let end = Instant::now() + Duration::from_millis(800);
+    while Instant::now() < end {
+        for c in [&mut a, &mut b] {
+            tick_one(&mut c.client, &mut c.transport);
+        }
+        while let Some(bytes) = b.client.receive_message(CHANNEL_SYSTEM) {
+            match bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) {
+                Ok((ServerWorldMsg::EntityTarget { id, target }, _)) if id == dummy => {
+                    last_target = Some(target);
+                }
+                Ok((
+                    ServerWorldMsg::Hit {
+                        attacker, target, ..
+                    },
+                    _,
+                )) if attacker == healer && target == dummy => {
+                    healer_hit = true;
+                }
+                Ok((ServerWorldMsg::CastFail { reason, .. }, _)) => refusals.push(reason),
+                _ => {}
+            }
+        }
+        while a.client.receive_message(CHANNEL_SYSTEM).is_some() {}
+        tokio::time::sleep(TICK_DT).await;
+    }
+    assert_eq!(
+        last_target,
+        Some(Some(tank)),
+        "before the death the dummy is on the tank"
+    );
+    assert!(
+        healer_hit,
+        "the second Cleric's Smite landed, so it has hate (refusals: {refusals:?})"
+    );
+
+    a.send_damage_self(1_000_000);
+    // `wait_for` services only the client it waits on: flush the tank's.
+    a.pump_for(Duration::from_millis(100)).await;
+    let turned = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(t) } if *id == dummy && *t == healer)
+        })
+        .await;
+    assert!(
+        turned.is_some(),
+        "with the tank dead the dummy turns on the other Cleric, who has hate on it"
+    );
+}

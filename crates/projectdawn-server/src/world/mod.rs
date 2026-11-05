@@ -203,6 +203,12 @@ pub const MIN_LEASH_RANGE: f32 = 35.0;
 /// 8 s, a knob.
 pub const MOB_STUCK_SECS: f32 = 8.0;
 
+/// How much closer to its goal a held mob or pet must come to count as no
+/// longer stuck (`MOB_STUCK_SECS`): any step taken is not enough, or a mob
+/// sliding along the foot of a face after a player walking the lip above would
+/// never give up. A knob.
+pub const STUCK_PROGRESS_M: f32 = 1.0;
+
 /// How far a `/say` carries, in metres from the speaker (user, 2026-10-27:
 /// "the volume of a conversation", 50 m). The eating emote and the jump relay
 /// reach the same people: the room. It used to be the speaker's 3x3 AOI

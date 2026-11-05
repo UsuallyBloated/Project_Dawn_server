@@ -263,7 +263,6 @@ pub(super) fn run_enemy_ai(
                 continue;
             }
             let old_enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
-            let hp_before = entity.hp;
             let events = entity.tick_ai(
                 &targets_for_enemy_ai,
                 &enemy_target_snapshots,
@@ -278,10 +277,10 @@ pub(super) fn run_enemy_ai(
             if let Some(hit) = events.hit {
                 enemy_hits.push((entity.id, hit));
             }
-            // The AI changes a mob's HP only by healing it to full at home
-            // after a leash (or after giving up below a face): told to every
-            // player, or their bars keep the HP it left the fight with.
-            if entity.hp != hp_before {
+            // Home from a leash (or from giving up below a face), healed to
+            // full: told to every player, or their bars keep the HP it left
+            // the fight with.
+            if events.healed_home {
                 healed_home.push((entity.id, entity.hp, entity.max_hp));
             }
             // Re-fan the status snapshot when the set of names on the

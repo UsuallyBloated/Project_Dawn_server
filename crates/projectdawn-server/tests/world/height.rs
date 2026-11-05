@@ -53,8 +53,15 @@ fn hill_ground(x: f32) -> f32 {
     (20.0 * 30f32.to_radians().tan() * (1.0 - (x - HILL_X).abs() / 20.0)).max(0.0)
 }
 
-/// A GM of `class` at `level`, standing at (x, Z) when it enters.
-async fn gm_at(h: &Harness, user: &str, class: &str, level: i32, x: f32) -> (WorldClient, i64) {
+/// A GM of `class` at `level`, standing at (x, z) when it enters.
+async fn gm_at_xz(
+    h: &Harness,
+    user: &str,
+    class: &str,
+    level: i32,
+    x: f32,
+    z: f32,
+) -> (WorldClient, i64) {
     let (session, char_id, _stale) =
         provision_client(&h.auth_url, user, &format!("{user}a"), "Human", class).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
@@ -64,11 +71,16 @@ async fn gm_at(h: &Harness, user: &str, class: &str, level: i32, x: f32) -> (Wor
     if level > 1 {
         set_char_level(&h.db_url, char_id, level).await;
     }
-    seed_position(&h.db_url, char_id, x, Z).await;
+    seed_position(&h.db_url, char_id, x, z).await;
     let token = request_world_token(&h.auth_url, &session, char_id).await;
     let mut c = WorldClient::start(token, &session, char_id).await;
     c.pump_for(Duration::from_millis(300)).await;
     (c, char_id)
+}
+
+/// A GM of `class` at `level`, standing at (x, Z) when it enters.
+async fn gm_at(h: &Harness, user: &str, class: &str, level: i32, x: f32) -> (WorldClient, i64) {
+    gm_at_xz(h, user, class, level, x, Z).await
 }
 
 fn at(x: f32) -> Vec3 {
@@ -530,28 +542,48 @@ fn plateau_ground() -> Terrain {
     t
 }
 
-/// A mob at the foot of a face it cannot climb, its target on top, stops at the foot,
-/// gives up after `MOB_STUCK_SECS` and walks home, where it is back at full health for
-/// everyone who watches it (EQ's rule). A GM spawns a passive dummy at the plateau's
-/// east foot; a Cleric half a metre from the lip Smites it (from there the sight line
-/// clears the lip). On the previous server the mob climbed the face pinned to the
-/// ground and reached the Cleric in about three seconds.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_mob_at_a_face_gives_up_and_walks_home() {
-    let h = start_with_terrain(plateau_ground()).await;
-    let (mut a, _a_char_id) = gm_at(&h, "facewatch", "Warrior", 1, -45.0).await;
-    let (b_session, b_char_id, _stale) =
-        provision_client(&h.auth_url, "facelip", "Lippa", "Human", "Cleric").await;
+/// What a watcher saw while a Cleric on a lip nuked a dummy below a face it cannot climb.
+struct FaceRun {
+    dummy: u64,
+    home: Vec3,
+    cleric: u64,
+    /// The dummy's positions, with when they arrived.
+    positions: Vec<(Instant, Vec3)>,
+    /// The watcher's system messages, with when they arrived.
+    watched: Vec<(Instant, ServerWorldMsg)>,
+    /// The Cleric's system messages.
+    cleric_msgs: Vec<ServerWorldMsg>,
+}
+
+/// A GM watcher at `watch` spawns a passive dummy (aggro 0.5, speed 3, 500 HP) beside
+/// itself; a level 5 Cleric seeded at `lip`, at least `lip_y` up, Smites it once; both
+/// clients are serviced every tick for 26 s, with a heartbeat every 2 s (the run outlasts
+/// the server's 10 s heartbeat timeout).
+async fn nuke_from_a_lip(
+    h: &Harness,
+    user: &str,
+    watch: (f32, f32),
+    lip: (f32, f32),
+    lip_y: f32,
+) -> FaceRun {
+    let (mut a, _) = gm_at_xz(h, &format!("{user}w"), "Warrior", 1, watch.0, watch.1).await;
+    let (b_session, b_char_id, _stale) = provision_client(
+        &h.auth_url,
+        &format!("{user}c"),
+        &format!("{user}ca"),
+        "Human",
+        "Cleric",
+    )
+    .await;
     set_char_level(&h.db_url, b_char_id, 5).await;
-    seed_position(&h.db_url, b_char_id, -60.5, Z).await;
+    seed_position(&h.db_url, b_char_id, lip.0, lip.1).await;
     let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
     b.pump_for(Duration::from_millis(300)).await;
-    let b_id = b_char_id as u64;
     let on_lip = own_position_now(&mut b, b_char_id).await;
     assert!(
-        on_lip.y > 14.9,
-        "the Cleric stands on the plateau: {on_lip:?}"
+        on_lip.y > lip_y,
+        "the Cleric stands up on the lip: {on_lip:?}"
     );
 
     a.send_dev_spawn("Face Dummy", 1, 500.0, 0, 3.0, 0.5);
@@ -569,19 +601,13 @@ async fn a_mob_at_a_face_gives_up_and_walks_home() {
     else {
         unreachable!()
     };
-    assert!(
-        home.x > -50.0 && home.y.abs() < 0.05,
-        "east of the face: {home:?}"
-    );
     b.pump_for(Duration::from_millis(300)).await;
 
     b.send_cast_spell("Smite", Some(dummy));
 
-    // Both clients serviced every tick, with a heartbeat every 2 s (the run
-    // outlasts the server's 10 s heartbeat timeout).
     let mut positions: Vec<(Instant, Vec3)> = Vec::new();
-    let mut a_msgs: Vec<(Instant, ServerWorldMsg)> = Vec::new();
-    let mut b_msgs: Vec<ServerWorldMsg> = Vec::new();
+    let mut watched: Vec<(Instant, ServerWorldMsg)> = Vec::new();
+    let mut cleric_msgs: Vec<ServerWorldMsg> = Vec::new();
     let start = Instant::now();
     let mut beat = start;
     while start.elapsed() < Duration::from_secs(26) {
@@ -609,24 +635,38 @@ async fn a_mob_at_a_face_gives_up_and_walks_home() {
             if let Ok((msg, _)) =
                 bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
             {
-                a_msgs.push((now, msg));
+                watched.push((now, msg));
             }
         }
         while let Some(bytes) = b.client.receive_message(CHANNEL_SYSTEM) {
             if let Ok((msg, _)) =
                 bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
             {
-                b_msgs.push(msg);
+                cleric_msgs.push(msg);
             }
         }
         while b.client.receive_message(CHANNEL_POSITION).is_some() {}
         tokio::time::sleep(TICK_DT).await;
     }
+    FaceRun {
+        dummy,
+        home,
+        cleric: b_char_id as u64,
+        positions,
+        watched,
+        cleric_msgs,
+    }
+}
 
+/// The rule, as the watcher saw it: the Smite turned the dummy on the Cleric, it gave up
+/// `MOB_STUCK_SECS` or more later, walked home and was back at full health there (told to
+/// the watcher), and never hit the Cleric. Returns the highest the dummy ever stood.
+fn assert_gave_up_and_went_home(run: &FaceRun) -> f32 {
+    let dummy = run.dummy;
     let when = |pred: &dyn Fn(&ServerWorldMsg) -> bool| {
-        a_msgs.iter().find(|(_, m)| pred(m)).map(|(t, _)| *t)
+        run.watched.iter().find(|(_, m)| pred(m)).map(|(t, _)| *t)
     };
-    let chased = when(&|m| matches!(m, ServerWorldMsg::EntityTarget { id, target } if *id == dummy && *target == Some(b_id)))
+    let chased = when(&|m| matches!(m, ServerWorldMsg::EntityTarget { id, target } if *id == dummy && *target == Some(run.cleric)))
         .expect("the Smite turns the dummy on the Cleric");
     let gave_up =
         when(&|m| matches!(m, ServerWorldMsg::EntityTarget { id, target: None } if *id == dummy))
@@ -636,8 +676,46 @@ async fn a_mob_at_a_face_gives_up_and_walks_home() {
         (projectdawn_server::world::MOB_STUCK_SECS..16.0).contains(&held),
         "it gave up {held:.1} s after it began the chase"
     );
-    let highest = positions.iter().map(|(_, p)| p.y).fold(0.0f32, f32::max);
-    let westmost = positions
+    let home = run.home;
+    let back = run.positions.iter().find(|(t, p)| {
+        *t > gave_up && ((p.x - home.x).powi(2) + (p.z - home.z).powi(2)).sqrt() < 1.5
+    });
+    assert!(back.is_some(), "the dummy walked home after giving up");
+    assert!(
+        run.watched.iter().any(|(t, m)| *t > gave_up
+            && matches!(m, ServerWorldMsg::HealthUpdate { id, hp, max_hp } if *id == dummy && *hp == *max_hp && *max_hp == 500.0)),
+        "the dummy is back at full health at home, and the watcher is told"
+    );
+    assert!(
+        !run.cleric_msgs
+            .iter()
+            .any(|m| matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == dummy)),
+        "the dummy never reached the Cleric"
+    );
+    run.positions
+        .iter()
+        .map(|(_, p)| p.y)
+        .fold(f32::MIN, f32::max)
+}
+
+/// A mob at the foot of a face it cannot climb, its target on top, stops at the foot,
+/// gives up after `MOB_STUCK_SECS` and walks home, where it is back at full health for
+/// everyone who watches it (EQ's rule). A GM spawns a passive dummy at the plateau's
+/// east foot; a Cleric half a metre from the lip Smites it (from there the sight line
+/// clears the lip). On the previous server the mob climbed the face pinned to the
+/// ground and reached the Cleric in about three seconds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mob_at_a_face_gives_up_and_walks_home() {
+    let h = start_with_terrain(plateau_ground()).await;
+    let run = nuke_from_a_lip(&h, "face", (-45.0, Z), (-60.5, Z), 14.9).await;
+    assert!(
+        run.home.x > -50.0 && run.home.y.abs() < 0.05,
+        "the dummy spawned east of the face: {:?}",
+        run.home
+    );
+    let highest = assert_gave_up_and_went_home(&run);
+    let westmost = run
+        .positions
         .iter()
         .map(|(_, p)| p.x)
         .fold(f32::INFINITY, f32::min);
@@ -649,19 +727,31 @@ async fn a_mob_at_a_face_gives_up_and_walks_home() {
         westmost < -54.0,
         "the dummy reached the foot of the face: x = {westmost:.2}"
     );
-    let back = positions.iter().find(|(t, p)| {
-        *t > gave_up && ((p.x - home.x).powi(2) + (p.z - home.z).powi(2)).sqrt() < 1.5
-    });
-    assert!(back.is_some(), "the dummy walked home after giving up");
+}
+
+/// The same on the zone's own compiled hills, the perch the review found: the Greywood
+/// ridge's crest (walkable from its ends) above the Broken Crypt's bowl. A Cleric at the
+/// crest's north edge, (25, 89.8), 17.8 m up, Smites a dummy a GM spawns in the bowl at
+/// about (25, 108), 26 m away; the dummy walks to the foot of the ridge's north face
+/// (z = 100) and no further, gives up and walks home. Every other integration test runs
+/// on a flat plate; this one holds the shipped ground.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mob_below_the_greywood_ridge_gives_up_on_a_player_on_its_crest() {
+    let compiled = projectdawn_server::world::terrain::compiled().clone();
+    let h = start_with_terrain(compiled).await;
+    let run = nuke_from_a_lip(&h, "crest", (25.0, 108.0), (25.0, 89.8), 17.0).await;
+    let highest = assert_gave_up_and_went_home(&run);
+    let southmost = run
+        .positions
+        .iter()
+        .map(|(_, p)| p.z)
+        .fold(f32::INFINITY, f32::min);
     assert!(
-        a_msgs.iter().any(|(t, m)| *t > gave_up
-            && matches!(m, ServerWorldMsg::HealthUpdate { id, hp, max_hp } if *id == dummy && *hp == *max_hp && *max_hp == 500.0)),
-        "the dummy is back at full health at home, and the watcher is told"
+        southmost > 99.5 && highest < 1.5,
+        "the dummy never climbed the ridge (south to z = {southmost:.2}, up to y = {highest:.2})"
     );
     assert!(
-        !b_msgs
-            .iter()
-            .any(|m| matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == dummy)),
-        "the dummy never reached the Cleric"
+        southmost < 101.5,
+        "the dummy reached the foot of the ridge: z = {southmost:.2}"
     );
 }

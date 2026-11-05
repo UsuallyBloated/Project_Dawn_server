@@ -261,10 +261,24 @@ pub struct Entity {
     /// aren't routed here — pets have no mana / crit model.
     pub active_buffs: Vec<ActiveBuff>,
 
-    /// When this entity's last step was first refused by the slope rule
-    /// (a face it cannot climb), `None` while it moves. Read against
-    /// `MOB_STUCK_SECS`; cleared by any step taken and by every state change.
-    pub stuck_since: Option<Instant>,
+    /// Since when, and toward what, this entity has been held by the slope
+    /// rule (`StuckClock`); `None` while it is getting somewhere.
+    pub stuck: Option<StuckClock>,
+}
+
+/// The stuck clock (the first hills): started by a step the slope rule refused
+/// (a face the entity cannot climb), and kept until the entity comes
+/// `STUCK_PROGRESS_M` closer to the same goal than it was then, or the goal
+/// changes. Read against `MOB_STUCK_SECS`. A step taken does not stop it: a mob
+/// sliding along a face's foot after a player walking the lip above moves, and
+/// gets no closer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StuckClock {
+    pub since: Instant,
+    /// The target or owner it was heading for, or `None` for its home.
+    pub goal: Option<EntityId>,
+    /// Its distance to the goal when the clock started.
+    pub start_dist: f32,
 }
 
 /// Track 13 — five-stat block carried by an Entity. Used by pets so
@@ -290,6 +304,9 @@ pub struct AiEvents {
     /// Filled when the entity's Attack state fired a melee swing this
     /// tick.
     pub hit: Option<HitIntent>,
+    /// The mob reached home from a leash this tick and healed to full: its
+    /// HP is told to every player, or their bars keep the HP it left with.
+    pub healed_home: bool,
 }
 
 /// A named mob's enrage, once it has fired.
@@ -353,7 +370,7 @@ impl Entity {
             stats: PrimaryStats::default(),
             base_stats: PrimaryStats::default(),
             active_buffs: Vec::new(),
-            stuck_since: None,
+            stuck: None,
         };
         // Single choke point for both spawn paths (camp spawner and dev
         // spawn), so a named mob is scaled exactly once no matter how it
@@ -416,7 +433,7 @@ impl Entity {
             stats: base,
             base_stats: base,
             active_buffs: Vec::new(),
-            stuck_since: None,
+            stuck: None,
         }
     }
 
@@ -627,7 +644,7 @@ impl Entity {
         }
         self.state = new_state;
         self.state_entered_at = now;
-        self.stuck_since = None;
+        self.stuck = None;
     }
 
     /// One step toward `to`, standing on the ground, refused up a face the
@@ -641,16 +658,55 @@ impl Entity {
         true
     }
 
-    /// The stuck clock after a step was tried: a step taken clears it, a
-    /// refused one starts it (or keeps it running). True once the entity has
-    /// been held for `MOB_STUCK_SECS`.
-    fn stuck_too_long(&mut self, moved: bool, now: Instant) -> bool {
-        if moved {
-            self.stuck_since = None;
-            return false;
+    /// The stuck clock after a step toward `goal`, now `dist` away, was tried
+    /// (`StuckClock`): cleared by a new goal or by coming `STUCK_PROGRESS_M`
+    /// closer, started by a refused step. True once it has run
+    /// `MOB_STUCK_SECS`.
+    fn stuck_too_long(
+        &mut self,
+        moved: bool,
+        goal: Option<EntityId>,
+        dist: f32,
+        now: Instant,
+    ) -> bool {
+        if let Some(c) = self.stuck {
+            if c.goal != goal || dist <= c.start_dist - crate::world::STUCK_PROGRESS_M {
+                self.stuck = None;
+            }
         }
-        let since = *self.stuck_since.get_or_insert(now);
-        now.duration_since(since).as_secs_f32() >= crate::world::MOB_STUCK_SECS
+        if !moved && self.stuck.is_none() {
+            self.stuck = Some(StuckClock {
+                since: now,
+                goal,
+                start_dist: dist,
+            });
+        }
+        self.stuck.is_some_and(|c| {
+            now.duration_since(c.since).as_secs_f32() >= crate::world::MOB_STUCK_SECS
+        })
+    }
+
+    /// The present attacker with the most threat on this mob within its
+    /// leash, if any: who it turns on when nothing else has its attention.
+    fn best_hater_within_leash(&self, targets: &[(EntityId, Vec3f)]) -> Option<EntityId> {
+        let mut best: Option<(EntityId, f32)> = None;
+        for (&id, &threat) in &self.threat {
+            if threat <= 0.0 {
+                continue;
+            }
+            let Some((_, pos)) = targets.iter().find(|(t, _)| *t == id) else {
+                continue;
+            };
+            if self.pos.distance_to(*pos) > self.leash_range() {
+                continue;
+            }
+            match best {
+                None => best = Some((id, threat)),
+                Some((_, b)) if threat > b => best = Some((id, threat)),
+                _ => {}
+            }
+        }
+        best.map(|(id, _)| id)
     }
 
     /// How far from itself a mob keeps chasing, and how far out it will
@@ -1004,7 +1060,7 @@ impl Entity {
                 EnemyState::Idle => self.tick_idle(targets, hidden, now, terrain),
                 EnemyState::Chase => self.tick_chase(targets, dt, now, terrain),
                 EnemyState::Attack => self.tick_attack(targets, now, &mut events),
-                EnemyState::Leash => self.tick_leash(dt, now, terrain),
+                EnemyState::Leash => events.healed_home = self.tick_leash(dt, now, terrain),
                 EnemyState::Dead => {}
             }
         }
@@ -1064,7 +1120,7 @@ impl Entity {
                 let melee = self.melee_range();
                 if dist <= melee {
                     // In melee range — swing on cadence.
-                    self.stuck_since = None;
+                    self.stuck = None;
                     self.face_toward(target_pos);
                     let due = match self.last_attack_at {
                         None => true,
@@ -1082,12 +1138,13 @@ impl Entity {
                     let step = self.move_speed() * (1.0 - snare) * dt;
                     self.face_toward(target_pos);
                     let moved = self.step_on(terrain, self.pos.step_toward(target_pos, step));
-                    if self.stuck_too_long(moved, now) {
+                    let dist = self.pos.distance_to(target_pos);
+                    if self.stuck_too_long(moved, Some(target_id), dist, now) {
                         // A target it cannot reach (above a face): drop it.
                         // The follow branch takes over, and the inheritance
                         // pre-pass may hand it back to try again.
                         self.target = None;
-                        self.stuck_since = None;
+                        self.stuck = None;
                     }
                 }
             }
@@ -1101,7 +1158,7 @@ impl Entity {
                 // commanded otherwise or the inheritance/damage path
                 // re-targets us.
                 if self.stance == PetStance::Guard {
-                    self.stuck_since = None;
+                    self.stuck = None;
                     return;
                 }
                 let Some(owner_pos) = owner_pos_opt else {
@@ -1115,14 +1172,15 @@ impl Entity {
                     let step = self.move_speed() * (1.0 - snare) * dt;
                     self.face_toward(owner_pos);
                     let moved = self.step_on(terrain, self.pos.step_toward(owner_pos, step));
-                    if self.stuck_too_long(moved, now) {
+                    let dist = self.pos.distance_to(owner_pos);
+                    if self.stuck_too_long(moved, Some(owner_id), dist, now) {
                         // An owner it cannot reach (on a ledge): EQ's pets warp
                         // to their owner. Only to where the owner already is.
                         self.pos = terrain.ground_vec(owner_pos);
-                        self.stuck_since = None;
+                        self.stuck = None;
                     }
                 } else {
-                    self.stuck_since = None;
+                    self.stuck = None;
                 }
             }
         }
@@ -1150,24 +1208,7 @@ impl Entity {
         // leash range: tick_chase drops any target past leash_range() on its
         // first tick, so acquiring beyond it would flap Idle -> Chase -> Leash
         // forever instead of fighting.
-        let mut best: Option<(EntityId, f32)> = None;
-        for (&id, &threat) in &self.threat {
-            if threat <= 0.0 {
-                continue;
-            }
-            let Some((_, pos)) = targets.iter().find(|(t, _)| *t == id) else {
-                continue;
-            };
-            if self.pos.distance_to(*pos) > self.leash_range() {
-                continue;
-            }
-            match best {
-                None => best = Some((id, threat)),
-                Some((_, b)) if threat > b => best = Some((id, threat)),
-                _ => {}
-            }
-        }
-        if let Some((id, _)) = best {
+        if let Some(id) = self.best_hater_within_leash(targets) {
             self.target = Some(id);
             self.transition(EnemyState::Chase, now);
         }
@@ -1203,22 +1244,28 @@ impl Entity {
         }
         // Root and snare block / slow movement. Rooted is not stuck.
         if self.is_rooted() {
-            self.stuck_since = None;
+            self.stuck = None;
             return;
         }
         let snare = self.snare_factor();
         let step = self.enraged_speed() * (1.0 - snare) * dt;
         self.face_toward(target_pos);
         let moved = self.step_on(terrain, self.pos.step_toward(target_pos, step));
-        if self.stuck_too_long(moved, now) {
-            // EQ's rule: a mob that cannot reach its target (below a face)
-            // gives up, forgets everyone and walks home, where tick_leash
-            // heals it to full. A player on a lip gets no kill from a mob
-            // held at the foot of the face.
-            self.target = None;
-            self.threat.clear();
-            self.aggro.clear();
-            self.transition(EnemyState::Leash, now);
+        let dist = self.pos.distance_to(target_pos);
+        if self.stuck_too_long(moved, Some(target_id), dist, now) {
+            // EQ's rule: a mob that cannot reach its target (above a face)
+            // gives up on it. It forgets that one only and turns on the next
+            // attacker it has hate for; with none left it walks home, where
+            // tick_leash heals it to full.
+            self.threat.remove(&target_id);
+            self.aggro.remove(&target_id);
+            self.stuck = None;
+            self.target = self.best_hater_within_leash(targets);
+            if self.target.is_none() {
+                self.threat.clear();
+                self.aggro.clear();
+                self.transition(EnemyState::Leash, now);
+            }
         }
     }
 
@@ -1254,7 +1301,13 @@ impl Entity {
         }
     }
 
-    fn tick_leash(&mut self, dt: f32, now: Instant, terrain: &crate::world::terrain::Terrain) {
+    /// Walks a leashing mob home; true on the tick it arrives and heals.
+    fn tick_leash(
+        &mut self,
+        dt: f32,
+        now: Instant,
+        terrain: &crate::world::terrain::Terrain,
+    ) -> bool {
         let dist = self.pos.distance_to(self.spawn_pos);
         if dist < LEASH_HOME_TOLERANCE {
             self.hp = self.max_hp;
@@ -1268,17 +1321,19 @@ impl Entity {
             // mob that cannot acquire its caster (spell batch step 5).
             self.active_dots.clear();
             self.transition(EnemyState::Idle, now);
-            return;
+            return true;
         }
         let step = self.enraged_speed() * dt;
         self.face_toward(self.spawn_pos);
         let moved = self.step_on(terrain, self.pos.step_toward(self.spawn_pos, step));
-        if self.stuck_too_long(moved, now) {
+        let dist = self.pos.distance_to(self.spawn_pos);
+        if self.stuck_too_long(moved, None, dist, now) {
             // Home is up a face it came down: EQ's mobs warp home. The home
             // check next tick heals it and resets the fight.
             self.pos = terrain.ground_vec(self.spawn_pos);
-            self.stuck_since = None;
+            self.stuck = None;
         }
+        false
     }
 
     /// Track 12 Piece A2 — pet-induced threat redirect. If any
@@ -2102,7 +2157,7 @@ mod tests {
         for _ in 0..200 {
             now += Duration::from_millis(50);
             let _ = e.tick_ai(targets, enemy_targets, &[], 0.05, now, t);
-            if e.stuck_since.is_some() {
+            if e.stuck.is_some() {
                 return now;
             }
         }
@@ -2226,5 +2281,95 @@ mod tests {
         assert_eq!(pet.target, Some(enemy), "still trying");
         let _ = tick_for(&mut pet, &targets, &enemies, 1.0, &t, now);
         assert_eq!(pet.target, None, "dropped the target it cannot reach");
+    }
+
+    /// The review's find: any accepted step used to stop the clock, so a mob
+    /// sliding along a face's foot after a player walking the lip above, never
+    /// closing, never gave up. Steps that get no closer keep it running; coming
+    /// STUCK_PROGRESS_M closer, or a new goal, stops it.
+    #[test]
+    fn the_stuck_clock_runs_through_steps_that_get_no_closer() {
+        let t0 = Instant::now();
+        let at = |s: f32| t0 + Duration::from_secs_f32(s);
+        let goal = Some(7);
+        let mut e = idle_entity();
+        assert!(
+            !e.stuck_too_long(true, goal, 10.0, t0),
+            "a step taken starts nothing"
+        );
+        assert!(e.stuck.is_none());
+        assert!(
+            !e.stuck_too_long(false, goal, 10.0, t0),
+            "a refused step starts the clock"
+        );
+        // Steps taken, none closer, past the window: it has been held.
+        for i in 1..170 {
+            let held = e.stuck_too_long(i % 3 != 0, goal, 10.2, at(i as f32 * 0.05));
+            assert_eq!(
+                held,
+                i as f32 * 0.05 >= crate::world::MOB_STUCK_SECS,
+                "tick {i}"
+            );
+        }
+        // A metre closer than it began: no longer stuck.
+        assert!(!e.stuck_too_long(true, goal, 8.9, at(8.5)));
+        assert!(e.stuck.is_none());
+        // A new goal starts afresh (the review: a target switch inherited the
+        // old target's time).
+        assert!(!e.stuck_too_long(false, goal, 10.0, at(9.0)));
+        assert!(
+            !e.stuck_too_long(false, Some(8), 4.0, at(17.5)),
+            "a new goal is not held yet"
+        );
+        assert_eq!(e.stuck.map(|c| c.goal), Some(Some(8)));
+    }
+
+    /// The review's find: giving up wiped the whole hate list, so a Warrior
+    /// meleeing the mob at the foot while a caster on the lip held the top
+    /// threat got free swings at a mob walking home. It forgets only the
+    /// target it cannot reach and turns on the attacker it can.
+    #[test]
+    fn a_mob_that_gives_up_turns_on_an_attacker_it_can_reach() {
+        let t = foot_and_top();
+        let start = Instant::now();
+        let caster: EntityId = 1;
+        let warrior: EntityId = 2;
+        let foot = Vec3f {
+            x: -8.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let mut e = Entity::from_spawn(0, foot, template(), start);
+        e.threat.insert(caster, 20.0);
+        e.threat.insert(warrior, 10.0);
+        e.target = Some(caster);
+        e.transition(EnemyState::Chase, start);
+        let beside = Vec3f {
+            x: -12.0,
+            y: 0.0,
+            z: 6.0,
+        };
+        let targets = vec![(caster, TOP), (warrior, beside)];
+        let at_foot = until_stuck(&mut e, &targets, &[], &t, start);
+        tick_for(
+            &mut e,
+            &targets,
+            &[],
+            crate::world::MOB_STUCK_SECS + 0.2,
+            &t,
+            at_foot,
+        );
+        assert_eq!(
+            e.target,
+            Some(warrior),
+            "turned on the attacker it can reach"
+        );
+        assert!(!e.threat.contains_key(&caster), "forgot the one it cannot");
+        assert!(e.threat.contains_key(&warrior));
+        assert!(
+            matches!(e.state, EnemyState::Chase | EnemyState::Attack),
+            "still fighting: {:?}",
+            e.state
+        );
     }
 }

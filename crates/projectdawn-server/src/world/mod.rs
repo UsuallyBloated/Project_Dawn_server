@@ -209,6 +209,19 @@ pub const MOB_STUCK_SECS: f32 = 8.0;
 /// never give up. A knob.
 pub const STUCK_PROGRESS_M: f32 = 1.0;
 
+/// How long a chasing mob may be held below a face before it evades
+/// (`Entity::is_evading`, WoW's rule, the user's call of 2026-11-05): from then
+/// until it gives up, and on its walk home, it takes no damage. A short grace,
+/// so a mob that brushes a face for a step in an honest fight is not immune.
+/// A knob.
+pub const EVADE_GRACE_SECS: f32 = 1.0;
+
+/// How recently the slope rule must have refused a held mob's step for it to
+/// count as held (`Entity::is_evading`): a mob that brushed a face once and
+/// then moves freely after a fleeing target keeps its stuck clock, but is not
+/// held, so it takes damage. Ten ticks. A knob.
+pub const EVADE_REFUSAL_RECENT_SECS: f32 = 0.5;
+
 /// How far a `/say` carries, in metres from the speaker (user, 2026-10-27:
 /// "the volume of a conversation", 50 m). The eating emote and the jump relay
 /// reach the same people: the room. It used to be the speaker's 3x3 AOI

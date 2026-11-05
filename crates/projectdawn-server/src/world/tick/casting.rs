@@ -412,6 +412,7 @@ pub(super) fn apply_casts(
                 corpses,
                 group_manager,
                 terrain,
+                now,
             ) {
                 Ok(resolved) => resolved,
                 Err(line) => {
@@ -1465,8 +1466,10 @@ pub(super) fn apply_casts(
                             // Inside the radius and in sight: an AoE on a
                             // crest hits the near side of the ridge, not
                             // the far one (the height model, 3.8).
+                            // An evading mob takes nothing (`is_evading`).
                             if dx * dx + dy * dy + dz * dz <= radius_sq
                                 && terrain.can_see(caster_pos, entity.pos)
+                                && !entity.is_evading(now)
                             {
                                 victims.push(id);
                             }

@@ -553,18 +553,28 @@ struct FaceRun {
     watched: Vec<(Instant, ServerWorldMsg)>,
     /// The Cleric's system messages.
     cleric_msgs: Vec<ServerWorldMsg>,
+    /// The Warrior at the foot, if there was one, and its system messages.
+    warrior: Option<u64>,
+    warrior_msgs: Vec<ServerWorldMsg>,
 }
 
+/// When the second strike goes in, after the first Smite: the dummy has
+/// walked to the foot (about 3 s at speed 3), been held past the evade
+/// grace, and not yet given up (`MOB_STUCK_SECS` after it reached the foot).
+const SECOND_STRIKE: Duration = Duration::from_secs(7);
+
 /// A GM watcher at `watch` spawns a passive dummy (aggro 0.5, speed 3, 500 HP) beside
-/// itself; a level 5 Cleric seeded at `lip`, at least `lip_y` up, Smites it once; both
-/// clients are serviced every tick for 26 s, with a heartbeat every 2 s (the run outlasts
-/// the server's 10 s heartbeat timeout).
+/// itself; a level 5 Cleric seeded at `lip`, at least `lip_y` up, Smites it, and Smites
+/// it again `SECOND_STRIKE` later, while it is held; a Warrior seeded at `warrior_at`,
+/// if given, swings at it then too. Every client is serviced every tick for 26 s, with
+/// a heartbeat every 2 s (the run outlasts the server's 10 s heartbeat timeout).
 async fn nuke_from_a_lip(
     h: &Harness,
     user: &str,
     watch: (f32, f32),
     lip: (f32, f32),
     lip_y: f32,
+    warrior_at: Option<(f32, f32)>,
 ) -> FaceRun {
     let (mut a, _) = gm_at_xz(h, &format!("{user}w"), "Warrior", 1, watch.0, watch.1).await;
     let (b_session, b_char_id, _stale) = provision_client(
@@ -580,6 +590,24 @@ async fn nuke_from_a_lip(
     let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
     b.pump_for(Duration::from_millis(300)).await;
+    let mut w = match warrior_at {
+        Some((x, z)) => {
+            let (session, char_id, _stale) = provision_client(
+                &h.auth_url,
+                &format!("{user}r"),
+                &format!("{user}ra"),
+                "Human",
+                "Warrior",
+            )
+            .await;
+            seed_position(&h.db_url, char_id, x, z).await;
+            let token = request_world_token(&h.auth_url, &session, char_id).await;
+            let mut c = WorldClient::start(token, &session, char_id).await;
+            c.pump_for(Duration::from_millis(300)).await;
+            Some((c, char_id as u64))
+        }
+        None => None,
+    };
     let on_lip = own_position_now(&mut b, b_char_id).await;
     assert!(
         on_lip.y > lip_y,
@@ -608,11 +636,24 @@ async fn nuke_from_a_lip(
     let mut positions: Vec<(Instant, Vec3)> = Vec::new();
     let mut watched: Vec<(Instant, ServerWorldMsg)> = Vec::new();
     let mut cleric_msgs: Vec<ServerWorldMsg> = Vec::new();
+    let mut warrior_msgs: Vec<ServerWorldMsg> = Vec::new();
     let start = Instant::now();
     let mut beat = start;
+    let mut struck = false;
     while start.elapsed() < Duration::from_secs(26) {
+        if !struck && start.elapsed() >= SECOND_STRIKE {
+            struck = true;
+            b.send_cast_spell("Smite", Some(dummy));
+            if let Some((wc, _)) = w.as_mut() {
+                wc.send_attack(dummy, "", false, DamageType::Physical);
+            }
+        }
         let beat_due = beat.elapsed() >= Duration::from_secs(2);
-        for c in [&mut a, &mut b] {
+        let mut clients = vec![&mut a, &mut b];
+        if let Some((wc, _)) = w.as_mut() {
+            clients.push(wc);
+        }
+        for c in clients {
             if beat_due {
                 c.send_heartbeat();
             }
@@ -620,6 +661,16 @@ async fn nuke_from_a_lip(
         }
         if beat_due {
             beat = Instant::now();
+        }
+        if let Some((wc, _)) = w.as_mut() {
+            while let Some(bytes) = wc.client.receive_message(CHANNEL_SYSTEM) {
+                if let Ok((msg, _)) =
+                    bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+                {
+                    warrior_msgs.push(msg);
+                }
+            }
+            while wc.client.receive_message(CHANNEL_POSITION).is_some() {}
         }
         let now = Instant::now();
         while let Some(bytes) = a.client.receive_message(CHANNEL_POSITION) {
@@ -655,12 +706,16 @@ async fn nuke_from_a_lip(
         positions,
         watched,
         cleric_msgs,
+        warrior: w.map(|(_, id)| id),
+        warrior_msgs,
     }
 }
 
 /// The rule, as the watcher saw it: the Smite turned the dummy on the Cleric, it gave up
 /// `MOB_STUCK_SECS` or more later, walked home and was back at full health there (told to
-/// the watcher), and never hit the Cleric. Returns the highest the dummy ever stood.
+/// the watcher), and never hit the Cleric; and it evaded while held (WoW's rule, the
+/// user's call of 2026-11-05): the first Smite was the only hit it ever took, and the
+/// Warrior's swing (if any) was an Evade. Returns the highest the dummy ever stood.
 fn assert_gave_up_and_went_home(run: &FaceRun) -> f32 {
     let dummy = run.dummy;
     let when = |pred: &dyn Fn(&ServerWorldMsg) -> bool| {
@@ -692,6 +747,18 @@ fn assert_gave_up_and_went_home(run: &FaceRun) -> f32 {
             .any(|m| matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == dummy)),
         "the dummy never reached the Cleric"
     );
+    let hits = run
+        .watched
+        .iter()
+        .filter(|(_, m)| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == dummy))
+        .count();
+    assert_eq!(hits, 1, "the first Smite is the only hit the dummy takes");
+    if let Some(warrior) = run.warrior {
+        assert!(
+            run.warrior_msgs.iter().any(|m| matches!(m, ServerWorldMsg::Evade { attacker, target } if *attacker == warrior && *target == dummy)),
+            "the Warrior's swing at the held dummy is an Evade"
+        );
+    }
     run.positions
         .iter()
         .map(|(_, p)| p.y)
@@ -707,7 +774,15 @@ fn assert_gave_up_and_went_home(run: &FaceRun) -> f32 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_mob_at_a_face_gives_up_and_walks_home() {
     let h = start_with_terrain(plateau_ground()).await;
-    let run = nuke_from_a_lip(&h, "face", (-45.0, Z), (-60.5, Z), 14.9).await;
+    let run = nuke_from_a_lip(
+        &h,
+        "face",
+        (-45.0, Z),
+        (-60.5, Z),
+        14.9,
+        Some((-53.8, Z + 0.8)),
+    )
+    .await;
     assert!(
         run.home.x > -50.0 && run.home.y.abs() < 0.05,
         "the dummy spawned east of the face: {:?}",
@@ -733,14 +808,29 @@ async fn a_mob_at_a_face_gives_up_and_walks_home() {
 /// ridge's crest (walkable from its ends) above the Broken Crypt's bowl. A Cleric at the
 /// crest's north edge, (25, 89.8), 17.8 m up, Smites a dummy a GM spawns in the bowl at
 /// about (25, 108), 26 m away; the dummy walks to the foot of the ridge's north face
-/// (z = 100) and no further, gives up and walks home. Every other integration test runs
+/// (z = 100) and no further, gives up and walks home. The Cleric's second Smite, while
+/// the dummy is held, is refused: it is evading. Every other integration test runs
 /// on a flat plate; this one holds the shipped ground.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_mob_below_the_greywood_ridge_gives_up_on_a_player_on_its_crest() {
     let compiled = projectdawn_server::world::terrain::compiled().clone();
     let h = start_with_terrain(compiled).await;
-    let run = nuke_from_a_lip(&h, "crest", (25.0, 108.0), (25.0, 89.8), 17.0).await;
+    let run = nuke_from_a_lip(&h, "crest", (25.0, 108.0), (25.0, 89.8), 17.0, None).await;
     let highest = assert_gave_up_and_went_home(&run);
+    // The perch itself: the crest sees the bowl, so the second Smite reaches the
+    // evade rule (on the plateau the lip cannot see the face's foot, and sight
+    // refuses it first).
+    assert!(
+        run.cleric_msgs.iter().any(|m| matches!(m, ServerWorldMsg::CastFail { reason, .. } if reason == "Your target is evading.")),
+        "the Smite at the held dummy is refused: it is evading (refusals: {:?})",
+        run.cleric_msgs
+            .iter()
+            .filter_map(|m| match m {
+                ServerWorldMsg::CastFail { reason, .. } => Some(reason.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    );
     let southmost = run
         .positions
         .iter()

@@ -1003,6 +1003,17 @@ pub(super) fn apply_attacks(
                 );
                 continue;
             }
+            // An evading mob (held below a face, or walking home) takes
+            // nothing and adds no hate (`Entity::is_evading`).
+            if entity.is_evading(now) {
+                handlers::fan_out_evade(
+                    &mut *server,
+                    in_world_recipients_now,
+                    intent.attacker,
+                    intent.target_id,
+                );
+                continue;
+            }
             // Warder's Fury commands the warder at the target whether the
             // user's own blow lands or not (the command is not the blow).
             if intent

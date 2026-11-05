@@ -160,6 +160,8 @@ pub(super) enum ResolvedTarget {
 ///    Decided at the release, as EQEmu's `SpellFinished` does; a target that
 ///    steps behind a crest during the bar breaks the spell here, as one that
 ///    walks out of reach does, at no cost.
+/// 4. **Evade.** A hostile spell on a mob that is evading (held below a face,
+///    or walking home; `Entity::is_evading`) is refused at no cost.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn cast_target_refusal(
     spell: &spells::Spell,
@@ -172,6 +174,7 @@ pub(super) fn cast_target_refusal(
     corpses: &HashMap<EntityId, crate::world::corpses::Corpse>,
     group_manager: &GroupManager,
     terrain: &crate::world::terrain::Terrain,
+    now: Instant,
 ) -> Result<ResolvedTarget, String> {
     let resolved = resolve_cast_target(
         spell,
@@ -196,8 +199,16 @@ pub(super) fn cast_target_refusal(
             return Err(CANNOT_SEE_TARGET.to_string());
         }
     }
+    if let ResolvedTarget::Mob(id) = resolved {
+        if enemies.get(&id).is_some_and(|e| e.is_evading(now)) {
+            return Err(TARGET_EVADING.to_string());
+        }
+    }
     Ok(resolved)
 }
+
+/// The line for a hostile spell on an evading mob (`Entity::is_evading`).
+pub(super) const TARGET_EVADING: &str = "Your target is evading.";
 
 /// EQ's line for a target the terrain hides (EQEmu's `CANT_SEE_TARGET`).
 pub(super) const CANNOT_SEE_TARGET: &str = "You cannot see your target.";
@@ -817,6 +828,7 @@ mod tests {
                     &corpses,
                     &groups,
                     crate::world::terrain::compiled(),
+                    Instant::now(),
                 )
             };
             let refused = |line: &str| Err(line.to_string());

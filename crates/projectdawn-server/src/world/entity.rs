@@ -279,6 +279,8 @@ pub struct StuckClock {
     pub goal: Option<EntityId>,
     /// Its distance to the goal when the clock started.
     pub start_dist: f32,
+    /// The last step the slope rule refused (`Entity::is_evading`).
+    pub last_refused: Instant,
 }
 
 /// Track 13 — five-stat block carried by an Entity. Used by pets so
@@ -631,6 +633,31 @@ impl Entity {
         !matches!(self.state, EnemyState::Dead)
     }
 
+    /// WoW's evade (the user's call, 2026-11-05): a mob that cannot fight
+    /// back takes no damage. True while it walks home (`Leash`), and while
+    /// it chases a target the slope rule holds it below: held past
+    /// `EVADE_GRACE_SECS` and refused within `EVADE_REFUSAL_RECENT_SECS`.
+    /// Without it, a caster on a ledge above a mob nuked it for the 8 s it was
+    /// held and the whole walk home, and a mob pulled past its leash could be
+    /// nuked all the way home; neither ever hit back. Never a pet: a pet has
+    /// an owner to answer for it. Every place that damages a mob reads this
+    /// (the swing, the pet's swing, the spell pre-flight, an AoE's victims, a
+    /// DoT's tick).
+    pub fn is_evading(&self, now: Instant) -> bool {
+        if self.is_pet() {
+            return false;
+        }
+        match self.state {
+            EnemyState::Leash => true,
+            EnemyState::Chase => self.stuck.is_some_and(|c| {
+                now.duration_since(c.since).as_secs_f32() >= crate::world::EVADE_GRACE_SECS
+                    && now.duration_since(c.last_refused).as_secs_f32()
+                        <= crate::world::EVADE_REFUSAL_RECENT_SECS
+            }),
+            _ => false,
+        }
+    }
+
     pub fn transition(&mut self, new_state: EnemyState, now: Instant) {
         if self.state == new_state {
             return;
@@ -674,12 +701,18 @@ impl Entity {
                 self.stuck = None;
             }
         }
-        if !moved && self.stuck.is_none() {
-            self.stuck = Some(StuckClock {
-                since: now,
-                goal,
-                start_dist: dist,
-            });
+        if !moved {
+            match self.stuck.as_mut() {
+                Some(c) => c.last_refused = now,
+                None => {
+                    self.stuck = Some(StuckClock {
+                        since: now,
+                        goal,
+                        start_dist: dist,
+                        last_refused: now,
+                    })
+                }
+            }
         }
         self.stuck.is_some_and(|c| {
             now.duration_since(c.since).as_secs_f32() >= crate::world::MOB_STUCK_SECS
@@ -2221,6 +2254,62 @@ mod tests {
             let _ = c.tick_ai(&level, &[], &[], 0.05, now, &flat);
         }
         assert!(matches!(c.state, EnemyState::Attack), "{:?}", c.state);
+    }
+
+    /// WoW's evade (`is_evading`, the user's call of 2026-11-05): a mob held
+    /// below a face takes damage through the grace, then evades through the
+    /// hold and the whole walk home, and fights again at home. One that is no
+    /// longer being refused is not held; a pet never evades.
+    #[test]
+    fn a_mob_held_below_a_face_evades_until_it_is_home() {
+        let t = foot_and_top();
+        let start = Instant::now();
+        let player: EntityId = 1;
+        let foot = Vec3f {
+            x: -8.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let mut e = Entity::from_spawn(0, foot, template(), start);
+        e.threat.insert(player, 10.0);
+        e.target = Some(player);
+        e.transition(EnemyState::Chase, start);
+        assert!(!e.is_evading(start), "a mob getting somewhere fights");
+        let targets = vec![(player, TOP)];
+        let at_foot = until_stuck(&mut e, &targets, &[], &t, start);
+        let grace = Duration::from_secs_f32(crate::world::EVADE_GRACE_SECS);
+        let mut now = at_foot;
+        let mut leashed = false;
+        for _ in 0..1000 {
+            now += Duration::from_millis(50);
+            let _ = e.tick_ai(&targets, &[], &[], 0.05, now, &t);
+            match e.state {
+                EnemyState::Chase if now.duration_since(at_foot) < grace => {
+                    assert!(!e.is_evading(now), "inside the grace it takes damage");
+                }
+                EnemyState::Chase => {
+                    assert!(e.is_evading(now), "held past the grace it evades");
+                    // A mob the slope rule stopped refusing (it brushed the
+                    // face, then moved freely) is not held.
+                    let free = now
+                        + Duration::from_secs_f32(crate::world::EVADE_REFUSAL_RECENT_SECS + 0.1);
+                    assert!(!e.is_evading(free), "not refused lately: not held");
+                }
+                EnemyState::Leash => {
+                    leashed = true;
+                    assert!(e.is_evading(now), "it evades on the walk home");
+                }
+                _ => break,
+            }
+        }
+        assert!(leashed, "it gave up and walked home");
+        assert!(matches!(e.state, EnemyState::Idle), "{:?}", e.state);
+        assert!(!e.is_evading(now), "home, it fights again");
+
+        let mut pet = Entity::from_spawn(0, foot, template(), start);
+        pet.owner = Some(9);
+        pet.state = EnemyState::Leash;
+        assert!(!pet.is_evading(now), "a pet never evades");
     }
 
     #[test]

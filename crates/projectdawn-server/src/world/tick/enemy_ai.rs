@@ -245,7 +245,12 @@ pub(super) fn run_enemy_ai(
             // is handled after the loop, with nothing below running on
             // the body this tick.
             let mut killed_by_dot = false;
+            // An evading mob's DoTs run out their ticks dealing nothing.
+            let evading = entity.is_evading(now);
             for tick in entity.tick_dots(dt) {
+                if evading {
+                    continue;
+                }
                 entity.hp = (entity.hp - tick.amount as f32).max(0.0);
                 *entity.aggro.entry(tick.caster).or_insert(0.0) += tick.amount as f32;
                 *entity.threat.entry(tick.caster).or_insert(0.0) += tick.amount as f32;
@@ -563,6 +568,15 @@ pub(super) fn run_enemy_ai(
                 let amount = hit.amount.max(0);
                 if let Some(target_entity) = enemies.get_mut(&hit.target) {
                     if !target_entity.is_alive() {
+                        continue;
+                    }
+                    if target_entity.is_evading(now) {
+                        handlers::fan_out_evade(
+                            &mut *server,
+                            in_world_recipients_now,
+                            attacker,
+                            hit.target,
+                        );
                         continue;
                     }
                     target_entity.hp = (target_entity.hp - amount as f32).max(0.0);

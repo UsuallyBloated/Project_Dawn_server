@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Returns true when the server was launched with `PD_DEV_CMDS=1`.
 /// Checked once at first call; cached for the process lifetime.
@@ -132,6 +132,12 @@ impl Vec3f {
         self.sub(other).length()
     }
 
+    /// The distance on the ground plane alone: a body's horizontal step,
+    /// whatever its height did.
+    pub fn xz_distance_to(self, other: Self) -> f32 {
+        ((self.x - other.x).powi(2) + (self.z - other.z).powi(2)).sqrt()
+    }
+
     /// Returns `self / length` for non-zero vectors, else `ZERO`. Avoids
     /// NaN propagation when the AI computes a direction to a coincident
     /// target.
@@ -148,12 +154,15 @@ impl Vec3f {
         }
     }
 
-    /// Step `self` toward `target` by at most `step` units. The y axis is
-    /// preserved on `self` (enemies don't fly toward a player who's on a
-    /// raised mesh; matches the GDScript `_move_at_speed` behaviour).
+    /// Step `self` toward `target` by at most `step` units, horizontally: the
+    /// direction and the arrival test are the XZ delta, and `y` is kept for
+    /// the caller to pin to the ground (the height model). Taking them from
+    /// the 3D delta used to slow a mob below its target and strand one
+    /// directly below it.
     pub fn step_toward(self, target: Self, step: f32) -> Self {
-        let delta = target.sub(self);
-        let dist = delta.length();
+        let dx = target.x - self.x;
+        let dz = target.z - self.z;
+        let dist = (dx * dx + dz * dz).sqrt();
         if dist <= step || dist <= f32::EPSILON {
             Self {
                 x: target.x,
@@ -161,17 +170,27 @@ impl Vec3f {
                 z: target.z,
             }
         } else {
-            let dir = delta.normalize_or_zero();
             Self {
-                x: self.x + dir.x * step,
+                x: self.x + dx / dist * step,
                 y: self.y,
-                z: self.z + dir.z * step,
+                z: self.z + dz / dist * step,
             }
         }
     }
 }
 
-#[derive(Debug)]
+/// How long the swing-rate limit keeps counting a Haste after it expires.
+/// The client hears of the expiry a moment after the server acts on it, so
+/// a swing it timed under the haste can arrive just after the buff is gone;
+/// a second covers any honest round trip, and a forged client gains at most
+/// a second at the old haste.
+pub const HASTE_LAPSE_GRACE: Duration = Duration::from_secs(1);
+
+/// Clone is for one job: `tick::intake` copies a connection before handling
+/// its tick's messages and puts the copy back if one of them panics, so a
+/// half-changed connection never goes on. Every field must stay Clone; a
+/// field that cannot be (a channel, a handle) does not belong in here.
+#[derive(Debug, Clone)]
 #[allow(dead_code)] // account_id/charisma land in audit + chat once those paths exist
 pub struct PerConnection {
     pub char_id: i64,
@@ -208,6 +227,14 @@ pub struct PerConnection {
     /// Whether the character has been told the stage it logged in at (a
     /// character can arrive hungry or out; `drain` reports transitions only).
     pub appetite_announced: bool,
+    /// The hunger window's feed (`hunger::update_due`): set when a counter
+    /// jumps (an eat, a drink) or crosses a stage, so the next regen step
+    /// sends a `HungerUpdate` instead of waiting out the minute.
+    pub hunger_dirty: bool,
+    /// When the last `HungerUpdate` went to this client, and the drain rate
+    /// it carried (a change of rate, death or respawn, is a reason to send).
+    pub hunger_sent_at: Option<Instant>,
+    pub hunger_rate_sent: f32,
     /// Set after the application-layer Connect handshake completes. Until
     /// then we won't broadcast positions to this client.
     pub ready: bool,
@@ -239,6 +266,11 @@ pub struct PerConnection {
     /// application sites in the tick loop; never cleared (it's a monotonic
     /// last-hit marker, only meaningful relative to `camp_since`).
     pub last_damaged_at: Option<Instant>,
+    /// Falls (`fall.rs`): on the ground, or in the air with a vertical
+    /// speed. The movement step moves it; every teleport, port, respawn and
+    /// load lands the body standing (a move onto lower ground is never a
+    /// fall), settling a fall in progress first.
+    pub vertical: super::fall::Vertical,
 
     /// Wall-clock of this connection's most recent melee swing, stamped in the
     /// attack-apply. With `last_damaged_at` it marks "in combat" so the seated
@@ -256,8 +288,22 @@ pub struct PerConnection {
     /// Attack's `is_offhand`). Kept separate from `last_attack_at` because
     /// dual-wield swings two independent hands that legitimately co-fire in one
     /// tick; a single combined timer would false-throttle a legit dual-wielder.
-    /// Advanced only on a swing the rate gate accepts (`tick.rs`).
+    /// Advanced only on a swing the rate gate accepts (`tick/melee.rs`).
     pub last_swing_at: [Option<Instant>; 2],
+    /// Per hand, the haste the last two ACCEPTED swings were stamped with,
+    /// newest first (0.0 before the hand has swung). The limiter paces a
+    /// swing at the greatest of these and the current haste
+    /// (`tick::swing::carried_haste`), because the client's attack timer runs a
+    /// wait time set two swings back: a Haste buff that ran out must not cost
+    /// the honest swings already timed under it. Only the haste carries,
+    /// never the weapon (a client alternating a dagger and a staff every
+    /// swing would otherwise swing the staff at the dagger's pace for good;
+    /// the client re-times its swing on a weapon change instead). Stamped
+    /// with `last_swing_at`.
+    pub last_swing_haste: [[f32; 2]; 2],
+    /// The haste total just before a Haste buff last expired, and when.
+    /// `limiter_haste` keeps counting it for `HASTE_LAPSE_GRACE`.
+    pub haste_lapsed: Option<(f32, Instant)>,
 
     /// Wall-clock of the last Meditate skill-up tick. The regen loop advances
     /// the `meditate` casting skill roughly once per 6 s of medding (sitting with
@@ -269,6 +315,11 @@ pub struct PerConnection {
     /// EntityDied). Guards the sweep from re-running every tick while hp stays 0,
     /// and is cleared on `Respawn` so the next death is processed afresh.
     pub death_processed: bool,
+    /// The dead-state gate has told this player "You cannot do that while
+    /// dead." since they died. The line is said once per death, not once per
+    /// refused message (a client sends several while dead; the chat used to
+    /// fill with it). Cleared with `death_processed` on `Respawn`.
+    pub dead_refusal_told: bool,
     /// Corpse/resurrection Slice 1: set true by `kill_player`, so EVERY death
     /// path flags a corpse (the server-detected death sweep AND a client-first
     /// `DeathBroadcast` — Trigger Death, fall damage, a linkdead body that dies).
@@ -316,6 +367,11 @@ pub struct PerConnection {
     /// [`super::STALE_MOVE_THRESHOLD`] so a crashed client doesn't keep
     /// visually moving until heartbeat timeout.
     pub last_move_received: Option<Instant>,
+    /// The `jumping` flag of the last accepted Move, so a jump is relayed on
+    /// its rising edge and a held flag relays nothing more.
+    pub last_move_jumping: bool,
+    /// When this player's last jump was relayed (`JUMP_RELAY_MIN_INTERVAL`).
+    pub last_jump_relayed_at: Option<Instant>,
 
     /// Track 6: authoritative resources. Seeded from DB at spawn, mutated
     /// by the regen tick + future combat / heal / damage paths, fanned out
@@ -349,6 +405,19 @@ pub struct PerConnection {
     /// Track 6: sitting state. Flipped by the `Sit` / `Stand` client
     /// intents; multiplies regen rate per `regen::SITTING_HP_MULT` etc.
     pub is_sitting: bool,
+    /// When the character last sat down. A memorize must stay seated from
+    /// its start, so standing and sitting again in between voids it.
+    pub sat_at: Option<Instant>,
+
+    /// The memorized spell bar (client-authority audit fix 5): gem to spell
+    /// name. Loaded from `character_spell_gems` at entry, changed only by a
+    /// memorize, a forget or the one-time seed; a cast of a spell not in it is
+    /// refused.
+    pub spell_gems: std::collections::BTreeMap<i32, String>,
+    /// The server holds this character's bar (after a memorize or the seed).
+    pub spell_gems_seeded: bool,
+    /// A memorize in progress: (gem, spell name, when it began).
+    pub memorize_pending: Option<(i32, String, Instant)>,
 
     /// Track 6 sub-task 3 — sum of armor_class across equipped armor.
     /// Updated by `EquipUpdate` intents; consumed by the damage formula
@@ -369,6 +438,15 @@ pub struct PerConnection {
     /// `can_use_dev_cmds`, not this field directly.
     pub is_dev: bool,
 
+    /// Whether this caster's spells can fizzle: `Config::fizzles`, stamped at
+    /// the connect site. Always true on a running server; the integration
+    /// harness turns it off for every test but the fizzle test.
+    pub fizzles: bool,
+
+    /// `Config::panic_probe`, stamped at the connect site: a chat line that
+    /// panics its handler. Always `None` on a running server.
+    pub panic_probe: Option<String>,
+
     /// Per-account GM flag, carried from the signed connect token's `user_data`
     /// (the auth service reads it from `accounts.is_gm` at token mint). Unlike
     /// `is_dev`, this is per-connection, so a hosted server run with
@@ -381,6 +459,13 @@ pub struct PerConnection {
     /// `authorize_dev_cmd`, which is also the gate: a command is queued here
     /// or it does not run.
     pub gm_audit: Vec<GmAuditEntry>,
+    /// The item ledger's queue (`world/ledger.rs`): one row per movement of
+    /// items or coin into or out of this character's holdings since the last
+    /// store write, pushed by `ledger` beside the dirty flag the move set and
+    /// written inside the next transaction that persists the stores (the
+    /// flush, the trade commit, the corpse loot, the death strip), which
+    /// clears it. Rolled back with the in-memory move on a failed persist.
+    pub item_events: Vec<crate::db::ItemEventRow>,
     /// The command budget (see `GM_CMD_BURST`): tokens left, and when they
     /// were last refilled.
     pub gm_cmd_tokens: f32,
@@ -463,6 +548,19 @@ pub struct PerConnection {
     /// `connections.remove(&cid)`.
     pub spell_cooldowns: HashMap<String, Instant>,
 
+    /// Active skills (client-authority audit item 6): the instant each used
+    /// skill is ready again, by name. A `UseSkill` inside it (less
+    /// `active_skills::COOLDOWN_GRACE`) is refused at no cost. Cleared on
+    /// disconnect with the connection, as the spell cooldowns are.
+    pub skill_cooldowns: HashMap<String, Instant>,
+
+    /// Bard songs (the rework of 2026-10-20): the one song being sung, if
+    /// any, and when it next pulses. Set when a song's cast lands, cleared by
+    /// re-singing it, `StopSong`, any non-song cast, death, or the
+    /// connection going (the body never sings).
+    pub active_song: Option<String>,
+    pub song_next_pulse_at: Option<Instant>,
+
     /// The global cooldown (spell batch step 4): no spell may START inside
     /// `GLOBAL_COOLDOWN` of the last accepted cast, Bard songs excepted on
     /// both sides (twisting is casting songs back to back). Stamped when a
@@ -470,13 +568,10 @@ pub struct PerConnection {
     /// CastSpell (an instant one).
     pub gcd_until: Option<Instant>,
 
-    /// Track 4 sub-task 3 — last buff snapshot the client broadcast.
-    /// Used to seed new joiners; live updates fan out via the
-    /// BuffSnapshotFanOut outcome. Empty Vec = "no active buffs".
-    /// Track 6 sub-task 4a: this becomes a SERVER-DERIVED cache —
-    /// rebuilt from `active_buffs` whenever buff state changes.
-    /// Clients no longer originate the snapshot (BuffSnapshotBroadcast
-    /// is deprecated; sub-task 4b removes it after the full lift).
+    /// The player's active buffs as (name, seconds left), derived from
+    /// `active_buffs` by the server whenever buff state changes. Seeds
+    /// new joiners; each step that changes a buff fans the new snapshot. Clients never
+    /// originate it. Empty Vec = "no active buffs".
     pub buff_snapshot: Vec<(String, f32)>,
     pub buff_snapshot_set: bool,
 
@@ -510,7 +605,7 @@ pub struct PerConnection {
 
     /// Track 13.1 — server-side inventory snapshot. Loaded from the
     /// `character_items` table on `load_character`, mutated when
-    /// loot grants land (loot intent dispatch in `tick.rs`),
+    /// loot grants land (loot intent dispatch in `tick/looting.rs`),
     /// persisted on disconnect + the periodic checkpoint cadence.
     /// `inventory_dirty` flips when add_item / future move/drop
     /// mutates the snapshot; the persistence sweep clears it.
@@ -557,6 +652,23 @@ pub struct PerConnection {
     pub casting_skills: HashMap<String, i32>,
     pub skills_dirty: bool,
 
+    /// Faction standings by faction id (`world/factions.rs`), only the
+    /// factions this character has ever moved; a missing one sits at its
+    /// starting value. `factions_dirty` flips on any change; the persistence
+    /// sweep clears it.
+    pub factions: HashMap<String, f32>,
+    pub factions_dirty: bool,
+    /// The alignment score, the server's since migration 0016
+    /// (`world/alignment.rs`): moved by kills, quests and spells, read by
+    /// the prestige-class gates. Persisted with the resources; `None` for
+    /// the last persisted value means the server never wrote one (a
+    /// character seeded at this load), so the next checkpoint writes it.
+    pub alignment: f32,
+    pub last_persisted_alignment: Option<f32>,
+    /// The score the client was last told (`AlignmentUpdate`); None until
+    /// the enter-world send.
+    pub alignment_sent: Option<f32>,
+
     /// Track 14.2 — last accumulated stat bonuses from equipped items.
     /// `recompute_equipped_stats` reads this to know what to subtract
     /// before re-summing across the current equipment map. Stays
@@ -597,6 +709,28 @@ impl PerConnection {
                 Some((quest_id, progress))
             })
             .collect();
+        // Factions and alignment: a character the server has never held a
+        // score for is seeded from its class's start, exactly as the client
+        // seeded itself before the score moved server-side. A standing for a
+        // faction no longer in factions.toml is dropped.
+        let factions: HashMap<String, f32> = spawn
+            .factions
+            .iter()
+            .filter(|(id, _)| super::factions::lookup(id).is_some())
+            .map(|(id, standing)| {
+                (
+                    id.clone(),
+                    standing.clamp(
+                        -super::factions::STANDING_CAP,
+                        super::factions::STANDING_CAP,
+                    ),
+                )
+            })
+            .collect();
+        let alignment = spawn
+            .alignment
+            .unwrap_or_else(|| super::alignment::starting_score(&spawn.class))
+            .clamp(-super::alignment::SCORE_CAP, super::alignment::SCORE_CAP);
         Self {
             char_id: spawn.char_id,
             account_id: spawn.account_id,
@@ -618,6 +752,9 @@ impl PerConnection {
             last_persisted_hunger: spawn.hunger,
             last_persisted_thirst: spawn.thirst,
             appetite_announced: false,
+            hunger_dirty: true,
+            hunger_sent_at: None,
+            hunger_rate_sent: -1.0,
             last_persisted_xp: spawn.xp,
             last_persisted_level: spawn.level,
             ready: false,
@@ -626,9 +763,12 @@ impl PerConnection {
             linkdead_since: None,
             camp_since: None,
             last_damaged_at: None,
+            vertical: super::fall::Vertical::default(),
             last_attack_at: None,
             bind: spawn.bind,
             last_swing_at: [None, None],
+            last_swing_haste: [[0.0; 2]; 2],
+            haste_lapsed: None,
             last_meditate_at: None,
             // A character loaded at 0 HP died before it left (a crash, a
             // window-X, a server restart while dead) and has paid: the death
@@ -637,6 +777,7 @@ impl PerConnection {
             // works, since it gates on exactly this flag. The client learns it
             // is dead from the HP seed, as it always did.
             death_processed: spawn.hp <= 0.0,
+            dead_refusal_told: false,
             corpse_pending: false,
             death_lost_xp: 0,
             pending_res_offer: None,
@@ -646,6 +787,8 @@ impl PerConnection {
             last_move_seq: 0,
             latest_direction: Vec3f::ZERO,
             last_move_received: None,
+            last_move_jumping: false,
+            last_jump_relayed_at: None,
             hp: spawn.hp,
             max_hp: spawn.max_hp,
             mp: spawn.mp,
@@ -664,14 +807,21 @@ impl PerConnection {
             charisma: spawn.charisma,
             constitution: spawn.constitution,
             is_sitting: false,
+            sat_at: None,
+            spell_gems: std::collections::BTreeMap::new(),
+            spell_gems_seeded: false,
+            memorize_pending: None,
             equipped_armor: 0,
             pvp_override_on: false,
             is_dev: dev_cmds_enabled(),
+            fizzles: true,
+            panic_probe: None,
             // Defaulted here; the real value is stamped from the connect
-            // token's user_data at the connect site in tick.rs (from_spawn
+            // token's user_data at the connect site in tick/session.rs (from_spawn
             // only sees the character spawn, not the account's GM flag).
             is_gm: false,
             gm_audit: Vec::new(),
+            item_events: Vec::new(),
             gm_cmd_tokens: GM_CMD_BURST,
             gm_cmd_refill_at: now,
             gm_cmd_refused: 0,
@@ -684,7 +834,7 @@ impl PerConnection {
             intents_dropped: 0,
             intents_dropped_logged_at: None,
             kicked_at: None,
-            aoi_cell: (0, 0), // tick.rs sets the real cell from aoi::cell_for after construction
+            aoi_cell: (0, 0), // tick/session.rs sets the real cell from aoi::cell_for after construction
             regen_hp_acc: 0.0,
             regen_mp_acc: 0.0,
             regen_stamina_acc: 0.0,
@@ -698,6 +848,9 @@ impl PerConnection {
             cast_start_pos: Vec3f::ZERO,
             cast_interrupted_at: None,
             spell_cooldowns: HashMap::new(),
+            skill_cooldowns: HashMap::new(),
+            active_song: None,
+            song_next_pulse_at: None,
             gcd_until: None,
             buff_snapshot: Vec::new(),
             buff_snapshot_set: false,
@@ -722,7 +875,82 @@ impl PerConnection {
             armor_skills: HashMap::new(),
             casting_skills: HashMap::new(),
             skills_dirty: false,
+            factions,
+            factions_dirty: false,
+            alignment,
+            last_persisted_alignment: spawn.alignment,
+            alignment_sent: None,
         }
+    }
+
+    /// Every standing as rows for `db::save_factions`.
+    pub fn faction_rows(&self) -> Vec<(String, f32)> {
+        self.factions
+            .iter()
+            .map(|(id, s)| (id.clone(), *s))
+            .collect()
+    }
+
+    /// This character's PERSONAL standing with a faction: what kills, quests
+    /// and the GM tool have moved, zero when nothing has.
+    pub fn faction_standing(&self, faction: &super::factions::Faction) -> f32 {
+        self.factions.get(&faction.id).copied().unwrap_or(0.0)
+    }
+
+    /// The standing the faction's NPCs see: the personal number plus the
+    /// character's starting modifier with it for its race and class.
+    pub fn faction_shown(&self, faction: &super::factions::Faction) -> f32 {
+        super::factions::shown_standing(
+            self.faction_standing(faction),
+            faction,
+            &self.race,
+            &self.class,
+        )
+    }
+
+    pub fn faction_level(&self, faction: &super::factions::Faction) -> super::factions::Level {
+        super::factions::level_for(self.faction_shown(faction))
+    }
+
+    /// How an NPC's faction regards this character; Indifferent for an NPC
+    /// with no faction (the soul binder serves everyone).
+    pub fn npc_faction_level(&self, npc: &super::npcs::Npc) -> super::factions::Level {
+        npc.faction
+            .as_deref()
+            .and_then(super::factions::lookup)
+            .map(|f| self.faction_level(f))
+            .unwrap_or(super::factions::Level::Indifferent)
+    }
+
+    /// Will `npc` deal with this character? Its faction must regard them at
+    /// `min` or better: Apprehensive for a vendor or banker (EQ's merchants
+    /// refuse at Dubious), Indifferent for a quest giver.
+    pub fn npc_serves(&self, npc: &super::npcs::Npc, min: super::factions::Level) -> bool {
+        self.npc_faction_level(npc) >= min
+    }
+
+    /// The NPC-service gate with factions: Ok(the NPC) when an NPC of `kind`
+    /// is in service range and will deal with this character; Err(Some(npc))
+    /// when one is in range but refuses them (the first such); Err(None)
+    /// when none is in range at all.
+    pub fn npc_service(
+        &self,
+        kind: &str,
+    ) -> Result<&'static super::npcs::Npc, Option<&'static super::npcs::Npc>> {
+        let in_range = super::npcs::all_within_range(kind, self.pos);
+        if let Some(npc) = in_range
+            .iter()
+            .find(|n| self.npc_serves(n, super::factions::Level::Apprehensive))
+        {
+            return Ok(npc);
+        }
+        Err(in_range.first().copied())
+    }
+
+    /// The class this character casts and uses skills as: its own, or the
+    /// prestige class its alignment has carried it to.
+    pub fn effective_class(&self) -> String {
+        super::alignment::effective_class(&self.class, self.alignment)
     }
 
     /// May this connection use dev / GM commands (`/give`, `HealSelf`,
@@ -836,6 +1064,28 @@ impl PerConnection {
         now.duration_since(self.last_packet) >= super::HEARTBEAT_TIMEOUT
     }
 
+    /// Record a Move's `jumping` flag and say whether a jump should be
+    /// relayed now: only on the flag's rising edge (a held flag is one jump),
+    /// and at most once per [`super::JUMP_RELAY_MIN_INTERVAL`]. A relayed
+    /// jump stands the player, as a step does. The flag never touches
+    /// position: the relay is for the peers' screens only.
+    pub fn note_move_jump(&mut self, jumping: bool, now: Instant) -> bool {
+        let rising = jumping && !self.last_move_jumping;
+        self.last_move_jumping = jumping;
+        if !rising {
+            return false;
+        }
+        let due = self
+            .last_jump_relayed_at
+            .is_none_or(|t| now.duration_since(t) >= super::JUMP_RELAY_MIN_INTERVAL);
+        if !due {
+            return false;
+        }
+        self.last_jump_relayed_at = Some(now);
+        self.is_sitting = false;
+        true
+    }
+
     pub fn touch(&mut self, now: Instant) {
         self.last_packet = now;
     }
@@ -847,6 +1097,40 @@ impl PerConnection {
         let p = self.pos;
         let lp = self.last_persisted_pos;
         p.x != lp.x || p.y != lp.y || p.z != lp.z || self.yaw != self.last_persisted_yaw
+    }
+
+    /// Is any item or coin store (inventory, wallet, either vault) waiting to
+    /// be written? The one list of those stores: `persist_dirty_stores` writes
+    /// exactly these, and the logout retry queue holds a character while any
+    /// is set, so a store added here is covered by both.
+    pub fn any_store_dirty(&self) -> bool {
+        self.inventory_dirty
+            || self.coins_dirty
+            || self.bank_dirty
+            || self.bank_items_dirty
+            || self.account_bank_items_dirty
+    }
+
+    /// Queue an item ledger row for this character, stamped now
+    /// (`world/ledger.rs`). Called at the site that makes the move in memory,
+    /// beside the dirty flag it sets; the row is written with the next store
+    /// transaction and leaves the queue only when that commits.
+    pub fn ledger(&mut self, mut row: crate::db::ItemEventRow) {
+        row.at = super::ledger::unix_now_secs();
+        row.char_id = self.char_id;
+        self.item_events.push(row);
+    }
+
+    /// Where the ledger queue stands, for a site that may have to undo its
+    /// in-memory move on a failed persist: `ledger_rollback(mark)` drops
+    /// everything queued since, as the inventory snapshot it restores drops
+    /// the move.
+    pub fn ledger_mark(&self) -> usize {
+        self.item_events.len()
+    }
+
+    pub fn ledger_rollback(&mut self, mark: usize) {
+        self.item_events.truncate(mark);
     }
 
     pub fn mark_persisted(&mut self) {
@@ -869,6 +1153,7 @@ impl PerConnection {
             // worth is the threshold, so an idle lobby connection stays clean.
             || (self.hunger_secs - self.last_persisted_hunger).abs() >= 1.0
             || (self.thirst_secs - self.last_persisted_thirst).abs() >= 1.0
+            || Some(self.alignment) != self.last_persisted_alignment
     }
 
     pub fn mark_resources_persisted(&mut self) {
@@ -879,6 +1164,7 @@ impl PerConnection {
         self.last_persisted_level = self.level;
         self.last_persisted_hunger = self.hunger_secs;
         self.last_persisted_thirst = self.thirst_secs;
+        self.last_persisted_alignment = Some(self.alignment);
     }
 
     /// Camp + linkdead: true once a body that dropped uncleanly has lingered at
@@ -890,11 +1176,46 @@ impl PerConnection {
             .is_some_and(|t| now.duration_since(t) >= window)
     }
 
-    /// Camp slice B: record that incoming damage just landed on this player, so
-    /// the per-tick camp sweep can cancel an in-progress `/camp` ("cancelled by
-    /// damage"). Called at each player-damage application site in the tick loop.
+    /// Record that incoming damage just landed on this player. Two things ride
+    /// on it. Camp slice B: the per-tick camp sweep cancels an in-progress
+    /// `/camp` ("cancelled by damage"). And the seated-combat rule (classic
+    /// EQ, user call 2026-10-14): ANY damage stands a seated player, so the
+    /// seated regen rate, `/camp` and the seated-target damage rule all end
+    /// with the first hit; the client stands its own body on the Hit it
+    /// receives, since nothing on the wire carries the flag. Called at every
+    /// player-damage application site in the tick loop (melee, spells, DoT
+    /// ticks, damage shields): one home for what taking damage does to you.
     pub fn note_damage_taken(&mut self, now: Instant) {
         self.last_damaged_at = Some(now);
+        self.is_sitting = false;
+    }
+
+    /// The sum of the player's active Haste buffs (the Enchanter's Haste, a
+    /// Bard's Wanderer's Chord), 0.0 with none: what the client's attack
+    /// timer paces by, read from the same buffs the server fans it. The
+    /// swing-rate limit reads it so an unhasted player is held to an
+    /// unhasted pace.
+    pub fn haste_total(&self) -> f32 {
+        self.active_buffs
+            .iter()
+            .filter_map(|b| match b.effect {
+                super::buffs::BuffEffect::Haste { amount } => Some(amount),
+                _ => None,
+            })
+            // A fold from 0.0, not `sum`: an empty f32 sum is -0.0, which
+            // the swing-limit log printed as `haste=-0.0`.
+            .fold(0.0, |total, amount| total + amount)
+    }
+
+    /// The haste the swing-rate limit judges a swing at now: the active
+    /// Haste buffs, or the total held before one expired if that was under
+    /// `HASTE_LAPSE_GRACE` ago and higher.
+    pub fn limiter_haste(&self, now: Instant) -> f32 {
+        let lapsed = self
+            .haste_lapsed
+            .filter(|(_, at)| now.saturating_duration_since(*at) < HASTE_LAPSE_GRACE)
+            .map_or(0.0, |(haste, _)| haste);
+        self.haste_total().max(lapsed)
     }
 
     /// Where `Respawn` should put this player: their bind point, or the starter
@@ -927,7 +1248,46 @@ impl PerConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The seated-combat rule's stand half: any damage stands a seated player.
+    #[test]
+    fn taking_damage_stands_a_seated_player() {
+        let mut c = PerConnection::from_spawn(test_spawn(), Instant::now());
+        c.is_sitting = true;
+        c.note_damage_taken(Instant::now());
+        assert!(!c.is_sitting, "a hit stands you");
+        assert!(c.last_damaged_at.is_some());
+    }
     use std::time::Duration;
+
+    // The swing-rate limit counts an expired Haste for HASTE_LAPSE_GRACE
+    // (the client hears of the expiry a moment late), then stops; the total
+    // reads 0.0, never -0.0, with no Haste (the log printed `haste=-0.0`).
+    #[test]
+    fn the_limiter_counts_an_expired_haste_for_a_moment() {
+        let now = Instant::now();
+        let mut c = PerConnection::from_spawn(test_spawn(), now);
+        assert!(c.haste_total().is_sign_positive() && c.haste_total() == 0.0);
+        c.active_buffs
+            .push(super::super::buffs::ActiveBuff::new_haste(
+                "Haste".into(),
+                0.3,
+                660.0,
+                now,
+            ));
+        assert!((c.limiter_haste(now) - 0.3).abs() < 1e-6);
+        c.haste_lapsed = Some((c.haste_total(), now));
+        c.active_buffs.clear();
+        assert!(
+            (c.limiter_haste(now + Duration::from_millis(900)) - 0.3).abs() < 1e-6,
+            "inside the grace"
+        );
+        assert_eq!(
+            c.limiter_haste(now + HASTE_LAPSE_GRACE),
+            0.0,
+            "and gone after it"
+        );
+    }
 
     /// Minimal spawn for connection-state tests. Field values are arbitrary;
     /// only the lifecycle flags under test matter.
@@ -935,6 +1295,8 @@ mod tests {
         crate::db::CharacterSpawn {
             hunger: crate::world::hunger::FULLNESS_CAP_SECS,
             thirst: crate::world::hunger::FULLNESS_CAP_SECS,
+            alignment: None,
+            factions: Vec::new(),
             char_id: 1,
             account_id: 1,
             name: "Tester".into(),
@@ -1262,5 +1624,40 @@ mod tests {
         // At and past the window: reapable.
         assert!(conn.linkdead_expired(base + window, window));
         assert!(conn.linkdead_expired(base + Duration::from_secs(31), window));
+    }
+
+    /// The jump relay's rule: a jump is relayed on the flag's rising edge
+    /// only (a held flag is one jump, a cleared flag relays nothing), and
+    /// not again inside JUMP_RELAY_MIN_INTERVAL however many edges a forged
+    /// stream sends; a relayed jump stands the player.
+    #[test]
+    fn a_jump_relays_on_the_rising_edge_and_not_again_inside_the_interval() {
+        let t0 = Instant::now();
+        let mut conn = PerConnection::from_spawn(test_spawn(), t0);
+        conn.is_sitting = true;
+        assert!(!conn.note_move_jump(false, t0), "no flag, no jump");
+        assert!(conn.note_move_jump(true, t0), "the rising edge relays");
+        assert!(!conn.is_sitting, "a jump stands the player");
+        assert!(
+            !conn.note_move_jump(true, t0 + Duration::from_millis(50)),
+            "a held flag is the same jump"
+        );
+        assert!(
+            !conn.note_move_jump(false, t0 + Duration::from_millis(100)),
+            "clearing it relays nothing"
+        );
+        assert!(
+            !conn.note_move_jump(true, t0 + Duration::from_millis(150)),
+            "a second edge inside the interval is dropped"
+        );
+        let later = t0 + super::super::JUMP_RELAY_MIN_INTERVAL + Duration::from_millis(1);
+        assert!(
+            !conn.note_move_jump(false, later),
+            "the flag clears between jumps"
+        );
+        assert!(
+            conn.note_move_jump(true, later),
+            "past the interval the next edge relays again"
+        );
     }
 }

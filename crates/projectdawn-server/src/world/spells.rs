@@ -47,6 +47,28 @@ pub struct Spell {
     // Cleric tiers, 20 for the Paladin "Reclaim Soul"). 0 for every non-res spell.
     #[serde(default)]
     pub res_xp_percent: f32,
+    /// Summon Food / Summon Drink (food slice 2, user call 2026-10-15,
+    /// Monsters and Memories' shape): a SUMMON_ITEM spell conjures
+    /// `summon_item` into the caster's bags, `summon_count` of them: one at
+    /// the level the class gets the spell and one more per
+    /// `SUMMON_LEVELS_PER_EXTRA` levels, capped at `summon_max`.
+    #[serde(default)]
+    pub summon_item: String,
+    #[serde(default)]
+    pub summon_max: u32,
+    /// Per-class level requirements on a spell several classes share
+    /// (Summon Drink: Magician 1, Shaman 2, Cleric 3, Druid 10). A class
+    /// absent here uses `min_level`. Read by the cast gate's level check
+    /// and by the summon count's base; the client carries the same table.
+    #[serde(default)]
+    pub class_min_levels: std::collections::HashMap<String, i32>,
+    /// A Bard song's own start fraction: the share of its listed (level-50)
+    /// effect it has at the level the class learns it, climbing to the full
+    /// effect at `SONG_FULL_AT_LEVEL`. 0 means the global `SONG_SCALE_AT_LEARN`.
+    /// Selos' Melody carries EQ's Selo's curve (+20% when learned of +65% at
+    /// 50: 0.3077); the other songs use the global shape (user, 2026-10-20).
+    #[serde(default)]
+    pub song_scale_at_learn: f32,
 
     // Track 6 sub-task 4a — buff fields applied to the target (or
     // caster for SELF spells) after the immediate damage/heal lands.
@@ -170,7 +192,19 @@ pub struct Spell {
     pub silence_duration: f32,
     #[serde(default)]
     pub is_dispel: bool,
+    /// How far this spell reaches its target, metres; 0 means
+    /// `DEFAULT_SPELL_RANGE` (use `reach()`). Per-spell since 2026-10-19
+    /// (user, on Monsters and Memories' baseline: every single-target spell
+    /// reaches 30 m, heals and nukes alike). An area spell's own size is
+    /// `aoe_radius`, separate from this.
+    #[serde(default)]
+    pub range: f32,
 }
+
+/// The reach of a spell that names none: Monsters and Memories' 30 m for every
+/// single-target spell (their wiki, re-checked 2026-10-19). Must stay inside
+/// `MIN_LEASH_RANGE`, or a mob could be hit from beyond its own leash.
+pub const DEFAULT_SPELL_RANGE: f32 = 30.0;
 
 fn default_min_level() -> i32 {
     1
@@ -179,9 +213,7 @@ fn default_min_level() -> i32 {
 fn spells() -> &'static HashMap<String, Spell> {
     static SPELLS: OnceLock<HashMap<String, Spell>> = OnceLock::new();
     SPELLS.get_or_init(|| {
-        let parsed: SpellsFile = toml::from_str(SPELLS_TOML).expect(
-            "spells.toml must parse — fix the embedded file or re-run tools/export_spells.gd",
-        );
+        let parsed: SpellsFile = crate::world::parse_embedded("spells.toml", SPELLS_TOML);
         parsed
             .spells
             .into_iter()
@@ -196,6 +228,12 @@ fn spells() -> &'static HashMap<String, Spell> {
 /// rejects the cast (logged at debug level).
 pub fn lookup(name: &str) -> Option<&'static Spell> {
     spells().get(name)
+}
+
+/// Every spell the server knows (the tests that hold a rule over all of
+/// them, such as reach inside the leash floor).
+pub fn all() -> impl Iterator<Item = &'static Spell> {
+    spells().values()
 }
 
 /// Map a weapon's `proc_damage_type` (a `u8` authored in the client's
@@ -253,15 +291,17 @@ mod tests {
     /// regenerated toml that drops one fails here instead of in play.
     #[test]
     fn ported_direct_damage_spells_resolve() {
+        // The level 1 to 10 numbers are the EQ parity audit's (2026-10-20);
+        // the 12+ spells kept theirs.
         let expected: [(&str, &str, i32, f32, &str); 9] = [
-            ("Blizzard", "Wizard", 8, 65.0, "ICE"),
-            ("Thunder Clap", "Wizard", 10, 100.0, "LIGHTNING"),
-            ("Bloodfire", "Sorcerer", 4, 40.0, "FIRE"),
-            ("Void Lance", "Sorcerer", 6, 55.0, "ARCANE"),
-            ("Tempest Bolt", "Sorcerer", 10, 65.0, "LIGHTNING"),
+            ("Blizzard", "Wizard", 8, 36.0, "ICE"),
+            ("Thunder Clap", "Wizard", 10, 65.0, "LIGHTNING"),
+            ("Bloodfire", "Sorcerer", 4, 15.0, "FIRE"),
+            ("Void Lance", "Sorcerer", 6, 24.0, "ARCANE"),
+            ("Tempest Bolt", "Sorcerer", 10, 60.0, "LIGHTNING"),
             ("Cascade of Stars", "Enchanter", 12, 55.0, "ARCANE"),
-            ("Chorus of Misery", "Bard", 10, 45.0, "ARCANE"),
-            ("Feral Shriek", "Beast Master", 4, 35.0, "SPIRIT"),
+            ("Chorus of Misery", "Bard", 10, 25.0, "ARCANE"),
+            ("Feral Shriek", "Beast Master", 4, 14.0, "SPIRIT"),
             ("Judgment", "Paladin", 12, 80.0, "HOLY"),
         ];
         for (name, class, level, damage, dtype) in expected {
@@ -313,7 +353,10 @@ mod tests {
     fn warders_mend_resolves_as_a_pet_heal() {
         let s = lookup("Warder's Mend").expect("Warder's Mend in spells.toml");
         assert_eq!(s.target_type, "PET_HEAL");
-        assert!((s.heal_amount - 60.0).abs() < 0.01);
+        assert!(
+            (s.heal_amount - 12.0).abs() < 0.01,
+            "the parity audit's number"
+        );
         assert_eq!(s.classes, vec!["Beast Master".to_string()]);
         assert_eq!(s.min_level, 1);
     }
@@ -352,15 +395,24 @@ mod tests {
         let s = lookup("Fireball").expect("Fireball in table");
         assert_eq!(s.target_type, "ENEMY");
         assert_eq!(s.damage_type, "FIRE");
-        assert!((s.base_damage - 50.0).abs() < 0.01);
-        assert!((s.mana_cost - 30.0).abs() < 0.01);
+        assert!(
+            (s.base_damage - 12.0).abs() < 0.01,
+            "the parity audit's number"
+        );
+        assert!(
+            (s.mana_cost - 10.0).abs() < 0.01,
+            "EQ's Frost Bolt-sized cost"
+        );
     }
 
     #[test]
     fn healing_light_is_ally_heal() {
         let s = lookup("Healing Light").expect("Healing Light in table");
         assert_eq!(s.target_type, "ALLY");
-        assert!((s.heal_amount - 60.0).abs() < 0.01);
+        assert!(
+            (s.heal_amount - 10.0).abs() < 0.01,
+            "EQ's Minor Healing at level 1"
+        );
     }
 
     #[test]
@@ -418,7 +470,7 @@ mod tests {
 
     #[test]
     fn every_spell_is_class_and_level_tagged() {
-        // The Phase 1 cast gate (tick.rs) rejects a cast when the caster's
+        // The Phase 1 cast gate (tick/casting.rs) rejects a cast when the caster's
         // class isn't in `spell.classes` or their level < `spell.min_level`.
         // It leans on every spell carrying that data — an untagged spell (empty
         // classes) would reject EVERY caster and silently break casting for it.
@@ -440,7 +492,7 @@ mod tests {
 
     #[test]
     fn cast_gate_eligibility_matches_class_and_level() {
-        // Mirror of the tick.rs gate predicate (class in spell.classes AND
+        // Mirror of the cast gate's predicate (tick/casting.rs) (class in spell.classes AND
         // level >= spell.min_level), pinned to real table rows so a data or
         // logic drift trips a test rather than shipping an exploit or a
         // false rejection.
@@ -476,5 +528,89 @@ mod tests {
         assert_eq!(ds.target_type, "ENEMY");
         assert!(ds.classes.iter().any(|c| c == "Shadow Knight"));
         assert_eq!(ds.min_level, 10);
+    }
+}
+
+impl Spell {
+    /// How far this spell reaches its target: its own `range`, else the
+    /// default. The one reach every targeted cast is checked against.
+    pub fn reach(&self) -> f32 {
+        if self.range > 0.0 {
+            self.range
+        } else {
+            DEFAULT_SPELL_RANGE
+        }
+    }
+
+    /// The level `class` needs for this spell: its own entry in
+    /// `class_min_levels`, else `min_level`.
+    pub fn required_level(&self, class: &str) -> i32 {
+        self.class_min_levels
+            .get(class)
+            .copied()
+            .unwrap_or(self.min_level)
+    }
+}
+
+/// Summon Food / Drink: one more item per this many levels above the level
+/// the class got the spell (a tuning knob; Monsters and Memories scales 1 to
+/// 4 by level without publishing the steps).
+pub const SUMMON_LEVELS_PER_EXTRA: i32 = 1;
+
+/// How many of a SUMMON_ITEM spell's item a caster of `class` at
+/// `caster_level` conjures: 1 at the class's level for the spell, one more
+/// per `SUMMON_LEVELS_PER_EXTRA` levels, never more than `summon_max` (and
+/// never less than one).
+pub fn summon_count(spell: &Spell, class: &str, caster_level: i32) -> u32 {
+    let base = spell.required_level(class);
+    let extra = (caster_level - base).max(0) / SUMMON_LEVELS_PER_EXTRA;
+    ((1 + extra) as u32).min(spell.summon_max.max(1))
+}
+
+#[cfg(test)]
+mod summon_tests {
+    use super::*;
+
+    // Summon Food: Magician 1, Cleric 9, Shaman 9, Druid 14; one loaf at the
+    // class's level, one more per level after (user, 2026-10-19), ten at most.
+    #[test]
+    fn summon_count_scales_from_the_class_level_and_caps_at_ten() {
+        let food = lookup("Summon Food").expect("Summon Food in spells.toml");
+        assert_eq!(food.required_level("Magician"), 1);
+        assert_eq!(food.required_level("Druid"), 14);
+        assert_eq!(
+            food.required_level("Warrior"),
+            food.min_level,
+            "a class with no entry uses min_level"
+        );
+        assert_eq!(summon_count(food, "Magician", 1), 1);
+        assert_eq!(summon_count(food, "Magician", 2), 2);
+        assert_eq!(summon_count(food, "Magician", 9), 9);
+        assert_eq!(summon_count(food, "Magician", 10), 10);
+        assert_eq!(summon_count(food, "Magician", 60), 10);
+        assert_eq!(summon_count(food, "Druid", 14), 1);
+        assert_eq!(summon_count(food, "Druid", 18), 5);
+        assert_eq!(
+            summon_count(food, "Druid", 5),
+            1,
+            "below the level the gate refuses; the count itself never drops under one"
+        );
+        let drink = lookup("Summon Drink").expect("Summon Drink in spells.toml");
+        assert_eq!(drink.required_level("Shaman"), 2);
+        assert_eq!(drink.required_level("Cleric"), 3);
+        assert_eq!(drink.required_level("Druid"), 10);
+        assert_eq!(drink.summon_max, 10);
+        assert!(drink.summon_item.ends_with("conjured_water.tres"));
+    }
+
+    #[test]
+    fn a_spell_reaches_its_own_range_or_thirty_metres() {
+        let smite = lookup("Smite").expect("Smite in spells.toml");
+        assert_eq!(smite.range, 0.0, "no spell names its own range yet");
+        assert_eq!(smite.reach(), DEFAULT_SPELL_RANGE);
+        assert_eq!(DEFAULT_SPELL_RANGE, 30.0);
+        let mut far = smite.clone();
+        far.range = 12.0;
+        assert_eq!(far.reach(), 12.0);
     }
 }

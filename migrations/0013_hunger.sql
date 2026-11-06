@@ -7,11 +7,14 @@
 -- stops. Every existing character migrates full (14400 s, four hours, the cap), so
 -- nobody logs in starving the first evening.
 --
--- Numbered 0013: 0012 is the public hosting branch's invites table. sqlx applies
--- an unapplied lower number after a higher one without complaint, BUT a binary
--- whose migrations/ lacks a version the database has applied refuses to boot
--- (VersionMissing). So once this has run on the host, every branch that deploys
--- there must carry it: deploy the merged tree, never a branch on its own.
+-- Numbered 0013 with no 0012: that number was the public hosting branch's
+-- invites table, renumbered 0018 on 2026-11-06 so it applies after everything
+-- the host had already run (sqlx would apply an unapplied lower number after a
+-- higher one without complaint, but the file order and the applied order are
+-- better kept the same). A binary whose migrations/ lacks a version the
+-- database has applied refuses to boot (VersionMissing), so once a migration
+-- has run on the host, every branch that deploys there must carry it: deploy
+-- the merged tree, never a branch on its own.
 
 ALTER TABLE characters ADD COLUMN hunger REAL NOT NULL DEFAULT 14400.0;
 ALTER TABLE characters ADD COLUMN thirst REAL NOT NULL DEFAULT 14400.0;

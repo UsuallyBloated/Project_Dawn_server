@@ -54,6 +54,7 @@ pub struct MobTemplate {
     /// constant. Kept (defaulted) so existing `zone_camps.toml` entries still
     /// parse; safe to drop from the data in a later content pass.
     #[serde(default)]
+    #[allow(dead_code)]
     pub xp: i32,
     pub speed: f32,
     pub aggro: f32,
@@ -69,6 +70,19 @@ pub struct MobTemplate {
     /// missing id simply behaves like an ordinary mob.
     #[serde(default)]
     pub named_id: Option<String>,
+    /// The faction this mob belongs to (`factions.toml`); a kill costs the
+    /// killer standing with it and pays half to its enemies. None means the
+    /// kill moves no standing at all (`world/factions.rs`).
+    #[serde(default)]
+    pub faction: Option<String>,
+    /// The mob's alignment tier for the killer's alignment delta
+    /// (`world/alignment.rs::kill_delta`): "undead", "bad", "evil", "good",
+    /// "exalted", "innocent" or "neutral" (the default, which moves nothing).
+    #[serde(default)]
+    pub alignment: Option<String>,
+    /// Optional override of the derived faction hit (4 + level, x3 named).
+    #[serde(default)]
+    pub faction_hit: Option<f32>,
 }
 
 /// One spawn-point definition. The `SpawnPoint` runtime type in
@@ -85,8 +99,7 @@ pub struct CampSpawn {
 /// authored spawn position. Order is preserved from the file so spawn
 /// ids are deterministic across server restarts.
 pub fn load_camps() -> Vec<CampSpawn> {
-    let parsed: ZoneCampsFile = toml::from_str(ZONE_CAMPS_TOML)
-        .expect("zone_camps.toml failed to parse — fix the embedded file");
+    let parsed: ZoneCampsFile = crate::world::parse_embedded("zone_camps.toml", ZONE_CAMPS_TOML);
     let mut out = Vec::new();
     for camp in parsed.camps {
         let radius = camp.radius.unwrap_or(parsed.default_radius);
@@ -103,9 +116,44 @@ pub fn load_camps() -> Vec<CampSpawn> {
     out
 }
 
+/// The faction and alignment tier a camp template of `name` carries, for a
+/// dev spawn of the same mob (the Test Panel sends the display name), so a
+/// GM's test mob answers for its kills as the camp's does. A named mob is
+/// found by its `named_id` (its camp template carries the base name, "Dire
+/// Wolf" for Rotfang, never the display name the panel sends). None for a
+/// mob no camp spawns.
+pub fn faction_of_camp_mob(name: &str, named_id: Option<&str>) -> (Option<String>, Option<String>) {
+    load_camps()
+        .iter()
+        .find(|c| match named_id {
+            Some(id) => c.mob.named_id.as_deref() == Some(id),
+            None => c.mob.name == name,
+        })
+        .map(|c| (c.mob.faction.clone(), c.mob.alignment.clone()))
+        .unwrap_or((None, None))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dev_spawn_takes_its_camps_faction_named_or_not() {
+        let own = |a: &str, b: &str| (Some(a.to_string()), Some(b.to_string()));
+        assert_eq!(
+            faction_of_camp_mob("Gnoll Raider", None),
+            own("gnoll_raiders", "bad")
+        );
+        assert_eq!(
+            faction_of_camp_mob("Rotfang", Some("rotfang")),
+            own("wildlife", "neutral")
+        );
+        assert_eq!(
+            faction_of_camp_mob("The Undying", Some("the_undying")),
+            own("restless_dead", "undead")
+        );
+        assert_eq!(faction_of_camp_mob("Practice Dummy", None), (None, None));
+    }
 
     #[test]
     fn embedded_toml_parses() {

@@ -23,6 +23,12 @@ license = "Proprietary"
 publish = false
 
 [workspace.dependencies]
+# Random structured inputs for the handler soak test and the fuzz targets only
+# (protocol's `arbitrary` feature; never in the server's own build).
+arbitrary = { version = "1.5.0", features = ["derive"] }
+# Property tests (dev-dependency only; never in a shipped binary).
+proptest = "1"
+
 # Async runtime
 tokio = { version = "1.41.1", features = ["full"] }
 tokio-tungstenite = "0.24.0"
@@ -57,6 +63,7 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 
 # Errors
 anyhow = "1.0.93"
+sha2 = "0.10.9"
 thiserror = "2.0.3"
 
 # Config
@@ -68,6 +75,31 @@ chrono = { version = "0.4.38", features = ["serde"] }
 # Internal
 protocol = { path = "crates/protocol" }
 shared   = { path = "crates/shared" }
+
+# Lints every crate inherits (each crate's Cargo.toml has `[lints] workspace =
+# true`). CI runs clippy with `-D warnings`, so anything clippy warns about
+# by default fails the run unless it is allowed here with its reason.
+[workspace.lints.clippy]
+# A byte slice of a String panics when the cut lands inside a multi-byte
+# character: one chat line with an accented letter at byte 512 crashed the
+# whole server on 2026-10-23 (housekeeping audit H1). Cut on a char boundary.
+string_slice = "deny"
+# An unwrap or expect in live code turns a surprise into a crash, and in the
+# middle of an item move a crash or a hasty early return can leave the move
+# half done. Live code checks before it moves; a true invariant says why with
+# `#[expect(clippy::expect_used, reason = "...")]`. Tests are exempt
+# (clippy.toml).
+unwrap_used = "deny"
+expect_used = "deny"
+# The tick's step functions take the pieces of world state they touch as
+# separate arguments, and the queues they share are tuples; both are the shape
+# of the 2026-11-01 split, not mistakes. Revisit if a step grows a struct.
+too_many_arguments = "allow"
+type_complexity = "allow"
+# Range checks are written `if !(dist <= range) { refuse }` on purpose: a NaN
+# distance makes every comparison false, so this form refuses it where
+# `dist > range` would let it through (the 2026-09-25 NaN Move hole).
+neg_cmp_op_on_partial_ord = "allow"
 
 [profile.release]
 lto = "thin"

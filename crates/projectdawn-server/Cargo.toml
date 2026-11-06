@@ -9,6 +9,10 @@ publish = false
 # so `cargo run -p projectdawn-server` needs to know which is the default.
 default-run = "projectdawn-server"
 
+[features]
+# The `cargo fuzz` entry points (world/fuzzing.rs), for the fuzz/ crate only.
+fuzzing = ["dep:arbitrary", "protocol/arbitrary"]
+
 [dependencies]
 protocol = { workspace = true }
 shared   = { workspace = true }
@@ -23,6 +27,7 @@ bincode = { workspace = true }
 
 renet         = { workspace = true }
 renet_netcode = { workspace = true }
+arbitrary = { workspace = true, optional = true }
 
 sqlx = { workspace = true }
 
@@ -34,12 +39,16 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 anyhow = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 
 toml = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
+# The handler soak test (world/fuzzing.rs) builds random client messages.
+protocol = { workspace = true, features = ["arbitrary"] }
+arbitrary = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
@@ -50,3 +59,7 @@ renet_netcode = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 tempfile = "3.13.0"
+proptest = { workspace = true }
+
+[lints]
+workspace = true

@@ -13,6 +13,8 @@
 //! the shared `netcode_private_key`. The launcher delivers those bytes to
 //! the game .exe (track D will define the temp-file handoff).
 
+mod active_skills;
+pub mod alignment;
 mod aoi;
 mod buffs;
 mod cast_gate;
@@ -20,12 +22,19 @@ mod clock;
 mod combat;
 mod connection;
 mod corpses;
+pub mod encumbrance;
 mod entity;
+pub mod factions;
+pub mod fall;
+#[cfg(any(test, feature = "fuzzing"))]
+pub mod fuzzing;
 mod groups;
 mod handlers;
+mod health;
 pub mod hunger;
 mod inventory;
 mod items;
+pub mod ledger;
 mod loot;
 mod named;
 mod npcs;
@@ -35,12 +44,20 @@ mod progression;
 mod quests;
 mod regen;
 mod safe_areas;
+mod songs;
 // `pub` so the persistence layer (`crate::db::load_character`) can read MAX_LEVEL
 // to clamp a stored level into the cap on load.
 pub mod skills;
 mod spawn_points;
+mod spell_gems;
+mod spell_power;
 mod spells;
+pub mod starter_kit;
+pub mod terrain;
+#[cfg(test)]
+mod terrain_content;
 mod tick;
+mod trade;
 mod zones;
 
 use crate::Config;
@@ -52,13 +69,21 @@ use sqlx::SqlitePool;
 use std::{
     collections::HashMap,
     net::{SocketAddr, ToSocketAddrs, UdpSocket},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex, OnceLock,
-    },
+    sync::{Arc, Mutex, OnceLock, PoisonError},
     time::Duration,
 };
 use tokio::task::JoinHandle;
+
+/// Parses one of the data files compiled into the server (`include_str!`).
+/// A parse failure is a bug in the shipped data, not a runtime condition, so
+/// it stops the boot (or the first test that reads the table) rather than run
+/// a world with half its data: each table's unit tests parse it, so CI meets
+/// a broken file before any server does. This is the one panic live code
+/// keeps on purpose under the `expect_used` rule: it is spelled `panic!` only
+/// because `expect` cannot put the file's name in the message.
+pub(crate) fn parse_embedded<T: serde::de::DeserializeOwned>(file: &str, text: &str) -> T {
+    toml::from_str(text).unwrap_or_else(|e| panic!("{file} must parse; fix the embedded file: {e}"))
+}
 
 /// 20 Hz simulation tick.
 pub const TICK_DT: Duration = Duration::from_millis(50);
@@ -111,18 +136,21 @@ pub fn resolve_world_endpoint_all(endpoint: &str) -> anyhow::Result<Vec<SocketAd
 /// returns IPv6 first.
 pub fn resolve_world_endpoint(endpoint: &str) -> anyhow::Result<SocketAddr> {
     let addrs = resolve_world_endpoint_all(endpoint)?;
-    Ok(addrs
+    addrs
         .iter()
         .copied()
         .find(|a| a.is_ipv4())
-        .unwrap_or(addrs[0]))
+        .or_else(|| addrs.first().copied())
+        .ok_or_else(|| anyhow::anyhow!("world_endpoint '{endpoint}' resolved to no address"))
 }
 
 /// Resolve `endpoint` and record the result as the address every connect
 /// token for it names. `main` calls it before either service starts; the
 /// world calls it again at bind and gets the recorded address back.
 pub fn register_world_endpoint(endpoint: &str) -> anyhow::Result<SocketAddr> {
-    let mut map = boot_addrs().lock().expect("boot addrs poisoned");
+    // A poisoned lock still holds the map of addresses; recover it rather
+    // than refuse every connect token over one panic elsewhere.
+    let mut map = boot_addrs().lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(addr) = map.get(endpoint) {
         return Ok(*addr);
     }
@@ -145,7 +173,7 @@ fn boot_addrs() -> &'static Mutex<HashMap<String, SocketAddr>> {
 pub fn world_public_addr(endpoint: &str) -> anyhow::Result<SocketAddr> {
     if let Some(addr) = boot_addrs()
         .lock()
-        .expect("boot addrs poisoned")
+        .unwrap_or_else(PoisonError::into_inner)
         .get(endpoint)
     {
         return Ok(*addr);
@@ -153,28 +181,22 @@ pub fn world_public_addr(endpoint: &str) -> anyhow::Result<SocketAddr> {
     resolve_world_endpoint(endpoint)
 }
 
-/// A request for the world loop to finish the tick, tell everyone, write
-/// everyone and exit non-zero (systemd runs `Restart=on-failure`). Raised by
-/// the address watch; a test raises it by hand.
-#[derive(Default)]
-pub struct RestartSignal {
-    requested: AtomicBool,
-    reason: Mutex<String>,
-}
-
-impl RestartSignal {
-    pub fn request(&self, reason: &str) {
-        *self.reason.lock().expect("restart reason poisoned") = reason.to_string();
-        self.requested.store(true, Ordering::SeqCst);
-    }
-
-    pub fn requested(&self) -> bool {
-        self.requested.load(Ordering::SeqCst)
-    }
-
-    pub fn reason(&self) -> String {
-        self.reason.lock().expect("restart reason poisoned").clone()
-    }
+/// What the stop channel carries: whether the world loop is being asked to
+/// end, and why. The loop reads it at the top of every tick (`tick::run`
+/// step 0) and ends cleanly on anything but `Run`: everyone saved, everyone
+/// told with the line that is true for them, every connection closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Stop {
+    /// Keep running.
+    #[default]
+    Run,
+    /// A stop signal (SIGTERM from systemd, Ctrl-C): a clean exit.
+    Signal,
+    /// The advertised world name no longer resolves to the address the
+    /// transport was built with (the address watch): the same clean stop,
+    /// then an error exit so systemd (`Restart=on-failure`) brings the
+    /// process back on the new address.
+    AddressChanged,
 }
 
 /// What every player is told when the address watch restarts the server.
@@ -182,9 +204,15 @@ pub const RESTART_FOR_ADDRESS_CHANGE: &str =
     "The server's network address changed. Restarting now; your character is saved. Log back in in about a minute.";
 
 /// Re-resolve `endpoint` every `ADDRESS_WATCH_INTERVAL` and ask for a restart
-/// the first time it stops resolving to `boot`. A failed lookup keeps the
-/// boot address (the name may be briefly unavailable; the transport is not).
-async fn address_watch(endpoint: String, boot: SocketAddr, signal: Arc<RestartSignal>) {
+/// (`Stop::AddressChanged` on the stop channel) the first time it stops
+/// resolving to `boot`. A failed lookup keeps the boot address (the name may
+/// be briefly unavailable; the transport is not). `main` spawns it when the
+/// endpoint is a name; the world loop itself never watches.
+pub async fn address_watch(
+    endpoint: String,
+    boot: SocketAddr,
+    stop: tokio::sync::watch::Sender<Stop>,
+) {
     loop {
         tokio::time::sleep(ADDRESS_WATCH_INTERVAL).await;
         let name = endpoint.clone();
@@ -198,7 +226,7 @@ async fn address_watch(endpoint: String, boot: SocketAddr, signal: Arc<RestartSi
                     now = ?addrs,
                     "world address changed — restarting so connect tokens name the new address"
                 );
-                signal.request(RESTART_FOR_ADDRESS_CHANGE);
+                let _ = stop.send(Stop::AddressChanged);
                 return;
             }
             Ok(Ok(_)) => {}
@@ -246,10 +274,11 @@ pub const KICK_FLUSH_GRACE: Duration = Duration::from_secs(1);
 pub const ENEMY_POSITION_KEEPALIVE: Duration = Duration::from_millis(500);
 /// Cadence of the `enemy position fan` log line (sends in the window, alive
 /// enemies, players in world) that measures the stream above. Skipped while
-/// nobody is in world.
+/// nobody is in world. The `world health` line (tick and checkpoint times
+/// and the slope refusals, `health.rs`) shares the cadence, and is logged
+/// with nobody in world only when a tick ran past its budget or a step was
+/// refused.
 pub const ENEMY_FAN_REPORT_INTERVAL: Duration = Duration::from_secs(60);
-/// Server-side speed cap for movement intents (m/s). Anything faster
-/// than this gets clamped — server-authoritative, no exceptions.
 /// Where a character with no bind point respawns, and the position a freshly
 /// created character starts at (`create_character` leaves `pos_*` NULL, which
 /// loads as 0,0,0). Keeping the fallback identical to the new-character spawn
@@ -257,7 +286,19 @@ pub const ENEMY_FAN_REPORT_INTERVAL: Duration = Duration::from_secs(60);
 /// beside whatever just killed them.
 pub const STARTER_SPAWN: connection::Vec3f = connection::Vec3f::ZERO;
 
-pub const MAX_MOVE_SPEED: f32 = 7.5;
+/// A player's unbuffed running speed (m/s), the client's `player.gd` SPEED.
+/// The server decides how fast a player moves: this, times the speed buffs
+/// the server itself applied, times snare, times encumbrance. A Move's
+/// direction says only which way and how much of a run (its length is
+/// clamped to 1; a crouch sends a half-length one), never how fast: it used
+/// to carry the client's own speed against a 7.5 m/s ceiling, so a modified
+/// client ran 1.5x and an honest one under Spirit of Wolf got the buff twice.
+pub const RUN_SPEED: f32 = 5.0;
+/// The least time between two relayed jumps from one player. An honest
+/// client cannot jump again until it lands (0.7 s at its 7 m/s and 20 m/s²),
+/// so this never clips a real jump, and it caps what a forged stream of
+/// `jumping` flags can make peers' screens draw.
+pub const JUMP_RELAY_MIN_INTERVAL: Duration = Duration::from_millis(500);
 /// How long we keep integrating the last received direction after the
 /// most recent Move message. Beyond this window, the connection is
 /// treated as idle and integration stops — protects against a crashed
@@ -295,10 +336,47 @@ pub const ATTACK_RANGE_TOLERANCE: f32 = 1.5;
 /// defaults to twice the aggro radius, so a mob with a small radius (8 to
 /// 12 m) could be nuked from 17 to 24 m out and never respond: inside spell
 /// reach, outside its leash. Seen in play 2026-10-06 (a Wild Boar, leash
-/// 20 m). The floor sits past `RANGED_ATTACK_RANGE` so nothing a spell or a
-/// bow can reach is out of a mob's reach back. Mobs with an aggro radius of
-/// 0 (dev-spawned dummies) are left passive.
-pub const MIN_LEASH_RANGE: f32 = 30.0;
+/// 20 m). The floor sits past every spell's reach (`Spell::reach`, 30 m by
+/// default since 2026-10-19; a unit test checks every spell in spells.toml)
+/// and past `RANGED_ATTACK_RANGE`, so nothing a spell or a bow can reach is
+/// out of a mob's reach back. 30 m until spells reached 30 m themselves.
+/// Mobs with an aggro radius of 0 (dev-spawned dummies) are left passive.
+pub const MIN_LEASH_RANGE: f32 = 35.0;
+
+/// How long a mob or pet may be held at ground it cannot climb before it
+/// gives up (the first hills, decision 6, EQ's rule): a chasing mob forgets
+/// everyone and walks home, where it heals to full; a mob walking home warps
+/// there; a pet following its owner warps to them; a pet chasing a target
+/// drops it. No pathfinding exists, so a mob below a face has no way round.
+/// 8 s, a knob.
+pub const MOB_STUCK_SECS: f32 = 8.0;
+
+/// How much closer to its goal a held mob or pet must come to count as no
+/// longer stuck (`MOB_STUCK_SECS`): any step taken is not enough, or a mob
+/// sliding along the foot of a face after a player walking the lip above would
+/// never give up. A knob.
+pub const STUCK_PROGRESS_M: f32 = 1.0;
+
+/// How long a chasing mob may be held below a face before it evades
+/// (`Entity::is_evading`, WoW's rule, the user's call of 2026-11-05): from then
+/// until it gives up, and on its walk home, it takes no damage. A short grace,
+/// so a mob that brushes a face for a step in an honest fight is not immune.
+/// A knob.
+pub const EVADE_GRACE_SECS: f32 = 1.0;
+
+/// How recently the slope rule must have refused a held mob's step for it to
+/// count as held (`Entity::is_evading`): a mob that brushed a face once and
+/// then moves freely after a fleeing target keeps its stuck clock, but is not
+/// held, so it takes damage. Ten ticks. A knob.
+pub const EVADE_REFUSAL_RECENT_SECS: f32 = 0.5;
+
+/// How far a `/say` carries, in metres from the speaker (user, 2026-10-27:
+/// "the volume of a conversation", 50 m). The eating emote and the jump relay
+/// reach the same people: the room. It used to be the speaker's 3x3 AOI
+/// neighbourhood of 120 m cells, so anyone 120 to 240 m away heard a say and
+/// the reach moved with where the speaker stood in the cell. EQEmu's figure
+/// is 200 units for a player's say (`EntityList::ChannelMessage`).
+pub const SAY_RANGE: f32 = 50.0;
 /// Maximum distance a ranged attack (`weapon.is_ranged == true`) can
 /// connect at. Mirrors the GDScript `Combat.RANGED_RANGE = 25.0` so
 /// bows / crossbows feel the same on server-authoritative combat. The
@@ -325,11 +403,6 @@ pub const LOOT_PICKUP_RANGE: f32 = 6.0;
 /// camps nearest town. See docs/design/group_loot_and_coin.md.
 pub const GROUP_SHARE_RANGE: f32 = 200.0;
 
-/// How far a friendly spell (ALLY: heals and buffs on a player or a pet;
-/// PET_HEAL) reaches, metres. Hostile spells keep `RANGED_ATTACK_RANGE`.
-/// Decided 2026-10-05 (user: 30 m); the client checks one metre inside it.
-pub const FRIENDLY_SPELL_RANGE: f32 = 30.0;
-
 /// The global cooldown (spell batch step 4, decided 2026-10-05): after any
 /// accepted cast, no spell may START for this long, Bard songs excepted on
 /// both sides (twisting is casting songs back to back). Checked at CastStart
@@ -340,6 +413,29 @@ pub const FRIENDLY_SPELL_RANGE: f32 = 30.0;
 /// that quarter second over an honest one. (EQ's gem refresh is quoted at
 /// 1.5 to 2.25 s across eras.)
 pub const GLOBAL_COOLDOWN: Duration = Duration::from_millis(2_000);
+
+/// Bard songs (the rework of 2026-10-20, classic EQ's rules as Project 1999
+/// keeps them, user decisions): the server pulses the bard's one active song
+/// every `SONG_PULSE_SECS` (EQ's 6 s tick), and each pulse's effect lingers
+/// `SONG_LINGER_SECS` after it (the low end of EQ's 12 to 18 s, so a
+/// four-song twist on 3 s sings holds and a fifth song drops). The sing time
+/// is the song's `cast_time` (3 s) and the cast-time gate enforces it, which
+/// is what makes twisting a skill and an instant cycle a forgery. Movement
+/// never interrupts a song (Selos' is a running song).
+pub const SONG_PULSE_SECS: f32 = 6.0;
+pub const SONG_LINGER_SECS: f32 = 12.0;
+/// A song's strength grows with the bard's level (user, 2026-10-20: a level 1
+/// bard must not be a level 50 one, and EQ scaled each song by level rather
+/// than by rank): this fraction of the listed effect at the level the class
+/// learns the song, climbing to the full effect at `SONG_FULL_AT_LEVEL`. A
+/// song may carry its own start fraction (`Spell::song_scale_at_learn`):
+/// Selos' Melody does, EQ's Selo's curve (+20% when learned of +65% at 50;
+/// user, 2026-10-20: "our speed spell should match the scaling of the EQ
+/// Selos'"); the rest use this. The data carries the level-50 values. Both
+/// knobs; the client mirrors them in `bard_songs.gd` for the offline pulse
+/// and the buff bar.
+pub const SONG_SCALE_AT_LEARN: f32 = 0.4;
+pub const SONG_FULL_AT_LEVEL: i32 = 50;
 
 /// How often a damage-over-time spell ticks on a mob, a pet or a player
 /// (spell batch step 5, decided 2026-10-05): every three seconds, dealing
@@ -390,6 +486,17 @@ fn connection_config() -> ConnectionConfig {
 /// Bind the world UDP socket. Separated from `serve_with_socket` so tests
 /// can grab an ephemeral port and read the bound address before starting
 /// the tick task.
+/// Every spell a class can ever cast (any level), by name. For tools and
+/// tests that need a class's whole spell list.
+pub fn class_spell_names(class: &str) -> Vec<String> {
+    let mut names: Vec<String> = spells::all()
+        .filter(|s| s.classes.iter().any(|c| c == class))
+        .map(|s| s.name.clone())
+        .collect();
+    names.sort();
+    names
+}
+
 pub fn bind_world_socket(world_bind: &str) -> std::io::Result<UdpSocket> {
     let socket = UdpSocket::bind(world_bind)?;
     socket.set_nonblocking(true)?;
@@ -424,7 +531,7 @@ pub fn mint_connect_token(
     //   [0..8]  account_id (LE u64)
     //   [8]     is_gm (0 / 1)
     //   [9..]   zeros (future: premium flag, group hint, etc.)
-    // Keep the world-side `parse_*_from_user_data` helpers in tick.rs in step
+    // Keep the world-side `parse_*_from_user_data` helpers in tick/session.rs in step
     // with this layout.
     let mut user_data = [0u8; 256];
     user_data[..8].copy_from_slice(&account_id.to_le_bytes());
@@ -438,7 +545,7 @@ pub fn mint_connect_token(
         NETCODE_TIMEOUT_SECS,
         vec![server_addr],
         Some(&user_data),
-        &cfg.netcode_private_key,
+        &cfg.netcode_private_key.0,
     )
     .context("ConnectToken::generate failed")?;
 
@@ -450,8 +557,16 @@ pub fn mint_connect_token(
 }
 
 /// Production entry — binds from `cfg.world_bind` and runs the tick loop
-/// until the task ends or the process exits.
-pub async fn serve(cfg: Arc<Config>, pool: SqlitePool) -> anyhow::Result<()> {
+/// until `shutdown` turns true (a clean stop: everyone saved, see
+/// `tick::session::shut_down_world`) or the loop fails. Either way it returns, so the
+/// caller can end the process; an error comes back as an error, so a dead
+/// world takes the process (and auth) down with it and systemd restarts it,
+/// rather than auth handing out tokens for a world that is gone.
+pub async fn serve(
+    cfg: Arc<Config>,
+    pool: SqlitePool,
+    stop: tokio::sync::watch::Receiver<Stop>,
+) -> anyhow::Result<()> {
     let socket = bind_world_socket(&cfg.world_bind)
         .with_context(|| format!("binding world UDP {}", cfg.world_bind))?;
     let local = socket.local_addr()?;
@@ -460,34 +575,31 @@ pub async fn serve(cfg: Arc<Config>, pool: SqlitePool) -> anyhow::Result<()> {
         advertised = %cfg.world_endpoint,
         "world UDP listening (renet 2.0, Secure)"
     );
-    let handle = serve_with_socket(cfg, pool, socket).await?;
-    // The loop returns only on an error or on a restart request, and either
-    // way the process should end: `main`'s try_join finishes, the exit is
-    // non-zero, and systemd brings the server back (`Restart=on-failure`).
-    match handle.await? {
-        Ok(()) => Err(anyhow::anyhow!("world tick loop exited")),
-        Err(e) => Err(e),
-    }
+    let handle = serve_with_socket_until(cfg, pool, socket, stop).await?;
+    handle.await??;
+    Ok(())
 }
 
 /// Test / advanced entry — caller pre-binds the socket (e.g. on ephemeral
 /// port) and hands it in. Returns immediately with the JoinHandle for the
 /// tick task; caller can either `.await` it or drop it for fire-and-forget.
+/// The loop runs until the process ends (no stop signal).
 pub async fn serve_with_socket(
     cfg: Arc<Config>,
     pool: SqlitePool,
     socket: UdpSocket,
 ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
-    serve_with_socket_restartable(cfg, pool, socket, Arc::new(RestartSignal::default())).await
+    // A receiver whose sender is gone reads its last value forever: never stop.
+    let (_never, stop) = tokio::sync::watch::channel(Stop::Run);
+    serve_with_socket_until(cfg, pool, socket, stop).await
 }
 
-/// `serve_with_socket` with the restart signal supplied by the caller, so a
-/// test can raise it and watch the loop checkpoint, tell everyone and exit.
-pub async fn serve_with_socket_restartable(
+/// As `serve_with_socket`, ending cleanly when `shutdown` turns true.
+pub async fn serve_with_socket_until(
     cfg: Arc<Config>,
     pool: SqlitePool,
     socket: UdpSocket,
-    restart: Arc<RestartSignal>,
+    stop: tokio::sync::watch::Receiver<Stop>,
 ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
     let public_addr = register_world_endpoint(&cfg.world_endpoint)
         .with_context(|| format!("resolving world_endpoint '{}'", cfg.world_endpoint))?;
@@ -507,7 +619,7 @@ pub async fn serve_with_socket_restartable(
         protocol_id: WORLD_PROTOCOL_ID,
         public_addresses: vec![public_addr],
         authentication: ServerAuthentication::Secure {
-            private_key: cfg.netcode_private_key,
+            private_key: cfg.netcode_private_key.0,
         },
     };
 
@@ -515,17 +627,10 @@ pub async fn serve_with_socket_restartable(
         .context("constructing NetcodeServerTransport")?;
     let server = RenetServer::new(connection_config());
 
-    // Only a NAME can move; a literal address is watched by nobody.
-    if cfg.world_endpoint.parse::<SocketAddr>().is_err() {
-        let endpoint = cfg.world_endpoint.clone();
-        let signal = restart.clone();
-        tokio::spawn(async move { address_watch(endpoint, public_addr, signal).await });
-    }
-
     let handle = tokio::spawn(async move {
-        let result = tick::run(cfg, pool, server, transport, restart).await;
+        let result = tick::run(cfg, pool, server, transport, stop).await;
         if let Err(e) = &result {
-            tracing::error!(error = %e, "world tick loop exited");
+            tracing::error!(error = %e, "world tick loop exited with error");
         }
         result
     });
@@ -548,11 +653,11 @@ mod endpoint_tests {
     }
 
     #[test]
-    fn a_restart_signal_carries_its_reason() {
-        let s = RestartSignal::default();
-        assert!(!s.requested() && s.reason().is_empty());
-        s.request("moving house");
-        assert!(s.requested());
-        assert_eq!(s.reason(), "moving house");
+    fn the_stop_channel_starts_at_run() {
+        assert_eq!(Stop::default(), Stop::Run);
+        let (tx, rx) = tokio::sync::watch::channel(Stop::Run);
+        assert_eq!(*rx.borrow(), Stop::Run);
+        tx.send(Stop::AddressChanged).expect("a receiver is alive");
+        assert_eq!(*rx.borrow(), Stop::AddressChanged);
     }
 }

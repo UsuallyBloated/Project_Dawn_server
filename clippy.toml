@@ -1,0 +1,4 @@
+# Tests may unwrap and expect: a panic there is the test failing, which is the
+# point. Live code may not (`unwrap_used` / `expect_used` in Cargo.toml).
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

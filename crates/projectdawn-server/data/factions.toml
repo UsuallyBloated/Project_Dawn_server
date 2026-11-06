@@ -1,0 +1,46 @@
+# Factions: the peoples of the world and how they stand to each other
+# (docs/design/factions_and_alignment.md, decided 2026-10-23). Every mob
+# template in zone_camps.toml and every NPC in npcs.toml names one of these.
+#
+# A kill costs the killer `hit` with the mob's faction and pays half of it to
+# every faction that lists the mob's as an enemy; allies of the mob's faction
+# are untouched. `hit` is 4 + the mob's level, three times that for a named
+# mob (world/factions.rs). A quest's hits are explicit on the quest.
+#
+# `[faction.start]` is the standing a character begins with, by race and
+# class, as EverQuest set a city's view of each race at creation. Empty for
+# every faction in v1 (user, 2026-10-23: "Everyone indifferent is important
+# right now"); the code reads it from day one, so filling it is a content
+# edit, no code.
+
+[[faction]]
+id = "greyveil_town"
+name = "The Folk of Greyveil"
+allies = ["greyveil_watch"]
+enemies = ["gnoll_raiders", "bandits", "restless_dead"]
+
+[[faction]]
+id = "greyveil_watch"
+name = "The Greyveil Watch"
+allies = ["greyveil_town"]
+enemies = ["gnoll_raiders", "bandits", "restless_dead"]
+
+[[faction]]
+id = "gnoll_raiders"
+name = "The Gnoll Raiders"
+enemies = ["greyveil_town", "greyveil_watch"]
+
+[[faction]]
+id = "bandits"
+name = "The Road Bandits"
+enemies = ["greyveil_town", "greyveil_watch"]
+
+[[faction]]
+id = "restless_dead"
+name = "The Restless Dead"
+enemies = ["greyveil_town", "greyveil_watch"]
+
+[[faction]]
+id = "wildlife"
+name = "Wildlife"
+# No links: killing an animal moves no standing, as in EQ.

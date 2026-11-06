@@ -1,110 +1,9 @@
-//! End-to-end smoke test for the world UDP service.
-//!
-//! Drives the full cross-service handshake:
-//!   Auth WS:  Register → Login → CharCreate → RequestWorldToken
-//!   World UDP: ConnectToken → ConnectOk → Move → Position → Disconnect
-//!
-//! Both services run in-process on ephemeral ports against a per-test
-//! SQLite file. No external test client; uses `renet` + `renet_netcode`
-//! 2.0 directly to drive the wire as the real game client will.
+//! End-to-end smoke test for the world UDP service, driven with a bare renet client
+//! instead of WorldClient: Register, Login, CharCreate and RequestWorldToken over the
+//! auth WebSocket, then ConnectToken, ConnectOk, Move, Position and Disconnect over
+//! UDP. (World_smoke.rs, its own test binary with a copy of the harness, until 2026-11-01.)
 
-use bincode::config::standard as bincode_cfg;
-use futures_util::{SinkExt, StreamExt};
-use projectdawn_server::{auth, db, world, Config};
-use protocol::world::{ClientWorldMsg, ServerWorldMsg, Vec3, WORLD_PROTOCOL_ID};
-use renet::{ConnectionConfig, RenetClient};
-use renet_netcode::{ClientAuthentication, ConnectToken, NetcodeClientTransport};
-use std::{
-    io::Cursor,
-    net::{SocketAddr, UdpSocket},
-    sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
-use tempfile::TempDir;
-use tokio_tungstenite::tungstenite::Message;
-
-const CHANNEL_SYSTEM: u8 = 0;
-const CHANNEL_POSITION: u8 = 1;
-const TICK_DT: Duration = Duration::from_millis(50);
-
-struct Harness {
-    auth_url: String,
-    world_addr: SocketAddr,
-    _tmp: TempDir,
-}
-
-async fn start_both() -> Harness {
-    let tmp = TempDir::new().expect("tempdir");
-    let db_path = tmp.path().join("world_test.db");
-    let url = format!("sqlite://{}?mode=rwc", db_path.display());
-
-    // Per-test random key. The test alone signs and validates these.
-    let mut netcode_key = [0u8; 32];
-    use rand::RngCore;
-    rand::rngs::OsRng.fill_bytes(&mut netcode_key);
-
-    // Bind world UDP first so we know its port before building Config.
-    let world_socket = world::bind_world_socket("127.0.0.1:0").expect("bind world");
-    let world_addr = world_socket.local_addr().expect("world local_addr");
-
-    let cfg = Config {
-        auth_bind: "127.0.0.1:0".into(),
-        world_bind: "127.0.0.1:0".into(), // unused — we hand in the prebound socket
-        world_endpoint: world_addr.to_string(),
-        database_url: url.clone(),
-        min_client_version: projectdawn_server::config::semver::Version {
-            major: 0,
-            minor: 1,
-            patch: 0,
-        },
-        netcode_private_key: netcode_key,
-    };
-    let cfg = Arc::new(cfg);
-
-    let pool = db::open(&url).await.expect("open pool");
-    db::migrate(&pool).await.expect("migrate");
-
-    // World tick task — fire-and-forget for the test's lifetime.
-    let _world_handle = world::serve_with_socket(cfg.clone(), pool.clone(), world_socket)
-        .await
-        .expect("world serve_with_socket");
-
-    let (auth_addr, _auth_handle) = auth::serve_bound(cfg, pool).await.expect("auth bind");
-
-    Harness {
-        auth_url: format!("ws://{auth_addr}"),
-        world_addr,
-        _tmp: tmp,
-    }
-}
-
-async fn rpc(
-    ws: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-    payload: serde_json::Value,
-) -> serde_json::Value {
-    ws.send(Message::Text(payload.to_string()))
-        .await
-        .expect("send");
-    let frame = ws.next().await.expect("frame").expect("ok frame");
-    let text = match frame {
-        Message::Text(t) => t.to_string(),
-        other => panic!("unexpected non-text frame: {other:?}"),
-    };
-    serde_json::from_str(&text).expect("parse server json")
-}
-
-/// Drives the renet client one tick: update + send. Used in spin-loops below.
-fn tick_client(client: &mut RenetClient, transport: &mut NetcodeClientTransport) {
-    client.update(TICK_DT);
-    if let Err(e) = transport.update(TICK_DT, client) {
-        eprintln!("client transport update: {e}");
-    }
-    if let Err(e) = transport.send_packets(client) {
-        eprintln!("client transport send: {e}");
-    }
-}
+use crate::common::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn world_connect_move_position_disconnect() {
@@ -200,7 +99,7 @@ async fn world_connect_move_position_disconnect() {
     // Spin until renet handshake completes.
     let connect_deadline = Instant::now() + Duration::from_secs(5);
     while !client.is_connected() {
-        tick_client(&mut client, &mut transport);
+        tick_one(&mut client, &mut transport);
         if Instant::now() > connect_deadline {
             panic!("renet handshake did not complete within 5 s");
         }
@@ -213,8 +112,8 @@ async fn world_connect_move_position_disconnect() {
         char_id: char_id as u64,
         client_version: "0.1.0".into(),
     };
-    send_client_msg(&mut client, CHANNEL_SYSTEM, &connect_msg);
-    tick_client(&mut client, &mut transport);
+    send_msg(&mut client, CHANNEL_SYSTEM, &connect_msg);
+    tick_one(&mut client, &mut transport);
 
     // Wait for ConnectOk on the system channel.
     let connect_ok = wait_for_msg(
@@ -238,11 +137,11 @@ async fn world_connect_move_position_disconnect() {
     // Track 4 follow-up E: Position fan-out is gated on EnterWorld. The
     // real client sends this after the lobby's Enter World button; tests
     // do it immediately after ConnectOk.
-    send_client_msg(&mut client, CHANNEL_SYSTEM, &ClientWorldMsg::EnterWorld);
+    send_msg(&mut client, CHANNEL_SYSTEM, &ClientWorldMsg::EnterWorld);
 
     // Send a Move intent and wait for the resulting Position broadcast.
-    // Direction (1, 0, 0) at MAX_MOVE_SPEED * TICK_DT should produce
-    // pos.x ≈ 7.5 * 0.05 = 0.375 m on the very next tick — but the server
+    // Direction (1, 0, 0) at RUN_SPEED * TICK_DT should produce
+    // pos.x = 5 * 0.05 = 0.25 m on the very next tick — but the server
     // may also broadcast positions before our move is applied, so we just
     // assert "we got a Position with our id and pos.x > 0".
     let move_msg = ClientWorldMsg::Move {
@@ -253,8 +152,9 @@ async fn world_connect_move_position_disconnect() {
             z: 0.0,
         },
         jumping: false,
+        yaw: 0.0,
     };
-    send_client_msg(&mut client, CHANNEL_POSITION, &move_msg);
+    send_msg(&mut client, CHANNEL_POSITION, &move_msg);
 
     let position = wait_for_msg(
         &mut client,
@@ -275,7 +175,7 @@ async fn world_connect_move_position_disconnect() {
     }
 
     // Clean app-layer disconnect.
-    send_client_msg(&mut client, CHANNEL_SYSTEM, &ClientWorldMsg::Disconnect);
+    send_msg(&mut client, CHANNEL_SYSTEM, &ClientWorldMsg::Disconnect);
     // Pump a few ticks so the message lands. Stop on first error: once
     // the server processes Disconnect it tears down the renet connection
     // and further send_packets calls will (correctly) error.
@@ -291,34 +191,7 @@ async fn world_connect_move_position_disconnect() {
     }
 }
 
-fn connection_config_matching_server() -> ConnectionConfig {
-    use renet::{ChannelConfig, SendType};
-    let chans = vec![
-        ChannelConfig {
-            channel_id: CHANNEL_SYSTEM,
-            max_memory_usage_bytes: 64 * 1024,
-            send_type: SendType::ReliableOrdered {
-                resend_time: Duration::from_millis(150),
-            },
-        },
-        ChannelConfig {
-            channel_id: CHANNEL_POSITION,
-            max_memory_usage_bytes: 32 * 1024,
-            send_type: SendType::Unreliable,
-        },
-    ];
-    ConnectionConfig {
-        available_bytes_per_tick: 60_000,
-        server_channels_config: chans.clone(),
-        client_channels_config: chans,
-    }
-}
-
-fn send_client_msg(client: &mut RenetClient, channel: u8, msg: &ClientWorldMsg) {
-    let bytes = bincode::serde::encode_to_vec(msg, bincode_cfg()).expect("encode");
-    client.send_message(channel, bytes);
-}
-
+/// Ticks the bare client until a message on `channel` matches `pred`, or the timeout.
 async fn wait_for_msg(
     client: &mut RenetClient,
     transport: &mut NetcodeClientTransport,
@@ -328,7 +201,7 @@ async fn wait_for_msg(
 ) -> Option<ServerWorldMsg> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        tick_client(client, transport);
+        tick_one(client, transport);
         while let Some(bytes) = client.receive_message(channel) {
             if let Ok((msg, _)) =
                 bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
@@ -342,12 +215,3 @@ async fn wait_for_msg(
     }
     None
 }
-
-fn decode_token_bytes(hex_str: &str) -> [u8; 32] {
-    let v = hex::decode(hex_str).expect("hex decode session_token");
-    v.try_into().expect("32 bytes")
-}
-
-// Silence unused — exposed in protocol but slice 1 doesn't read it directly.
-#[allow(dead_code)]
-const _PROTOCOL_ID_USED: u64 = WORLD_PROTOCOL_ID;

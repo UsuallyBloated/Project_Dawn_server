@@ -1,9 +1,10 @@
-//! SQLite pool, migrations, and the small set of queries auth needs.
+//! SQLite pool, migrations, and every query: the auth service's (accounts,
+//! sessions, characters; `AuthResult`) and the world's persistence (`DbResult`).
 //!
 //! Uses runtime-checked `sqlx::query`/`query_as` rather than the compile-time
 //! `query!` macros so the build doesn't need a live DATABASE_URL.
 
-use crate::error::{AuthError, AuthResult};
+use crate::error::{AuthError, AuthResult, DbError, DbResult};
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
     Argon2, PasswordHash, PasswordVerifier,
@@ -298,6 +299,10 @@ struct AccountAuthRow {
 /// password verify when the username doesn't exist (see `verify_login`).
 /// Computed once with the server's Argon2 params so its verify cost matches
 /// production. The password it hashes is irrelevant — the verify always fails.
+#[expect(
+    clippy::expect_used,
+    reason = "a fixed input under the default parameters; Argon2 refuses only bad parameters"
+)]
 fn dummy_login_hash() -> &'static str {
     static H: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     H.get_or_init(|| {
@@ -338,6 +343,10 @@ pub async fn verify_login(
             // letting an attacker distinguish "user exists" by response time. Burn
             // one dummy verify against a fixed valid hash, discard it, then fail
             // with the SAME error as a wrong password.
+            #[expect(
+                clippy::expect_used,
+                reason = "dummy_login_hash is the server's own Argon2 output, always valid PHC"
+            )]
             let _ = Argon2::default().verify_password(
                 password.as_bytes(),
                 &PasswordHash::new(dummy_login_hash()).expect("dummy hash is valid PHC"),
@@ -540,6 +549,14 @@ pub async fn create_character(
     // character starts bound at the starter spawn, so Gate always has
     // somewhere to go and a bind is only ever replaced, never absent.
     let birth_bind = crate::world::STARTER_SPAWN;
+    // The starting kit (world/starter_kit.rs) is written with the character,
+    // in one transaction: a character never exists without it, and the item
+    // ledger's `starter` rows land with the items so the books balance from
+    // the first login.
+    let Some(kit) = crate::world::starter_kit::starter_kit(class) else {
+        return Err(AuthError::InvalidInput("unknown class".into()));
+    };
+    let mut tx = pool.begin().await?;
     let res = sqlx::query(
         "INSERT INTO characters (
             account_id, name, race, class, level, xp_to_next,
@@ -548,13 +565,15 @@ pub async fn create_character(
             base_constitution,
             base_max_hp, base_max_mp, base_max_stamina,
             hp, mp, stamina,
-            bind_x, bind_y, bind_z
+            bind_x, bind_y, bind_z,
+            alignment_score, alignment_seeded
          ) VALUES (
             ?1, ?2, ?3, ?4, 1, ?5,
             ?6, ?7, ?8, ?9, ?10, ?11, ?12,
             ?13, ?14, ?15,
             ?16, ?17, ?18,
-            ?19, ?20, ?21
+            ?19, ?20, ?21,
+            ?22, 1
          )",
     )
     .bind(account_id)
@@ -578,14 +597,45 @@ pub async fn create_character(
     .bind(birth_bind.x)
     .bind(birth_bind.y)
     .bind(birth_bind.z)
-    .execute(pool)
+    // Alignment is the server's from birth (migration 0016): the class's
+    // starting score, as the client's creation screen used to seed it.
+    .bind(crate::world::alignment::starting_score(class))
+    .execute(&mut *tx)
     .await;
 
-    match res {
-        Ok(out) => Ok(out.last_insert_rowid()),
-        Err(sqlx::Error::Database(dbe)) if dbe.is_unique_violation() => Err(AuthError::NameTaken),
-        Err(e) => Err(AuthError::from(e)),
+    let char_id = match res {
+        Ok(out) => out.last_insert_rowid(),
+        Err(sqlx::Error::Database(dbe)) if dbe.is_unique_violation() => {
+            return Err(AuthError::NameTaken)
+        }
+        Err(e) => return Err(AuthError::from(e)),
+    };
+    let now = crate::world::ledger::unix_now_secs();
+    let mut rows = Vec::with_capacity(kit.len());
+    for (slot, item_path) in kit {
+        sqlx::query(
+            "INSERT INTO character_items (char_id, location, slot, item_path, count)
+             VALUES (?1, 'equip', ?2, ?3, 1)",
+        )
+        .bind(char_id)
+        .bind(i64::from(slot))
+        .bind(item_path)
+        .execute(&mut *tx)
+        .await?;
+        let mut row = crate::world::ledger::item_event(
+            crate::world::ledger::ItemAction::Starter,
+            item_path,
+            1,
+            1,
+            Some("starting kit".to_string()),
+        );
+        row.at = now;
+        row.char_id = char_id;
+        rows.push(row);
     }
+    write_item_events(&mut tx, &rows).await?;
+    tx.commit().await?;
+    Ok(char_id)
 }
 
 pub async fn delete_character(pool: &SqlitePool, account_id: i64, char_id: i64) -> AuthResult<()> {
@@ -676,7 +726,7 @@ pub async fn account_is_banned(pool: &SqlitePool, account_id: i64) -> AuthResult
 /// Every banned account id, for the world loop's ban sweep (which removes a
 /// banned account's character that is already in the world). A handful of
 /// rows at most; the sweep runs it every `BAN_SWEEP_INTERVAL`.
-pub async fn banned_account_ids(pool: &SqlitePool) -> AuthResult<Vec<i64>> {
+pub async fn banned_account_ids(pool: &SqlitePool) -> DbResult<Vec<i64>> {
     let rows = sqlx::query("SELECT id FROM accounts WHERE is_banned = 1")
         .fetch_all(pool)
         .await?;
@@ -785,7 +835,7 @@ pub struct GmActionRow {
 /// Note for whoever builds an account-delete tool: `gm_actions` references
 /// accounts and characters WITHOUT `ON DELETE CASCADE`, unlike every other
 /// child table, so a delete has to decide what happens to these rows.
-pub async fn record_gm_actions(pool: &SqlitePool, rows: &[GmActionRow]) -> AuthResult<()> {
+pub async fn record_gm_actions(pool: &SqlitePool, rows: &[GmActionRow]) -> DbResult<()> {
     if rows.is_empty() {
         return Ok(());
     }
@@ -804,6 +854,179 @@ pub async fn record_gm_actions(pool: &SqlitePool, rows: &[GmActionRow]) -> AuthR
     }
     tx.commit().await?;
     Ok(())
+}
+
+/// One row of the item ledger (`item_events`, migration 0017; the rules in
+/// `world/ledger.rs`). Built by `world::ledger::item_event` / `coin_event`,
+/// stamped with `at` and `char_id` when queued on the connection, and written
+/// by `write_item_events` inside the transaction that persists the move.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemEventRow {
+    pub at: i64,
+    pub char_id: i64,
+    pub action: &'static str,
+    pub item_path: Option<String>,
+    pub count: i64,
+    pub delta: i64,
+    pub copper: i64,
+    pub detail: Option<String>,
+}
+
+/// Write queued ledger rows inside a caller's transaction. Every transaction
+/// that writes a character's stores calls this with that character's queue
+/// (the store flush, the trade commit, the corpse loot, the death strip), so
+/// a row is committed exactly when the move it describes is.
+pub async fn write_item_events(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    rows: &[ItemEventRow],
+) -> DbResult<()> {
+    for row in rows {
+        sqlx::query(
+            "INSERT INTO item_events (at, char_id, action, item_path, count, delta, copper, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind(row.at)
+        .bind(row.char_id)
+        .bind(row.action)
+        .bind(&row.item_path)
+        .bind(row.count)
+        .bind(row.delta)
+        .bind(row.copper)
+        .bind(&row.detail)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+/// The ledger's prune, written so the books still balance afterwards: every
+/// row older than `cutoff` is folded into one `carry` row per character and
+/// item holding the folded sums (stamped `cutoff`), then deleted, in one
+/// transaction. Returns (carry rows written, rows deleted). A character and
+/// item whose old rows sum to nothing gets no carry row.
+pub async fn fold_item_events_before(pool: &SqlitePool, cutoff: i64) -> DbResult<(u64, u64)> {
+    let mut tx = pool.begin().await?;
+    let carried = sqlx::query(
+        "INSERT INTO item_events (at, char_id, action, item_path, count, delta, copper, detail)
+         SELECT ?1, char_id, 'carry', item_path, 0, SUM(delta), SUM(copper), 'folded'
+         FROM item_events
+         WHERE at < ?1
+         GROUP BY char_id, item_path
+         HAVING SUM(delta) != 0 OR SUM(copper) != 0",
+    )
+    .bind(cutoff)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    let deleted = sqlx::query("DELETE FROM item_events WHERE at < ?1")
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    Ok((carried, deleted))
+}
+
+/// One place the books do not balance: an account whose ledger says it should
+/// hold `ledger` of `item_path` (or that much copper, when `item_path` is
+/// None) while its stores hold `held`.
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct LedgerMismatch {
+    pub account_id: i64,
+    pub item_path: Option<String>,
+    pub ledger: i64,
+    pub held: i64,
+}
+
+/// The conservation query: for every account and item, the sum of `delta`
+/// over its characters' ledger rows against the count in their inventories
+/// and vaults, and the sum of `copper` against their wallets. Empty when the
+/// books balance. Read-only; the daily sweep logs what it returns and
+/// `admin_report` shows it.
+pub async fn ledger_mismatches(pool: &SqlitePool) -> DbResult<Vec<LedgerMismatch>> {
+    let mut out: Vec<LedgerMismatch> = sqlx::query_as(
+        "WITH ledger AS (
+            SELECT c.account_id AS account_id, e.item_path AS item_path, SUM(e.delta) AS delta
+            FROM item_events e JOIN characters c ON c.id = e.char_id
+            WHERE e.item_path IS NOT NULL
+            GROUP BY c.account_id, e.item_path
+         ),
+         held_rows AS (
+            SELECT c.account_id AS account_id, i.item_path AS item_path, i.count AS n
+            FROM character_items i JOIN characters c ON c.id = i.char_id
+            UNION ALL
+            SELECT c.account_id, b.item_path, b.count
+            FROM bank_items b JOIN characters c ON c.id = b.char_id
+            UNION ALL
+            SELECT a.account_id, a.item_path, a.count FROM account_bank_items a
+         ),
+         held AS (
+            SELECT account_id, item_path, SUM(n) AS n FROM held_rows GROUP BY account_id, item_path
+         ),
+         keys AS (
+            SELECT account_id, item_path FROM ledger
+            UNION
+            SELECT account_id, item_path FROM held
+         )
+         SELECT k.account_id AS account_id, k.item_path AS item_path,
+                COALESCE(l.delta, 0) AS ledger, COALESCE(h.n, 0) AS held
+         FROM keys k
+         LEFT JOIN ledger l ON l.account_id = k.account_id AND l.item_path = k.item_path
+         LEFT JOIN held h ON h.account_id = k.account_id AND h.item_path = k.item_path
+         WHERE COALESCE(l.delta, 0) != COALESCE(h.n, 0)
+         ORDER BY k.account_id, k.item_path",
+    )
+    .fetch_all(pool)
+    .await?;
+    let coins: Vec<LedgerMismatch> = sqlx::query_as(
+        "WITH ledger AS (
+            SELECT c.account_id AS account_id, SUM(e.copper) AS copper
+            FROM item_events e JOIN characters c ON c.id = e.char_id
+            GROUP BY c.account_id
+         ),
+         held AS (
+            SELECT account_id,
+                   SUM(platinum * 1000000 + gold * 10000 + silver * 100 + copper
+                       + bank_platinum * 1000000 + bank_gold * 10000 + bank_silver * 100 + bank_copper) AS n
+            FROM characters GROUP BY account_id
+         )
+         SELECT h.account_id AS account_id, NULL AS item_path,
+                COALESCE(l.copper, 0) AS ledger, h.n AS held
+         FROM held h LEFT JOIN ledger l ON l.account_id = h.account_id
+         WHERE COALESCE(l.copper, 0) != h.n
+         ORDER BY h.account_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    out.extend(coins);
+    Ok(out)
+}
+
+/// A ledger row as the operator reads it (`admin_report`), newest first.
+#[derive(Debug, Clone, FromRow)]
+pub struct ItemEventView {
+    pub at: i64,
+    pub char_name: Option<String>,
+    pub action: String,
+    pub item_path: Option<String>,
+    pub count: i64,
+    pub delta: i64,
+    pub copper: i64,
+    pub detail: Option<String>,
+}
+
+/// The newest `limit` ledger rows with the character's name (a LEFT JOIN, so
+/// a row outlives its character). Read-only.
+pub async fn recent_item_events(pool: &SqlitePool, limit: i64) -> DbResult<Vec<ItemEventView>> {
+    let rows: Vec<ItemEventView> = sqlx::query_as(
+        "SELECT e.at, c.name AS char_name, e.action, e.item_path, e.count, e.delta, e.copper, e.detail
+         FROM item_events e LEFT JOIN characters c ON c.id = e.char_id
+         ORDER BY e.id DESC LIMIT ?1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
 }
 
 /// A character's bind point: where `Respawn` puts them. Coordinates are
@@ -855,6 +1078,13 @@ pub struct CharacterSpawn {
     /// Food and water: seconds of fullness left (`world/hunger.rs`).
     pub hunger: f32,
     pub thirst: f32,
+    /// The alignment score the server holds; None until the server has
+    /// seeded it (migration 0016's `alignment_seeded`), after which the
+    /// first checkpoint writes the class's starting score.
+    pub alignment: Option<f32>,
+    /// Faction standings by faction id (`character_factions`); a faction with
+    /// no row sits at its starting value (`world/factions.rs`).
+    pub factions: Vec<(String, f32)>,
     /// Quest ids this character has already turned in (quests pay once, ever).
     /// Loaded into `PerConnection.completed_quests`; the tick loop consults it
     /// before granting a `CompleteQuest` reward.
@@ -870,6 +1100,8 @@ pub struct CharacterSpawn {
 struct SpawnRow {
     hunger: f32,
     thirst: f32,
+    alignment_score: f32,
+    alignment_seeded: i32,
     id: i64,
     account_id: i64,
     name: String,
@@ -877,7 +1109,6 @@ struct SpawnRow {
     class: String,
     level: i32,
     xp: i32,
-    xp_to_next: i32,
     base_strength: i32,
     base_dexterity: i32,
     base_agility: i32,
@@ -904,15 +1135,14 @@ struct SpawnRow {
     pos_y: Option<f32>,
     pos_z: Option<f32>,
     yaw: Option<f32>,
-    bind_zone: Option<String>,
     bind_x: Option<f32>,
     bind_y: Option<f32>,
     bind_z: Option<f32>,
 }
 
-pub async fn load_character(pool: &SqlitePool, char_id: i64) -> AuthResult<CharacterSpawn> {
+pub async fn load_character(pool: &SqlitePool, char_id: i64) -> DbResult<CharacterSpawn> {
     let row: Option<SpawnRow> = sqlx::query_as(
-        "SELECT id, account_id, name, race, class, level, xp, xp_to_next,
+        "SELECT id, account_id, name, race, class, level, xp,
                 base_strength, base_dexterity, base_agility,
                 base_intelligence, base_wisdom, base_charisma,
                 base_constitution,
@@ -920,15 +1150,16 @@ pub async fn load_character(pool: &SqlitePool, char_id: i64) -> AuthResult<Chara
                 hp, mp, stamina, platinum, gold, silver, copper,
                 bank_platinum, bank_gold, bank_silver, bank_copper,
                 zone, pos_x, pos_y, pos_z, yaw,
-                bind_zone, bind_x, bind_y, bind_z,
-                hunger, thirst
+                bind_x, bind_y, bind_z,
+                hunger, thirst,
+                CAST(alignment_score AS REAL) AS alignment_score, alignment_seeded
          FROM characters
          WHERE id = ?1 AND deleted_at IS NULL",
     )
     .bind(char_id)
     .fetch_optional(pool)
     .await?;
-    let row = row.ok_or(AuthError::NotFound)?;
+    let row = row.ok_or(DbError::NotFound)?;
 
     // Track 6 sub-task 2: always recompute stats + max resources from
     // race/class/level via `char_data`. The DB columns capture
@@ -991,6 +1222,8 @@ pub async fn load_character(pool: &SqlitePool, char_id: i64) -> AuthResult<Chara
         })
         .collect();
 
+    let factions = load_factions(pool, char_id).await?;
+
     Ok(CharacterSpawn {
         char_id: row.id,
         account_id: row.account_id,
@@ -1012,6 +1245,12 @@ pub async fn load_character(pool: &SqlitePool, char_id: i64) -> AuthResult<Chara
         max_stamina: computed.max_stamina,
         hunger: row.hunger,
         thirst: row.thirst,
+        alignment: if row.alignment_seeded != 0 {
+            Some(row.alignment_score)
+        } else {
+            None
+        },
+        factions,
         hp: row.hp.min(computed.max_hp),
         mp: row.mp.min(computed.max_mp),
         stamina: row.stamina.min(computed.max_stamina),
@@ -1055,8 +1294,8 @@ pub async fn save_quest_progress(
     char_id: i64,
     quest_id: &str,
     progress: &[i32],
-) -> AuthResult<()> {
-    let json = serde_json::to_string(progress).expect("Vec<i32> serializes");
+) -> DbResult<()> {
+    let json = serde_json::to_string(progress).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
     sqlx::query(
         "INSERT INTO active_quests (char_id, quest_id, progress) VALUES (?1, ?2, ?3)
          ON CONFLICT (char_id, quest_id) DO UPDATE SET progress = excluded.progress",
@@ -1071,11 +1310,7 @@ pub async fn save_quest_progress(
 
 /// Drop one active quest row (abandon, or turn-in — the finished quest's
 /// permanent record is `completed_quests`, not this table). Idempotent.
-pub async fn delete_active_quest(
-    pool: &SqlitePool,
-    char_id: i64,
-    quest_id: &str,
-) -> AuthResult<()> {
+pub async fn delete_active_quest(pool: &SqlitePool, char_id: i64, quest_id: &str) -> DbResult<()> {
     sqlx::query("DELETE FROM active_quests WHERE char_id = ?1 AND quest_id = ?2")
         .bind(char_id)
         .bind(quest_id)
@@ -1084,21 +1319,55 @@ pub async fn delete_active_quest(
     Ok(())
 }
 
-/// Record a quest turn-in (server-authoritative quest rewards). Idempotent —
-/// the (char_id, quest_id) primary key makes a repeat insert a no-op, and the
-/// world loop checks the in-memory set before awarding anyway. Persisted
-/// BEFORE the XP grant so a crash can't leave a paid-but-unrecorded quest that
-/// a relog could turn in again.
+/// A character's experience as it stands after an XP change: written inside
+/// the transaction that records WHY it changed (a death's corpse, a quest
+/// turn-in, a resurrection), so the record and the XP can never come apart.
+/// Left to the 60 s checkpoint, a crash kept the record and lost the XP move:
+/// a death's loss came back while its corpse still held the refundable amount
+/// (dying gained XP), and a turned-in quest lost its reward for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct XpProgress {
+    pub xp: i32,
+    pub xp_to_next: i32,
+    pub level: i32,
+}
+
+async fn write_xp_progress(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    char_id: i64,
+    progress: XpProgress,
+) -> DbResult<()> {
+    sqlx::query("UPDATE characters SET xp = ?1, xp_to_next = ?2, level = ?3 WHERE id = ?4")
+        .bind(progress.xp)
+        .bind(progress.xp_to_next)
+        .bind(progress.level)
+        .bind(char_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Record a quest turn-in (server-authoritative quest rewards) together with
+/// the reward's XP, in one transaction. Idempotent — the (char_id, quest_id)
+/// primary key makes a repeat insert a no-op, and the world loop checks the
+/// in-memory set before awarding anyway. Persisted BEFORE the XP is granted in
+/// memory so a crash can't leave a paid-but-unrecorded quest that a relog
+/// could turn in again, and WITH the XP so a crash can't leave a recorded
+/// quest whose reward was never saved.
 pub async fn record_quest_completion(
     pool: &SqlitePool,
     char_id: i64,
     quest_id: &str,
-) -> AuthResult<()> {
+    progress: XpProgress,
+) -> DbResult<()> {
+    let mut tx = pool.begin().await?;
     sqlx::query("INSERT OR IGNORE INTO completed_quests (char_id, quest_id) VALUES (?1, ?2)")
         .bind(char_id)
         .bind(quest_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    write_xp_progress(&mut tx, char_id, progress).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1108,14 +1377,14 @@ pub async fn record_quest_completion(
 /// path cheap (single-row UPDATE).
 /// Persist a character's bind point (where `Respawn` sends them). Written
 /// immediately when the player binds rather than riding the 60 s checkpoint:
-/// binding is a deliberate, rare act, and losing it to an ungraceful shutdown
+/// binding is a deliberate, rare act, and losing it to a crash
 /// would send the player somewhere they explicitly chose not to be.
 pub async fn set_bind_point(
     pool: &SqlitePool,
     char_id: i64,
     zone: Option<&str>,
     pos: (f32, f32, f32),
-) -> AuthResult<()> {
+) -> DbResult<()> {
     sqlx::query(
         "UPDATE characters
          SET bind_zone = ?1, bind_x = ?2, bind_y = ?3, bind_z = ?4
@@ -1137,7 +1406,7 @@ pub async fn checkpoint_position(
     zone: Option<&str>,
     pos: (f32, f32, f32),
     yaw: f32,
-) -> AuthResult<()> {
+) -> DbResult<()> {
     sqlx::query(
         "UPDATE characters
          SET zone = ?1, pos_x = ?2, pos_y = ?3, pos_z = ?4, yaw = ?5,
@@ -1190,11 +1459,12 @@ pub async fn checkpoint_resources(
     level: i32,
     hunger: f32,
     thirst: f32,
-) -> AuthResult<()> {
+    alignment: f32,
+) -> DbResult<()> {
     sqlx::query(
         "UPDATE characters
          SET hp = ?1, mp = ?2, stamina = ?3, xp = ?4, xp_to_next = ?5,
-             hunger = ?8, thirst = ?9,
+             hunger = ?8, thirst = ?9, alignment_score = ?10, alignment_seeded = 1,
              level = ?6
          WHERE id = ?7 AND deleted_at IS NULL",
     )
@@ -1207,6 +1477,7 @@ pub async fn checkpoint_resources(
     .bind(char_id)
     .bind(hunger)
     .bind(thirst)
+    .bind(alignment)
     .execute(pool)
     .await?;
     Ok(())
@@ -1229,7 +1500,7 @@ pub struct InventoryRow {
 /// Load every inventory row for a character. Returns an empty Vec for
 /// freshly-created characters (which never wrote any rows). Callers
 /// project this into the in-memory `PlayerInventory` shape.
-pub async fn load_inventory(pool: &SqlitePool, char_id: i64) -> AuthResult<Vec<InventoryRow>> {
+pub async fn load_inventory(pool: &SqlitePool, char_id: i64) -> DbResult<Vec<InventoryRow>> {
     let rows: Vec<InventoryRow> = sqlx::query_as(
         "SELECT location, slot, item_path, count
          FROM character_items
@@ -1251,7 +1522,7 @@ pub async fn save_inventory(
     pool: &SqlitePool,
     char_id: i64,
     rows: &[InventoryRow],
-) -> AuthResult<()> {
+) -> DbResult<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM character_items WHERE char_id = ?1")
         .bind(char_id)
@@ -1314,7 +1585,10 @@ struct CorpseHeaderRow {
 /// leaves the gear on the corpse (recoverable) rather than vaporizing it.
 /// `corpse_id` is the minted EntityId (loot-bag id partition); `items` are
 /// flat (item_path, count, worn slot) stacks, the slot `None` for anything
-/// that was carried (`PlayerInventory::corpse_stacks`).
+/// that was carried (`PlayerInventory::corpse_stacks`). `owner_progress` is the
+/// owner's XP after the death penalty, written with the corpse that records
+/// the loss (`lost_xp`), so the two cannot disagree after a crash.
+#[allow(clippy::too_many_arguments)] // one corpse row's fields, written together
 pub async fn save_corpse(
     pool: &SqlitePool,
     corpse_id: i64,
@@ -1326,7 +1600,9 @@ pub async fn save_corpse(
     items: &[(String, u32, Option<u8>)],
     lost_xp: i32,
     strip_owner: bool,
-) -> AuthResult<()> {
+    owner_progress: Option<XpProgress>,
+    events: &[ItemEventRow],
+) -> DbResult<()> {
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1388,6 +1664,12 @@ pub async fn save_corpse(
         .execute(&mut *tx)
         .await?;
     }
+    if let Some(progress) = owner_progress {
+        write_xp_progress(&mut tx, char_id, progress).await?;
+    }
+    // The owner's queued ledger rows and the death rows the caller added to
+    // them, committed with the strip they describe.
+    write_item_events(&mut tx, events).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -1395,7 +1677,7 @@ pub async fn save_corpse(
 /// Load every corpse (+ its items) from the DB. Called ONCE at server boot,
 /// before any login is accepted, so a corpse is always in memory before its
 /// owner could log in and loot it.
-pub async fn load_corpses(pool: &SqlitePool) -> AuthResult<Vec<CorpseRow>> {
+pub async fn load_corpses(pool: &SqlitePool) -> DbResult<Vec<CorpseRow>> {
     let headers: Vec<CorpseHeaderRow> = sqlx::query_as(
         "SELECT corpse_id, char_id, owner_name, zone, pos_x, pos_y, pos_z,
                 platinum, gold, silver, copper, lost_xp, resurrected
@@ -1437,7 +1719,7 @@ pub async fn load_corpses(pool: &SqlitePool) -> AuthResult<Vec<CorpseRow>> {
 
 /// Delete a corpse + its items (decay, or fully-looted in Slice 2). Explicit
 /// two-table delete so it works regardless of the FK-cascade pragma.
-pub async fn delete_corpse(pool: &SqlitePool, corpse_id: i64) -> AuthResult<()> {
+pub async fn delete_corpse(pool: &SqlitePool, corpse_id: i64) -> DbResult<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM corpse_items WHERE corpse_id = ?1")
         .bind(corpse_id)
@@ -1452,12 +1734,22 @@ pub async fn delete_corpse(pool: &SqlitePool, corpse_id: i64) -> AuthResult<()> 
 }
 
 /// Mark a corpse resurrected (corpse / resurrection Slice 3) so it can't be
-/// rezzed twice for free XP. Persisted so a restart can't reset the flag.
-pub async fn set_corpse_resurrected(pool: &SqlitePool, corpse_id: i64) -> AuthResult<()> {
+/// rezzed twice for free XP, and write the owner's XP after the refund in the
+/// same transaction: a flag saved without its refund would spend the
+/// resurrection and lose the XP to a crash.
+pub async fn set_corpse_resurrected(
+    pool: &SqlitePool,
+    corpse_id: i64,
+    owner_char_id: i64,
+    owner_progress: XpProgress,
+) -> DbResult<()> {
+    let mut tx = pool.begin().await?;
     sqlx::query("UPDATE corpses SET resurrected = 1 WHERE corpse_id = ?1")
         .bind(corpse_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    write_xp_progress(&mut tx, owner_char_id, owner_progress).await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1480,7 +1772,8 @@ pub async fn apply_corpse_loot(
     corpse_items: &[(String, u32, Option<u8>)],
     corpse_coins: protocol::world::Coins,
     delete_corpse: bool,
-) -> AuthResult<()> {
+    events: &[ItemEventRow],
+) -> DbResult<()> {
     let mut tx = pool.begin().await?;
     // Looter inventory — full DELETE + reINSERT (same shape as save_inventory).
     sqlx::query("DELETE FROM character_items WHERE char_id = ?1")
@@ -1546,6 +1839,9 @@ pub async fn apply_corpse_loot(
             .execute(&mut *tx)
             .await?;
     }
+    // The looter's queued ledger rows (the corpse loot rows among them),
+    // committed with the inventory they describe.
+    write_item_events(&mut tx, events).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -1562,7 +1858,7 @@ pub struct BankItemRow {
 
 /// Load the per-character bank vault rows (char-keyed). Empty for a
 /// character that has never banked an item.
-pub async fn load_bank_items(pool: &SqlitePool, char_id: i64) -> AuthResult<Vec<BankItemRow>> {
+pub async fn load_bank_items(pool: &SqlitePool, char_id: i64) -> DbResult<Vec<BankItemRow>> {
     let rows: Vec<BankItemRow> = sqlx::query_as(
         "SELECT slot, item_path, count FROM bank_items WHERE char_id = ?1 ORDER BY slot",
     )
@@ -1578,7 +1874,7 @@ pub async fn save_bank_items(
     pool: &SqlitePool,
     char_id: i64,
     rows: &[BankItemRow],
-) -> AuthResult<()> {
+) -> DbResult<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM bank_items WHERE char_id = ?1")
         .bind(char_id)
@@ -1604,7 +1900,7 @@ pub async fn save_bank_items(
 pub async fn load_account_bank_items(
     pool: &SqlitePool,
     account_id: i64,
-) -> AuthResult<Vec<BankItemRow>> {
+) -> DbResult<Vec<BankItemRow>> {
     let rows: Vec<BankItemRow> = sqlx::query_as(
         "SELECT slot, item_path, count FROM account_bank_items WHERE account_id = ?1 ORDER BY slot",
     )
@@ -1620,7 +1916,7 @@ pub async fn save_account_bank_items(
     pool: &SqlitePool,
     account_id: i64,
     rows: &[BankItemRow],
-) -> AuthResult<()> {
+) -> DbResult<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM account_bank_items WHERE account_id = ?1")
         .bind(account_id)
@@ -1676,7 +1972,8 @@ pub async fn save_stores_atomic(
     bank_coins: Option<Coins>,
     bank_items: Option<&[BankItemRow]>,
     account_bank_items: Option<&[BankItemRow]>,
-) -> AuthResult<()> {
+    events: &[ItemEventRow],
+) -> DbResult<()> {
     let mut tx = pool.begin().await?;
 
     if let Some(rows) = inventory {
@@ -1765,6 +2062,10 @@ pub async fn save_stores_atomic(
         }
     }
 
+    // The ledger rows queued since the last flush, committed with the stores
+    // they describe (world/ledger.rs).
+    write_item_events(&mut tx, events).await?;
+
     tx.commit().await?;
     Ok(())
 }
@@ -1773,7 +2074,7 @@ pub async fn save_stores_atomic(
 /// disconnect flush whenever `coins_dirty` is set — without this the
 /// in-session wallet (vendor buys/sells, dev grants) silently resets
 /// to the stale DB row on next login.
-pub async fn save_coins(pool: &SqlitePool, char_id: i64, coins: Coins) -> AuthResult<()> {
+pub async fn save_coins(pool: &SqlitePool, char_id: i64, coins: Coins) -> DbResult<()> {
     sqlx::query(
         "UPDATE characters SET platinum = ?1, gold = ?2, silver = ?3, copper = ?4
          WHERE id = ?5",
@@ -1791,7 +2092,7 @@ pub async fn save_coins(pool: &SqlitePool, char_id: i64, coins: Coins) -> AuthRe
 /// Persist the per-character bank wallet (Banker NPC, slice 1). Mirror of
 /// `save_coins`; gated on `bank_dirty` in the checkpoint sweep + disconnect
 /// flush so deposits / withdrawals / exchanges survive logout.
-pub async fn save_bank(pool: &SqlitePool, char_id: i64, bank: Coins) -> AuthResult<()> {
+pub async fn save_bank(pool: &SqlitePool, char_id: i64, bank: Coins) -> DbResult<()> {
     sqlx::query(
         "UPDATE characters SET bank_platinum = ?1, bank_gold = ?2,
                 bank_silver = ?3, bank_copper = ?4
@@ -1817,7 +2118,81 @@ pub struct SkillRow {
     pub score: i32,
 }
 
-pub async fn load_skills(pool: &SqlitePool, char_id: i64) -> AuthResult<Vec<SkillRow>> {
+/// The server-held spell bar (client-authority audit fix 5, migration 0015):
+/// the character's filled gems as (gem, spell name), and whether the server has
+/// ever held a bar for it (the one-time seed from the player's own copy).
+pub async fn load_spell_gems(
+    pool: &SqlitePool,
+    char_id: i64,
+) -> DbResult<(Vec<(i32, String)>, bool)> {
+    let rows: Vec<(i32, String)> = sqlx::query_as(
+        "SELECT gem, spell_name FROM character_spell_gems WHERE char_id = ?1 ORDER BY gem",
+    )
+    .bind(char_id)
+    .fetch_all(pool)
+    .await?;
+    let seeded: i64 = sqlx::query_scalar("SELECT spell_gems_seeded FROM characters WHERE id = ?1")
+        .bind(char_id)
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or(0);
+    Ok((rows, seeded != 0))
+}
+
+/// Replace the character's spell bar and record that the server now holds it.
+/// One transaction: the bar is never half written.
+pub async fn save_spell_gems(
+    pool: &SqlitePool,
+    char_id: i64,
+    gems: &[(i32, String)],
+    seeded: bool,
+) -> DbResult<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM character_spell_gems WHERE char_id = ?1")
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await?;
+    for (gem, name) in gems {
+        sqlx::query(
+            "INSERT INTO character_spell_gems (char_id, gem, spell_name) VALUES (?1, ?2, ?3)",
+        )
+        .bind(char_id)
+        .bind(gem)
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query("UPDATE characters SET spell_gems_seeded = ?1 WHERE id = ?2")
+        .bind(seeded as i64)
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// When the character last left the world, unix seconds (NO RENT items,
+/// migration 0015); `None` until it first does.
+pub async fn load_logged_out_at(pool: &SqlitePool, char_id: i64) -> DbResult<Option<i64>> {
+    let at: Option<i64> = sqlx::query_scalar("SELECT logged_out_at FROM characters WHERE id = ?1")
+        .bind(char_id)
+        .fetch_optional(pool)
+        .await?
+        .flatten();
+    Ok(at)
+}
+
+/// Stamp the moment a character leaves the world.
+pub async fn set_logged_out_at(pool: &SqlitePool, char_id: i64, at: i64) -> DbResult<()> {
+    sqlx::query("UPDATE characters SET logged_out_at = ?1 WHERE id = ?2")
+        .bind(at)
+        .bind(char_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn load_skills(pool: &SqlitePool, char_id: i64) -> DbResult<Vec<SkillRow>> {
     let rows: Vec<SkillRow> = sqlx::query_as(
         "SELECT kind, key, score
          FROM character_skills
@@ -1834,7 +2209,7 @@ pub async fn load_skills(pool: &SqlitePool, char_id: i64) -> AuthResult<Vec<Skil
 /// (same shape as `save_inventory`); ≤ 21 rows per character so
 /// rewriting the whole set is cheap. Called from the same checkpoint
 /// + disconnect cadence the inventory uses.
-pub async fn save_skills(pool: &SqlitePool, char_id: i64, rows: &[SkillRow]) -> AuthResult<()> {
+pub async fn save_skills(pool: &SqlitePool, char_id: i64, rows: &[SkillRow]) -> DbResult<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM character_skills WHERE char_id = ?1")
         .bind(char_id)
@@ -1851,6 +2226,110 @@ pub async fn save_skills(pool: &SqlitePool, char_id: i64, rows: &[SkillRow]) -> 
         .bind(row.score)
         .execute(&mut *tx)
         .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Faction standings (migration 0016): one row per faction the character has
+/// moved standing with. Read with the character; a faction with no row sits
+/// at its starting value for the character's race and class.
+pub async fn load_factions(pool: &SqlitePool, char_id: i64) -> DbResult<Vec<(String, f32)>> {
+    let rows: Vec<(String, f32)> = sqlx::query_as(
+        "SELECT faction_id, standing
+         FROM character_factions
+         WHERE char_id = ?1
+         ORDER BY faction_id",
+    )
+    .bind(char_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Persist every standing for `char_id`: atomic delete + insert, the
+/// `save_skills` shape (a handful of rows per character). Called on the same
+/// checkpoint + disconnect cadence.
+pub async fn save_factions(
+    pool: &SqlitePool,
+    char_id: i64,
+    rows: &[(String, f32)],
+) -> DbResult<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM character_factions WHERE char_id = ?1")
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await?;
+    for (faction_id, standing) in rows {
+        sqlx::query(
+            "INSERT INTO character_factions (char_id, faction_id, standing)
+             VALUES (?1, ?2, ?3)",
+        )
+        .bind(char_id)
+        .bind(faction_id)
+        .bind(standing)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// PD_W0028 — the trade commit: BOTH characters' inventories and wallets in
+/// ONE transaction. A trade is the sharpest two-connection transfer in the
+/// game: writing the parties separately (or leaving them to their own
+/// periodic checkpoints) opens the classic split-brain dupe — one side's
+/// post-trade state persisted, the other's rolled back, and the traded items
+/// exist twice. Same single-tx doctrine as `apply_corpse_loot` and
+/// `save_stores_atomic`, spanning two characters instead of two stores.
+#[allow(clippy::too_many_arguments)]
+pub async fn commit_trade(
+    pool: &SqlitePool,
+    a_char_id: i64,
+    a_inventory: &[InventoryRow],
+    a_coins: Coins,
+    a_events: &[ItemEventRow],
+    b_char_id: i64,
+    b_inventory: &[InventoryRow],
+    b_coins: Coins,
+    b_events: &[ItemEventRow],
+) -> DbResult<()> {
+    let mut tx = pool.begin().await?;
+    for (char_id, rows, coins, events) in [
+        (a_char_id, a_inventory, a_coins, a_events),
+        (b_char_id, b_inventory, b_coins, b_events),
+    ] {
+        sqlx::query("DELETE FROM character_items WHERE char_id = ?1")
+            .bind(char_id)
+            .execute(&mut *tx)
+            .await?;
+        for row in rows {
+            sqlx::query(
+                "INSERT INTO character_items (char_id, location, slot, item_path, count)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .bind(char_id)
+            .bind(&row.location)
+            .bind(row.slot)
+            .bind(&row.item_path)
+            .bind(row.count)
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query(
+            "UPDATE characters SET platinum = ?1, gold = ?2, silver = ?3, copper = ?4
+             WHERE id = ?5",
+        )
+        .bind(coins.platinum)
+        .bind(coins.gold)
+        .bind(coins.silver)
+        .bind(coins.copper)
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await?;
+        // Each side's queued ledger rows (the trade rows among them),
+        // committed with the inventories and wallets they describe.
+        write_item_events(&mut tx, events).await?;
     }
     tx.commit().await?;
     Ok(())
@@ -1959,7 +2438,8 @@ mod invite_tests {
         assert!(codes[0].len() == INVITE_CODE_BYTES * 2 && codes[0] != codes[1]);
 
         // Typed with dashes and capitals: still the same code.
-        let typed = format!("{}-{}", &codes[0][..16].to_uppercase(), &codes[0][16..]);
+        let (head, tail) = codes[0].split_at(16);
+        let typed = format!("{}-{}", head.to_uppercase(), tail);
         let id = create_account_with_invite(&pool, "sam", "longpassword", None, &typed)
             .await
             .expect("register with a fresh code");
@@ -2433,6 +2913,8 @@ mod corpse_loot_tests {
             ],
             0,     // lost_xp
             false, // strip_owner: tests exercise corpse creation only
+            None,  // owner_progress
+            &[],   // ledger rows
         )
         .await
         .expect("save corpse");
@@ -2460,6 +2942,7 @@ mod corpse_loot_tests {
             &[("res://items/shield.tres".to_string(), 1, Some(1))],
             protocol::world::Coins::ZERO,
             false, // partial -> keep the corpse
+            &[],
         )
         .await
         .expect("apply");
@@ -2511,6 +2994,7 @@ mod corpse_loot_tests {
             &[],
             protocol::world::Coins::ZERO,
             true, // looted clean -> delete the corpse
+            &[],
         )
         .await
         .expect("apply");
@@ -2589,6 +3073,8 @@ mod corpse_loot_tests {
             ],
             0,
             true, // strip_owner
+            None,
+            &[],
         )
         .await
         .expect("save corpse + strip");
@@ -2642,6 +3128,8 @@ mod corpse_loot_tests {
             &[("res://items/staff.tres".to_string(), 1, Some(0))],
             500,   // lost_xp
             false, // strip_owner: tests exercise corpse creation only
+            None,  // owner_progress
+            &[],   // ledger rows
         )
         .await
         .expect("save");
@@ -2653,6 +3141,59 @@ mod corpse_loot_tests {
             "lost_xp must survive a save/load round-trip"
         );
         assert!(!loaded[0].resurrected, "a fresh corpse is not resurrected");
+    }
+
+    /// The resurrected flag and the refunded XP land in one transaction: the
+    /// flag alone would spend the resurrection and lose the refund to a crash.
+    #[tokio::test]
+    async fn a_resurrection_saves_its_refund_with_the_flag() {
+        let (pool, _tmp) = fresh_pool().await;
+        let account = create_account(&pool, "rezref", "hunter2!", None)
+            .await
+            .expect("account");
+        let char_id = create_character(&pool, account, "Rezref", "Human", "Warrior")
+            .await
+            .expect("char");
+        let corpse_id = 2_000_000_078_i64;
+        save_corpse(
+            &pool,
+            corpse_id,
+            char_id,
+            "Rezref",
+            "test_zone",
+            (0.0, 0.0, 0.0),
+            protocol::world::Coins::ZERO,
+            &[],
+            400,
+            false,
+            None,
+            &[],
+        )
+        .await
+        .expect("save");
+
+        let refunded = XpProgress {
+            xp: 123,
+            xp_to_next: 9_000,
+            level: 7,
+        };
+        set_corpse_resurrected(&pool, corpse_id, char_id, refunded)
+            .await
+            .expect("resurrect");
+
+        let loaded = load_corpses(&pool).await.expect("load");
+        assert!(loaded[0].resurrected, "the flag is set");
+        let (xp, xp_to_next, level): (i64, i64, i64) =
+            sqlx::query_as("SELECT xp, xp_to_next, level FROM characters WHERE id = ?1")
+                .bind(char_id)
+                .fetch_one(&pool)
+                .await
+                .expect("xp row");
+        assert_eq!(
+            (xp, xp_to_next, level),
+            (123, 9_000, 7),
+            "the refund is saved with the flag"
+        );
     }
 
     // Server-authoritative quest rewards — a completion persists across a
@@ -2674,15 +3215,42 @@ mod corpse_loot_tests {
             "fresh char has no completions"
         );
 
-        record_quest_completion(&pool, char_id, "wolf_threat")
-            .await
-            .expect("record");
-        record_quest_completion(&pool, char_id, "wolf_threat")
-            .await
-            .expect("repeat is a no-op");
-        record_quest_completion(&pool, char_id, "rotfang_hunt")
-            .await
-            .expect("record 2nd");
+        record_quest_completion(
+            &pool,
+            char_id,
+            "wolf_threat",
+            XpProgress {
+                xp: 0,
+                xp_to_next: 1000,
+                level: 1,
+            },
+        )
+        .await
+        .expect("record");
+        record_quest_completion(
+            &pool,
+            char_id,
+            "wolf_threat",
+            XpProgress {
+                xp: 0,
+                xp_to_next: 1000,
+                level: 1,
+            },
+        )
+        .await
+        .expect("repeat is a no-op");
+        record_quest_completion(
+            &pool,
+            char_id,
+            "rotfang_hunt",
+            XpProgress {
+                xp: 0,
+                xp_to_next: 1000,
+                level: 1,
+            },
+        )
+        .await
+        .expect("record 2nd");
 
         let spawn = load_character(&pool, char_id).await.expect("reload");
         let mut done = spawn.completed_quests.clone();

@@ -5,6 +5,9 @@
 //! the full Register → Login → CharCreate → CharList → CharDelete
 //! → Logout flow. No external test client (wscat/websocat) required.
 
+// Test code may unwrap and expect: a panic is the test failing.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use futures_util::{SinkExt, StreamExt};
 use projectdawn_server::auth::AuthPolicy;
 use projectdawn_server::{auth, db, Config};
@@ -38,7 +41,10 @@ async fn start_server_with(policy: AuthPolicy) -> (String, String, TempDir) {
         },
         // Fixed bytes — auth tests never actually mint a token, so the
         // value doesn't matter; we just need *some* 32-byte array.
-        netcode_private_key: [0xA5; 32],
+        netcode_private_key: projectdawn_server::config::NetcodeKey([0xA5; 32]),
+        fizzles: true,
+        panic_probe: None,
+        terrain: None,
     };
 
     let pool = db::open(&url).await.expect("open pool");

@@ -91,8 +91,7 @@ struct NamedFile {
 fn table() -> &'static HashMap<String, NamedMob> {
     static NAMED: OnceLock<HashMap<String, NamedMob>> = OnceLock::new();
     NAMED.get_or_init(|| {
-        let parsed: NamedFile =
-            toml::from_str(NAMED_TOML).expect("named_mobs.toml must parse — fix the embedded file");
+        let parsed: NamedFile = crate::world::parse_embedded("named_mobs.toml", NAMED_TOML);
         parsed
             .named
             .into_iter()
@@ -140,7 +139,8 @@ pub fn resolve_for_dev_spawn(name: &str) -> Option<&'static NamedMob> {
         .find(|m| m.display_name == name || m.full_name() == name)
 }
 
-/// Every named id, for dev tooling and tests.
+/// Every named id, for the tests that walk the whole table.
+#[cfg(test)]
 pub fn all_ids() -> Vec<&'static str> {
     table().keys().map(|s| s.as_str()).collect()
 }

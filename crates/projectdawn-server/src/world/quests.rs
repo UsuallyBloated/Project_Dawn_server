@@ -53,6 +53,15 @@ pub struct Quest {
     /// gate — fine for dev quests like `test_q1`.
     #[serde(default)]
     pub turn_in_npc: Option<String>,
+    /// Faction standing paid on turn-in, by faction id (`factions.toml`),
+    /// explicit per quest as EQ's were (`world/factions.rs`). Empty means the
+    /// quest moves no standing.
+    #[serde(default)]
+    pub faction_hits: HashMap<String, f32>,
+    /// Alignment moved on turn-in, through the momentum rule
+    /// (`world/alignment.rs`). Zero (the default) moves nothing.
+    #[serde(default)]
+    pub alignment_delta: f32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -113,7 +122,7 @@ fn tier_fraction(tier: &str) -> Option<f64> {
 /// compile-time-embedded, so a data bug should fail the very first test run,
 /// never limp into a live server that silently miscounts.
 fn parse(toml_str: &str) -> HashMap<String, Quest> {
-    let file: QuestsFile = toml::from_str(toml_str).expect("data/quests.toml must parse");
+    let file: QuestsFile = crate::world::parse_embedded("quests.toml", toml_str);
     for q in &file.quests {
         assert!(
             !q.objectives.is_empty(),
@@ -146,6 +155,16 @@ fn parse(toml_str: &str) -> HashMap<String, Quest> {
                 "quest {:?}: item_reward {:?} is not a known item (regenerate items.toml)",
                 q.id,
                 path
+            );
+        }
+        // Every faction a quest pays must exist, or the turn-in would pay
+        // standing nobody can read.
+        for fid in q.faction_hits.keys() {
+            assert!(
+                super::factions::lookup(fid).is_some(),
+                "quest {:?}: faction_hits names unknown faction {:?}",
+                q.id,
+                fid
             );
         }
     }

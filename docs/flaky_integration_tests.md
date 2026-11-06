@@ -1,4 +1,4 @@
-# Flaky integration tests — `tests/world_two_clients.rs`
+# Flaky integration tests — `tests/world_two_clients.rs` (since 2026-11-01, `tests/world/`)
 
 **Status: RESOLVED 2026-09-16 (commits `ebb161f` + `96c6036`), with the one
 remaining varier root-caused 2026-10-01 (`3523bd1` + `30f0474`). The suite runs

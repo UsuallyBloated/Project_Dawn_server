@@ -32,6 +32,18 @@ pub struct Npc {
     pub name: String,
     pub kinds: Vec<String>,
     pub pos: [f32; 3],
+    /// The faction whose standing decides whether this NPC serves a player
+    /// (`factions.toml`): a vendor or banker refuses at Dubious or below, a
+    /// quest giver at Apprehensive or below. None means the NPC serves
+    /// everyone (the soul binder, by design).
+    #[serde(default)]
+    pub faction: Option<String>,
+    /// For a vendor: the client's `VendorDefinitions` entry it mirrors.
+    #[serde(default)]
+    pub vendor_type: Option<String>,
+    /// For a vendor: the item names it sells. Nothing else is for sale there.
+    #[serde(default)]
+    pub stock: Vec<String>,
 }
 
 impl Npc {
@@ -56,9 +68,15 @@ struct NpcsFile {
 fn table() -> &'static Vec<Npc> {
     static NPCS: OnceLock<Vec<Npc>> = OnceLock::new();
     NPCS.get_or_init(|| {
-        let parsed: NpcsFile =
-            toml::from_str(NPCS_TOML).expect("npcs.toml must parse — fix the embedded file");
-        for n in &parsed.npc {
+        let parsed: NpcsFile = crate::world::parse_embedded("npcs.toml", NPCS_TOML);
+        let mut npcs = parsed.npc;
+        // Every NPC stands on the ground (the height model's decision 4):
+        // the file's y is a placeholder the ground overrides, so an authored
+        // height can never disagree with where the client draws the NPC.
+        for n in &mut npcs {
+            n.pos[1] = super::terrain::compiled().ground(n.pos[0], n.pos[2]);
+        }
+        for n in &npcs {
             for k in &n.kinds {
                 assert!(
                     matches!(k.as_str(), "vendor" | "banker" | "quest" | "soul_binder"),
@@ -66,13 +84,34 @@ fn table() -> &'static Vec<Npc> {
                     n.id
                 );
             }
+            if let Some(f) = n.faction.as_deref() {
+                assert!(
+                    super::factions::lookup(f).is_some(),
+                    "npcs.toml: unknown faction '{f}' on '{}'",
+                    n.id
+                );
+            }
         }
-        parsed.npc
+        npcs
     })
+}
+
+/// Every NPC, for the tests that hold the zone's ground to them
+/// (`terrain_content.rs`).
+#[cfg(test)]
+pub fn all() -> &'static [Npc] {
+    table()
 }
 
 pub fn lookup(id: &str) -> Option<&'static Npc> {
     table().iter().find(|n| n.id == id)
+}
+
+/// An NPC by its id or, failing that, its display name (case-insensitive):
+/// the client's NPC nodes carry the name and not the id, so a `Consider`
+/// names what the player sees.
+pub fn lookup_by_id_or_name(key: &str) -> Option<&'static Npc> {
+    lookup(key).or_else(|| table().iter().find(|n| n.name.eq_ignore_ascii_case(key)))
 }
 
 /// Is any NPC of `kind` within service range of `pos`? Returns the NPC so the
@@ -82,6 +121,33 @@ pub fn any_within_range(kind: &str, pos: Vec3f) -> Option<&'static Npc> {
         .iter()
         .filter(|n| n.has_kind(kind))
         .find(|n| n.position().distance_to(pos) <= NPC_SERVICE_RANGE)
+}
+
+/// Every NPC of `kind` within service range of `pos`, for the faction gate
+/// (one vendor may refuse a character another serves).
+pub fn all_within_range(kind: &str, pos: Vec3f) -> Vec<&'static Npc> {
+    table()
+        .iter()
+        .filter(|n| n.has_kind(kind))
+        .filter(|n| n.position().distance_to(pos) <= NPC_SERVICE_RANGE)
+        .collect()
+}
+
+/// A vendor within service range of `pos` that `serves` the buyer and stocks
+/// `item_name`, if any. The client names no vendor yet (its `vendor_id` is
+/// always 0), so any vendor in reach that deals with the buyer and sells the
+/// item will do; what matters is that an item nobody stocks, a rare drop with
+/// a sell-back price, cannot be bought anywhere, and that a vendor who refuses
+/// the buyer on faction cannot be the one who sells.
+pub fn vendor_stocking_within_range(
+    item_name: &str,
+    pos: Vec3f,
+    serves: impl Fn(&Npc) -> bool,
+) -> Option<&'static Npc> {
+    all_within_range("vendor", pos)
+        .into_iter()
+        .filter(|n| serves(n))
+        .find(|n| n.stock.iter().any(|s| s == item_name))
 }
 
 /// Is the specific NPC `id` within service range of `pos`? Used for quest
@@ -156,6 +222,61 @@ mod tests {
         );
         assert!(any_within_range("vendor", dungeon).is_none());
         assert!(!id_within_range("aldric", dungeon));
+    }
+
+    /// Every stocked name must be a real item with a price, or the vendor
+    /// lists an item the BuyItem path can never sell.
+    #[test]
+    fn every_vendor_stocks_only_real_priced_items() {
+        for n in table().iter().filter(|n| n.has_kind("vendor")) {
+            assert!(!n.stock.is_empty(), "vendor {} has no stock", n.id);
+            assert!(
+                n.vendor_type.is_some(),
+                "vendor {} names no vendor_type",
+                n.id
+            );
+            for name in &n.stock {
+                let item = crate::world::items::lookup_by_name(name).unwrap_or_else(|| {
+                    panic!("{}: stocked item '{name}' is not in items.toml", n.id)
+                });
+                assert!(
+                    item.vendor_price > 0,
+                    "{}: '{name}' has no vendor_price",
+                    n.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_priced_item_nobody_stocks_is_sold_nowhere() {
+        let at_brom = Vec3f {
+            x: 8.0,
+            y: 0.0,
+            z: 5.0,
+        };
+        assert_eq!(
+            vendor_stocking_within_range("Bread Loaf", at_brom, |_| true).map(|n| n.id.as_str()),
+            Some("brom")
+        );
+        // Hadrik (x = -5) is within service range of the spawn, Brom is not
+        // the one who sells swords.
+        assert!(vendor_stocking_within_range("Iron Short Sword", Vec3f::ZERO, |_| true).is_some());
+        // The only vendor who stocks it refuses the buyer (faction): not for sale.
+        assert!(
+            vendor_stocking_within_range("Iron Short Sword", Vec3f::ZERO, |n| n.id != "hadrik")
+                .is_none()
+        );
+        // A named drop with a sell-back price.
+        assert!(crate::world::items::lookup_by_name("Predator's Collar")
+            .is_some_and(|i| i.vendor_price > 0));
+        assert!(vendor_stocking_within_range("Predator's Collar", at_brom, |_| true).is_none());
+        let dungeon = Vec3f {
+            x: 200.0,
+            y: 0.0,
+            z: 200.0,
+        };
+        assert!(vendor_stocking_within_range("Bread Loaf", dungeon, |_| true).is_none());
     }
 
     #[test]

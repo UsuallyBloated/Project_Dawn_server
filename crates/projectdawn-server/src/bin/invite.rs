@@ -173,7 +173,7 @@ async fn list(pool: &sqlx::SqlitePool) -> Result<()> {
         };
         // Shown once means once: an unused code is masked here.
         let shown = if r.redeemed_at.is_none() && r.revoked_at.is_none() {
-            format!("{}{}", &r.code[..6.min(r.code.len())], "…".repeat(1))
+            format!("{}…", r.code.chars().take(6).collect::<String>())
         } else {
             r.code.clone()
         };

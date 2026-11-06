@@ -95,6 +95,15 @@ impl NetClient {
     #[signal]
     fn kicked(reason: GString, code: GString);
 
+    /// The kick just received says when a relogin will be accepted
+    /// (`reconnect_after_secs`: a duplicate login refused while the old body
+    /// lingers linkdead). Emitted immediately BEFORE `kicked`, and only when
+    /// the server sent a time, so `kicked` keeps its two arguments and a
+    /// client that never connects this signal loses nothing but the
+    /// countdown.
+    #[signal]
+    fn kick_retry_after(secs: i64);
+
     /// Server position broadcast. `sequence` echoes the last accepted Move seq.
     #[signal]
     fn position(id: i64, pos: Vector3, vel: Vector3, yaw: f32, sequence: i64);
@@ -145,6 +154,21 @@ impl NetClient {
     #[signal]
     fn cast_fail(caster: i64, reason: GString);
 
+    /// The server refused one of our `UseSkill`s (client-authority audit
+    /// item 6): the skill's name, so the client drops the cooldown it
+    /// started, and the reason for the chat line.
+    #[signal]
+    fn skill_fail(skill_name: GString, reason: GString);
+
+    /// One of our faction standings (factions, 2026-10-23): on entering the
+    /// world, after a change, after a GM set. `level` is 0 Scowls to 8 Ally.
+    #[signal]
+    fn faction_update(faction_id: GString, name: GString, standing: f64, level: i64);
+
+    /// Our alignment score as the server holds it.
+    #[signal]
+    fn alignment_update(score: f64);
+
     /// Track 4 sub-task 4 combat events. `dmg_type` is the u8
     /// discriminant of `protocol::world::DamageType` (mirror of
     /// NetProtocol.DamageType on the GDScript side).
@@ -163,6 +187,30 @@ impl NetClient {
         crit: bool,
         dmg_type: i64,
     );
+
+    // ── PD_W0028 — the trade window (docs/design/trade_window.md). ──
+    #[signal]
+    fn trade_opened(partner_id: i64, partner_name: GString);
+
+    /// Full state of ONE side's offer after any edit. `mine` = my side vs
+    /// the partner's. `item_paths` / `counts` are TRADE_SLOTS long; an
+    /// empty path means an empty window slot.
+    #[signal]
+    fn trade_offer_update(
+        mine: bool,
+        item_paths: PackedStringArray,
+        counts: PackedInt32Array,
+        platinum: i64,
+        gold: i64,
+        silver: i64,
+        copper: i64,
+    );
+
+    #[signal]
+    fn trade_accept_state(you: bool, them: bool);
+
+    #[signal]
+    fn trade_closed(committed: bool, reason: GString);
 
     #[signal]
     fn miss(attacker: i64, target: i64);
@@ -215,6 +263,13 @@ impl NetClient {
         pos: Vector3,
         yaw: f32,
     );
+
+    /// PD_W0028: the spawn just emitted (`enemy_spawn` / `pet_spawn`) is the
+    /// creature that was `old_id`, under a new id: a charm landing or ending.
+    /// A separate signal so the spawn signals keep their arity; emitted
+    /// right after the spawn, so the new node already exists.
+    #[signal]
+    fn entity_replaced(old_id: i64, new_id: i64);
 
     /// Track 13.2 — full inventory snapshot privately seeded to the
     /// owning client on EnterWorld. Parallel arrays: locations[i] /
@@ -294,6 +349,25 @@ impl NetClient {
     /// with every other player.
     #[signal]
     fn time_of_day(hour: f64);
+
+    /// The hunger window: the local player's food and water counters in
+    /// seconds of fullness, the cap, and the drain per real second right
+    /// now (0 while dead). Sent on entering the world, after any eat or
+    /// drink, on a stage change, on death and respawn, and about once a
+    /// minute; the client runs the bars down between sends.
+    #[signal]
+    fn hunger_update(hunger_secs: f64, thirst_secs: f64, cap_secs: f64, drain_per_sec: f64);
+
+    /// A player you can see began a jump (never your own). The client
+    /// plays a hop on that body; the server moves nobody for it.
+    #[signal]
+    fn player_jumped(id: i64);
+
+    /// The memorized spell bar as the server holds it (index = gem, "" =
+    /// empty); `seeded` false means the server holds none yet and the client
+    /// may offer its own once. Client-authority audit fix 5.
+    #[signal]
+    fn spell_gems(gems: PackedStringArray, seeded: bool);
 
     /// Track 5 sub-task 4 — private confirmation that the local
     /// player's LootItem / LootAll intent landed and the server has
@@ -638,8 +712,9 @@ impl NetClient {
 
     /// Send a Move intent on the unreliable position channel. Server clamps
     /// `direction` to unit length and applies the speed cap; we just relay it.
+    /// `yaw` is the body's facing (PD_W0029), relayed to peers as sent.
     #[func]
-    fn send_move(&mut self, sequence: i64, direction: Vector3, jumping: bool) -> bool {
+    fn send_move(&mut self, sequence: i64, direction: Vector3, jumping: bool, yaw: f32) -> bool {
         let msg = ClientWorldMsg::Move {
             sequence: sequence.max(0) as u32,
             direction: WireVec3 {
@@ -648,6 +723,7 @@ impl NetClient {
                 z: direction.z,
             },
             jumping,
+            yaw,
         };
         self.send_app(CHANNEL_POSITION, &msg)
     }
@@ -739,6 +815,83 @@ impl NetClient {
         )
     }
 
+    // ── PD_W0028 — the trade window (docs/design/trade_window.md). ──
+    /// Open a trade with the player `target_id` (a char id). The holding-
+    /// click path sends this; the server opens instantly for both parties.
+    #[func]
+    fn send_trade_request(&mut self, target_id: i64) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeRequest {
+                target_id: target_id.max(0) as u64,
+            },
+        )
+    }
+
+    /// Place the stack at `(from_location, from_slot)` into my `window_slot`
+    /// (0..8). `from_location = "cursor"` parks the held stack first.
+    #[func]
+    fn send_trade_offer_item(
+        &mut self,
+        window_slot: i64,
+        from_location: GString,
+        from_slot: i64,
+    ) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeOfferItem {
+                window_slot: window_slot.clamp(0, 255) as u8,
+                from_location: from_location.to_string(),
+                from_slot: from_slot.max(0) as u32,
+            },
+        )
+    }
+
+    /// Clear my side's `window_slot` (unlocks the referenced inventory slot).
+    #[func]
+    fn send_trade_retrieve_item(&mut self, window_slot: i64) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeRetrieveItem {
+                window_slot: window_slot.clamp(0, 255) as u8,
+            },
+        )
+    }
+
+    /// Absolute per-tier coin offer.
+    #[func]
+    fn send_trade_offer_coins(
+        &mut self,
+        platinum: i64,
+        gold: i64,
+        silver: i64,
+        copper: i64,
+    ) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::TradeOfferCoins {
+                coins: protocol::world::Coins {
+                    platinum,
+                    gold,
+                    silver,
+                    copper,
+                },
+            },
+        )
+    }
+
+    /// Press Trade. Both sides accepted commits in the same server tick.
+    #[func]
+    fn send_trade_accept(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::TradeAccept)
+    }
+
+    /// Close the window (also implied by range/death/zone/disconnect).
+    #[func]
+    fn send_trade_cancel(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::TradeCancel)
+    }
+
     /// PD_W0024 — accept a quest so the server starts counting its objectives.
     /// Fire alongside the local QuestManager.add_quest (optimistic add); a
     /// `quest_rejected` reply means roll the add back. giver_id is a scaffold
@@ -791,6 +944,117 @@ impl NetClient {
                 aggro: aggro as f32,
             },
         )
+    }
+
+    /// Dev-only, gated and audited like `send_dev_spawn_mob`: remove every
+    /// unowned enemy in this player's view from the SERVER (the Test Panel's
+    /// "Despawn All Enemies"). The clients learn of it through the ordinary
+    /// EntityDespawn.
+    #[func]
+    fn send_dev_despawn_enemies(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::DevDespawnEnemies)
+    }
+
+    /// Use an active skill by name (client-authority audit item 6). A damage
+    /// skill names its target; a SELF skill passes 0. The server owns the
+    /// stamina, the cooldown, the swing and the effect, and answers a
+    /// refusal with `skill_fail`.
+    #[func]
+    fn send_use_skill(&mut self, skill_name: GString, target_id: i64) -> bool {
+        let target = if target_id == 0 {
+            None
+        } else {
+            Some(target_id as u64)
+        };
+        let msg = ClientWorldMsg::UseSkill {
+            skill_name: skill_name.to_string(),
+            target_id: target,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// Stop the song being sung (the Bard song rework): the server pulses
+    /// the song, so ending it is a message, not another sing.
+    #[func]
+    fn send_stop_song(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::StopSong)
+    }
+
+    /// Consider an NPC (by its npcs.toml id; "" for none) or a mob (by
+    /// entity id; 0 for none). The server answers with the con line.
+    #[func]
+    fn send_consider(&mut self, npc_id: GString, target_id: i64) -> bool {
+        let npc = npc_id.to_string();
+        let msg = ClientWorldMsg::Consider {
+            npc_id: if npc.is_empty() { None } else { Some(npc) },
+            target_id: if target_id == 0 {
+                None
+            } else {
+                Some(target_id as u64)
+            },
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// Dev-only, gated and audited like `send_dev_spawn_mob`: set our own
+    /// standing with one faction (the GM faction panel's slider).
+    #[func]
+    fn send_dev_set_faction(&mut self, faction_id: GString, standing: f64) -> bool {
+        let msg = ClientWorldMsg::DevSetFaction {
+            faction_id: faction_id.to_string(),
+            standing: standing as f32,
+        };
+        self.send_app(CHANNEL_SYSTEM, &msg)
+    }
+
+    /// Dev-only, gated and audited like `send_dev_spawn_mob`: lift ourselves
+    /// `height` metres and fall (the Test Panel's Fling buttons). The server
+    /// ignores a height outside (0, 100] and a plain account's request.
+    #[func]
+    fn send_dev_fling(&mut self, height: f64) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::DevFling {
+                height: height as f32,
+            },
+        )
+    }
+
+    /// The server-held spell bar (client-authority audit fix 5): begin
+    /// memorizing `spell_name` into `gem` (0-based).
+    #[func]
+    fn send_memorize_start(&mut self, gem: i64, spell_name: GString) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::MemorizeStart {
+                gem: gem.clamp(0, u8::MAX as i64) as u8,
+                spell_name: spell_name.to_string(),
+            },
+        )
+    }
+
+    /// The memorize bar ran out here; the server decides whether it took.
+    #[func]
+    fn send_memorize_finish(&mut self) -> bool {
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::MemorizeFinish)
+    }
+
+    /// Empty a gem.
+    #[func]
+    fn send_forget_spell(&mut self, gem: i64) -> bool {
+        self.send_app(
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::ForgetSpell {
+                gem: gem.clamp(0, u8::MAX as i64) as u8,
+            },
+        )
+    }
+
+    /// Offer this machine's bar once, for a character the server holds none for.
+    #[func]
+    fn send_seed_spell_gems(&mut self, gems: PackedStringArray) -> bool {
+        let gems: Vec<String> = gems.to_vec().iter().map(|g| g.to_string()).collect();
+        self.send_app(CHANNEL_SYSTEM, &ClientWorldMsg::SeedSpellGems { gems })
     }
 
     /// Track 6 — owning client respawned (local death-timer elapsed).
@@ -1250,6 +1514,8 @@ impl NetClient {
         let slot_u8 = slot.clamp(0, u8::MAX as i64) as u8;
         let slot_ref = if loc == "base" {
             protocol::world::SlotRef::BaseSlot { idx: slot_u8 }
+        } else if loc == "cursor" {
+            protocol::world::SlotRef::Cursor
         } else if let Some(rest) = loc.strip_prefix("bag_") {
             let base: u8 = match rest.parse() {
                 Ok(v) => v,
@@ -1307,16 +1573,18 @@ impl NetClient {
     }
 
     /// Track 14 follow-up — vendor sell intent. `location` is one of
-    /// "base" or "bag_<i>"; equip slots reject server-side. The
-    /// GDScript caller uses the same string `location` it'd use for
-    /// `send_move_item`, so the vendor UI never has to mint a typed
-    /// SlotRef.
+    /// "base", "bag_<i>" or "cursor" (the held stack, PD_W0029); equip
+    /// slots reject server-side. The GDScript caller uses the same string
+    /// `location` it'd use for `send_move_item`, so the vendor UI never has
+    /// to mint a typed SlotRef.
     #[func]
     fn send_sell_item(&mut self, location: GString, slot: i64, qty: i64) -> bool {
         let loc = location.to_string();
         let slot_u8 = slot.clamp(0, u8::MAX as i64) as u8;
         let slot_ref = if loc == "base" {
             protocol::world::SlotRef::BaseSlot { idx: slot_u8 }
+        } else if loc == "cursor" {
+            protocol::world::SlotRef::Cursor
         } else if let Some(rest) = loc.strip_prefix("bag_") {
             let base: u8 = match rest.parse() {
                 Ok(v) => v,
@@ -1411,6 +1679,8 @@ enum Incoming {
     Kick {
         reason: String,
         code: String,
+        /// Seconds until a relogin is accepted, or -1 when the kick sent none.
+        retry_after_secs: i64,
     },
     Position {
         id: i64,
@@ -1478,6 +1748,27 @@ enum Incoming {
         crit: bool,
         dmg_type: u8,
     },
+    // ── PD_W0028 — the trade window. ──
+    TradeOpened {
+        partner_id: i64,
+        partner_name: String,
+    },
+    TradeOfferUpdate {
+        mine: bool,
+        slots: Vec<(String, u32)>,
+        platinum: i64,
+        gold: i64,
+        silver: i64,
+        copper: i64,
+    },
+    TradeAcceptState {
+        you: bool,
+        them: bool,
+    },
+    TradeClosed {
+        committed: bool,
+        reason: String,
+    },
     Miss {
         attacker: i64,
         target: i64,
@@ -1497,6 +1788,7 @@ enum Incoming {
         hp: f32,
         pos: WireVec3,
         yaw: f32,
+        replaces: Option<i64>,
     },
     EntityTarget {
         id: i64,
@@ -1511,6 +1803,7 @@ enum Incoming {
         hp: f32,
         pos: WireVec3,
         yaw: f32,
+        replaces: Option<i64>,
     },
     InventorySnapshot {
         entries: Vec<(String, u32, String, u32)>,
@@ -1555,6 +1848,32 @@ enum Incoming {
     },
     TimeOfDay {
         hour: f32,
+    },
+    HungerUpdate {
+        hunger_secs: f32,
+        thirst_secs: f32,
+        cap_secs: f32,
+        drain_per_sec: f32,
+    },
+    PlayerJumped {
+        id: i64,
+    },
+    SpellGems {
+        gems: Vec<String>,
+        seeded: bool,
+    },
+    SkillFail {
+        skill_name: String,
+        reason: String,
+    },
+    FactionUpdate {
+        faction_id: String,
+        name: String,
+        standing: f32,
+        level: u8,
+    },
+    AlignmentUpdate {
+        score: f32,
     },
     LootGranted {
         item_path: String,
@@ -1764,7 +2083,15 @@ impl NetClient {
                 Incoming::Heartbeat => {
                     self.base_mut().emit_signal("heartbeat", &[]);
                 }
-                Incoming::Kick { reason, code } => {
+                Incoming::Kick {
+                    reason,
+                    code,
+                    retry_after_secs,
+                } => {
+                    if retry_after_secs >= 0 {
+                        self.base_mut()
+                            .emit_signal("kick_retry_after", &[retry_after_secs.to_variant()]);
+                    }
                     self.base_mut().emit_signal(
                         "kicked",
                         &[
@@ -1885,6 +2212,58 @@ impl NetClient {
                         ],
                     );
                 }
+                Incoming::TradeOpened {
+                    partner_id,
+                    partner_name,
+                } => {
+                    self.base_mut().emit_signal(
+                        "trade_opened",
+                        &[
+                            partner_id.to_variant(),
+                            GString::from(partner_name.as_str()).to_variant(),
+                        ],
+                    );
+                }
+                Incoming::TradeOfferUpdate {
+                    mine,
+                    slots,
+                    platinum,
+                    gold,
+                    silver,
+                    copper,
+                } => {
+                    let mut item_paths = PackedStringArray::new();
+                    let mut counts = PackedInt32Array::new();
+                    for (path, count) in slots {
+                        item_paths.push(&GString::from(path.as_str()));
+                        counts.push(count as i32);
+                    }
+                    self.base_mut().emit_signal(
+                        "trade_offer_update",
+                        &[
+                            mine.to_variant(),
+                            item_paths.to_variant(),
+                            counts.to_variant(),
+                            platinum.to_variant(),
+                            gold.to_variant(),
+                            silver.to_variant(),
+                            copper.to_variant(),
+                        ],
+                    );
+                }
+                Incoming::TradeAcceptState { you, them } => {
+                    self.base_mut()
+                        .emit_signal("trade_accept_state", &[you.to_variant(), them.to_variant()]);
+                }
+                Incoming::TradeClosed { committed, reason } => {
+                    self.base_mut().emit_signal(
+                        "trade_closed",
+                        &[
+                            committed.to_variant(),
+                            GString::from(reason.as_str()).to_variant(),
+                        ],
+                    );
+                }
                 Incoming::ProcTriggered {
                     attacker,
                     target,
@@ -1941,6 +2320,7 @@ impl NetClient {
                     hp,
                     pos,
                     yaw,
+                    replaces,
                 } => {
                     self.base_mut().emit_signal(
                         "enemy_spawn",
@@ -1954,6 +2334,12 @@ impl NetClient {
                             yaw.to_variant(),
                         ],
                     );
+                    if let Some(old_id) = replaces {
+                        self.base_mut().emit_signal(
+                            "entity_replaced",
+                            &[old_id.to_variant(), id.to_variant()],
+                        );
+                    }
                 }
                 Incoming::PetSpawn {
                     id,
@@ -1964,6 +2350,7 @@ impl NetClient {
                     hp,
                     pos,
                     yaw,
+                    replaces,
                 } => {
                     self.base_mut().emit_signal(
                         "pet_spawn",
@@ -1978,6 +2365,12 @@ impl NetClient {
                             yaw.to_variant(),
                         ],
                     );
+                    if let Some(old_id) = replaces {
+                        self.base_mut().emit_signal(
+                            "entity_replaced",
+                            &[old_id.to_variant(), id.to_variant()],
+                        );
+                    }
                 }
                 Incoming::InventorySnapshot { entries } => {
                     let mut locations = PackedStringArray::new();
@@ -2122,6 +2515,63 @@ impl NetClient {
                 Incoming::TimeOfDay { hour } => {
                     self.base_mut()
                         .emit_signal("time_of_day", &[(hour as f64).to_variant()]);
+                }
+                Incoming::PlayerJumped { id } => {
+                    self.base_mut()
+                        .emit_signal("player_jumped", &[id.to_variant()]);
+                }
+                Incoming::SpellGems { gems, seeded } => {
+                    let mut names = PackedStringArray::new();
+                    for g in &gems {
+                        names.push(&GString::from(g.as_str()));
+                    }
+                    self.base_mut()
+                        .emit_signal("spell_gems", &[names.to_variant(), seeded.to_variant()]);
+                }
+                Incoming::SkillFail { skill_name, reason } => {
+                    self.base_mut().emit_signal(
+                        "skill_fail",
+                        &[
+                            GString::from(skill_name.as_str()).to_variant(),
+                            GString::from(reason.as_str()).to_variant(),
+                        ],
+                    );
+                }
+                Incoming::FactionUpdate {
+                    faction_id,
+                    name,
+                    standing,
+                    level,
+                } => {
+                    self.base_mut().emit_signal(
+                        "faction_update",
+                        &[
+                            GString::from(faction_id.as_str()).to_variant(),
+                            GString::from(name.as_str()).to_variant(),
+                            (standing as f64).to_variant(),
+                            (level as i64).to_variant(),
+                        ],
+                    );
+                }
+                Incoming::AlignmentUpdate { score } => {
+                    self.base_mut()
+                        .emit_signal("alignment_update", &[(score as f64).to_variant()]);
+                }
+                Incoming::HungerUpdate {
+                    hunger_secs,
+                    thirst_secs,
+                    cap_secs,
+                    drain_per_sec,
+                } => {
+                    self.base_mut().emit_signal(
+                        "hunger_update",
+                        &[
+                            (hunger_secs as f64).to_variant(),
+                            (thirst_secs as f64).to_variant(),
+                            (cap_secs as f64).to_variant(),
+                            (drain_per_sec as f64).to_variant(),
+                        ],
+                    );
                 }
                 Incoming::LootGranted { item_path, count } => {
                     self.base_mut().emit_signal(
@@ -2473,9 +2923,14 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             is_gm,
         },
         ServerWorldMsg::Heartbeat => Incoming::Heartbeat,
-        ServerWorldMsg::Kick { reason, code, .. } => Incoming::Kick {
+        ServerWorldMsg::Kick {
+            reason,
+            code,
+            reconnect_after_secs,
+        } => Incoming::Kick {
             reason,
             code: format!("{code:?}"),
+            retry_after_secs: reconnect_after_secs.map_or(-1, i64::from),
         },
         ServerWorldMsg::Position {
             id,
@@ -2572,6 +3027,26 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             crit,
             dmg_type: damage_type_to_u8(dmg_type),
         },
+        // ── PD_W0028 — the trade window. ──
+        ServerWorldMsg::TradeOpened {
+            partner_id,
+            partner_name,
+        } => Incoming::TradeOpened {
+            partner_id: partner_id as i64,
+            partner_name,
+        },
+        ServerWorldMsg::TradeOfferUpdate { mine, slots, coins } => Incoming::TradeOfferUpdate {
+            mine,
+            slots,
+            platinum: coins.platinum,
+            gold: coins.gold,
+            silver: coins.silver,
+            copper: coins.copper,
+        },
+        ServerWorldMsg::TradeAcceptState { you, them } => Incoming::TradeAcceptState { you, them },
+        ServerWorldMsg::TradeClosed { committed, reason } => {
+            Incoming::TradeClosed { committed, reason }
+        }
         ServerWorldMsg::Miss { attacker, target } => Incoming::Miss {
             attacker: attacker as i64,
             target: target as i64,
@@ -2589,6 +3064,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             hp,
             pos,
             yaw,
+            replaces,
         } => Incoming::EnemySpawn {
             id: id as i64,
             mob_name,
@@ -2597,6 +3073,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             hp,
             pos,
             yaw,
+            replaces: replaces.map(|r| r as i64),
         },
         ServerWorldMsg::EntityTarget { id, target } => Incoming::EntityTarget {
             id: id as i64,
@@ -2611,6 +3088,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             hp,
             pos,
             yaw,
+            replaces,
         } => Incoming::PetSpawn {
             id: id as i64,
             owner: owner as i64,
@@ -2620,6 +3098,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             hp,
             pos,
             yaw,
+            replaces: replaces.map(|r| r as i64),
         },
         ServerWorldMsg::InventorySnapshot { entries } => Incoming::InventorySnapshot { entries },
         ServerWorldMsg::InventoryDelta {
@@ -2683,6 +3162,34 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
         },
         ServerWorldMsg::Teleport { pos } => Incoming::Teleport { pos },
         ServerWorldMsg::TimeOfDay { hour } => Incoming::TimeOfDay { hour },
+        ServerWorldMsg::HungerUpdate {
+            hunger_secs,
+            thirst_secs,
+            cap_secs,
+            drain_per_sec,
+        } => Incoming::HungerUpdate {
+            hunger_secs,
+            thirst_secs,
+            cap_secs,
+            drain_per_sec,
+        },
+        ServerWorldMsg::PlayerJumped { id } => Incoming::PlayerJumped { id: id as i64 },
+        ServerWorldMsg::SpellGems { gems, seeded } => Incoming::SpellGems { gems, seeded },
+        ServerWorldMsg::SkillFail { skill_name, reason } => {
+            Incoming::SkillFail { skill_name, reason }
+        }
+        ServerWorldMsg::FactionUpdate {
+            faction_id,
+            name,
+            standing,
+            level,
+        } => Incoming::FactionUpdate {
+            faction_id,
+            name,
+            standing,
+            level,
+        },
+        ServerWorldMsg::AlignmentUpdate { score } => Incoming::AlignmentUpdate { score },
         ServerWorldMsg::LootGranted { item_path, count } => {
             Incoming::LootGranted { item_path, count }
         }
@@ -2933,5 +3440,44 @@ fn connection_config_matching_server() -> ConnectionConfig {
         available_bytes_per_tick: 60_000,
         server_channels_config: chans.clone(),
         client_channels_config: chans,
+    }
+}
+
+#[cfg(test)]
+mod kick_retry_tests {
+    use super::*;
+    use protocol::world::KickCode;
+
+    // The live relogin countdown: the kick's reconnect_after_secs reaches the
+    // client as retry_after_secs, and a kick with none says -1.
+    #[test]
+    fn a_kick_carries_its_retry_time_to_the_client() {
+        let with = ServerWorldMsg::Kick {
+            reason: "You already have a character in this world.".into(),
+            code: KickCode::DuplicateLogin,
+            reconnect_after_secs: Some(27),
+        };
+        match classify(CHANNEL_SYSTEM, with, &[]) {
+            Incoming::Kick {
+                code,
+                retry_after_secs,
+                ..
+            } => {
+                assert_eq!(code, "DuplicateLogin");
+                assert_eq!(retry_after_secs, 27);
+            }
+            _ => panic!("a Kick classifies as Incoming::Kick"),
+        }
+        let without = ServerWorldMsg::Kick {
+            reason: "Banned.".into(),
+            code: KickCode::BannedNow,
+            reconnect_after_secs: None,
+        };
+        match classify(CHANNEL_SYSTEM, without, &[]) {
+            Incoming::Kick {
+                retry_after_secs, ..
+            } => assert_eq!(retry_after_secs, -1),
+            _ => panic!("a Kick classifies as Incoming::Kick"),
+        }
     }
 }

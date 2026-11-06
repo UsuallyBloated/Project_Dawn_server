@@ -308,7 +308,8 @@ enum ServerMsg {
     CoinsUpdate { coins: i64 },                                 // owner only
     XpGained { amount: i32, current: i32, to_next: i32 },      // owner only; current/to_next now real (PD_W0018)
     LevelUp { new_level: u32, xp: i32, xp_to_next: i32 },       // owner only; up on xp, DOWN on death penalty (PD_W0018)
-    AlignmentChanged { score: i32, tier: String },
+    AlignmentUpdate { score: f32 },                             // owner only; on a 0.01 move or a tier crossing (PD_W0028, factions 2026-10-23)
+    FactionUpdate { faction_id, name, standing: f32, level: u8 }, // owner only; one standing, 0 Scowls to 8 Ally (PD_W0028)
 
     // Combat events
     Hit { attacker: EntityId, target: EntityId, amount: i32, crit: bool, dmg_type: DamageType },
@@ -433,7 +434,7 @@ CREATE TABLE characters (
     stamina             REAL    NOT NULL,
     coins               INTEGER NOT NULL DEFAULT 0,
     -- Persistent meta
-    alignment_score     INTEGER NOT NULL DEFAULT 0,
+    alignment_score     INTEGER NOT NULL DEFAULT 0,   -- written since migration 0016 (a REAL value; read with CAST), with alignment_seeded
     bind_zone           TEXT,
     bind_entry          TEXT,
     bind_zone_name      TEXT,
@@ -521,6 +522,46 @@ CREATE TABLE gm_actions (
 ```
 
 Every `/gm ...` invocation writes a row. Cheap insurance.
+
+### The item ledger (`item_events`, migration 0017, 2026-10-30)
+
+```sql
+CREATE TABLE item_events (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    at        INTEGER NOT NULL,          -- unix seconds
+    char_id   INTEGER NOT NULL,          -- no FK: a row outlives its character
+    action    TEXT    NOT NULL,          -- loot, pickup, drop, destroy, eat, use, trade_out,
+                                         -- trade_in, trade_coins, buy, sell, bank_in, bank_out,
+                                         -- bank_coin_in, bank_coin_out, bank_exchange,
+                                         -- quest_reward, summon, gm_give, gm_coins, death,
+                                         -- death_coins, corpse_loot, corpse_coins, no_rent,
+                                         -- loot_coins; plus opening and carry (the table's own)
+    item_path TEXT,                      -- NULL for a coin-only row
+    count     INTEGER NOT NULL DEFAULT 0, -- the quantity involved
+    delta     INTEGER NOT NULL DEFAULT 0, -- signed change to the ACCOUNT's holdings of the item
+    copper    INTEGER NOT NULL DEFAULT 0, -- signed change to the account's coin
+    detail    TEXT                       -- the vendor, the partner's char id, the bag or corpse id
+);
+```
+
+One row per server-made movement of items or coin into or out of a character's
+holdings (inventory, cursor, worn gear, both vaults); rearrangements inside the
+holdings write nothing. The rule that makes a row evidence: it is queued on the
+connection at the moment the move is made in memory and **written inside the
+transaction that persists that character's stores** (the store flush, the trade
+commit, the corpse loot, the death strip; `db::write_item_events`), cleared only
+when that commit lands, rolled back with the in-memory move on a failed persist.
+The table and the stores therefore agree at every commit, and nothing the client
+sends is ever a row. The books balance per account: the sum of `delta` over an
+account's rows for an item equals its count across the account's inventories and
+vaults, the sum of `copper` its wallets; `db::ledger_mismatches` names every
+account and item where they differ (a dupe or a loss, dated). The migration
+writes one `opening` row per held item so the rule holds from the first boot.
+Retention: a daily sweep (`world/ledger.rs`, at boot and every 24 h, on its own
+task) folds rows older than 30 days into one `carry` row per character and
+item, prunes them, runs the check and logs `ledger swept` and `ledger check`
+(each mismatch at warn). `admin_report` shows the check and the newest rows. The
+design and the user's calls: `docs/design/item_log_research.md` (client repo).
 
 ### Server config
 

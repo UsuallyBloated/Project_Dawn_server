@@ -290,6 +290,7 @@ pub fn roll_coin_for_mob(mob_name: &str, level: u32) -> Coins {
 
 // ── Authored tables (mirror of MobLootTables.TABLES) ──────────────────
 
+#[rustfmt::skip]
 const T_WOLF: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 0.5,
@@ -321,6 +322,7 @@ const T_WOLF: MobLootTable = MobLootTable {
     ],
 };
 
+#[rustfmt::skip]
 const T_SKELETON: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 1.0,
@@ -340,6 +342,7 @@ const T_SKELETON: MobLootTable = MobLootTable {
     ],
 };
 
+#[rustfmt::skip]
 const T_GNOLL: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 0.5,
@@ -371,6 +374,7 @@ const T_GNOLL: MobLootTable = MobLootTable {
     ],
 };
 
+#[rustfmt::skip]
 const T_RAT: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 1.0,
@@ -390,6 +394,7 @@ const T_RAT: MobLootTable = MobLootTable {
     ],
 };
 
+#[rustfmt::skip]
 const T_BOAR: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 0.5,
@@ -415,6 +420,7 @@ const T_BOAR: MobLootTable = MobLootTable {
     ],
 };
 
+#[rustfmt::skip]
 const T_SNAKE: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 0.5,
@@ -440,6 +446,7 @@ const T_SNAKE: MobLootTable = MobLootTable {
     ],
 };
 
+#[rustfmt::skip]
 const T_BEAR: MobLootTable = MobLootTable {
     rolls: 2,
     empty_weight: 0.3,
@@ -465,6 +472,7 @@ const T_BEAR: MobLootTable = MobLootTable {
     ],
 };
 
+#[rustfmt::skip]
 const T_SPIDER: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 0.5,
@@ -484,6 +492,7 @@ const T_SPIDER: MobLootTable = MobLootTable {
     ],
 };
 
+#[rustfmt::skip]
 const T_BAT: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 1.0,
@@ -503,6 +512,7 @@ const T_BAT: MobLootTable = MobLootTable {
     ],
 };
 
+#[rustfmt::skip]
 const T_ZOMBIE: MobLootTable = MobLootTable {
     rolls: 1,
     empty_weight: 1.0,
@@ -522,6 +532,7 @@ const T_ZOMBIE: MobLootTable = MobLootTable {
     ],
 };
 
+#[rustfmt::skip]
 const T_BANDIT: MobLootTable = MobLootTable {
     rolls: 2,
     empty_weight: 0.5,
@@ -570,6 +581,7 @@ const TABLES: &[(&str, &MobLootTable)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::world::IdKind;
 
     #[test]
     fn skeleton_partial_match_resolves() {
@@ -649,7 +661,7 @@ mod tests {
     fn minted_bag_ids_partition_above_enemies() {
         let a = mint_bag_id();
         let b = mint_bag_id();
-        assert!(a >= LOOT_BAG_ID_BASE);
+        assert_eq!(IdKind::of(a), IdKind::Bag);
         assert!(b > a);
     }
 

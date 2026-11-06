@@ -21,7 +21,7 @@ use protocol::auth::{ClientAuthMsg, ServerAuthMsg};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
@@ -283,7 +283,7 @@ impl LoginRateLimiter {
         }
         let key = source_key(source);
         let account_key = account.map(|a| a.trim().to_ascii_lowercase());
-        let mut l = self.inner.lock().expect("login limiter poisoned");
+        let mut l = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         if l.sources.len() >= RATE_LIMIT_PRUNE_AT {
             l.sources
                 .retain(|_, w| now.duration_since(w.start) < LOGIN_WINDOW);
@@ -353,7 +353,7 @@ impl LoginRateLimiter {
     /// Register budget (hence the per-kind key).
     fn clear(&self, source: IpAddr, kind: AuthKind, account: Option<&str>) {
         let key = source_key(source);
-        let mut l = self.inner.lock().expect("login limiter poisoned");
+        let mut l = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         l.sources.remove(&(key, kind));
         if let Some(g) = l.global.get_mut(&kind) {
             g.count = g.count.saturating_sub(1);
@@ -390,7 +390,11 @@ struct ConnSlot {
 
 impl Drop for ConnSlot {
     fn drop(&mut self) {
-        let mut m = self.shared.conns.lock().expect("conn counts poisoned");
+        let mut m = self
+            .shared
+            .conns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         if let Some(n) = m.get_mut(&self.key) {
             *n = n.saturating_sub(1);
             if *n == 0 {
@@ -404,7 +408,7 @@ impl Drop for ConnSlot {
 /// limiter (an IPv6 /64). `None` when the address already holds the cap.
 fn acquire_conn(shared: &Arc<Shared>, ip: IpAddr) -> Option<ConnSlot> {
     let key = source_key(ip);
-    let mut m = shared.conns.lock().expect("conn counts poisoned");
+    let mut m = shared.conns.lock().unwrap_or_else(PoisonError::into_inner);
     let n = m.entry(key).or_insert(0);
     if *n >= shared.policy.max_conns_per_ip {
         return None;
@@ -430,7 +434,40 @@ pub async fn serve_with_policy(
     let listener = TcpListener::bind(&cfg.auth_bind).await?;
     let actual = listener.local_addr()?;
     tracing::info!(addr = %actual, require_invite = policy.require_invite, "auth WS listening");
+    accept_loop(listener, cfg, pool, policy).await;
+    Ok(())
+}
 
+/// Like `serve` but returns the bound address. Used by integration tests
+/// to start the server on an ephemeral port and discover where it landed.
+pub async fn serve_bound(
+    cfg: Arc<Config>,
+    pool: SqlitePool,
+) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+    serve_bound_with_policy(cfg, pool, AuthPolicy::default()).await
+}
+
+/// `serve_bound` with an explicit policy, for the tests that exercise the
+/// socket limits and the invite gate.
+pub async fn serve_bound_with_policy(
+    cfg: Arc<Config>,
+    pool: SqlitePool,
+    policy: AuthPolicy,
+) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+    let listener = TcpListener::bind(&cfg.auth_bind).await?;
+    let addr = listener.local_addr()?;
+    let handle = tokio::spawn(accept_loop(listener, cfg, pool, policy));
+    Ok((addr, handle))
+}
+
+/// The accept loop every entry point runs, so the tests exercise the same
+/// one the server does, policy included.
+async fn accept_loop(
+    listener: TcpListener,
+    cfg: Arc<Config>,
+    pool: SqlitePool,
+    policy: AuthPolicy,
+) {
     // Precompute the auth-timing equalizer hash now so no live request pays the
     // one-time init (see db::verify_login's enumeration defense).
     db::warm_login_timing_defense();
@@ -459,47 +496,6 @@ pub async fn serve_with_policy(
     }
 }
 
-/// Like `serve` but returns the bound address. Used by integration tests
-/// to start the server on an ephemeral port and discover where it landed.
-pub async fn serve_bound(
-    cfg: Arc<Config>,
-    pool: SqlitePool,
-) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
-    serve_bound_with_policy(cfg, pool, AuthPolicy::default()).await
-}
-
-/// `serve_bound` with an explicit policy, for the tests that exercise the
-/// socket limits and the invite gate.
-pub async fn serve_bound_with_policy(
-    cfg: Arc<Config>,
-    pool: SqlitePool,
-    policy: AuthPolicy,
-) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
-    let listener = TcpListener::bind(&cfg.auth_bind).await?;
-    let addr = listener.local_addr()?;
-    db::warm_login_timing_defense();
-    let shared = Arc::new(Shared {
-        limiter: LoginRateLimiter::new(),
-        conns: Mutex::new(HashMap::new()),
-        policy,
-    });
-    let handle = tokio::spawn(async move {
-        loop {
-            let (stream, peer) = match listener.accept().await {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            let cfg = cfg.clone();
-            let pool = pool.clone();
-            let shared = shared.clone();
-            tokio::spawn(async move {
-                let _ = handle_connection(stream, peer, cfg, pool, shared).await;
-            });
-        }
-    });
-    Ok((addr, handle))
-}
-
 async fn handle_connection(
     stream: TcpStream,
     peer: SocketAddr,
@@ -514,13 +510,19 @@ async fn handle_connection(
     // the TCP peer, which no header can forge).
     let forwarded: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let seen = forwarded.clone();
+    // tungstenite's handshake callback must return its own `ErrorResponse` in
+    // the error position, a large type this closure never constructs.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the signature is tungstenite's Callback trait; the closure only ever returns Ok"
+    )]
     let callback = move |req: &Request, resp: Response| {
         if let Some(v) = req
             .headers()
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
         {
-            *seen.lock().expect("forwarded-for poisoned") = Some(v.to_string());
+            *seen.lock().unwrap_or_else(PoisonError::into_inner) = Some(v.to_string());
         }
         Ok(resp)
     };
@@ -542,7 +544,10 @@ async fn handle_connection(
             return Ok(());
         }
     };
-    let header = forwarded.lock().expect("forwarded-for poisoned").take();
+    let header = forwarded
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
     // Key the login rate limiter on the address only — the ephemeral source
     // port changes every connection, so keying on the full SocketAddr would
     // defeat it.

@@ -46,7 +46,7 @@ const ZEM_KILL_SCALE: f64 = 3.5; // EQEmu's 35/10 calibration
 /// XP for killing a `mob_level` mob in a zone with modifier `zem` (pass
 /// [`ZEM_NORMAL`] as the default). Floored at 1 so every kill is worth something.
 /// NOTE: quest objective counting (PD_W0024, inside `award_kill`) rides the
-/// same `xp > 0` gate at the tick.rs kill sites, so this floor is also what
+/// same `xp > 0` gate at the kill sites (tick/kills.rs), so this floor is also what
 /// keeps "kill N X" objectives advancing — if a future con-color rule lets
 /// this return 0, hoist the quest counting out of those blocks.
 pub fn kill_xp(mob_level: i32, zem: f32) -> i32 {
@@ -94,6 +94,28 @@ pub fn award_xp(server: &mut RenetServer, conn: &mut PerConnection, amount: i32)
     }
     handlers::send_xp_gained(server, owner_cid, amount, conn.xp, conn.xp_to_next);
     leveled
+}
+
+/// The XP state `award_xp(conn, amount)` will leave, without changing
+/// anything. A quest turn-in or a resurrection writes this inside the
+/// transaction that records it, then calls `award_xp` with the same amount,
+/// which lands on the same numbers (both go through `resolve`).
+pub fn progress_after(conn: &PerConnection, amount: i32) -> crate::db::XpProgress {
+    let (xp, level, xp_to_next) = resolve(conn.xp.saturating_add(amount), conn.level);
+    crate::db::XpProgress {
+        xp,
+        xp_to_next,
+        level,
+    }
+}
+
+/// The connection's XP state as it stands now.
+pub fn current_progress(conn: &PerConnection) -> crate::db::XpProgress {
+    crate::db::XpProgress {
+        xp: conn.xp,
+        xp_to_next: conn.xp_to_next,
+        level: conn.level,
+    }
 }
 
 /// Apply the death XP penalty: 5% of the current level's band, cascading down

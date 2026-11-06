@@ -1,8 +1,8 @@
 //! World-channel messages (bincode over UDP/renet).
 //!
-//! These types compile but the world server is not yet wired up. They're
-//! the source of truth for the wire format whenever it lands. Adding,
-//! removing, or reordering variants is a protocol-version bump.
+//! These types are the source of truth for the wire format, shared by the
+//! server and the client's wire layer (gdext-net). Adding, removing, or
+//! reordering variants is a protocol-version bump.
 //!
 //! Sessions: world packets carry the same 32-byte token issued by the
 //! auth service, but as raw bytes instead of hex (saves 50%).
@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 /// Auth-minted ConnectTokens are signed with this; mismatch ⇒ token rejected.
 ///
 /// PD_W0005 covers the Track 6 batch: server-authoritative player stats. The
-/// server now owns HP/MP/Stamina (loaded from DB at spawn, mutated by regen
-/// + combat + PvP, fanned out as `HealthUpdate` / `ManaUpdate` /
+/// server now owns HP/MP/Stamina (loaded from DB at spawn, mutated by regen,
+/// combat and PvP, fanned out as `HealthUpdate` / `ManaUpdate` /
 /// `StaminaUpdate`); `ClientWorldMsg::ResourceUpdate` is removed because the
 /// authority flips and the client no longer broadcasts resources. One bump
 /// per track; individual sub-task commits append new variants under this id.
@@ -120,7 +120,47 @@ use serde::{Deserialize, Serialize};
 /// `DropItem` / `UseConsumable` / `InventoryDelta` (strings, so no shape
 /// change — the bump exists because an old server would drop the new intent
 /// and an old client would not understand a cursor delta).
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3237; // "PD_W0027"
+///
+/// PD_W0028: the trade window, slice 1 (player to player;
+/// docs/design/trade_window.md). Appends the trade intents
+/// (`TradeRequest` / `TradeOfferItem` / `TradeRetrieveItem` /
+/// `TradeOfferCoins` / `TradeAccept` / `TradeCancel`) at the END of
+/// `ClientWorldMsg`, and the trade messages (`TradeOpened` /
+/// `TradeOfferUpdate` / `TradeAcceptState` / `TradeClosed`) at the END of
+/// `ServerWorldMsg`. Escrow is by LOCKING: offered items never leave the
+/// owner's inventory until the single-transaction commit, and every offer
+/// edit clears both accepts server-side. Both sides deploy together.
+/// The same bump also gives `EnemySpawn` and `PetSpawn` a trailing
+/// `replaces: Option<EntityId>`, so a charm landing or ending can say which
+/// id the new one takes over and the client keeps its target (EQ's one
+/// entity throughout). And it appends `HungerUpdate` after `TradeClosed`,
+/// the owner's food and water counters for the hunger window
+/// (docs/design/food_and_water.md section 8), then `PlayerJumped` after
+/// that: the one-shot a client's real `Move.jumping` flag becomes for the
+/// players who can see the jumper, so a jump no longer reads as a slide.
+/// It also appends the dev-gated `DevDespawnEnemies` after `TradeCancel`, so
+/// the Test Panel's "Despawn All Enemies" removes the mobs on the server
+/// instead of only hiding them on one client; then the server-held spell bar
+/// (`MemorizeStart` / `MemorizeFinish` / `ForgetSpell` / `SeedSpellGems` after
+/// it, and `SpellGems` after `PlayerJumped`). `UseSkill`, declared but never
+/// sent before, carries a `skill_name` now (the server resolves active
+/// skills by name, as spells), and `SkillFail` is appended after `SpellGems`.
+/// `StopSong` is appended after `SeedSpellGems` (the Bard song rework).
+/// Factions and alignment (2026-10-23) append `Consider` and `DevSetFaction`
+/// after `StopSong`, and `FactionUpdate` and `AlignmentUpdate` after
+/// `SkillFail`.
+///
+/// PD_W0029: the facing (user, 2026-10-27). `Move` gains a trailing `yaw`,
+/// the client's own body yaw, which the server stores and the `Position` fan
+/// relays (it always carried a `yaw`; it was the login value forever), so
+/// players turn on each other's screens. EQ and WoW both send the heading
+/// with every movement packet. A shape change on a client intent, so both
+/// sides deploy together. Riding the same bump (2026-10-30): `SlotRef` gains
+/// a `Cursor` variant, appended last, so `SellItem` and `UseConsumable` can
+/// name what the player holds (sell-from-cursor); `BankStoreItem` already
+/// took `"cursor"` as a location string. The first hills (2026-11-04) append
+/// the dev-gated `DevFling` after `DevSetFaction`.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3239; // "PD_W0029"
 
 pub type EntityId = u64;
 
@@ -135,6 +175,7 @@ pub type EntityId = u64;
 /// existing stacks. Wholesale re-minting is an explicit moneychanger action,
 /// never a side effect of buying or selling.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Coins {
     pub platinum: i64,
     pub gold: i64,
@@ -369,9 +410,43 @@ impl Coins {
         self.copper = self.copper.saturating_add(p.copper);
     }
 }
+
+/// A coin amount a client asked to move, known to hold no negative tier.
+/// Client messages carry plain `Coins`, the signed wallet type, and a forged
+/// negative amount would mint coin at the bank or take it from a trade
+/// partner. The server converts each one once, where the message is handled,
+/// and the steps that move coin take only this type, so none of them can
+/// forget the check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoinAmount(Coins);
+
+/// A coin amount with a negative tier: only a modified client sends one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NegativeCoins;
+
+impl TryFrom<Coins> for CoinAmount {
+    type Error = NegativeCoins;
+
+    fn try_from(coins: Coins) -> Result<Self, NegativeCoins> {
+        if coins.has_negative() {
+            Err(NegativeCoins)
+        } else {
+            Ok(Self(coins))
+        }
+    }
+}
+
+impl CoinAmount {
+    pub const ZERO: CoinAmount = CoinAmount(Coins::ZERO);
+
+    pub fn get(self) -> Coins {
+        self.0
+    }
+}
 pub type Sequence = u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Vec3 {
     pub x: f32,
     pub y: f32,
@@ -379,6 +454,7 @@ pub struct Vec3 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(u8)]
 pub enum DamageType {
     Physical = 0,
@@ -406,6 +482,7 @@ pub enum SkillKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum ChatChannel {
     Say,
     Ooc,
@@ -421,6 +498,7 @@ pub enum ChatChannel {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum EquipSlot {
     Weapon,
     Offhand,
@@ -434,15 +512,26 @@ pub enum EquipSlot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum SlotRef {
-    BaseSlot { idx: u8 },
-    BagSlot { base: u8, slot: u8 },
+    BaseSlot {
+        idx: u8,
+    },
+    BagSlot {
+        base: u8,
+        slot: u8,
+    },
     EquipSlot(EquipSlot),
+    /// PD_W0029: the cursor slot, what the player holds (the `"cursor"`
+    /// location of `MoveItem`), for selling and eating from the hand.
+    /// Appended last: the encoding is positional.
+    Cursor,
 }
 
 // ─── Client → Server ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub enum ClientWorldMsg {
     // Connection
     Connect {
@@ -458,6 +547,9 @@ pub enum ClientWorldMsg {
         sequence: Sequence,
         direction: Vec3,
         jumping: bool,
+        /// The body's facing (Godot `rotation.y`, radians). Cosmetic: the
+        /// server stores it for the `Position` fan and reads it into nothing.
+        yaw: f32,
     },
 
     // Combat (intent only — server resolves outcomes)
@@ -491,8 +583,17 @@ pub enum ClientWorldMsg {
         spell_name: String,
         target_id: Option<EntityId>,
     },
+    /// Use an active skill (Backstab, Shield Bash, Hide, Feign Death, ...),
+    /// keyed by name like `CastSpell` (client-authority audit item 6,
+    /// 2026-10-19). The server owns the whole thing: the class gate, the
+    /// cooldown, the stamina, the swing roll and the skill's multiplier,
+    /// and the effect (a stun on the target, a hide, an evade or an absorb
+    /// on the user, a feign death). A damage skill needs `target_id`; a
+    /// SELF skill ignores it. A refusal costs nothing and answers with
+    /// `SkillFail`. Replaces the never-sent `skill_id: u32` form under the
+    /// same unshipped PD_W0028.
     UseSkill {
-        skill_id: u32,
+        skill_name: String,
         target_id: Option<EntityId>,
     },
     CancelCast,
@@ -735,12 +836,11 @@ pub enum ClientWorldMsg {
         buffs: Vec<(String, f32)>,
     },
 
-    // Track 4 sub-task 4: attacker broadcasts a hit/miss/evade result so
-    // peers can render floating damage / "MISS" / "EVADE" text over the
-    // target. Combat math stays client-local (the attacker computes the
-    // outcome); these messages are pure visualization fan-out. PvP damage
-    // application is Track 6 — for now the target's HP doesn't change as
-    // a result of receiving these.
+    // Dev-only (the Test Panel): relay a made-up hit / miss / evade to peers
+    // as combat text. They change no HP. Real combat is the server's own
+    // (Attack, spells, mobs) and reaches clients as ServerWorldMsg::Hit etc.;
+    // since 2026-10-19 the server ignores these from anyone without dev
+    // commands, because a forged Hit stood its target up.
     HitBroadcast {
         target: EntityId,
         amount: i32,
@@ -872,7 +972,9 @@ pub enum ClientWorldMsg {
     /// `(src_location, src_slot)` in the player's inventory into a bank item
     /// vault: `shared = false` is the 10-slot per-character vault, `true` is the
     /// 2-slot account-shared vault. The server merges into same-item stacks then
-    /// claims free vault slots; any remainder stays in inventory.
+    /// claims free vault slots; any remainder stays in inventory. The location
+    /// may be `"cursor"` (slot 0): the held stack, from a click on a vault slot
+    /// while holding (2026-10-30); bags are refused from anywhere.
     BankStoreItem {
         src_location: String,
         src_slot: u32,
@@ -938,6 +1040,100 @@ pub enum ClientWorldMsg {
     /// Test Panel leveling buttons.
     CompleteQuest {
         quest_id: String,
+    },
+
+    // ── PD_W0028 — the trade window (docs/design/trade_window.md) ──
+    /// Open a trade with `target_id` (a player char id). Sent by the
+    /// holding-click path; the server validates target is a connected,
+    /// alive, in-range PLAYER with no session of their own, then opens
+    /// instantly for both (decided: EQ-style, no accept prompt).
+    TradeRequest {
+        target_id: EntityId,
+    },
+    /// Place the stack at `(from_location, from_slot)` into my side's
+    /// `window_slot` (0..8). The server re-reads the slot from ITS
+    /// inventory (the client never names an item path) and LOCKS it in
+    /// place; `"cursor"` as the source first parks the held stack into an
+    /// empty inventory slot so the hand frees for the next pickup.
+    TradeOfferItem {
+        window_slot: u8,
+        from_location: String,
+        from_slot: u32,
+    },
+    /// Clear my side's `window_slot`: the referenced inventory slot
+    /// unlocks where it sits (escrow-by-locking means nothing moves).
+    TradeRetrieveItem {
+        window_slot: u8,
+    },
+    /// Absolute per-tier coin offer (the four independent stacks).
+    /// Validated against the live wallet at offer time and again at
+    /// commit inside the tick.
+    TradeOfferCoins {
+        coins: Coins,
+    },
+    /// Press Trade. Both sides accepted -> commit (one db transaction).
+    TradeAccept,
+    /// Close the window. Also implied by range, death, zone, disconnect.
+    TradeCancel,
+
+    /// Dev-only, gated and audited like `DevSpawnMob`: remove every unowned
+    /// enemy in the requester's view (their AOI neighbourhood) from the
+    /// world. Backs the Test Panel's "Despawn All Enemies", which used to
+    /// free only the client's own nodes while the server kept the mobs. Pays
+    /// nothing, drops nothing; camp mobs respawn on their camp's timer.
+    DevDespawnEnemies,
+
+    // ── The server-held spell bar (client-authority audit fix 5) ──
+    /// Begin memorizing `spell_name` into `gem` (0-based). The server checks
+    /// the caster sits, the gem is unlocked at their level and the spell is
+    /// theirs to cast, and remembers when it began.
+    MemorizeStart {
+        gem: u8,
+        spell_name: String,
+    },
+    /// The memorize bar ran out on the client. The server fills the gem only
+    /// if the memorize it began has run its time with the caster seated
+    /// throughout, charging half the spell's mana; it answers with SpellGems.
+    MemorizeFinish,
+    /// Empty a gem. Free.
+    ForgetSpell {
+        gem: u8,
+    },
+    /// The bar this character already had on the player's machine (index =
+    /// gem, "" = empty), accepted once, for a character the server has never
+    /// held a bar for; every spell is checked as a memorize would check it.
+    SeedSpellGems {
+        gems: Vec<String>,
+    },
+    /// Stop the song being sung (the Bard song rework, 2026-10-20): the
+    /// server pulses a bard's one active song itself, so a client that wants
+    /// it to end (re-clicking the song, `/stopsong`) says so instantly instead
+    /// of singing it again. No-op when nothing is sung.
+    StopSong,
+    /// Consider a target (factions, 2026-10-23): an NPC by its `npcs.toml`
+    /// id or display name, or a mob by entity id. The server answers with EQ's con line
+    /// (the faction phrase from this character's standing with the target's
+    /// faction, then the level phrase) on the System channel. Only the
+    /// phrase travels, never a standing.
+    Consider {
+        npc_id: Option<String>,
+        target_id: Option<EntityId>,
+    },
+    /// Dev-gated (GM only, audited like `DevSpawnMob`): set this character's
+    /// OWN standing with one faction to an absolute value, clamped. The GM
+    /// faction panel's slider. A plain account's request is ignored silently.
+    DevSetFaction {
+        faction_id: String,
+        standing: f32,
+    },
+    /// Dev-gated (GM only, audited like `DevSpawnMob`): lift this character
+    /// `height` metres straight up and let it fall, so a landing can be seen
+    /// anywhere, the flat world included. The fall is the ordinary one
+    /// (`fall.rs`): the landing costs what a fall from that height costs. A
+    /// plain account's request, and a height that is not finite or not in
+    /// (0, `MAX_FLING_HEIGHT`], is ignored silently.
+    DevFling {
+        height: f32,
     },
 }
 
@@ -1108,6 +1304,10 @@ pub enum ServerWorldMsg {
     // spell-id table on either side yet, and the reliable system channel
     // makes the string cost negligible. A future track can add a SpellDefinitions
     // numeric id table and tighten the wire if it ever matters.
+    // Since 2026-10-30 the server relays only spells it knows, under its own
+    // name and at its own cast time (`duration`), and a cancelled cast's
+    // `CastFail` carries a fixed reason: nothing a client wrote reaches a
+    // peer's screen through these.
     CastStart {
         caster: EntityId,
         spell_name: String,
@@ -1179,6 +1379,10 @@ pub enum ServerWorldMsg {
         hp: f32,
         pos: Vec3,
         yaw: f32,
+        /// The id this entity takes over, when it is the same creature under
+        /// a new id: a charmed pet handed back as an enemy. `None` for every
+        /// ordinary spawn. The client moves its target across on a match.
+        replaces: Option<EntityId>,
     },
     /// Server-authoritative aggro replication. Broadcast on target switch
     /// only (not per tick) — enough for "the mob turned on the healer!"
@@ -1274,6 +1478,9 @@ pub enum ServerWorldMsg {
         hp: f32,
         pos: Vec3,
         yaw: f32,
+        /// The id this pet takes over: the enemy a charm just converted.
+        /// `None` for a summon. See `EnemySpawn::replaces`.
+        replaces: Option<EntityId>,
     },
 
     /// Track 13.2 — full inventory snapshot. Fanned privately to the
@@ -1476,6 +1683,89 @@ pub enum ServerWorldMsg {
         crit: bool,
         dmg_type: DamageType,
     },
+
+    // ── PD_W0028 — the trade window (docs/design/trade_window.md) ──
+    /// A trade session opened; sent to both parties (instant open).
+    TradeOpened {
+        partner_id: EntityId,
+        partner_name: String,
+    },
+    /// Full state of ONE side's offer after any edit — full-state per
+    /// update, not deltas: a tiny payload with no desync class. `mine`
+    /// tells the recipient whether this is their own side or the
+    /// partner's. Slots are `(item_path, count)`, empty string = empty.
+    TradeOfferUpdate {
+        mine: bool,
+        slots: Vec<(String, u32)>,
+        coins: Coins,
+    },
+    /// Accept flags after any change (every offer edit clears both).
+    TradeAcceptState {
+        you: bool,
+        them: bool,
+    },
+    /// The session ended. `committed` distinguishes a successful trade
+    /// from a cancel; `reason` is the human-readable why for chat.
+    TradeClosed {
+        committed: bool,
+        reason: String,
+    },
+    /// Food and water, the hunger window: the owner's two counters in
+    /// seconds of fullness, the cap, and how many counter-seconds run off per
+    /// real second right now (the race's rate while alive in the world, 0
+    /// while dead). To the owner ONLY: on entering the world, after any eat
+    /// or drink, on a stage change, on death and on respawn, and otherwise
+    /// about once a minute. The client runs its bars down between sends; the
+    /// bars are a picture, the server's regen gate is the rule.
+    HungerUpdate {
+        hunger_secs: f32,
+        thirst_secs: f32,
+        cap_secs: f32,
+        drain_per_sec: f32,
+    },
+    /// A player began a jump: the rising edge of `Move.jumping`, relayed
+    /// once to the players who can see them (never back to the jumper), at
+    /// most once per `JUMP_RELAY_MIN_INTERVAL`. Cosmetic only: each client
+    /// plays its own hop on the jumper's body, and the server never moves
+    /// anyone for it (XZ stays the server's, Y stays zero), so a forged
+    /// flag can make a player look silly and nothing more.
+    PlayerJumped {
+        id: EntityId,
+    },
+    /// The character's memorized spell bar as the server holds it (index =
+    /// gem, "" = empty): on entering the world and after every change. The
+    /// client's bar adopts it. `seeded` false means the server has never
+    /// held a bar for this character, so the client may offer its own once
+    /// (`SeedSpellGems`).
+    SpellGems {
+        gems: Vec<String>,
+        seeded: bool,
+    },
+    /// The server refused a `UseSkill`, privately to its sender: the reason
+    /// for the chat line, and the skill's name so the client drops the
+    /// cooldown it started optimistically (the server stamped none). A
+    /// refused skill costs nothing.
+    SkillFail {
+        skill_name: String,
+        reason: String,
+    },
+    /// One faction standing, to its owner only (factions, 2026-10-23): on
+    /// entering the world (one per faction the character has moved), after
+    /// every change, and after a `DevSetFaction`. `standing` is the number
+    /// the faction's NPCs see; `level` its con level, 0 Scowls to 8 Ally.
+    FactionUpdate {
+        faction_id: String,
+        name: String,
+        standing: f32,
+        level: u8,
+    },
+    /// The character's alignment score as the server holds it, to its owner
+    /// only: on entering the world and whenever it has moved a hundredth of
+    /// a point or crossed a tier since the last send (a spell's delta is far
+    /// under that, so a cast alone fans nothing).
+    AlignmentUpdate {
+        score: f32,
+    },
 }
 
 /// First entity id reserved for server-spawned enemies. Player char_ids are
@@ -1494,6 +1784,36 @@ pub const LOOT_BAG_ID_BASE: EntityId = 2_000_000_000;
 /// space the client routes on.
 pub const PET_ID_BASE: EntityId = 3_000_000_000;
 
+/// What an entity id names. The id space is partitioned (the `*_ID_BASE`
+/// constants above), so an id's kind is its range and nothing else; ask this
+/// instead of comparing against the bases, so the partitions are written down
+/// once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdKind {
+    /// A player: the id is the character's row id.
+    Player,
+    /// A server-spawned mob (a charmed mob is re-keyed as a pet).
+    Enemy,
+    /// A loot bag or a corpse: corpses mint their ids from the bag range.
+    Bag,
+    /// A player-owned pet, summoned or charmed.
+    Pet,
+}
+
+impl IdKind {
+    pub fn of(id: EntityId) -> Self {
+        if id < ENEMY_ID_BASE {
+            Self::Player
+        } else if id < LOOT_BAG_ID_BASE {
+            Self::Enemy
+        } else if id < PET_ID_BASE {
+            Self::Bag
+        } else {
+            Self::Pet
+        }
+    }
+}
+
 /// Track 12 Piece A — pet command codes. Wire format: a single u8
 /// on `ClientWorldMsg::PetCommand.command`. Values reserved for
 /// future commands (Follow/Guard/Sit) are present so the server can
@@ -1504,6 +1824,23 @@ pub mod pet_command {
     pub const ATTACK: u8 = 2;
     pub const BACK: u8 = 3;
     pub const SIT: u8 = 4;
+}
+
+#[cfg(test)]
+mod id_kind_tests {
+    use super::{IdKind, ENEMY_ID_BASE, LOOT_BAG_ID_BASE, PET_ID_BASE};
+
+    #[test]
+    fn each_partition_starts_at_its_base() {
+        assert_eq!(IdKind::of(1), IdKind::Player);
+        assert_eq!(IdKind::of(ENEMY_ID_BASE - 1), IdKind::Player);
+        assert_eq!(IdKind::of(ENEMY_ID_BASE), IdKind::Enemy);
+        assert_eq!(IdKind::of(LOOT_BAG_ID_BASE - 1), IdKind::Enemy);
+        assert_eq!(IdKind::of(LOOT_BAG_ID_BASE), IdKind::Bag);
+        assert_eq!(IdKind::of(PET_ID_BASE - 1), IdKind::Bag);
+        assert_eq!(IdKind::of(PET_ID_BASE), IdKind::Pet);
+        assert_eq!(IdKind::of(u64::MAX), IdKind::Pet);
+    }
 }
 
 #[cfg(test)]
@@ -1740,6 +2077,40 @@ mod coins_tests {
     }
 
     #[test]
+    fn a_coin_amount_refuses_any_negative_tier() {
+        use super::{CoinAmount, NegativeCoins};
+        let fine = Coins {
+            platinum: 1,
+            gold: 0,
+            silver: 3,
+            copper: 0,
+        };
+        assert_eq!(CoinAmount::try_from(fine).map(CoinAmount::get), Ok(fine));
+        assert_eq!(CoinAmount::try_from(Coins::ZERO), Ok(CoinAmount::ZERO));
+        for bad in [
+            Coins {
+                platinum: -1,
+                ..Coins::ZERO
+            },
+            Coins {
+                gold: -1,
+                ..Coins::ZERO
+            },
+            Coins {
+                silver: -1,
+                ..Coins::ZERO
+            },
+            Coins {
+                copper: i64::MIN,
+                platinum: 5,
+                ..Coins::ZERO
+            },
+        ] {
+            assert_eq!(CoinAmount::try_from(bad), Err(NegativeCoins), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn has_negative_flags_malformed_amounts() {
         assert!(Coins {
             copper: -1,
@@ -1836,5 +2207,88 @@ mod coin_breaking_tests {
         assert!(purse.pay_value_of(c(0, 0, 1, 0)));
         assert_eq!(purse, c(0, 99, 99, 0));
         assert_eq!(purse.total_copper(), 1_000_000 - 100);
+    }
+}
+
+/// Property tests for the coin arithmetic: whatever the purse and the request,
+/// value is never created or destroyed and no tier goes negative. Coin is the
+/// thing a dupe or a rounding bug would make, so these search the space rather
+/// than check a handful of examples.
+#[cfg(test)]
+mod coin_properties {
+    use super::Coins;
+    use proptest::prelude::*;
+
+    /// Ordinary purses most of the time, and enormous ones too: up to a
+    /// trillion platinum (10^18 copper, below i64's 9.2 x 10^18), where the
+    /// arithmetic's products are largest. Saturation itself (past 9.2 x 10^12
+    /// platinum) is out of reach of any economy and not generated.
+    fn purse() -> impl Strategy<Value = Coins> {
+        let tier = |max: i64| prop_oneof![3 => 0i64..1_000_000, 1 => 0i64..max];
+        (
+            tier(1_000_000_000_000_000),
+            tier(1_000_000_000_000_000),
+            tier(1_000_000_000_000),
+            tier(1_000_000_000_000),
+        )
+            .prop_map(|(copper, silver, gold, platinum)| Coins {
+                copper,
+                silver,
+                gold,
+                platinum,
+            })
+    }
+
+    fn no_negative_tier(c: Coins) -> bool {
+        !c.has_negative()
+    }
+
+    proptest! {
+        /// An exchange keeps the purse's total value, or refuses and leaves it as it was.
+        #[test]
+        fn an_exchange_never_changes_the_total(mut p in purse(), from in 0u8..5, to in 0u8..5, qty in 0u32..2_000_000) {
+            let before = p;
+            match p.exchange(from, to, qty) {
+                Ok(()) => {
+                    prop_assert_eq!(p.total_copper(), before.total_copper());
+                    prop_assert!(no_negative_tier(p));
+                }
+                Err(_) => prop_assert_eq!(p, before),
+            }
+        }
+
+        /// A spend takes exactly its cost, or refuses and takes nothing.
+        #[test]
+        fn a_spend_takes_exactly_its_cost(mut p in purse(), cost in -10i64..2_000_000_000) {
+            let before = p;
+            if p.spend(cost) {
+                prop_assert_eq!(p.total_copper(), before.total_copper() - cost);
+                prop_assert!(no_negative_tier(p));
+            } else {
+                prop_assert_eq!(p, before);
+                prop_assert!(cost < 0 || before.total_copper() < cost);
+            }
+        }
+
+        /// Paying the value of some coins takes exactly that value, or nothing.
+        #[test]
+        fn paying_a_value_takes_exactly_that_value(mut p in purse(), want in purse()) {
+            let before = p;
+            if p.pay_value_of(want) {
+                prop_assert_eq!(p.total_copper(), before.total_copper() - want.total_copper());
+                prop_assert!(no_negative_tier(p));
+            } else {
+                prop_assert_eq!(p, before);
+            }
+        }
+
+        /// A payout adds exactly its amount.
+        #[test]
+        fn a_payout_adds_exactly_its_amount(mut p in purse(), amount in 0i64..1_000_000_000) {
+            let before = p.total_copper();
+            p.add_payout(amount);
+            prop_assert_eq!(p.total_copper(), before + amount);
+            prop_assert!(no_negative_tier(p));
+        }
     }
 }

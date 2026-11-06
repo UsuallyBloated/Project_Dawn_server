@@ -9,7 +9,7 @@ use super::{
     CHANNEL_POSITION, CHANNEL_SYSTEM,
 };
 use bincode::config::standard as bincode_cfg;
-use protocol::world::{ClientWorldMsg, Coins, KickCode, ServerWorldMsg, Vec3};
+use protocol::world::{ClientWorldMsg, Coins, IdKind, KickCode, ServerWorldMsg, Vec3};
 use renet::{ClientId, RenetServer};
 use std::time::Instant;
 
@@ -43,10 +43,10 @@ pub enum Outcome {
     CastFailFanOut {
         reason: String,
     },
-    /// Track 4 sub-task 3 — owning client broadcast a fresh buff snapshot.
-    /// Cache updated on `conn`; tick loop fans out to in_world peers in
-    /// a post-dispatch sweep, deduped per sender like resources.
-    BuffSnapshotFanOut,
+    /// The owning client's Move carried a jump's rising edge
+    /// (`PerConnection::note_move_jump`). The tick loop fans one
+    /// `PlayerJumped` to the players who can see the jumper.
+    JumpFanOut,
     /// Track 4 sub-task 4 — combat outcome from the attacker's POV. Pure
     /// visual fan-out; payload travels verbatim in the matching server
     /// variant.
@@ -85,6 +85,17 @@ pub enum Outcome {
         // the equip slot (0 main / 1 off).
         is_offhand: bool,
         dmg_type: protocol::world::DamageType,
+    },
+
+    /// An active skill (client-authority audit item 6). The handler has
+    /// checked the skill is known, the class has it, the user is not
+    /// stunned or mesmerized, the cooldown has run and the stamina is there;
+    /// the tick loop resolves the target, charges the stamina, stamps the
+    /// cooldown and runs the swing or the effect.
+    UseSkillIntent {
+        user: u64,
+        skill_name: String,
+        target_id: Option<protocol::world::EntityId>,
     },
 
     /// Track 6 sub-task 3b — player → server spell-cast intent. The
@@ -168,6 +179,35 @@ pub enum Outcome {
         src_slot: u32,
         dst_location: String,
         dst_slot: u32,
+    },
+
+    // ── PD_W0028 — trade window intents. All validation happens in the
+    //    tick apply phase, which owns the TradeManager and both parties'
+    //    inventories; the handler only gates in_world (and the dead-state
+    //    whitelist upstream refuses every one of these while dead). ──
+    TradeRequestIntent {
+        requester: u64,
+        target: u64,
+    },
+    TradeOfferItemIntent {
+        owner: u64,
+        window_slot: u8,
+        from_location: String,
+        from_slot: u32,
+    },
+    TradeRetrieveItemIntent {
+        owner: u64,
+        window_slot: u8,
+    },
+    TradeOfferCoinsIntent {
+        owner: u64,
+        coins: protocol::world::CoinAmount,
+    },
+    TradeAcceptIntent {
+        owner: u64,
+    },
+    TradeCancelIntent {
+        owner: u64,
     },
 
     /// Track 13.2.b — split `count` items off src into dst. Both
@@ -273,12 +313,12 @@ pub enum Outcome {
     /// wallet into their bank (validated + applied in the tick loop).
     BankDepositIntent {
         owner: u64,
-        coins: Coins,
+        coins: protocol::world::CoinAmount,
     },
     /// PD_W0015 — Banker, slice 1. Move `coins` from the bank to the wallet.
     BankWithdrawIntent {
         owner: u64,
-        coins: Coins,
+        coins: protocol::world::CoinAmount,
     },
     /// PD_W0015 — Banker, slice 1. Convert `qty` coins of `from_tier` into
     /// `to_tier` on the carried wallet (tiers 0 = copper … 3 = platinum).
@@ -360,6 +400,33 @@ pub enum Outcome {
         pos: super::connection::Vec3f,
         mob: super::zones::MobTemplate,
     },
+    /// Dev-gated "Despawn All Enemies" (Test Panel). The handler checks the
+    /// gate and queues the audit row; the tick loop removes every unowned
+    /// enemy visible from `pos`, since it owns the enemies map and the AOI,
+    /// and tells `requester` how many went.
+    DevDespawnEnemiesIntent {
+        requester: ClientId,
+        pos: super::connection::Vec3f,
+    },
+    /// Dev-gated fling (Test Panel): the tick loop lifts `requester` by
+    /// `height` and sets it falling, since it holds the fan.
+    DevFlingIntent {
+        requester: ClientId,
+        height: f32,
+    },
+    /// A `Consider` of a mob (factions, 2026-10-23): answered in the tick
+    /// loop, which holds the enemies map.
+    ConsiderIntent {
+        requester: ClientId,
+        target_id: protocol::world::EntityId,
+    },
+    /// The spell bar changed (a memorize, a forget or the one-time seed): the
+    /// tick loop writes it to `character_spell_gems`, where the pool is.
+    SpellGemsChanged {
+        char_id: i64,
+        gems: Vec<(i32, String)>,
+        seeded: bool,
+    },
     /// PD_W0023 — server-authoritative quest turn-in. The tick loop validates
     /// against the server quest table + the character's completed set +
     /// (PD_W0024) full objective progress, persists the completion FIRST,
@@ -419,6 +486,35 @@ fn quest_id_well_formed(quest_id: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
+/// The most characters one chat line carries (EQ II's chat box took about 250;
+/// user, 2026-10-26). The client's chat line refuses typing past it, so the
+/// line every player sees is the line its sender sent; this cut only bites on a
+/// forged client. Kept in lockstep with `ChatChannel.MAX_CHARS` (counted the
+/// same way: Unicode scalar values, which is what a Godot String's length is).
+pub const MAX_CHAT_CHARS: usize = 250;
+
+/// What a client-cancelled cast is relayed to peers as. The client's own
+/// `CastFailBroadcast` reason is never shown anywhere (a peer only ends the
+/// bar it drew), so the relay carries this one word rather than whatever a
+/// client wrote.
+pub const CAST_CANCELLED_RELAY: &str = "cancelled";
+
+/// The highest a GM may fling themselves (`DevFling`): past
+/// `fall::LETHAL_DROP`, so a lethal fall can be tested, and bounded, so no
+/// height a client sends puts a body wherever it likes.
+pub const MAX_FLING_HEIGHT: f32 = 100.0;
+
+/// Cut `text` to at most `max_chars` characters. Counting characters, never
+/// slicing by byte: `&text[..n]` panics when `n` falls inside a multibyte
+/// character, and a panic in the tick task takes the whole server down, so
+/// every cut of client text goes through here.
+fn truncate_to_chars(mut text: String, max_chars: usize) -> String {
+    if let Some((cut, _)) = text.char_indices().nth(max_chars) {
+        text.truncate(cut);
+    }
+    text
+}
+
 /// The gate every dev/GM command goes through: authorize it, charge its
 /// budget and queue its audit row in one step (`authorize_dev_cmd`). True
 /// only when the command should run. An unauthorized client gets silence (a
@@ -452,12 +548,19 @@ fn dev_cmd_allowed(
     }
 }
 
-/// Which budget an intent draws on, or none: movement, combat, casts, quests,
-/// the group and the lifecycle messages have gates of their own (the swing
-/// rate limit, one cast per tick, the dead-state gate).
+/// Which budget an intent draws on, or none. The match is exhaustive on
+/// purpose: a new intent does not compile until it is placed, so none can
+/// slip past the budgets by being forgotten. `None` is for the intents with
+/// a gate of their own (the swing-rate limit, one cast or skill per tick, the
+/// dead-state gate, the GM command bucket), the lifecycle messages, and the
+/// intents the server has no handler for.
 pub fn intent_class(msg: &ClientWorldMsg) -> Option<IntentClass> {
     use ClientWorldMsg as M;
     match msg {
+        // Each one a validated write: the inventory family, the bank, the
+        // vendor, loot, quest state (a write per message through the per-tick
+        // flush), the trade window (locks and a two-party commit), and the
+        // server-held spell bar (a refused one answers with the whole bar).
         M::MoveItem { .. }
         | M::SplitStack { .. }
         | M::DropItem { .. }
@@ -465,7 +568,7 @@ pub fn intent_class(msg: &ClientWorldMsg) -> Option<IntentClass> {
         | M::EquipItem { .. }
         | M::UnequipItem { .. }
         | M::UseConsumable { .. }
-        | M::StackAll { .. }
+        | M::StackAll
         | M::LootItem { .. }
         | M::LootAll { .. }
         | M::LootToCursor { .. }
@@ -476,10 +579,23 @@ pub fn intent_class(msg: &ClientWorldMsg) -> Option<IntentClass> {
         | M::BankExchange { .. }
         | M::BankStoreItem { .. }
         | M::BankWithdrawItem { .. }
-        // Quest state is a write per message too (the per-tick flush).
         | M::AcceptQuest { .. }
         | M::AbandonQuest { .. }
-        | M::CompleteQuest { .. } => Some(IntentClass::Inventory),
+        | M::CompleteQuest { .. }
+        | M::TradeRequest { .. }
+        | M::TradeOfferItem { .. }
+        | M::TradeRetrieveItem { .. }
+        | M::TradeOfferCoins { .. }
+        | M::TradeAccept
+        | M::TradeCancel
+        | M::MemorizeStart { .. }
+        | M::MemorizeFinish
+        | M::ForgetSpell { .. }
+        | M::SeedSpellGems { .. } => Some(IntentClass::Inventory),
+        // Fan-outs to peers, and handlers that answer or write a log line per
+        // message: the cosmetic broadcasts, chat, the group, pet commands,
+        // skills (each use answers, a refusal with a SkillFail), songs,
+        // consider, inspect, the sit and stand, and the camp.
         M::CastStartBroadcast { .. }
         | M::CastCompleteBroadcast { .. }
         | M::CastFailBroadcast { .. }
@@ -487,28 +603,93 @@ pub fn intent_class(msg: &ClientWorldMsg) -> Option<IntentClass> {
         | M::HitBroadcast { .. }
         | M::MissBroadcast { .. }
         | M::EvadeBroadcast { .. }
-        | M::DeathBroadcast { .. }
+        | M::DeathBroadcast
         | M::EquipUpdate { .. }
         | M::Chat { .. }
         | M::InspectPlayer { .. }
-        // Fan-outs to peers and handlers that write a log line per message.
         | M::SetTarget { .. }
-        | M::Sit { .. }
-        | M::Stand { .. }
+        | M::Sit
+        | M::Stand
         | M::GroupInvite { .. }
         | M::GroupAcceptInvite { .. }
-        | M::GroupLeave { .. }
+        | M::GroupLeave
         | M::GroupKick { .. }
         | M::SetGroupLootMode { .. }
         | M::SetAutosplit { .. }
         | M::PassLeadership { .. }
         | M::PetCommand { .. }
         | M::PvpToggle { .. }
-        | M::BindAtCurrentLocation { .. }
-        | M::Camp { .. }
-        | M::CancelCamp { .. } => Some(IntentClass::Cosmetic),
-        _ => None,
+        | M::BindAtCurrentLocation
+        | M::Camp
+        | M::CancelCamp
+        | M::UseSkill { .. }
+        | M::StopSong
+        | M::Consider { .. }
+        | M::ResurrectAccept { .. } => Some(IntentClass::Cosmetic),
+        // Gates of their own: the lifecycle (one each per session), movement
+        // (one per tick is the stream), the swing-rate limit, one cast per
+        // caster per tick, the dead-state gate on Respawn, and every dev
+        // command (the GM command bucket, `authorize_dev_cmd`, which refuses a
+        // plain account before anything runs or is written).
+        M::Connect { .. }
+        | M::Disconnect
+        | M::Heartbeat
+        | M::EnterWorld
+        | M::Move { .. }
+        | M::Attack { .. }
+        | M::CastSpell { .. }
+        | M::Respawn
+        | M::GmCommand { .. }
+        | M::DamageSelf { .. }
+        | M::HealSelf { .. }
+        | M::GiveCoins { .. }
+        | M::GrantQuestXp { .. }
+        | M::DevSpawnMob { .. }
+        | M::DevDespawnEnemies
+        | M::DevSetFaction { .. }
+        | M::DevFling { .. } => None,
+        // No handler: these hit the dispatcher's fall-through and cost nothing.
+        M::CancelCast
+        | M::Interact { .. }
+        | M::DialogueResponse { .. }
+        | M::TurnInQuest { .. }
+        | M::StartCombine { .. }
+        | M::StartMining { .. }
+        | M::StartSkinning { .. } => None,
     }
+}
+
+/// A coin amount from a client message, refused here if any tier is negative.
+/// Only a modified client sends one, so the refusal is silent (an answer would
+/// only help it probe); the log line names the character.
+fn client_coin_amount(
+    conn: &PerConnection,
+    coins: Coins,
+    message: &str,
+) -> Option<protocol::world::CoinAmount> {
+    match protocol::world::CoinAmount::try_from(coins) {
+        Ok(amount) => Some(amount),
+        Err(_) => {
+            tracing::info!(
+                char_id = conn.char_id,
+                message,
+                ?coins,
+                "refused a negative coin amount (a forged client)"
+            );
+            None
+        }
+    }
+}
+
+/// A client message's variant name ("UseSkill", "Sit") for logs, without its
+/// fields (a chat line or a trade offer stays out of the journal).
+fn message_name(msg: &ClientWorldMsg) -> String {
+    let debug = format!("{msg:?}");
+    debug
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 pub fn handle_message(
@@ -565,6 +746,11 @@ pub fn handle_message(
     // sessions) and refuse the rest with one honest line. Move stays
     // whitelisted because its own silent gate already drops it — it arrives
     // at 20 Hz, and a chat refusal per packet would flood an old client.
+    // SetTarget is allowed (2026-10-26): clicking things while dead is natural
+    // and a target only matters to attacks and casts, which stay refused. The
+    // line is said once per death (a client sends several messages while dead,
+    // and each used to add a line); every refusal is logged by its message
+    // name, the first at info and the rest at debug.
     if conn.death_processed {
         let allowed_while_dead = matches!(
             msg,
@@ -586,9 +772,17 @@ pub fn handle_message(
                 | ClientWorldMsg::GroupKick { .. }
                 | ClientWorldMsg::SetGroupLootMode { .. }
                 | ClientWorldMsg::PassLeadership { .. }
+                | ClientWorldMsg::SetTarget { .. }
         );
         if !allowed_while_dead {
-            send_refusal(server, client_id, "You cannot do that while dead.");
+            let refused = message_name(&msg);
+            if conn.dead_refusal_told {
+                tracing::debug!(char_id = conn.char_id, refused, "refused while dead");
+            } else {
+                tracing::info!(char_id = conn.char_id, refused, "refused while dead");
+                send_refusal(server, client_id, "You cannot do that while dead.");
+                conn.dead_refusal_told = true;
+            }
             return Outcome::Continue;
         }
     }
@@ -646,7 +840,10 @@ pub fn handle_message(
             tracing::info!(char_id = conn.char_id, "client requested disconnect");
             // Mark this leave as CLEAN so the tick loop reaps the body at once
             // instead of letting it linger as linkdead. Quit Game and a
-            // completed `/camp` both route through here.
+            // completed `/camp` both route through here. Whether the body is
+            // in mid-air is judged where the transport drops, not here: the
+            // movement step runs after this handler and could still carry it
+            // over an edge this tick (`session::handle_transport_events`).
             conn.clean_disconnect = true;
             Outcome::Disconnect
         }
@@ -656,7 +853,8 @@ pub fn handle_message(
         ClientWorldMsg::Move {
             sequence,
             direction,
-            jumping: _,
+            jumping,
+            yaw,
         } => {
             // Death lock: a dead player stays put. Without this you could walk
             // your corpse around during the respawn countdown, and worse, keep
@@ -679,7 +877,11 @@ pub fn handle_message(
             // client can never send one, so drop it before it touches any
             // state (same shape as DevSpawnMob's payload guard). Deliberately
             // silent: only a forged client can reach this arm.
-            if !direction.x.is_finite() || !direction.y.is_finite() || !direction.z.is_finite() {
+            if !direction.x.is_finite()
+                || !direction.y.is_finite()
+                || !direction.z.is_finite()
+                || !yaw.is_finite()
+            {
                 return Outcome::Continue;
             }
             // Drop out-of-order Move packets (unreliable channel can reorder).
@@ -695,11 +897,14 @@ pub fn handle_message(
             // out-of-order detection stays correct.
             let dir_v = if super::buffs::is_mezzed(&conn.active_buffs)
                 || super::buffs::is_rooted(&conn.active_buffs)
+                || super::buffs::is_stunned(&conn.active_buffs)
             {
                 Vec3f::ZERO
             } else {
-                // Y is zeroed — server does not simulate gravity or jumping.
-                // Only XZ is authoritative; vertical position stays at spawn height.
+                // Only the XZ direction is the client's. Nothing vertical is ever
+                // read from it: the ground decides height (the height model,
+                // `terrain::player_step` pins every player each tick), and there
+                // is no gravity or jumping to simulate.
                 let v = Vec3f {
                     x: direction.x,
                     y: 0.0,
@@ -710,12 +915,27 @@ pub fn handle_message(
             // Store the latest intent for the tick loop to integrate exactly
             // once per tick. Integrating here would advance pos N times when
             // N Moves arrive between ticks — at typical client send rates
-            // that's a ~3× speedup. Server-authoritative speed cap is
-            // enforced by clamping the direction to unit length; the tick
-            // loop multiplies by MAX_MOVE_SPEED × TICK_DT.
+            // that's a ~3× speedup. The direction's length is clamped to 1
+            // (a full run; a crouch sends half); the tick loop decides the
+            // speed itself (RUN_SPEED's note) and multiplies by TICK_DT.
             conn.latest_direction = dir_v;
             conn.last_move_received = Some(now);
-            Outcome::Continue
+            // The facing (PD_W0029): the client's own body yaw, carried by the
+            // Position fan so peers see each other turn (before it, everyone
+            // faced their login yaw forever). Cosmetic: nothing reads it into
+            // movement or combat, and a rooted player may still turn. Wrapped
+            // into [-PI, PI) (an exact PI reads as -PI, the same facing), so a
+            // forged huge value stays a facing and not a 1e30 in the database.
+            conn.yaw = (yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+            // The jump is cosmetic and separate from the direction: it is
+            // relayed as a one-shot for peers to animate, and nothing here
+            // reads it into `pos` (the ground alone decides Y).
+            if conn.note_move_jump(jumping, now) {
+                Outcome::JumpFanOut
+            } else {
+                Outcome::Continue
+            }
         }
 
         ClientWorldMsg::CastStartBroadcast {
@@ -725,6 +945,23 @@ pub fn handle_message(
             if !conn.ready {
                 return Outcome::Continue;
             }
+            // A stunned or mesmerized caster starts no bar (review of the
+            // active skills, 2026-10-19): the CastSpell gate refused only a
+            // release inside the stun, so a bar begun under one and released
+            // after it went through. Private, as the global cooldown's refusal.
+            let cc_reason = if super::buffs::is_stunned(&conn.active_buffs) {
+                Some("You are stunned.")
+            } else if super::buffs::is_mezzed(&conn.active_buffs) {
+                Some("Mesmerized.")
+            } else {
+                None
+            };
+            if let Some(reason) = cc_reason {
+                let caster = conn.char_id as u64;
+                fan_out_cast_fail(server, &[client_id], caster, reason.to_string());
+                fan_out_mana_update(server, &[client_id], caster, conn.mp, conn.max_mp);
+                return Outcome::Continue;
+            }
             // The global cooldown (spell batch step 4): a timed cast that
             // would START inside it is refused here, before any bar runs,
             // so the caster loses no cast time; nothing is cached, so a
@@ -732,7 +969,8 @@ pub fn handle_message(
             // peer has drawn a bar yet. The client spent its mana at the
             // start, so the true value goes with the refusal. Songs are
             // exempt; an unknown spell is left to the CastSpell gate.
-            let song = super::spells::lookup(&spell_name).is_some_and(|s| s.is_song);
+            let known = super::spells::lookup(&spell_name);
+            let song = known.is_some_and(|s| s.is_song);
             if !song {
                 if let Some(until) = conn.gcd_until {
                     if now < until {
@@ -754,8 +992,45 @@ pub fn handle_message(
                     }
                 }
             }
+            // The fizzle (the EQ parity audit, 2026-10-20), rolled as EQ
+            // rolled it: at the cast's start, before any bar, on the casting
+            // skill against the spell's level. A fizzle burns a quarter of
+            // the mana, starts the gem's refresh (the global cooldown; P99's
+            // spell pages list a 2.25 s "fizzle time"), caches no bar and
+            // trains nothing. Private, as the refusals above. An instant
+            // spell has no CastStart and rolls at its CastSpell instead.
+            if let Some(spell) = known {
+                if conn.fizzles && super::cast_gate::roll_fizzle(conn, spell) {
+                    let burned = super::cast_gate::fizzle_mana(spell.mana_cost, conn.mp);
+                    conn.mp -= burned;
+                    conn.gcd_until = Some(now + super::GLOBAL_COOLDOWN);
+                    conn.cast_spell_name.clear();
+                    conn.cast_total_duration = 0.0;
+                    conn.cast_set_at = None;
+                    super::regen::mark_dirty(conn);
+                    tracing::info!(
+                        caster = conn.char_id,
+                        spell = %spell_name,
+                        burned,
+                        "CastStart fizzled"
+                    );
+                    let caster = conn.char_id as u64;
+                    fan_out_cast_fail(
+                        server,
+                        &[client_id],
+                        caster,
+                        super::cast_gate::FIZZLE_LINE.to_string(),
+                    );
+                    fan_out_mana_update(server, &[client_id], caster, conn.mp, conn.max_mp);
+                    return Outcome::Continue;
+                }
+            }
+            // The cache keeps the client's name for the cast-time gate, which
+            // refuses an unknown spell in its own words; the bar's length is
+            // the server's own cast time (the late-joiner seed reads it), 0
+            // for a spell the server does not know.
             conn.cast_spell_name = spell_name.clone();
-            conn.cast_total_duration = duration;
+            conn.cast_total_duration = known.map_or(0.0, |s| s.cast_time);
             conn.cast_set_at = Some(now);
             // Track 17.2 — snapshot the caster's position so the
             // CastSpell gate can reject movement-during-cast forgeries.
@@ -763,9 +1038,29 @@ pub fn handle_message(
             // Casting stands you, as a swing does (spell batch step 0): the
             // seated regen rate does not run under a cast bar.
             conn.is_sitting = false;
+            // The relay carries the server's numbers, not the client's (the
+            // client-authority audit, Phase 4): peers' bars used to be drawn
+            // from whatever name and duration the client wrote, so a modified
+            // client could put any string on every screen in view and stretch
+            // or shrink its bar at will (and a non-finite duration was never
+            // checked). Only a spell the server knows is relayed, under its
+            // own name and at its own cast time; an honest client sent that
+            // number already. A mismatch marks a modified client, at debug.
+            let Some(spell) = known else {
+                return Outcome::Continue;
+            };
+            if !duration.is_finite() || (duration - spell.cast_time).abs() > 0.01 {
+                tracing::debug!(
+                    caster = conn.char_id,
+                    spell = %spell_name,
+                    client_duration = duration,
+                    server_cast_time = spell.cast_time,
+                    "CastStart duration differs from the server's; the server's is relayed"
+                );
+            }
             Outcome::CastStartFanOut {
-                spell_name,
-                duration,
+                spell_name: spell.name.clone(),
+                duration: spell.cast_time,
             }
         }
 
@@ -776,7 +1071,14 @@ pub fn handle_message(
             conn.cast_spell_name.clear();
             conn.cast_total_duration = 0.0;
             conn.cast_set_at = None;
-            Outcome::CastCompleteFanOut { spell_name }
+            // Relayed only for a spell the server knows, under its own name
+            // (the CastStart rule above).
+            match super::spells::lookup(&spell_name) {
+                Some(spell) => Outcome::CastCompleteFanOut {
+                    spell_name: spell.name.clone(),
+                },
+                None => Outcome::Continue,
+            }
         }
 
         ClientWorldMsg::HitBroadcast {
@@ -785,7 +1087,18 @@ pub fn handle_message(
             crit,
             dmg_type,
         } => {
-            if !conn.ready {
+            // A client-made Hit, Miss or Evade is fiction: every real one comes
+            // from the server's own combat (Attack, spells, mobs). Relayed
+            // freely, these put forged combat text on every screen, and since
+            // a Hit stands its target's client (the seated-combat rule), a
+            // forged one could stand another player up, ending their seated
+            // regen and their /camp. Only the Test Panel sends them, so they
+            // are dev commands: gated and audited, ignored for anyone else.
+            if !conn.ready || !conn.can_use_dev_cmds() {
+                return Outcome::Continue;
+            }
+            let args = format!("target={target} amount={amount} crit={crit}");
+            if !dev_cmd_allowed(server, conn, client_id, now, "hit_broadcast", args) {
                 return Outcome::Continue;
             }
             Outcome::HitFanOut {
@@ -797,14 +1110,36 @@ pub fn handle_message(
         }
 
         ClientWorldMsg::MissBroadcast { target } => {
-            if !conn.ready {
+            // Dev-only, as HitBroadcast above.
+            if !conn.ready || !conn.can_use_dev_cmds() {
+                return Outcome::Continue;
+            }
+            if !dev_cmd_allowed(
+                server,
+                conn,
+                client_id,
+                now,
+                "miss_broadcast",
+                format!("target={target}"),
+            ) {
                 return Outcome::Continue;
             }
             Outcome::MissFanOut { target }
         }
 
         ClientWorldMsg::EvadeBroadcast { target } => {
-            if !conn.ready {
+            // Dev-only, as HitBroadcast above.
+            if !conn.ready || !conn.can_use_dev_cmds() {
+                return Outcome::Continue;
+            }
+            if !dev_cmd_allowed(
+                server,
+                conn,
+                client_id,
+                now,
+                "evade_broadcast",
+                format!("target={target}"),
+            ) {
                 return Outcome::Continue;
             }
             Outcome::EvadeFanOut { target }
@@ -827,15 +1162,26 @@ pub fn handle_message(
             if !conn.ready {
                 return Outcome::Continue;
             }
-            // Server-authoritative death (Slice 0): the per-tick death sweep
-            // already kills players whose hp hit zero in server-simulated
-            // combat. This handler now covers death causes the server doesn't
-            // simulate (e.g. client-side fall damage): if this death hasn't been
-            // processed yet, run the same authoritative kill path (xp penalty +
-            // de-level, on-death resets). The `death_processed` guard keeps the
-            // penalty + EntityDied to exactly once whether the sweep or this
-            // handler reaches it first.
+            // A dev command since 2026-10-23 (docs/design/server_fall_damage.md,
+            // slice 0). Online every honest death is already the server's: HP
+            // only falls on the server, and the per-tick death sweep kills at
+            // zero, so an honest client's send arrives after `death_processed`
+            // is set and stops at the check below without writing an audit
+            // row. The one honest sender of a fresh death is the Test Panel's
+            // Trigger Death, a GM tool. Ungated, this was an instant death on
+            // demand: a free trip to the bind point and a wipe of every mob's
+            // hate (housekeeping audit B1).
             if conn.death_processed {
+                return Outcome::Continue;
+            }
+            if !dev_cmd_allowed(
+                server,
+                conn,
+                client_id,
+                now,
+                "death_broadcast",
+                format!("hp={}", conn.hp),
+            ) {
                 return Outcome::Continue;
             }
             super::progression::kill_player(server, conn);
@@ -878,6 +1224,72 @@ pub fn handle_message(
             Outcome::CompleteQuestIntent {
                 responder: conn.char_id as u64,
                 quest_id,
+            }
+        }
+
+        // ── PD_W0028 — trade window. Thin conversions to intents; the
+        //    tick apply phase owns the TradeManager and both inventories,
+        //    so every real check lives there. The dead-state whitelist
+        //    above already refuses all of these while dead. ──
+        ClientWorldMsg::TradeRequest { target_id } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::TradeRequestIntent {
+                requester: conn.char_id as u64,
+                target: target_id,
+            }
+        }
+        ClientWorldMsg::TradeOfferItem {
+            window_slot,
+            from_location,
+            from_slot,
+        } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::TradeOfferItemIntent {
+                owner: conn.char_id as u64,
+                window_slot,
+                from_location,
+                from_slot,
+            }
+        }
+        ClientWorldMsg::TradeRetrieveItem { window_slot } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::TradeRetrieveItemIntent {
+                owner: conn.char_id as u64,
+                window_slot,
+            }
+        }
+        ClientWorldMsg::TradeOfferCoins { coins } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            let Some(coins) = client_coin_amount(conn, coins, "TradeOfferCoins") else {
+                return Outcome::Continue;
+            };
+            Outcome::TradeOfferCoinsIntent {
+                owner: conn.char_id as u64,
+                coins,
+            }
+        }
+        ClientWorldMsg::TradeAccept => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::TradeAcceptIntent {
+                owner: conn.char_id as u64,
+            }
+        }
+        ClientWorldMsg::TradeCancel => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            Outcome::TradeCancelIntent {
+                owner: conn.char_id as u64,
             }
         }
 
@@ -999,7 +1411,13 @@ pub fn handle_message(
             // be recovered here. And it is strictly less trusting — the client
             // currently hands over six numbers the server takes at face value,
             // whereas a named mob is now defined entirely server-side.
-            let mob = match super::named::resolve_for_dev_spawn(&name) {
+            // A dev spawn of a mob a camp also spawns carries the camp's
+            // faction and alignment, so a GM can test a kill's hits on a
+            // spawned mob; anything else moves no standing.
+            let named_dev = super::named::resolve_for_dev_spawn(&name);
+            let (camp_faction, camp_alignment) =
+                super::zones::faction_of_camp_mob(&name, named_dev.map(|n| n.id.as_str()));
+            let mob = match named_dev {
                 Some(n) => super::zones::MobTemplate {
                     // from_spawn applies the multipliers, so these are the
                     // client's enemy-scene BASE values, not the scaled ones the
@@ -1016,6 +1434,9 @@ pub fn handle_message(
                     melee_range: None,
                     attack_interval: None,
                     named_id: Some(n.id.clone()),
+                    faction: camp_faction.clone(),
+                    alignment: camp_alignment.clone(),
+                    faction_hit: None,
                 },
                 None => super::zones::MobTemplate {
                     name,
@@ -1029,6 +1450,9 @@ pub fn handle_message(
                     melee_range: None,
                     attack_interval: None,
                     named_id: None,
+                    faction: camp_faction,
+                    alignment: camp_alignment,
+                    faction_hit: None,
                 },
             };
             let pos = super::connection::Vec3f {
@@ -1050,6 +1474,155 @@ pub fn handle_message(
                 "dev spawn mob"
             );
             Outcome::DevSpawnMobIntent { pos, mob }
+        }
+
+        ClientWorldMsg::DevDespawnEnemies => {
+            // Same gate and audit as DevSpawnMob: a plain account's request is
+            // ignored silently and writes nothing (a reply would tell it
+            // whether dev commands are on).
+            if !conn.in_world || !conn.can_use_dev_cmds() {
+                return Outcome::Continue;
+            }
+            let pos = conn.pos;
+            let audit_args = format!("pos={:.1},{:.1}", pos.x, pos.z);
+            if !dev_cmd_allowed(
+                server,
+                conn,
+                client_id,
+                now,
+                "dev_despawn_enemies",
+                audit_args,
+            ) {
+                return Outcome::Continue;
+            }
+            Outcome::DevDespawnEnemiesIntent {
+                requester: client_id,
+                pos,
+            }
+        }
+
+        ClientWorldMsg::DevFling { height } => {
+            // The same gate and audit as the other dev commands. The height is
+            // checked before anything is recorded or moved: only a finite one
+            // in (0, MAX_FLING_HEIGHT] reaches a position (rule A3), and the
+            // dead are not flung (no row for a command that would do nothing).
+            if !conn.in_world || !conn.can_use_dev_cmds() {
+                return Outcome::Continue;
+            }
+            if !(height.is_finite() && height > 0.0 && height <= MAX_FLING_HEIGHT)
+                || conn.hp <= 0.0
+                || conn.death_processed
+            {
+                return Outcome::Continue;
+            }
+            if !dev_cmd_allowed(
+                server,
+                conn,
+                client_id,
+                now,
+                "dev_fling",
+                format!("height={height:.1}"),
+            ) {
+                return Outcome::Continue;
+            }
+            Outcome::DevFlingIntent {
+                requester: client_id,
+                height,
+            }
+        }
+
+        // ── The server-held spell bar (client-authority audit fix 5) ──
+        // The rules are spell_gems.rs; these arms only apply them. A refusal
+        // answers with a line and the true bar, so a client that drifted is
+        // put right.
+        ClientWorldMsg::MemorizeStart { gem, spell_name } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            conn.memorize_pending = None;
+            if !conn.is_sitting {
+                send_refusal(server, client_id, "You must be sitting to memorize spells.");
+                return Outcome::Continue;
+            }
+            match super::spell_gems::check_gem(conn, gem as i32, &spell_name) {
+                Ok(_) => conn.memorize_pending = Some((gem as i32, spell_name, now)),
+                Err(line) => {
+                    send_refusal(server, client_id, line);
+                    send_spell_gems(server, client_id, conn);
+                }
+            }
+            Outcome::Continue
+        }
+
+        ClientWorldMsg::MemorizeFinish => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            let Some((gem, spell_name, began)) = conn.memorize_pending.take() else {
+                return Outcome::Continue;
+            };
+            // Seated the whole way: sitting now, and not stood up and sat
+            // down again since the memorize began.
+            let seated_throughout = conn.is_sitting && conn.sat_at.is_some_and(|t| t <= began);
+            let ran = now.duration_since(began).as_secs_f32();
+            let refusal = if !seated_throughout {
+                Some("You stop memorizing.")
+            } else if ran
+                < super::spell_gems::MEMORIZE_SECS - super::spell_gems::MEMORIZE_GRACE_SECS
+            {
+                Some("You have not finished memorizing.")
+            } else {
+                None
+            };
+            if let (Some(line), _) | (None, Err(line)) = (
+                refusal,
+                super::spell_gems::check_gem(conn, gem, &spell_name),
+            ) {
+                tracing::info!(char_id = conn.char_id, gem, spell = %spell_name, ran, line, "memorize refused");
+                send_refusal(server, client_id, line);
+                send_spell_gems(server, client_id, conn);
+                return Outcome::Continue;
+            }
+            // Memorizing is free, as in EQ: the mana is paid when the spell is
+            // cast (user, 2026-10-26; it used to cost half the spell's mana).
+            conn.spell_gems.insert(gem, spell_name.clone());
+            conn.spell_gems_seeded = true;
+            tracing::info!(char_id = conn.char_id, gem, spell = %spell_name, "spell memorized");
+            send_spell_gems(server, client_id, conn);
+            spell_gems_changed(conn)
+        }
+
+        ClientWorldMsg::ForgetSpell { gem } => {
+            if !conn.in_world || gem as i32 >= super::spell_gems::GEM_COUNT {
+                return Outcome::Continue;
+            }
+            conn.spell_gems.remove(&(gem as i32));
+            conn.spell_gems_seeded = true;
+            send_spell_gems(server, client_id, conn);
+            spell_gems_changed(conn)
+        }
+
+        ClientWorldMsg::SeedSpellGems { gems } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            // Once only, and only for a character the server holds no bar
+            // for: a second seed would be a free memorize of anything.
+            if conn.spell_gems_seeded {
+                send_spell_gems(server, client_id, conn);
+                return Outcome::Continue;
+            }
+            let offered = gems.len();
+            let taken = super::spell_gems::seed(conn, &gems);
+            conn.spell_gems_seeded = true;
+            tracing::info!(
+                char_id = conn.char_id,
+                offered,
+                taken,
+                "spell bar seeded from the client's copy"
+            );
+            send_spell_gems(server, client_id, conn);
+            spell_gems_changed(conn)
         }
 
         ClientWorldMsg::DamageSelf { amount } => {
@@ -1131,11 +1704,22 @@ pub fn handle_message(
             // Exact per-tier credit, no reduction — a raw-copper grant must
             // stay raw copper (that's what makes it useful for encumbrance
             // testing). Negative grants allowed (dev drain), floored at 0.
+            let before = conn.coins.total_copper();
             conn.coins.platinum = conn.coins.platinum.saturating_add(platinum).max(0);
             conn.coins.gold = conn.coins.gold.saturating_add(gold).max(0);
             conn.coins.silver = conn.coins.silver.saturating_add(silver).max(0);
             conn.coins.copper = conn.coins.copper.saturating_add(copper).max(0);
             conn.coins_dirty = true;
+            // The ledger gets what the wallet really gained (the floor at 0
+            // can make a drain smaller than asked).
+            let gained = conn.coins.total_copper() - before;
+            if gained != 0 {
+                conn.ledger(super::ledger::coin_event(
+                    super::ledger::ItemAction::GmCoins,
+                    gained,
+                    Some("gm".to_string()),
+                ));
+            }
             send_coins_update(server, client_id, conn.coins);
             tracing::info!(
                 char_id = conn.char_id,
@@ -1230,6 +1814,7 @@ pub fn handle_message(
             // Slice 0: the player is alive again, so the death sweep should
             // process the next death afresh.
             conn.death_processed = false;
+            conn.dead_refusal_told = false;
             super::regen::mark_dirty(conn);
             // Move them to their bind point. Until now Respawn only restored
             // resources and left position untouched — and since the SERVER owns
@@ -1245,7 +1830,8 @@ pub fn handle_message(
                 .unwrap_or(super::STARTER_SPAWN);
             // Mutating pos makes `is_dirty_for_persist()` true on its own, so the
             // next checkpoint writes the bind location rather than leaving the DB
-            // pointing at the death site.
+            // pointing at the death site. The respawn lands standing (fall.rs).
+            conn.vertical = super::fall::Vertical::default();
             conn.pos = dest;
             Outcome::RespawnTeleport { pos: dest }
         }
@@ -1253,20 +1839,26 @@ pub fn handle_message(
         ClientWorldMsg::BuffSnapshotBroadcast { buffs: _ } => {
             // Track 6 sub-task 4a: server is now the source of truth
             // for buff state. The client's snapshot is ignored — the
-            // server-originated fan-out from tick.rs step 5a is the
+            // server-originated fan-out from the buff tick (tick/buff_tick.rs, step 5a) is the
             // canonical signal. Variant kept for transitional builds;
             // sub-task 4b removes the wire variant entirely.
             Outcome::Continue
         }
 
-        ClientWorldMsg::CastFailBroadcast { reason } => {
+        ClientWorldMsg::CastFailBroadcast { reason: _ } => {
             if !conn.ready {
                 return Outcome::Continue;
             }
             conn.cast_spell_name.clear();
             conn.cast_total_duration = 0.0;
             conn.cast_set_at = None;
-            Outcome::CastFailFanOut { reason }
+            // The client's reason never reaches a screen (a peer only ends
+            // the bar it drew; the caster is not among the recipients), so
+            // the relay carries one fixed word instead of whatever the client
+            // wrote (the CastStart rule above).
+            Outcome::CastFailFanOut {
+                reason: CAST_CANCELLED_RELAY.to_string(),
+            }
         }
 
         ClientWorldMsg::Sit => {
@@ -1277,6 +1869,9 @@ pub fn handle_message(
             // dropped on the wire.
             if !conn.ready {
                 return Outcome::Continue;
+            }
+            if !conn.is_sitting {
+                conn.sat_at = Some(now);
             }
             conn.is_sitting = true;
             Outcome::Continue
@@ -1297,7 +1892,7 @@ pub fn handle_message(
             // never reaches here. Reject silently if not seated, not ready, or
             // already camping. On accept, start the countdown and confirm to the
             // client so its display matches our clock; the per-tick camp sweep
-            // (tick.rs) drives cancel-on-stand/move/damage + completion.
+            // (tick/camp.rs) drives cancel-on-stand/move/damage + completion.
             if !conn.ready || !conn.is_sitting || conn.camp_since.is_some() {
                 return Outcome::Continue;
             }
@@ -1328,8 +1923,10 @@ pub fn handle_message(
                 // legitimate UI interactions).
                 return Outcome::Continue;
             }
-            // Track 6 sub-task 4d — Mez gates Attack.
-            if super::buffs::is_mezzed(&conn.active_buffs) {
+            // Track 6 sub-task 4d — Mez gates Attack; so does a stun.
+            if super::buffs::is_mezzed(&conn.active_buffs)
+                || super::buffs::is_stunned(&conn.active_buffs)
+            {
                 return Outcome::Continue;
             }
             Outcome::AttackIntent {
@@ -1338,6 +1935,160 @@ pub fn handle_message(
                 is_offhand,
                 dmg_type,
             }
+        }
+
+        ClientWorldMsg::UseSkill {
+            skill_name,
+            target_id,
+        } => {
+            // Active skills (client-authority audit item 6). Everything the
+            // client used to decide for itself is checked here or in the
+            // tick loop, and a refusal answers privately with SkillFail and
+            // costs nothing: the client drops the cooldown it started.
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            let Some(skill) = super::active_skills::lookup(&skill_name) else {
+                send_skill_fail(
+                    server,
+                    client_id,
+                    &skill_name,
+                    "That skill isn't known here yet.",
+                );
+                return Outcome::Continue;
+            };
+            // The class the character acts as: a Paladin at Evil uses the
+            // Fallen kit and loses the Paladin's (alignment.rs).
+            let acting_class = conn.effective_class();
+            if !skill.usable_by(&acting_class) {
+                tracing::info!(user = conn.char_id, skill = %skill.name, class = %acting_class,
+                    "UseSkill rejected — class");
+                send_skill_fail(server, client_id, &skill.name, "You cannot use that skill.");
+                return Outcome::Continue;
+            }
+            if super::buffs::is_stunned(&conn.active_buffs) {
+                send_skill_fail(server, client_id, &skill.name, "You are stunned.");
+                return Outcome::Continue;
+            }
+            if super::buffs::is_mezzed(&conn.active_buffs) {
+                send_skill_fail(server, client_id, &skill.name, "Mesmerized.");
+                return Outcome::Continue;
+            }
+            if super::active_skills::on_cooldown(
+                conn.skill_cooldowns.get(&skill.name).copied(),
+                now,
+            ) {
+                send_skill_fail(server, client_id, &skill.name, "You cannot use that yet.");
+                return Outcome::Continue;
+            }
+            if conn.stamina < skill.stamina_cost {
+                send_skill_fail(server, client_id, &skill.name, "You are too tired.");
+                return Outcome::Continue;
+            }
+            Outcome::UseSkillIntent {
+                user: conn.char_id as u64,
+                skill_name: skill.name.clone(),
+                target_id,
+            }
+        }
+
+        ClientWorldMsg::StopSong => {
+            // The Bard song rework: the server pulses the song, so stopping
+            // it is this message (re-clicking the song, /stopsong). The
+            // lingering effects run out on their own, as in EQ.
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            if let Some(song) = conn.active_song.take() {
+                conn.song_next_pulse_at = None;
+                send_system_line(server, client_id, &format!("You stop singing {song}."));
+                tracing::info!(singer = conn.char_id, %song, "song stopped");
+            }
+            Outcome::Continue
+        }
+
+        // ── Factions and alignment (2026-10-23) ──
+        ClientWorldMsg::Consider { npc_id, target_id } => {
+            if !conn.in_world {
+                return Outcome::Continue;
+            }
+            // An NPC is static, so its con is answered here; a mob needs the
+            // enemies map and goes to the tick. Anything else (a player, a
+            // bag, an id that is nothing) gets one line, so a Consider is no
+            // oracle for what an id is.
+            if let Some(npc) = npc_id
+                .as_deref()
+                .and_then(super::npcs::lookup_by_id_or_name)
+            {
+                let level = conn.npc_faction_level(npc);
+                send_system_line(
+                    server,
+                    client_id,
+                    &super::factions::con_line(&npc.name, level),
+                );
+                return Outcome::Continue;
+            }
+            match target_id {
+                Some(id) if IdKind::of(id) != IdKind::Player => Outcome::ConsiderIntent {
+                    requester: client_id,
+                    target_id: id,
+                },
+                _ => {
+                    send_system_line(server, client_id, "You cannot consider that.");
+                    Outcome::Continue
+                }
+            }
+        }
+
+        ClientWorldMsg::DevSetFaction {
+            faction_id,
+            standing,
+        } => {
+            // The GM faction panel's slider. Same gate and audit as
+            // DevSpawnMob: a plain account's request is ignored silently and
+            // writes nothing. Only the sender's OWN standing moves.
+            if !conn.in_world || !conn.can_use_dev_cmds() || !standing.is_finite() {
+                return Outcome::Continue;
+            }
+            let shown_id: String = faction_id.chars().take(40).collect();
+            let audit_args = format!("faction={shown_id:?} standing={standing:.0}");
+            if !dev_cmd_allowed(server, conn, client_id, now, "dev_set_faction", audit_args) {
+                return Outcome::Continue;
+            }
+            let Some(faction) = super::factions::lookup(&faction_id) else {
+                send_refusal(server, client_id, "No such faction.");
+                return Outcome::Continue;
+            };
+            // The slider names the standing the NPCs see; the personal part
+            // is what gets stored (the start modifier stays the table's).
+            let start = super::factions::start_modifier(faction, &conn.race, &conn.class) as f32;
+            let personal = (standing - start).clamp(
+                -super::factions::STANDING_CAP,
+                super::factions::STANDING_CAP,
+            );
+            conn.factions.insert(faction.id.clone(), personal);
+            conn.factions_dirty = true;
+            let shown = conn.faction_shown(faction);
+            let level = super::factions::level_for(shown);
+            send_faction_update(server, client_id, faction, shown);
+            send_system_line(
+                server,
+                client_id,
+                &format!(
+                    "Your standing with {} is now {} ({}).",
+                    faction.name,
+                    shown as i32,
+                    level.name()
+                ),
+            );
+            tracing::info!(
+                char_id = conn.char_id,
+                faction = %faction.id,
+                standing = shown,
+                level = level.name(),
+                "GM set own faction standing"
+            );
+            Outcome::Continue
         }
 
         ClientWorldMsg::GroupInvite { name } => {
@@ -1418,6 +2169,8 @@ pub fn handle_message(
                 Some("Silenced.")
             } else if super::buffs::is_mezzed(&conn.active_buffs) {
                 Some("Mesmerized.")
+            } else if super::buffs::is_stunned(&conn.active_buffs) {
+                Some("You are stunned.")
             } else {
                 None
             };
@@ -1587,6 +2340,9 @@ pub fn handle_message(
                 protocol::world::SlotRef::BagSlot { base, slot } => {
                     (format!("bag_{base}"), slot as u32)
                 }
+                // Eating from the hand (PD_W0029): the apply phase already
+                // reads the cursor as a location, under the same hunger rules.
+                protocol::world::SlotRef::Cursor => ("cursor".to_string(), 0),
                 protocol::world::SlotRef::EquipSlot(_) => {
                     return Outcome::Continue;
                 }
@@ -1661,6 +2417,9 @@ pub fn handle_message(
             if !conn.in_world {
                 return Outcome::Continue;
             }
+            let Some(coins) = client_coin_amount(conn, coins, "BankDepositCoins") else {
+                return Outcome::Continue;
+            };
             Outcome::BankDepositIntent {
                 owner: conn.char_id as u64,
                 coins,
@@ -1671,6 +2430,9 @@ pub fn handle_message(
             if !conn.in_world {
                 return Outcome::Continue;
             }
+            let Some(coins) = client_coin_amount(conn, coins, "BankWithdrawCoins") else {
+                return Outcome::Continue;
+            };
             Outcome::BankWithdrawIntent {
                 owner: conn.char_id as u64,
                 coins,
@@ -1774,7 +2536,7 @@ pub fn handle_message(
         // The other ~30 ClientWorldMsg variants land in later tracks.
         // Unknown-but-decoded messages: ignore, don't kick. Unknown-and-
         // failed-to-decode messages don't reach here (decode error is
-        // logged in tick.rs).
+        // logged in tick/intake.rs).
         ClientWorldMsg::InspectPlayer { target_char_id } => {
             if !conn.in_world {
                 return Outcome::Continue;
@@ -1790,14 +2552,14 @@ pub fn handle_message(
             if !conn.in_world {
                 return Outcome::Continue;
             }
-            // Hard cap to keep payloads sane. Clients should validate but
-            // a hostile or buggy client could still try to flood.
-            const MAX_CHAT_LEN: usize = 512;
-            let trimmed = if text.len() > MAX_CHAT_LEN {
-                text[..MAX_CHAT_LEN].to_string()
-            } else {
-                text
-            };
+            // The integration harness's stand-in for an unknown bug (see
+            // `Config::panic_probe`); never set on a running server.
+            if conn.panic_probe.as_deref() == Some(text.as_str()) {
+                panic!("panic probe: a chat line the harness armed");
+            }
+            // The client stops at the same cap, so this only bites on a forged
+            // client (a hostile or buggy one could still try to flood).
+            let trimmed = truncate_to_chars(text, MAX_CHAT_CHARS);
             Outcome::ChatFanOut {
                 channel,
                 text: trimmed,
@@ -2292,6 +3054,152 @@ pub fn send_system_line(server: &mut RenetServer, recipient: ClientId, text: &st
     send_refusal(server, recipient, text);
 }
 
+/// Refuse a `UseSkill` privately (client-authority audit item 6): the reason
+/// for the chat line and the skill's name, so the client drops the cooldown
+/// it started. The server stamped nothing and charged nothing.
+pub fn send_skill_fail(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    skill_name: &str,
+    reason: &str,
+) {
+    let msg = ServerWorldMsg::SkillFail {
+        skill_name: skill_name.to_string(),
+        reason: reason.to_string(),
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// One faction standing to its owner (factions, 2026-10-23): the number the
+/// faction's NPCs see and its con level.
+pub fn send_faction_update(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    faction: &super::factions::Faction,
+    shown: f32,
+) {
+    let msg = ServerWorldMsg::FactionUpdate {
+        faction_id: faction.id.clone(),
+        name: faction.name.clone(),
+        standing: shown,
+        level: super::factions::level_for(shown).as_wire(),
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// Apply faction hits to a character (a kill's derived hits or a quest's
+/// explicit ones): each clamps, flips the dirty flag, is told with EQ's line
+/// and fanned as a `FactionUpdate`. A zero hit is skipped.
+pub fn apply_faction_hits(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    conn: &mut PerConnection,
+    hits: &[(String, f32)],
+) {
+    for (faction_id, delta) in hits {
+        if *delta == 0.0 || !delta.is_finite() {
+            continue;
+        }
+        let Some(faction) = super::factions::lookup(faction_id) else {
+            continue;
+        };
+        let entry = conn.factions.entry(faction.id.clone()).or_insert(0.0);
+        let applied = super::factions::apply_hit(entry, *delta);
+        let personal = *entry;
+        conn.factions_dirty = true;
+        let shown = conn.faction_shown(faction);
+        send_system_line(
+            server,
+            recipient,
+            &super::factions::change_line(faction, applied, personal),
+        );
+        send_faction_update(server, recipient, faction, shown);
+        tracing::info!(
+            char_id = conn.char_id,
+            faction = %faction.id,
+            delta,
+            applied,
+            standing = shown,
+            level = super::factions::level_for(shown).name(),
+            "faction standing changed"
+        );
+    }
+}
+
+/// Every standing the character has moved, on entering the world, so the
+/// client follows the server's numbers from the first frame.
+pub fn send_factions_snapshot(server: &mut RenetServer, recipient: ClientId, conn: &PerConnection) {
+    let mut ids: Vec<&String> = conn.factions.keys().collect();
+    ids.sort();
+    for id in ids {
+        if let Some(faction) = super::factions::lookup(id) {
+            let shown = conn.faction_shown(faction);
+            send_faction_update(server, recipient, faction, shown);
+        }
+    }
+}
+
+/// Tell the owner their alignment when it is due: always when `force` (the
+/// enter-world send), otherwise once it has moved a hundredth of a point or
+/// crossed a tier since the last send (a spell's delta alone never fans one).
+pub fn send_alignment_if_due(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    conn: &mut PerConnection,
+    force: bool,
+) {
+    let due = match conn.alignment_sent {
+        None => true,
+        Some(sent) => {
+            force
+                || (conn.alignment - sent).abs() >= 0.01
+                || super::alignment::tier_for(sent) != super::alignment::tier_for(conn.alignment)
+        }
+    };
+    if !due {
+        return;
+    }
+    conn.alignment_sent = Some(conn.alignment);
+    let msg = ServerWorldMsg::AlignmentUpdate {
+        score: conn.alignment,
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// Move a character's alignment by `delta` through the momentum rule and
+/// tell them if it is due. A tier change is logged (it is what swaps a
+/// Paladin's or Shadow Knight's kit).
+pub fn move_alignment(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    conn: &mut PerConnection,
+    delta: f32,
+) {
+    if delta == 0.0 || !delta.is_finite() {
+        return;
+    }
+    let before = conn.alignment;
+    conn.alignment = super::alignment::apply(before, delta);
+    let tier_before = super::alignment::tier_for(before);
+    let tier_now = super::alignment::tier_for(conn.alignment);
+    if tier_before != tier_now {
+        tracing::info!(
+            char_id = conn.char_id,
+            from = tier_before.name(),
+            to = tier_now.name(),
+            score = conn.alignment,
+            "alignment tier changed"
+        );
+    }
+    send_alignment_if_due(server, recipient, conn, false);
+}
+
 pub fn fan_out_chat_message(
     server: &mut RenetServer,
     recipients: &[ClientId],
@@ -2339,8 +3247,14 @@ pub fn send_inspect_result(
 /// Fan out `EnemySpawn` for `entity` to every recipient. Encoded once and
 /// cloned per recipient. Used for live spawns (new mob appears → broadcast
 /// to all in_world clients) and late-joiner seed (new client enters world
-/// → server sends every living enemy).
-pub fn fan_out_enemy_spawn(server: &mut RenetServer, recipients: &[ClientId], entity: &Entity) {
+/// → server sends every living enemy). `replaces` names the id this mob
+/// takes over (a charm ending), `None` otherwise.
+pub fn fan_out_enemy_spawn(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    entity: &Entity,
+    replaces: Option<protocol::world::EntityId>,
+) {
     if recipients.is_empty() {
         return;
     }
@@ -2356,6 +3270,7 @@ pub fn fan_out_enemy_spawn(server: &mut RenetServer, recipients: &[ClientId], en
             z: entity.pos.z,
         },
         yaw: entity.yaw,
+        replaces,
     };
     let Some(bytes) = encode(&msg) else {
         return;
@@ -2401,11 +3316,33 @@ pub fn send_inventory_delta(
     server.send_message(recipient, CHANNEL_SYSTEM, bytes);
 }
 
+/// Send one slot's current contents as an `InventoryDelta`. `contents` is what
+/// `Inventory::peek_at` returned for the slot; `None` means it is now empty.
+pub fn send_slot_delta(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    location: String,
+    slot: u32,
+    contents: Option<(String, u32)>,
+) {
+    let (item_path, count) = match contents {
+        Some((path, count)) => (Some(path), count),
+        None => (None, 0),
+    };
+    send_inventory_delta(server, recipient, location, slot, item_path, count);
+}
+
 /// Track 11 — fan out `PetSpawn` for a freshly summoned pet. Same
 /// pattern as `fan_out_enemy_spawn`; the variant carries the owner's
 /// char_id so the client can route the pet under the right player.
-/// Caller is responsible for `entity.owner.is_some()`.
-pub fn fan_out_pet_spawn(server: &mut RenetServer, recipients: &[ClientId], entity: &Entity) {
+/// Caller is responsible for `entity.owner.is_some()`. `replaces` names the
+/// enemy id a charm just converted, `None` for a summon.
+pub fn fan_out_pet_spawn(
+    server: &mut RenetServer,
+    recipients: &[ClientId],
+    entity: &Entity,
+    replaces: Option<protocol::world::EntityId>,
+) {
     if recipients.is_empty() {
         return;
     }
@@ -2426,6 +3363,7 @@ pub fn fan_out_pet_spawn(server: &mut RenetServer, recipients: &[ClientId], enti
             z: entity.pos.z,
         },
         yaw: entity.yaw,
+        replaces,
     };
     let Some(bytes) = encode(&msg) else {
         return;
@@ -2442,9 +3380,9 @@ pub fn fan_out_pet_spawn(server: &mut RenetServer, recipients: &[ClientId], enti
 /// bag arm, so a player walking into view of an existing pet never saw it.
 pub fn fan_out_entity_spawn(server: &mut RenetServer, recipients: &[ClientId], entity: &Entity) {
     if entity.is_pet() {
-        fan_out_pet_spawn(server, recipients, entity);
+        fan_out_pet_spawn(server, recipients, entity, None);
     } else {
-        fan_out_enemy_spawn(server, recipients, entity);
+        fan_out_enemy_spawn(server, recipients, entity, None);
     }
 }
 
@@ -2474,6 +3412,19 @@ pub fn fan_out_cast_start(
         spell_name,
         duration,
     };
+    let Some(bytes) = encode(&msg) else { return };
+    for recipient in recipients {
+        server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+/// A jump's one-shot to the players who can see the jumper (the jumper is
+/// not among `recipients`; their own client already played the hop).
+pub fn fan_out_player_jumped(server: &mut RenetServer, recipients: &[ClientId], id: u64) {
+    if recipients.is_empty() {
+        return;
+    }
+    let msg = ServerWorldMsg::PlayerJumped { id };
     let Some(bytes) = encode(&msg) else { return };
     for recipient in recipients {
         server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
@@ -2659,6 +3610,62 @@ pub fn fan_out_buff_snapshot(
     }
 }
 
+// ── PD_W0028 — trade window fans, all private per-party. ──
+pub fn send_trade_opened(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    partner_id: u64,
+    partner_name: String,
+) {
+    let msg = ServerWorldMsg::TradeOpened {
+        partner_id,
+        partner_name,
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+pub fn send_trade_offer_update(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    mine: bool,
+    slots: Vec<(String, u32)>,
+    coins: Coins,
+) {
+    let msg = ServerWorldMsg::TradeOfferUpdate { mine, slots, coins };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+pub fn send_trade_accept_state(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    you: bool,
+    them: bool,
+) {
+    let msg = ServerWorldMsg::TradeAcceptState { you, them };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+pub fn send_trade_closed(
+    server: &mut RenetServer,
+    recipient: ClientId,
+    committed: bool,
+    reason: &str,
+) {
+    let msg = ServerWorldMsg::TradeClosed {
+        committed,
+        reason: reason.to_string(),
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(recipient, CHANNEL_SYSTEM, bytes);
+    }
+}
+
 /// The world clock's hour (`clock::current_hour`), to one player entering
 /// the world or to everyone on the slow cadence. Clients keep their own
 /// time between sends; this only keeps them in step with each other.
@@ -2679,6 +3686,20 @@ pub fn fan_out_time_of_day(server: &mut RenetServer, recipients: &[ClientId], ho
 /// client. Vendor BuyItem / SellItem use this after mutating
 /// `conn.coins`. Carries the full four-tier `Coins` wallet
 /// (`ServerWorldMsg::CoinsUpdate`); gdext-net re-emits it as four ints.
+/// The hunger window's feed, to its owner only (`hunger::update_due` says
+/// when). Never fanned: another player's appetite is nobody else's business.
+pub fn send_hunger_update(server: &mut RenetServer, client_id: ClientId, conn: &PerConnection) {
+    let msg = ServerWorldMsg::HungerUpdate {
+        hunger_secs: conn.hunger_secs,
+        thirst_secs: conn.thirst_secs,
+        cap_secs: super::hunger::FULLNESS_CAP_SECS,
+        drain_per_sec: super::hunger::drain_rate_now(conn),
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(client_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
 pub fn send_coins_update(server: &mut RenetServer, client_id: ClientId, coins: Coins) {
     let msg = ServerWorldMsg::CoinsUpdate { coins };
     if let Some(bytes) = encode(&msg) {
@@ -2722,6 +3743,30 @@ pub fn send_bank_rejected(server: &mut RenetServer, client_id: ClientId, reason:
 /// Track 18.1 — fan a per-skill advance event privately to the
 /// owning client. Called from the attack / cast / armor-hit paths
 /// when `skills::try_advance` returns Some.
+/// The server-held spell bar, to its owner only.
+pub fn send_spell_gems(server: &mut RenetServer, client_id: ClientId, conn: &PerConnection) {
+    let msg = ServerWorldMsg::SpellGems {
+        gems: super::spell_gems::snapshot(&conn.spell_gems),
+        seeded: conn.spell_gems_seeded,
+    };
+    if let Some(bytes) = encode(&msg) {
+        server.send_message(client_id, CHANNEL_SYSTEM, bytes);
+    }
+}
+
+/// The outcome that has the tick loop write the bar as it now stands.
+fn spell_gems_changed(conn: &PerConnection) -> Outcome {
+    Outcome::SpellGemsChanged {
+        char_id: conn.char_id,
+        gems: conn
+            .spell_gems
+            .iter()
+            .map(|(g, s)| (*g, s.clone()))
+            .collect(),
+        seeded: conn.spell_gems_seeded,
+    }
+}
+
 pub fn send_skill_progress_update(
     server: &mut RenetServer,
     client_id: ClientId,
@@ -2855,7 +3900,7 @@ pub fn send_kick_with_reconnect(
     }
 }
 
-fn encode(msg: &ServerWorldMsg) -> Option<Vec<u8>> {
+pub(crate) fn encode(msg: &ServerWorldMsg) -> Option<Vec<u8>> {
     match bincode::serde::encode_to_vec(msg, bincode_cfg()) {
         Ok(b) => Some(b),
         Err(e) => {
@@ -2865,13 +3910,155 @@ fn encode(msg: &ServerWorldMsg) -> Option<Vec<u8>> {
     }
 }
 
-/// Decode a single client message; returns None on protocol error.
-pub fn decode_client(bytes: &[u8]) -> Option<ClientWorldMsg> {
-    match bincode::serde::decode_from_slice::<ClientWorldMsg, _>(bytes, bincode_cfg()) {
+/// The most a client message may decode into, in bytes. The largest honest
+/// message (a 512-byte chat line, a full trade offer, a seeded spell bar) is a
+/// small fraction of it. The cap is what stops a forged length prefix (a
+/// string or list claiming billions of entries) from making the decoder
+/// reserve memory the bytes never back.
+const CLIENT_MSG_DECODE_LIMIT: usize = 16 * 1024;
+
+/// Decode one client message from untrusted bytes, refusing anything over
+/// `CLIENT_MSG_DECODE_LIMIT`. Bytes after the message are ignored, not
+/// refused: the protocol's compatibility rule is that a field appended to the
+/// end of a variant is safe, so a newer client must still be understood by an
+/// older server. Never panics; property tests feed it random and mutated bytes.
+/// `from` names the sender in the (throttled) warning a failure logs.
+pub fn decode_client(bytes: &[u8], from: ClientId) -> Option<ClientWorldMsg> {
+    let cfg = bincode_cfg().with_limit::<CLIENT_MSG_DECODE_LIMIT>();
+    match bincode::serde::decode_from_slice::<ClientWorldMsg, _>(bytes, cfg) {
         Ok((msg, _)) => Some(msg),
         Err(e) => {
-            tracing::warn!(error = %e, "failed to bincode-decode ClientWorldMsg");
+            warn_decode_failure(from, &e);
             None
         }
+    }
+}
+
+/// A forged client can send garbage as fast as it likes, and decoding comes
+/// before any intent budget, so a warning per bad message would let one
+/// client flood the log. At most one line a second, naming the client whose
+/// failure opened the window and carrying how many failures it stands for.
+fn warn_decode_failure(client_id: ClientId, error: &bincode::error::DecodeError) {
+    use std::sync::Mutex;
+    static WINDOW: Mutex<Option<(std::time::Instant, u64)>> = Mutex::new(None);
+    let Ok(mut window) = WINDOW.lock() else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    match window.as_mut() {
+        Some((since, count)) if now.duration_since(*since) < std::time::Duration::from_secs(1) => {
+            *count += 1;
+        }
+        _ => {
+            let suppressed = window.map(|(_, count)| count).unwrap_or(0);
+            tracing::warn!(%client_id, error = %error, suppressed_last_second = suppressed, "failed to bincode-decode ClientWorldMsg");
+            *window = Some((now, 0));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        decode_client, message_name, truncate_to_chars, CLIENT_MSG_DECODE_LIMIT, MAX_CHAT_CHARS,
+    };
+    use protocol::world::{ChatChannel, ClientWorldMsg};
+
+    fn encode(msg: &ClientWorldMsg) -> Vec<u8> {
+        bincode::serde::encode_to_vec(msg, bincode::config::standard()).expect("encode")
+    }
+
+    fn say(text: String) -> ClientWorldMsg {
+        ClientWorldMsg::Chat {
+            channel: ChatChannel::Say,
+            text,
+            target_name: None,
+        }
+    }
+
+    #[test]
+    fn message_name_is_the_variant_alone() {
+        assert_eq!(message_name(&say("a secret".into())), "Chat");
+        assert_eq!(message_name(&ClientWorldMsg::Sit), "Sit");
+        assert_eq!(
+            message_name(&ClientWorldMsg::SetTarget { target_id: Some(7) }),
+            "SetTarget"
+        );
+    }
+
+    #[test]
+    fn a_valid_message_decodes() {
+        assert!(decode_client(&encode(&say("hello".into())), 0).is_some());
+    }
+
+    /// The append-only compatibility rule: a newer client's extra trailing
+    /// field must not make an older server drop the whole message.
+    #[test]
+    fn trailing_bytes_are_ignored() {
+        let mut bytes = encode(&say("hello".into()));
+        bytes.extend_from_slice(&[1, 2, 3]);
+        assert!(decode_client(&bytes, 0).is_some());
+    }
+
+    #[test]
+    fn a_message_over_the_decode_limit_is_refused() {
+        let bytes = encode(&say("a".repeat(CLIENT_MSG_DECODE_LIMIT + 1)));
+        assert!(decode_client(&bytes, 0).is_none());
+    }
+
+    proptest::proptest! {
+        /// The decoder takes untrusted bytes straight off the network: no
+        /// input may panic it (a panic in the world loop ends the server).
+        #[test]
+        fn random_bytes_never_panic_the_decoder(bytes in proptest::collection::vec(proptest::num::u8::ANY, 0..4096)) {
+            let _ = decode_client(&bytes, 0);
+        }
+
+        /// The same, starting from real messages with a few bytes changed:
+        /// random bytes rarely get past the variant index, mutations do.
+        #[test]
+        fn mutated_messages_never_panic_the_decoder(
+            text in ".{0,64}",
+            flips in proptest::collection::vec((0usize..256, proptest::num::u8::ANY), 1..8),
+        ) {
+            let mut bytes = encode(&say(text));
+            for (at, value) in flips {
+                let i = at % bytes.len();
+                bytes[i] = value;
+            }
+            let _ = decode_client(&bytes, 0);
+        }
+    }
+
+    #[test]
+    fn a_long_line_is_cut_to_the_character_cap() {
+        let cut = truncate_to_chars("a".repeat(300), MAX_CHAT_CHARS);
+        assert_eq!(cut.chars().count(), 250);
+    }
+
+    #[test]
+    fn multibyte_characters_count_as_one_each() {
+        // 2-byte é and 4-byte emoji: the cut keeps 250 whole characters, and
+        // the shape that panicked the old byte slice (`text[..512]`) never
+        // arises.
+        let cut = truncate_to_chars("é".repeat(300), MAX_CHAT_CHARS);
+        assert_eq!(cut, "é".repeat(250));
+        let cut = truncate_to_chars("\u{1F600}".repeat(300), MAX_CHAT_CHARS);
+        assert_eq!(cut, "\u{1F600}".repeat(250));
+        let mixed = format!("{}é{}", "a".repeat(249), "b".repeat(10));
+        assert_eq!(
+            truncate_to_chars(mixed, MAX_CHAT_CHARS),
+            format!("{}é", "a".repeat(249))
+        );
+    }
+
+    #[test]
+    fn short_text_is_untouched() {
+        assert_eq!(
+            truncate_to_chars("hello".to_string(), MAX_CHAT_CHARS),
+            "hello"
+        );
+        let exactly = "x".repeat(250);
+        assert_eq!(truncate_to_chars(exactly.clone(), MAX_CHAT_CHARS), exactly);
     }
 }

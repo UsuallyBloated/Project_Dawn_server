@@ -31,6 +31,9 @@ pub fn lookup(pet_type: &str) -> Option<MobTemplate> {
             melee_range: Some(1.8),
             attack_interval: Some(2.2),
             named_id: None,
+            faction: None,
+            alignment: None,
+            faction_hit: None,
         }),
         // Track 12 Piece B — Beast Master's Wolf warder. Faster and
         // hits slightly less than the skeleton; the warder's edge is
@@ -49,6 +52,9 @@ pub fn lookup(pet_type: &str) -> Option<MobTemplate> {
             melee_range: Some(1.8),
             attack_interval: Some(2.0),
             named_id: None,
+            faction: None,
+            alignment: None,
+            faction_hit: None,
         }),
         _ => None,
     }
@@ -86,23 +92,27 @@ pub const SKELETON_LEVEL_CAP: u32 = 10;
 /// Linear interpolation between anchors; past the last anchor the 12-to-14
 /// slope continues.
 const CURVE: &[(u32, f32, f32)] = &[
-    (1, 25.0, 3.0),
-    (2, 38.0, 5.0),
-    (3, 57.0, 7.0),
-    (4, 70.0, 9.0),
-    (5, 90.0, 10.0),
-    (6, 116.0, 12.0),
-    (7, 140.0, 15.0),
-    (9, 188.0, 20.0),
+    // Levels 1 to 9 are the EQ parity audit's cut (2026-10-20): the mobs'
+    // hit points brought toward P99's; their damage was already EQ's.
+    (1, 16.0, 3.0),
+    (2, 26.0, 5.0),
+    (3, 37.0, 7.0),
+    (4, 52.0, 9.0),
+    (5, 64.0, 10.0),
+    (6, 80.0, 12.0),
+    (7, 104.0, 15.0),
+    (9, 160.0, 20.0),
     (10, 215.0, 22.0),
     (12, 265.0, 26.0),
     (14, 365.0, 35.0),
 ];
+// `curve_at` reads the last anchor; an empty ladder fails the build.
+const _: () = assert!(!CURVE.is_empty());
 
 /// (hp, dmg) the camp ladder pays at `level`, interpolated.
 fn curve_at(level: u32) -> (f32, f32) {
     let l = level.max(1);
-    let (last_level, last_hp, last_dmg) = *CURVE.last().expect("curve non-empty");
+    let (last_level, last_hp, last_dmg) = CURVE[CURVE.len() - 1];
     if l >= last_level {
         // Continue the 12-to-14 slope: +50 hp, +4.5 dmg per level.
         let over = (l - last_level) as f32;
@@ -202,12 +212,12 @@ mod tests {
     #[test]
     fn pet_stats_sit_below_even_con() {
         // A level-5 pet must be weaker than the level-5 camp mobs it fights
-        // beside (Dire Wolf: 88 hp / 10 dmg) — the 70% scalar's whole point.
+        // beside (Dire Wolf: 64 hp / 10 dmg) — the 70% scalar's whole point.
         let t = scaled("warder", 6, 0).expect("warder");
         assert_eq!(t.level, 5);
-        assert!(t.hp < 88.0, "pet hp {} must sit below even-con 88", t.hp);
+        assert!(t.hp < 64.0, "pet hp {} must sit below even-con 64", t.hp);
         assert!(t.dmg < 10, "pet dmg {} must sit below even-con 10", t.dmg);
-        assert_eq!(t.hp, 90.0 * PET_STAT_SCALAR);
+        assert_eq!(t.hp, 64.0 * PET_STAT_SCALAR);
     }
 
     #[test]
@@ -247,9 +257,9 @@ mod tests {
 
     #[test]
     fn curve_interpolates_between_anchors() {
-        // Level 8 sits between the authored 7 (140/15) and 9 (188/20).
+        // Level 8 sits between the authored 7 (104/15) and 9 (160/20).
         let (hp, dmg) = curve_at(8);
-        assert_eq!(hp, 164.0);
+        assert_eq!(hp, 132.0);
         assert_eq!(dmg, 17.5);
         // Past the last anchor the 12-to-14 slope continues.
         let (hp16, dmg16) = curve_at(16);

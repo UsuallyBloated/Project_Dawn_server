@@ -148,13 +148,48 @@ pub struct Item {
     // Vendor
     #[serde(default)]
     pub vendor_price: u32,
+
+    // Carry weight per unit (encumbrance.rs); the .tres `weight`, kept in
+    // lockstep by the client's tools/check_item_lockstep.gd.
+    #[serde(default)]
+    pub weight: f32,
+
+    // NO RENT (EverQuest's TEMPORARY tag, user 2026-10-19): destroyed once its
+    // owner has been logged out for `NO_RENT_AFTER_SECS` (purged at the next
+    // login). Conjured food and water.
+    #[serde(default)]
+    pub no_rent: bool,
+
+    // NO DROP (EverQuest's tag; user 2026-11-03): bound to the character that
+    // holds it. It never leaves that character's own holdings: no ground drop,
+    // no trade, no account-shared vault. Destroying it is allowed. The
+    // starting kit (world/starter_kit.rs).
+    #[serde(default)]
+    pub no_drop: bool,
+}
+
+/// Whether the item at `path` is NO DROP. An unknown path is not.
+pub fn is_no_drop(path: &str) -> bool {
+    lookup(path).is_some_and(|i| i.no_drop)
+}
+
+/// The one line every NO DROP refusal answers with.
+pub const NO_DROP_REFUSAL: &str = "That item is NO DROP: it cannot leave you.";
+
+/// How long a character may be logged out before its NO RENT items go:
+/// thirty minutes, EverQuest's rule (Allakhazam's item-tag reference), so a
+/// quick relog or a crash keeps them.
+pub const NO_RENT_AFTER_SECS: i64 = 30 * 60;
+
+/// Whether the item at `path` is NO RENT. An unknown path is not.
+pub fn is_no_rent(path: &str) -> bool {
+    lookup(path).is_some_and(|i| i.no_rent)
 }
 
 fn items() -> &'static HashMap<String, Item> {
     static ITEMS: OnceLock<HashMap<String, Item>> = OnceLock::new();
     ITEMS.get_or_init(|| {
-        let parsed: ItemsFile = toml::from_str(ITEMS_TOML)
-            .expect("items.toml must parse — re-run export_items_oneshot.py if it's stale");
+        let parsed: ItemsFile = crate::world::parse_embedded("items.toml", ITEMS_TOML);
         parsed
             .items
             .into_iter()
@@ -200,18 +235,18 @@ pub fn is_equippable_in_slot(path: &str, slot: u8) -> bool {
     let Some(item) = lookup(path) else {
         return false;
     };
-    match (item.item_type, slot) {
-        (ItemType::Weapon, 0) | (ItemType::Weapon, 1) => true,
-        (ItemType::Offhand, 1) => true,
-        (ItemType::Head, 2) => true,
-        (ItemType::Chest, 3) => true,
-        (ItemType::Legs, 4) => true,
-        (ItemType::Feet, 5) => true,
-        (ItemType::Hands, 6) => true,
-        (ItemType::Ring, 7) => true,
-        (ItemType::Neck, 8) => true,
-        _ => false,
-    }
+    matches!(
+        (item.item_type, slot),
+        (ItemType::Weapon, 0 | 1)
+            | (ItemType::Offhand, 1)
+            | (ItemType::Head, 2)
+            | (ItemType::Chest, 3)
+            | (ItemType::Legs, 4)
+            | (ItemType::Feet, 5)
+            | (ItemType::Hands, 6)
+            | (ItemType::Ring, 7)
+            | (ItemType::Neck, 8)
+    )
 }
 
 /// Track 14.1 — max stack size for a path. Returns `u32::MAX` for
@@ -236,6 +271,21 @@ pub fn bag_num_slots(path: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The two-handed flag follows the skill (2026-10-29): every 2h_ or archery
+    // weapon carries it, and nothing else does. Both staves lacked it, so a
+    // staff went on beside an off-hand weapon and the off hand swung beside it.
+    #[test]
+    fn the_two_handed_flag_follows_the_skill() {
+        for item in items().values() {
+            let two_handed_skill = item.skill.starts_with("2h_") || item.skill == "archery";
+            assert_eq!(
+                item.is_two_handed, two_handed_skill,
+                "{}: skill {:?}, is_two_handed {}",
+                item.name, item.skill, item.is_two_handed
+            );
+        }
+    }
 
     #[test]
     fn embedded_toml_parses() {

@@ -41,683 +41,74 @@ impl Skill {
 /// (class, [(skill_key, max_cap_at_level_60), ...])
 type CapTable<'a> = &'a [(&'a str, &'a [(&'a str, i32)])];
 
+#[rustfmt::skip]
 const WEAPON_CAPS: CapTable<'static> = &[
-    (
-        "Warrior",
-        &[
-            ("1h_slashing", 250),
-            ("2h_slashing", 250),
-            ("1h_blunt", 250),
-            ("2h_blunt", 250),
-            ("piercing", 250),
-            ("hand_to_hand", 100),
-            ("archery", 75),
-            ("defense", 250),
-            ("dodge", 200),
-            ("dual_wield", 200),
-        ],
-    ),
-    (
-        "Rogue",
-        &[
-            ("1h_slashing", 225),
-            ("2h_slashing", 0),
-            ("1h_blunt", 75),
-            ("2h_blunt", 0),
-            ("piercing", 250),
-            ("hand_to_hand", 200),
-            ("archery", 100),
-            ("defense", 200),
-            ("dodge", 250),
-            ("dual_wield", 250),
-        ],
-    ),
-    (
-        "Magician",
-        &[
-            ("1h_slashing", 0),
-            ("2h_slashing", 0),
-            ("1h_blunt", 75),
-            ("2h_blunt", 0),
-            ("piercing", 0),
-            ("hand_to_hand", 25),
-            ("archery", 0),
-            ("defense", 100),
-            ("dodge", 75),
-            ("dual_wield", 0),
-        ],
-    ),
-    (
-        "Wizard",
-        &[
-            ("1h_slashing", 0),
-            ("2h_slashing", 0),
-            ("1h_blunt", 75),
-            ("2h_blunt", 0),
-            ("piercing", 0),
-            ("hand_to_hand", 25),
-            ("archery", 0),
-            ("defense", 100),
-            ("dodge", 75),
-            ("dual_wield", 0),
-        ],
-    ),
-    (
-        "Sorcerer",
-        &[
-            ("1h_slashing", 0),
-            ("2h_slashing", 0),
-            ("1h_blunt", 75),
-            ("2h_blunt", 0),
-            ("piercing", 0),
-            ("hand_to_hand", 25),
-            ("archery", 0),
-            ("defense", 100),
-            ("dodge", 75),
-            ("dual_wield", 0),
-        ],
-    ),
-    (
-        "Necromancer",
-        &[
-            ("1h_slashing", 0),
-            ("2h_slashing", 0),
-            ("1h_blunt", 75),
-            ("2h_blunt", 0),
-            ("piercing", 0),
-            ("hand_to_hand", 25),
-            ("archery", 0),
-            ("defense", 100),
-            ("dodge", 75),
-            ("dual_wield", 0),
-        ],
-    ),
-    (
-        "Enchanter",
-        &[
-            ("1h_slashing", 0),
-            ("2h_slashing", 0),
-            ("1h_blunt", 75),
-            ("2h_blunt", 0),
-            ("piercing", 0),
-            ("hand_to_hand", 25),
-            ("archery", 0),
-            ("defense", 100),
-            ("dodge", 75),
-            ("dual_wield", 0),
-        ],
-    ),
-    (
-        "Blood Mage",
-        &[
-            ("1h_slashing", 0),
-            ("2h_slashing", 0),
-            ("1h_blunt", 100),
-            ("2h_blunt", 0),
-            ("piercing", 50),
-            ("hand_to_hand", 50),
-            ("archery", 0),
-            ("defense", 100),
-            ("dodge", 75),
-            ("dual_wield", 0),
-        ],
-    ),
-    (
-        "Cleric",
-        &[
-            ("1h_slashing", 0),
-            ("2h_slashing", 0),
-            ("1h_blunt", 200),
-            ("2h_blunt", 200),
-            ("piercing", 0),
-            ("hand_to_hand", 50),
-            ("archery", 0),
-            ("defense", 200),
-            ("dodge", 150),
-            ("dual_wield", 0),
-        ],
-    ),
-    (
-        "Druid",
-        &[
-            ("1h_slashing", 0),
-            ("2h_slashing", 0),
-            ("1h_blunt", 175),
-            ("2h_blunt", 175),
-            ("piercing", 0),
-            ("hand_to_hand", 50),
-            ("archery", 75),
-            ("defense", 175),
-            ("dodge", 150),
-            ("dual_wield", 0),
-        ],
-    ),
-    (
-        "Shaman",
-        &[
-            ("1h_slashing", 150),
-            ("2h_slashing", 0),
-            ("1h_blunt", 200),
-            ("2h_blunt", 200),
-            ("piercing", 100),
-            ("hand_to_hand", 100),
-            ("archery", 0),
-            ("defense", 200),
-            ("dodge", 150),
-            ("dual_wield", 0),
-        ],
-    ),
-    (
-        "Paladin",
-        &[
-            ("1h_slashing", 225),
-            ("2h_slashing", 225),
-            ("1h_blunt", 225),
-            ("2h_blunt", 225),
-            ("piercing", 150),
-            ("hand_to_hand", 75),
-            ("archery", 75),
-            ("defense", 225),
-            ("dodge", 175),
-            ("dual_wield", 0),
-        ],
-    ),
-    (
-        "Shadow Knight",
-        &[
-            ("1h_slashing", 225),
-            ("2h_slashing", 225),
-            ("1h_blunt", 225),
-            ("2h_blunt", 225),
-            ("piercing", 150),
-            ("hand_to_hand", 75),
-            ("archery", 50),
-            ("defense", 225),
-            ("dodge", 175),
-            ("dual_wield", 150),
-        ],
-    ),
-    (
-        "Bard",
-        &[
-            ("1h_slashing", 200),
-            ("2h_slashing", 150),
-            ("1h_blunt", 175),
-            ("2h_blunt", 150),
-            ("piercing", 200),
-            ("hand_to_hand", 100),
-            ("archery", 75),
-            ("defense", 175),
-            ("dodge", 200),
-            ("dual_wield", 175),
-        ],
-    ),
-    (
-        "Ranger",
-        &[
-            ("1h_slashing", 225),
-            ("2h_slashing", 225),
-            ("1h_blunt", 175),
-            ("2h_blunt", 175),
-            ("piercing", 225),
-            ("hand_to_hand", 100),
-            ("archery", 250),
-            ("defense", 200),
-            ("dodge", 225),
-            ("dual_wield", 225),
-        ],
-    ),
-    (
-        "Monk",
-        &[
-            ("1h_slashing", 50),
-            ("2h_slashing", 0),
-            ("1h_blunt", 200),
-            ("2h_blunt", 100),
-            ("piercing", 0),
-            ("hand_to_hand", 250),
-            ("archery", 0),
-            ("defense", 250),
-            ("dodge", 250),
-            ("dual_wield", 0),
-        ],
-    ),
-    (
-        "Witch Hunter",
-        &[
-            ("1h_slashing", 200),
-            ("2h_slashing", 150),
-            ("1h_blunt", 100),
-            ("2h_blunt", 0),
-            ("piercing", 225),
-            ("hand_to_hand", 125),
-            ("archery", 150),
-            ("defense", 200),
-            ("dodge", 200),
-            ("dual_wield", 200),
-        ],
-    ),
-    (
-        "Beast Master",
-        &[
-            ("1h_slashing", 150),
-            ("2h_slashing", 100),
-            ("1h_blunt", 150),
-            ("2h_blunt", 100),
-            ("piercing", 125),
-            ("hand_to_hand", 200),
-            ("archery", 100),
-            ("defense", 200),
-            ("dodge", 175),
-            ("dual_wield", 150),
-        ],
-    ),
+    ("Warrior",       &[("1h_slashing", 250), ("2h_slashing", 250), ("1h_blunt", 250), ("2h_blunt", 250), ("piercing", 250), ("hand_to_hand", 100), ("archery",  75), ("defense", 250), ("dodge", 200), ("dual_wield", 200)]),
+    ("Rogue",         &[("1h_slashing", 225), ("2h_slashing",   0), ("1h_blunt",  75), ("2h_blunt",   0), ("piercing", 250), ("hand_to_hand", 200), ("archery", 100), ("defense", 200), ("dodge", 250), ("dual_wield", 250)]),
+    ("Magician",      &[("1h_slashing",   0), ("2h_slashing",   0), ("1h_blunt",  75), ("2h_blunt",  75), ("piercing",   0), ("hand_to_hand",  25), ("archery",   0), ("defense", 100), ("dodge",  75), ("dual_wield",   0)]),
+    ("Wizard",        &[("1h_slashing",   0), ("2h_slashing",   0), ("1h_blunt",  75), ("2h_blunt",  75), ("piercing",   0), ("hand_to_hand",  25), ("archery",   0), ("defense", 100), ("dodge",  75), ("dual_wield",   0)]),
+    ("Sorcerer",      &[("1h_slashing",   0), ("2h_slashing",   0), ("1h_blunt",  75), ("2h_blunt",  75), ("piercing",   0), ("hand_to_hand",  25), ("archery",   0), ("defense", 100), ("dodge",  75), ("dual_wield",   0)]),
+    ("Necromancer",   &[("1h_slashing",   0), ("2h_slashing",   0), ("1h_blunt",  75), ("2h_blunt",  75), ("piercing",   0), ("hand_to_hand",  25), ("archery",   0), ("defense", 100), ("dodge",  75), ("dual_wield",   0)]),
+    ("Enchanter",     &[("1h_slashing",   0), ("2h_slashing",   0), ("1h_blunt",  75), ("2h_blunt",  75), ("piercing",   0), ("hand_to_hand",  25), ("archery",   0), ("defense", 100), ("dodge",  75), ("dual_wield",   0)]),
+    ("Blood Mage",    &[("1h_slashing",   0), ("2h_slashing",   0), ("1h_blunt", 100), ("2h_blunt",   0), ("piercing",  50), ("hand_to_hand",  50), ("archery",   0), ("defense", 100), ("dodge",  75), ("dual_wield",   0)]),
+    ("Cleric",        &[("1h_slashing",   0), ("2h_slashing",   0), ("1h_blunt", 200), ("2h_blunt", 200), ("piercing",   0), ("hand_to_hand",  50), ("archery",   0), ("defense", 200), ("dodge", 150), ("dual_wield",   0)]),
+    ("Druid",         &[("1h_slashing",   0), ("2h_slashing",   0), ("1h_blunt", 175), ("2h_blunt", 175), ("piercing",   0), ("hand_to_hand",  50), ("archery",  75), ("defense", 175), ("dodge", 150), ("dual_wield",   0)]),
+    ("Shaman",        &[("1h_slashing", 150), ("2h_slashing",   0), ("1h_blunt", 200), ("2h_blunt", 200), ("piercing", 100), ("hand_to_hand", 100), ("archery",   0), ("defense", 200), ("dodge", 150), ("dual_wield",   0)]),
+    ("Paladin",       &[("1h_slashing", 225), ("2h_slashing", 225), ("1h_blunt", 225), ("2h_blunt", 225), ("piercing", 150), ("hand_to_hand",  75), ("archery",  75), ("defense", 225), ("dodge", 175), ("dual_wield",   0)]),
+    ("Shadow Knight", &[("1h_slashing", 225), ("2h_slashing", 225), ("1h_blunt", 225), ("2h_blunt", 225), ("piercing", 150), ("hand_to_hand",  75), ("archery",  50), ("defense", 225), ("dodge", 175), ("dual_wield", 150)]),
+    ("Bard",          &[("1h_slashing", 200), ("2h_slashing", 150), ("1h_blunt", 175), ("2h_blunt", 150), ("piercing", 200), ("hand_to_hand", 100), ("archery",  75), ("defense", 175), ("dodge", 200), ("dual_wield", 175)]),
+    ("Ranger",        &[("1h_slashing", 225), ("2h_slashing", 225), ("1h_blunt", 175), ("2h_blunt", 175), ("piercing", 225), ("hand_to_hand", 100), ("archery", 250), ("defense", 200), ("dodge", 225), ("dual_wield", 225)]),
+    ("Monk",          &[("1h_slashing",  50), ("2h_slashing",   0), ("1h_blunt", 200), ("2h_blunt", 100), ("piercing",   0), ("hand_to_hand", 250), ("archery",   0), ("defense", 250), ("dodge", 250), ("dual_wield", 250)]),
+    ("Witch Hunter",  &[("1h_slashing", 200), ("2h_slashing", 150), ("1h_blunt", 100), ("2h_blunt",   0), ("piercing", 225), ("hand_to_hand", 125), ("archery", 150), ("defense", 200), ("dodge", 200), ("dual_wield", 200)]),
+    ("Beast Master",  &[("1h_slashing", 150), ("2h_slashing", 100), ("1h_blunt", 150), ("2h_blunt", 100), ("piercing", 125), ("hand_to_hand", 200), ("archery", 100), ("defense", 200), ("dodge", 175), ("dual_wield", 150)]),
 ];
 
+#[rustfmt::skip]
 const ARMOR_CAPS: CapTable<'static> = &[
-    (
-        "Warrior",
-        &[
-            ("cloth", 75),
-            ("leather", 150),
-            ("chain", 225),
-            ("plate", 250),
-            ("shield", 250),
-        ],
-    ),
-    (
-        "Paladin",
-        &[
-            ("cloth", 75),
-            ("leather", 150),
-            ("chain", 200),
-            ("plate", 225),
-            ("shield", 250),
-        ],
-    ),
-    (
-        "Shadow Knight",
-        &[
-            ("cloth", 75),
-            ("leather", 150),
-            ("chain", 200),
-            ("plate", 225),
-            ("shield", 225),
-        ],
-    ),
-    (
-        "Cleric",
-        &[
-            ("cloth", 100),
-            ("leather", 100),
-            ("chain", 200),
-            ("plate", 225),
-            ("shield", 225),
-        ],
-    ),
-    (
-        "Druid",
-        &[
-            ("cloth", 100),
-            ("leather", 200),
-            ("chain", 175),
-            ("plate", 0),
-            ("shield", 125),
-        ],
-    ),
-    (
-        "Shaman",
-        &[
-            ("cloth", 100),
-            ("leather", 175),
-            ("chain", 225),
-            ("plate", 0),
-            ("shield", 175),
-        ],
-    ),
-    (
-        "Rogue",
-        &[
-            ("cloth", 100),
-            ("leather", 250),
-            ("chain", 100),
-            ("plate", 0),
-            ("shield", 100),
-        ],
-    ),
-    (
-        "Monk",
-        &[
-            ("cloth", 150),
-            ("leather", 0),
-            ("chain", 0),
-            ("plate", 0),
-            ("shield", 0),
-        ],
-    ),
-    (
-        "Ranger",
-        &[
-            ("cloth", 75),
-            ("leather", 225),
-            ("chain", 225),
-            ("plate", 0),
-            ("shield", 175),
-        ],
-    ),
-    (
-        "Beast Master",
-        &[
-            ("cloth", 75),
-            ("leather", 200),
-            ("chain", 200),
-            ("plate", 0),
-            ("shield", 150),
-        ],
-    ),
-    (
-        "Bard",
-        &[
-            ("cloth", 75),
-            ("leather", 200),
-            ("chain", 225),
-            ("plate", 0),
-            ("shield", 150),
-        ],
-    ),
-    (
-        "Witch Hunter",
-        &[
-            ("cloth", 75),
-            ("leather", 200),
-            ("chain", 225),
-            ("plate", 0),
-            ("shield", 150),
-        ],
-    ),
-    (
-        "Magician",
-        &[
-            ("cloth", 250),
-            ("leather", 50),
-            ("chain", 0),
-            ("plate", 0),
-            ("shield", 0),
-        ],
-    ),
-    (
-        "Wizard",
-        &[
-            ("cloth", 250),
-            ("leather", 50),
-            ("chain", 0),
-            ("plate", 0),
-            ("shield", 0),
-        ],
-    ),
-    (
-        "Sorcerer",
-        &[
-            ("cloth", 250),
-            ("leather", 50),
-            ("chain", 0),
-            ("plate", 0),
-            ("shield", 0),
-        ],
-    ),
-    (
-        "Necromancer",
-        &[
-            ("cloth", 250),
-            ("leather", 50),
-            ("chain", 0),
-            ("plate", 0),
-            ("shield", 0),
-        ],
-    ),
-    (
-        "Enchanter",
-        &[
-            ("cloth", 250),
-            ("leather", 50),
-            ("chain", 0),
-            ("plate", 0),
-            ("shield", 0),
-        ],
-    ),
-    (
-        "Blood Mage",
-        &[
-            ("cloth", 200),
-            ("leather", 100),
-            ("chain", 50),
-            ("plate", 0),
-            ("shield", 0),
-        ],
-    ),
+    ("Warrior",       &[("cloth",  75), ("leather", 150), ("chain", 225), ("plate", 250), ("shield", 250)]),
+    ("Paladin",       &[("cloth",  75), ("leather", 150), ("chain", 200), ("plate", 225), ("shield", 250)]),
+    ("Shadow Knight", &[("cloth",  75), ("leather", 150), ("chain", 200), ("plate", 225), ("shield", 225)]),
+    ("Cleric",        &[("cloth", 100), ("leather", 100), ("chain", 200), ("plate", 225), ("shield", 225)]),
+    ("Druid",         &[("cloth", 100), ("leather", 200), ("chain", 175), ("plate",   0), ("shield", 125)]),
+    ("Shaman",        &[("cloth", 100), ("leather", 175), ("chain", 225), ("plate",   0), ("shield", 175)]),
+    ("Rogue",         &[("cloth", 100), ("leather", 250), ("chain", 100), ("plate",   0), ("shield", 100)]),
+    ("Monk",          &[("cloth", 150), ("leather",   0), ("chain",   0), ("plate",   0), ("shield",   0)]),
+    ("Ranger",        &[("cloth",  75), ("leather", 225), ("chain", 225), ("plate",   0), ("shield", 175)]),
+    ("Beast Master",  &[("cloth",  75), ("leather", 200), ("chain", 200), ("plate",   0), ("shield", 150)]),
+    ("Bard",          &[("cloth",  75), ("leather", 200), ("chain", 225), ("plate",   0), ("shield", 150)]),
+    ("Witch Hunter",  &[("cloth",  75), ("leather", 200), ("chain", 225), ("plate",   0), ("shield", 150)]),
+    ("Magician",      &[("cloth", 250), ("leather",  50), ("chain",   0), ("plate",   0), ("shield",   0)]),
+    ("Wizard",        &[("cloth", 250), ("leather",  50), ("chain",   0), ("plate",   0), ("shield",   0)]),
+    ("Sorcerer",      &[("cloth", 250), ("leather",  50), ("chain",   0), ("plate",   0), ("shield",   0)]),
+    ("Necromancer",   &[("cloth", 250), ("leather",  50), ("chain",   0), ("plate",   0), ("shield",   0)]),
+    ("Enchanter",     &[("cloth", 250), ("leather",  50), ("chain",   0), ("plate",   0), ("shield",   0)]),
+    ("Blood Mage",    &[("cloth", 200), ("leather", 100), ("chain",  50), ("plate",   0), ("shield",   0)]),
 ];
 
 // `meditate` is a casting skill for regen purposes only (it never trains on a
 // cast; the tick loop advances it while the player sits and meditates). Cap 250
 // for any class with a mana pool, 0 for the pure-melee classes. See regen.rs
 // (`mp_regen_per_tick`) and docs/design/regen_model.md.
+#[rustfmt::skip]
 const CASTING_CAPS: CapTable<'static> = &[
-    (
-        "Warrior",
-        &[
-            ("evocation", 0),
-            ("alteration", 0),
-            ("abjuration", 0),
-            ("conjuration", 0),
-            ("divination", 0),
-            ("channeling", 0),
-            ("meditate", 0),
-        ],
-    ),
-    (
-        "Paladin",
-        &[
-            ("evocation", 125),
-            ("alteration", 150),
-            ("abjuration", 225),
-            ("conjuration", 0),
-            ("divination", 50),
-            ("channeling", 225),
-            ("meditate", 250),
-        ],
-    ),
-    (
-        "Shadow Knight",
-        &[
-            ("evocation", 125),
-            ("alteration", 125),
-            ("abjuration", 100),
-            ("conjuration", 0),
-            ("divination", 50),
-            ("channeling", 225),
-            ("meditate", 250),
-        ],
-    ),
-    (
-        "Cleric",
-        &[
-            ("evocation", 150),
-            ("alteration", 200),
-            ("abjuration", 250),
-            ("conjuration", 75),
-            ("divination", 200),
-            ("channeling", 175),
-            ("meditate", 250),
-        ],
-    ),
-    (
-        "Druid",
-        &[
-            ("evocation", 175),
-            ("alteration", 225),
-            ("abjuration", 175),
-            ("conjuration", 75),
-            ("divination", 175),
-            ("channeling", 175),
-            ("meditate", 250),
-        ],
-    ),
-    (
-        "Shaman",
-        &[
-            ("evocation", 175),
-            ("alteration", 250),
-            ("abjuration", 125),
-            ("conjuration", 75),
-            ("divination", 150),
-            ("channeling", 200),
-            ("meditate", 250),
-        ],
-    ),
-    (
-        "Rogue",
-        &[
-            ("evocation", 0),
-            ("alteration", 0),
-            ("abjuration", 0),
-            ("conjuration", 0),
-            ("divination", 0),
-            ("channeling", 0),
-            ("meditate", 0),
-        ],
-    ),
-    (
-        "Monk",
-        &[
-            ("evocation", 0),
-            ("alteration", 0),
-            ("abjuration", 0),
-            ("conjuration", 0),
-            ("divination", 0),
-            ("channeling", 0),
-            ("meditate", 0),
-        ],
-    ),
-    (
-        "Ranger",
-        &[
-            ("evocation", 125),
-            ("alteration", 150),
-            ("abjuration", 75),
-            ("conjuration", 0),
-            ("divination", 150),
-            ("channeling", 200),
-            ("meditate", 250),
-        ],
-    ),
-    (
-        "Beast Master",
-        &[
-            ("evocation", 125),
-            ("alteration", 150),
-            ("abjuration", 100),
-            ("conjuration", 75),
-            ("divination", 75),
-            ("channeling", 175),
-            ("meditate", 250),
-        ],
-    ),
-    (
-        "Bard",
-        &[
-            ("evocation", 125),
-            ("alteration", 200),
-            ("abjuration", 100),
-            ("conjuration", 150),
-            ("divination", 75),
-            ("channeling", 200),
-            ("meditate", 250),
-        ],
-    ),
-    (
-        "Witch Hunter",
-        &[
-            ("evocation", 225),
-            ("alteration", 125),
-            ("abjuration", 100),
-            ("conjuration", 0),
-            ("divination", 75),
-            ("channeling", 200),
-            ("meditate", 250),
-        ],
-    ),
-    (
-        "Magician",
-        &[
-            ("evocation", 225),
-            ("alteration", 100),
-            ("abjuration", 75),
-            ("conjuration", 250),
-            ("divination", 75),
-            ("channeling", 150),
-            ("meditate", 250),
-        ],
-    ),
-    (
-        "Wizard",
-        &[
-            ("evocation", 250),
-            ("alteration", 100),
-            ("abjuration", 150),
-            ("conjuration", 100),
-            ("divination", 225),
-            ("channeling", 150),
-            ("meditate", 250),
-        ],
-    ),
-    (
-        "Sorcerer",
-        &[
-            ("evocation", 250),
-            ("alteration", 100),
-            ("abjuration", 75),
-            ("conjuration", 75),
-            ("divination", 50),
-            ("channeling", 150),
-            ("meditate", 250),
-        ],
-    ),
-    (
-        "Necromancer",
-        &[
-            ("evocation", 200),
-            ("alteration", 175),
-            ("abjuration", 50),
-            ("conjuration", 225),
-            ("divination", 100),
-            ("channeling", 150),
-            ("meditate", 250),
-        ],
-    ),
-    (
-        "Enchanter",
-        &[
-            ("evocation", 150),
-            ("alteration", 250),
-            ("abjuration", 200),
-            ("conjuration", 175),
-            ("divination", 125),
-            ("channeling", 150),
-            ("meditate", 250),
-        ],
-    ),
-    (
-        "Blood Mage",
-        &[
-            ("evocation", 200),
-            ("alteration", 175),
-            ("abjuration", 75),
-            ("conjuration", 0),
-            ("divination", 50),
-            ("channeling", 175),
-            ("meditate", 250),
-        ],
-    ),
+    ("Warrior",       &[("evocation",   0), ("alteration",   0), ("abjuration",   0), ("conjuration",   0), ("divination",   0), ("channeling",   0), ("meditate",   0)]),
+    ("Paladin",       &[("evocation", 125), ("alteration", 150), ("abjuration", 225), ("conjuration",   0), ("divination",  50), ("channeling", 225), ("meditate", 250)]),
+    ("Shadow Knight", &[("evocation", 125), ("alteration", 125), ("abjuration", 100), ("conjuration",   0), ("divination",  50), ("channeling", 225), ("meditate", 250)]),
+    ("Cleric",        &[("evocation", 150), ("alteration", 200), ("abjuration", 250), ("conjuration",  75), ("divination", 200), ("channeling", 175), ("meditate", 250)]),
+    ("Druid",         &[("evocation", 175), ("alteration", 225), ("abjuration", 175), ("conjuration",  75), ("divination", 175), ("channeling", 175), ("meditate", 250)]),
+    ("Shaman",        &[("evocation", 175), ("alteration", 250), ("abjuration", 125), ("conjuration",  75), ("divination", 150), ("channeling", 200), ("meditate", 250)]),
+    ("Rogue",         &[("evocation",   0), ("alteration",   0), ("abjuration",   0), ("conjuration",   0), ("divination",   0), ("channeling",   0), ("meditate",   0)]),
+    ("Monk",          &[("evocation",   0), ("alteration",   0), ("abjuration",   0), ("conjuration",   0), ("divination",   0), ("channeling",   0), ("meditate",   0)]),
+    ("Ranger",        &[("evocation", 125), ("alteration", 150), ("abjuration",  75), ("conjuration",   0), ("divination", 150), ("channeling", 200), ("meditate", 250)]),
+    ("Beast Master",  &[("evocation", 125), ("alteration", 150), ("abjuration", 100), ("conjuration",  75), ("divination",  75), ("channeling", 175), ("meditate", 250)]),
+    ("Bard",          &[("evocation", 125), ("alteration", 200), ("abjuration", 100), ("conjuration", 150), ("divination",  75), ("channeling", 200), ("meditate", 250)]),
+    ("Witch Hunter",  &[("evocation", 225), ("alteration", 125), ("abjuration", 100), ("conjuration",   0), ("divination",  75), ("channeling", 200), ("meditate", 250)]),
+    ("Magician",      &[("evocation", 225), ("alteration", 100), ("abjuration",  75), ("conjuration", 250), ("divination",  75), ("channeling", 150), ("meditate", 250)]),
+    ("Wizard",        &[("evocation", 250), ("alteration", 100), ("abjuration", 150), ("conjuration", 100), ("divination", 225), ("channeling", 150), ("meditate", 250)]),
+    ("Sorcerer",      &[("evocation", 250), ("alteration", 100), ("abjuration",  75), ("conjuration",  75), ("divination",  50), ("channeling", 150), ("meditate", 250)]),
+    ("Necromancer",   &[("evocation", 200), ("alteration", 175), ("abjuration",  50), ("conjuration", 225), ("divination", 100), ("channeling", 150), ("meditate", 250)]),
+    ("Enchanter",     &[("evocation", 150), ("alteration", 250), ("abjuration", 200), ("conjuration", 175), ("divination", 125), ("channeling", 150), ("meditate", 250)]),
+    ("Blood Mage",    &[("evocation", 200), ("alteration", 175), ("abjuration",  75), ("conjuration",   0), ("divination",  50), ("channeling", 175), ("meditate", 250)]),
 ];
 
 /// All weapon keys (10). Used by load_character to seed starting
@@ -769,6 +160,122 @@ fn max_cap(skill: Skill, player_class: &str, key: &str) -> i32 {
         .find(|(k, _)| *k == key)
         .map(|(_, v)| *v)
         .unwrap_or(0)
+}
+
+/// The level at which a class may first swing its off hand (user,
+/// 2026-10-19: Rangers earliest, the cap table's order after that; Monks are
+/// born with it, as in classic EQ). `None`: the class never dual wields.
+/// Kept in lockstep by hand with `DUAL_WIELD_LEVELS` in the client's
+/// `data/weapon_skill_definitions.gd`.
+pub fn dual_wield_level(player_class: &str) -> Option<i32> {
+    match player_class {
+        "Monk" => Some(1),
+        "Ranger" | "Rogue" => Some(13),
+        "Warrior" | "Witch Hunter" | "Bard" => Some(15),
+        "Shadow Knight" | "Beast Master" => Some(20),
+        _ => None,
+    }
+}
+
+/// Whether a character may swing its off hand now.
+pub fn can_dual_wield(player_class: &str, level: i32) -> bool {
+    dual_wield_level(player_class).is_some_and(|l| level >= l)
+}
+
+/// Whether a class trains a skill at all (its cap at 60 is above zero).
+pub fn class_trains(skill: Skill, player_class: &str, key: &str) -> bool {
+    max_cap(skill, player_class, key) > 0
+}
+
+/// Why this class may not put `item_path` on paperdoll slot `equip_slot`
+/// (0 main hand, 1 off hand), or `None` when it may. EQ's rule (2026-10-27,
+/// after a Cleric wore two clubs): the item refuses the class at the equip,
+/// not at the swing. A weapon of a type the class never trains, armor of a
+/// kind it never trains, and a weapon in the off hand before the class can
+/// dual wield are all refused with a line. Gear worn before this rule still
+/// goes through the swing's 80% miss and half damage. The client asks the
+/// same question first (`Equipment.equip_refusal`), so an honest player gets
+/// the line without a round trip; this is the backstop.
+///
+/// The two-hander rule (2026-10-29, after a Carved Staff went on beside a
+/// club): `other_hand` is what the OTHER weapon slot holds (empty when bare).
+/// A two-hander goes in the main hand only, and only while the off hand is
+/// empty; nothing goes in the off hand while the main hand holds one. The
+/// user's call: wielding a two-hander with anything in the off hand is an
+/// end-game Warrior ability, and nobody has it until that ability exists.
+pub fn equip_refusal(
+    player_class: &str,
+    level: i32,
+    item_path: &str,
+    equip_slot: u8,
+    other_hand: &str,
+) -> Option<String> {
+    let item = super::items::lookup(item_path)?;
+    if item.item_type == super::items::ItemType::Weapon {
+        let key = super::combat::weapon_skill_key(item_path);
+        if !class_trains(Skill::Weapon, player_class, &key) {
+            return Some("Your class cannot wield that.".to_string());
+        }
+        match equip_slot {
+            1 => {
+                if item.is_two_handed {
+                    return Some("A two-handed weapon goes in the main hand.".to_string());
+                }
+                if !can_dual_wield(player_class, level) {
+                    return Some(match dual_wield_level(player_class) {
+                        Some(at) => format!("You will be able to dual wield at level {at}."),
+                        None => "Your class cannot dual wield.".to_string(),
+                    });
+                }
+                if is_two_handed(other_hand) {
+                    return Some("You cannot hold that with a two-handed weapon.".to_string());
+                }
+            }
+            0 if item.is_two_handed && !other_hand.is_empty() => {
+                return Some("Empty your off hand first.".to_string());
+            }
+            _ => {}
+        }
+        return None;
+    }
+    if !item.armor_type.is_empty() && !class_trains(Skill::Armor, player_class, &item.armor_type) {
+        return Some("Your class cannot wear that.".to_string());
+    }
+    None
+}
+
+/// Whether the item at `path` is a two-handed weapon; an empty or unknown
+/// path is not.
+fn is_two_handed(path: &str) -> bool {
+    super::items::lookup(path).is_some_and(|w| w.is_two_handed)
+}
+
+/// Why a character may not swing its off hand now, or `None` when it may:
+/// the class has no dual wield yet (before its level, or never); the off
+/// hand holds no weapon (a Monk with BOTH hands empty punches with it, as
+/// EQ's monks did; everyone else needs a real off-hand weapon, or a forged
+/// off-hand Attack would be a free second damage stream); or the main hand
+/// holds a two-handed weapon (the equip refuses that pairing since
+/// 2026-10-29, so this is the backstop for gear worn before the rule and for
+/// a modified client). One home for the rule: the Attack path logs the
+/// reason and drops the swing, answering nothing.
+pub fn offhand_swing_refusal(
+    player_class: &str,
+    level: i32,
+    main_path: &str,
+    off_path: &str,
+) -> Option<&'static str> {
+    if !can_dual_wield(player_class, level) {
+        return Some("before the class can dual wield");
+    }
+    let monk_fists = player_class == "Monk" && main_path.is_empty();
+    if off_path.is_empty() && !monk_fists {
+        return Some("with no off-hand weapon equipped");
+    }
+    if is_two_handed(main_path) {
+        return Some("beside a two-handed weapon");
+    }
+    None
 }
 
 /// Cap for a (class, level, skill_key). Mirrors the GDScript
@@ -1027,6 +534,15 @@ fn build_discipline_map() -> HashMap<&'static str, &'static str> {
         // Witch Hunter (new)
         ("Spellbreak", "alteration"),
         ("Antimagic Ward", "abjuration"),
+        // Missing until 2026-10-19 (found comparing this map with the
+        // client's DISCIPLINE for every spells.toml entry): they fell back to
+        // evocation, so casting them trained the wrong skill.
+        ("Resurrection (Minor)", "alteration"),
+        ("Resurrection", "alteration"),
+        ("Resurrection II", "alteration"),
+        ("Reclaim Soul", "alteration"),
+        ("Summon Food", "conjuration"),
+        ("Summon Drink", "conjuration"),
     ];
     for (k, v) in entries {
         m.insert(*k, *v);
@@ -1140,5 +656,175 @@ mod tests {
         assert_eq!(discipline_for_spell("Fireball Rk. II"), "evocation");
         // Unknown falls back to evocation
         assert_eq!(discipline_for_spell("Bogus Made-Up Spell"), "evocation");
+    }
+
+    #[test]
+    fn dual_wield_is_earned_by_class_and_level() {
+        assert_eq!(dual_wield_level("Monk"), Some(1));
+        assert_eq!(dual_wield_level("Ranger"), Some(13));
+        assert_eq!(dual_wield_level("Rogue"), Some(13));
+        assert_eq!(dual_wield_level("Warrior"), Some(15));
+        assert_eq!(dual_wield_level("Witch Hunter"), Some(15));
+        assert_eq!(dual_wield_level("Bard"), Some(15));
+        assert_eq!(dual_wield_level("Shadow Knight"), Some(20));
+        assert_eq!(dual_wield_level("Beast Master"), Some(20));
+        assert_eq!(dual_wield_level("Paladin"), None);
+        assert_eq!(dual_wield_level("Wizard"), None);
+        assert!(!can_dual_wield("Warrior", 14));
+        assert!(can_dual_wield("Warrior", 15));
+        assert!(can_dual_wield("Monk", 1));
+        assert!(!can_dual_wield("Cleric", 60));
+        // Every class that dual wields can train the skill, and no other can.
+        for class in [
+            "Monk",
+            "Ranger",
+            "Rogue",
+            "Warrior",
+            "Witch Hunter",
+            "Bard",
+            "Shadow Knight",
+            "Beast Master",
+        ] {
+            assert!(
+                cap_for(Skill::Weapon, class, 60, "dual_wield") > 0,
+                "{class} trains dual wield"
+            );
+        }
+        for class in ["Paladin", "Wizard", "Cleric", "Druid"] {
+            assert_eq!(
+                cap_for(Skill::Weapon, class, 60, "dual_wield"),
+                0,
+                "{class} does not"
+            );
+        }
+    }
+
+    /// The equip gate: the off hand needs dual wield, a weapon needs a skill
+    /// the class trains, armor a kind it trains; anything else goes on.
+    #[test]
+    fn the_equip_gate_refuses_by_class_and_dual_wield() {
+        const CLUB: &str = "res://data/loot/items/cracked_wooden_club.tres";
+        const SWORD: &str = "res://data/loot/items/iron_short_sword.tres";
+        const VEST: &str = "res://data/loot/items/cracked_leather_vest.tres";
+        const BOOTS: &str = "res://data/loot/items/copper_chain_boots.tres";
+        assert_eq!(
+            equip_refusal("Cleric", 1, CLUB, 0, ""),
+            None,
+            "a Cleric wields a club"
+        );
+        assert_eq!(
+            equip_refusal("Cleric", 60, CLUB, 1, "").as_deref(),
+            Some("Your class cannot dual wield."),
+            "never in the off hand"
+        );
+        assert_eq!(
+            equip_refusal("Warrior", 14, CLUB, 1, "").as_deref(),
+            Some("You will be able to dual wield at level 15."),
+            "a Warrior's off hand waits for 15"
+        );
+        assert_eq!(equip_refusal("Warrior", 15, CLUB, 1, ""), None);
+        assert_eq!(
+            equip_refusal("Monk", 1, CLUB, 1, ""),
+            None,
+            "a Monk is born with it"
+        );
+        assert_eq!(
+            equip_refusal("Cleric", 60, SWORD, 0, "").as_deref(),
+            Some("Your class cannot wield that."),
+            "Clerics never train 1h_slashing"
+        );
+        assert_eq!(equip_refusal("Warrior", 1, SWORD, 0, ""), None);
+        assert_eq!(
+            equip_refusal("Monk", 60, VEST, 3, "").as_deref(),
+            Some("Your class cannot wear that."),
+            "Monks train cloth alone"
+        );
+        assert_eq!(equip_refusal("Rogue", 1, VEST, 3, ""), None);
+        assert_eq!(
+            equip_refusal("Cleric", 1, BOOTS, 5, ""),
+            None,
+            "Clerics train chain"
+        );
+        assert_eq!(
+            equip_refusal("Wizard", 60, BOOTS, 5, "").as_deref(),
+            Some("Your class cannot wear that."),
+            "Wizards never train chain"
+        );
+        assert_eq!(
+            equip_refusal("Cleric", 1, "res://no/such/item.tres", 0, ""),
+            None,
+            "an unknown item is the next gate's problem"
+        );
+        // The two-hander rule (2026-10-29): the main hand only, and only
+        // while the off hand is empty; nothing joins one; a one-hander swaps
+        // in beside an off-hand weapon as before.
+        const STAFF: &str = "res://data/loot/items/carved_staff.tres";
+        assert_eq!(
+            equip_refusal("Warrior", 15, STAFF, 0, ""),
+            None,
+            "a staff goes in an empty-off-hand main hand"
+        );
+        assert_eq!(
+            equip_refusal("Warrior", 15, STAFF, 0, CLUB).as_deref(),
+            Some("Empty your off hand first."),
+            "not beside an off-hand weapon"
+        );
+        assert_eq!(
+            equip_refusal("Warrior", 15, CLUB, 1, STAFF).as_deref(),
+            Some("You cannot hold that with a two-handed weapon."),
+            "and nothing joins a two-hander"
+        );
+        assert_eq!(
+            equip_refusal("Warrior", 15, STAFF, 1, "").as_deref(),
+            Some("A two-handed weapon goes in the main hand."),
+            "a two-hander never sits in the off hand"
+        );
+        assert_eq!(
+            equip_refusal("Cleric", 60, CLUB, 1, STAFF).as_deref(),
+            Some("Your class cannot dual wield."),
+            "the class rule answers first"
+        );
+        assert_eq!(
+            equip_refusal("Warrior", 15, SWORD, 0, CLUB),
+            None,
+            "a one-hander swaps in beside an off-hand weapon"
+        );
+    }
+
+    // The off-hand swing rule has one home (2026-10-29), the Attack path's
+    // gate: the class's dual wield level, a real off-hand weapon (a Monk with
+    // both hands empty punches), and never beside a two-handed main hand.
+    #[test]
+    fn the_off_hand_swing_rule_has_one_home() {
+        const CLUB: &str = "res://data/loot/items/cracked_wooden_club.tres";
+        const STAFF: &str = "res://data/loot/items/carved_staff.tres";
+        assert_eq!(
+            offhand_swing_refusal("Warrior", 14, CLUB, CLUB),
+            Some("before the class can dual wield")
+        );
+        assert_eq!(
+            offhand_swing_refusal("Cleric", 60, CLUB, CLUB),
+            Some("before the class can dual wield")
+        );
+        assert_eq!(
+            offhand_swing_refusal("Warrior", 15, CLUB, ""),
+            Some("with no off-hand weapon equipped")
+        );
+        assert_eq!(
+            offhand_swing_refusal("Monk", 1, "", ""),
+            None,
+            "a bare-handed Monk punches with both"
+        );
+        assert_eq!(
+            offhand_swing_refusal("Monk", 1, CLUB, ""),
+            Some("with no off-hand weapon equipped"),
+            "a Monk with one club has one weapon"
+        );
+        assert_eq!(
+            offhand_swing_refusal("Warrior", 15, STAFF, CLUB),
+            Some("beside a two-handed weapon"),
+            "the backstop for gear worn before the rule"
+        );
+        assert_eq!(offhand_swing_refusal("Warrior", 15, CLUB, CLUB), None);
     }
 }

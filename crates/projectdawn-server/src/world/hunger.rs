@@ -192,7 +192,9 @@ pub fn first_in_slot_order(
         .collect();
     keys.sort_unstable();
     for key in keys {
-        let Some(slots) = inv.bags.get(&key) else { continue };
+        let Some(slots) = inv.bags.get(&key) else {
+            continue;
+        };
         for (s, entry) in slots.iter().enumerate() {
             if let Some(e) = entry {
                 if let Some(item) = items::lookup(&e.item_path) {
@@ -283,11 +285,17 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|(_, stage, _)| *stage == Stage::Out));
         assert_eq!(out[0].2, "You are out of food.");
-        assert!(drain(&mut c, 100.0).is_empty(), "out is told once, and the counter floors at zero");
+        assert!(
+            drain(&mut c, 100.0).is_empty(),
+            "out is told once, and the counter floors at zero"
+        );
         assert_eq!(c.hunger_secs, 0.0);
         assert!(is_famished(&c, Need::Food) && is_famished(&c, Need::Drink));
         // The character is still out: the login announcement names both.
-        assert_eq!(current_stage_lines(&c), vec!["You are out of food.", "You are out of water."]);
+        assert_eq!(
+            current_stage_lines(&c),
+            vec!["You are out of food.", "You are out of water."]
+        );
         // Fed again: no line, the eat line says it.
         feed(&mut c, Need::Food, 2880.0);
         assert!(drain(&mut c, 1.0).is_empty());
@@ -299,12 +307,23 @@ mod tests {
     fn feeding_is_capped_and_fullness_is_the_items_size() {
         let mut c = conn("Human");
         c.hunger_secs = FULLNESS_CAP_SECS - 100.0;
-        assert!((feed(&mut c, Need::Food, 2880.0) - 100.0).abs() < 0.01, "only the room is added");
+        assert!(
+            (feed(&mut c, Need::Food, 2880.0) - 100.0).abs() < 0.01,
+            "only the room is added"
+        );
         assert!(is_full(&c, Need::Food));
         let bread = items::lookup("res://data/loot/items/bread_loaf.tres").expect("bread");
         let water = items::lookup("res://data/loot/items/water_flask.tres").expect("water");
-        assert_eq!(fullness_of(bread), 20.0 * FULLNESS_UNIT_SECS, "a meal of twenty units");
-        assert_eq!(fullness_of(water), 15.0 * FULLNESS_UNIT_SECS, "a drink of fifteen");
+        assert_eq!(
+            fullness_of(bread),
+            20.0 * FULLNESS_UNIT_SECS,
+            "a meal of twenty units"
+        );
+        assert_eq!(
+            fullness_of(water),
+            15.0 * FULLNESS_UNIT_SECS,
+            "a drink of fifteen"
+        );
     }
 
     #[test]
@@ -313,16 +332,28 @@ mod tests {
         let water = "res://data/loot/items/water_flask.tres".to_string();
         let mut inv = PlayerInventory::new();
         // A bag lives in base slot 1; its contents are the bag_1 vector.
-        inv.base[1] = Some(InventoryEntry { item_path: "res://data/loot/items/small_pouch.tres".into(), count: 1 });
+        inv.base[1] = Some(InventoryEntry {
+            item_path: "res://data/loot/items/small_pouch.tres".into(),
+            count: 1,
+        });
         inv.ensure_bag_init(1);
-        inv.bags.get_mut(&1).unwrap()[0] = Some(InventoryEntry { item_path: bread.clone(), count: 2 });
-        inv.base[5] = Some(InventoryEntry { item_path: water.clone(), count: 1 });
+        inv.bags.get_mut(&1).unwrap()[0] = Some(InventoryEntry {
+            item_path: bread.clone(),
+            count: 2,
+        });
+        inv.base[5] = Some(InventoryEntry {
+            item_path: water.clone(),
+            count: 1,
+        });
         assert_eq!(
             first_in_slot_order(&inv, Need::Food).map(|(l, s, _)| (l, s)),
             Some(("bag_1".to_string(), 0)),
             "the only bread is in the bag"
         );
-        inv.base[3] = Some(InventoryEntry { item_path: bread.clone(), count: 1 });
+        inv.base[3] = Some(InventoryEntry {
+            item_path: bread.clone(),
+            count: 1,
+        });
         assert_eq!(
             first_in_slot_order(&inv, Need::Food).map(|(l, s, _)| (l, s)),
             Some(("base".to_string(), 3)),

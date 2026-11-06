@@ -70,12 +70,13 @@ pub async fn create_account(
     validate_password(password)?;
     let hash = hash_password(password)?;
 
-    let res = sqlx::query("INSERT INTO accounts (username, password_hash, email) VALUES (?1, ?2, ?3)")
-        .bind(username)
-        .bind(&hash)
-        .bind(email)
-        .execute(pool)
-        .await;
+    let res =
+        sqlx::query("INSERT INTO accounts (username, password_hash, email) VALUES (?1, ?2, ?3)")
+            .bind(username)
+            .bind(&hash)
+            .bind(email)
+            .execute(pool)
+            .await;
 
     match res {
         Ok(out) => Ok(out.last_insert_rowid()),
@@ -253,12 +254,13 @@ pub async fn create_account_with_invite(
         // Dropping `tx` rolls back; nothing was written.
         return Err(AuthError::InviteInvalid(INVITE_REFUSAL.into()));
     }
-    let res = sqlx::query("INSERT INTO accounts (username, password_hash, email) VALUES (?1, ?2, ?3)")
-        .bind(username)
-        .bind(&hash)
-        .bind(email)
-        .execute(&mut *tx)
-        .await;
+    let res =
+        sqlx::query("INSERT INTO accounts (username, password_hash, email) VALUES (?1, ?2, ?3)")
+            .bind(username)
+            .bind(&hash)
+            .bind(email)
+            .execute(&mut *tx)
+            .await;
     let id = match res {
         Ok(out) => out.last_insert_rowid(),
         Err(sqlx::Error::Database(dbe)) if dbe.is_unique_violation() => {
@@ -586,11 +588,7 @@ pub async fn create_character(
     }
 }
 
-pub async fn delete_character(
-    pool: &SqlitePool,
-    account_id: i64,
-    char_id: i64,
-) -> AuthResult<()> {
+pub async fn delete_character(pool: &SqlitePool, account_id: i64, char_id: i64) -> AuthResult<()> {
     // Append _del_{id} to the name so the UNIQUE constraint frees the original
     // name for a new character without requiring a schema migration.
     let res = sqlx::query(
@@ -613,11 +611,7 @@ pub async fn delete_character(
 /// Confirm `char_id` belongs to `account_id` and is not soft-deleted.
 /// Used by the auth handler before minting a world ConnectToken — without
 /// this a logged-in player could request a token for *any* character.
-pub async fn verify_char_owned(
-    pool: &SqlitePool,
-    account_id: i64,
-    char_id: i64,
-) -> AuthResult<()> {
+pub async fn verify_char_owned(pool: &SqlitePool, account_id: i64, char_id: i64) -> AuthResult<()> {
     let row = sqlx::query(
         "SELECT 1 FROM characters
          WHERE id = ?1 AND account_id = ?2 AND deleted_at IS NULL",
@@ -916,10 +910,7 @@ struct SpawnRow {
     bind_z: Option<f32>,
 }
 
-pub async fn load_character(
-    pool: &SqlitePool,
-    char_id: i64,
-) -> AuthResult<CharacterSpawn> {
+pub async fn load_character(pool: &SqlitePool, char_id: i64) -> AuthResult<CharacterSpawn> {
     let row: Option<SpawnRow> = sqlx::query_as(
         "SELECT id, account_id, name, race, class, level, xp, xp_to_next,
                 base_strength, base_dexterity, base_agility,
@@ -958,10 +949,18 @@ pub async fn load_character(
     let level = row.level.clamp(1, crate::world::skills::MAX_LEVEL);
     let computed = crate::char_data::compute(&row.race, &row.class, level);
     let xp = row.xp.clamp(0, computed.xp_to_next);
-    let _ = (row.base_strength, row.base_dexterity, row.base_agility,
-             row.base_intelligence, row.base_wisdom, row.base_charisma,
-             row.base_constitution, row.base_max_hp, row.base_max_mp,
-             row.base_max_stamina);
+    let _ = (
+        row.base_strength,
+        row.base_dexterity,
+        row.base_agility,
+        row.base_intelligence,
+        row.base_wisdom,
+        row.base_charisma,
+        row.base_constitution,
+        row.base_max_hp,
+        row.base_max_mp,
+        row.base_max_stamina,
+    );
 
     // Quest completions (server-authoritative rewards): loaded with the
     // character so the world loop can reject a repeat turn-in without a query.
@@ -1166,15 +1165,13 @@ pub async fn set_character_position(
     y: f64,
     z: f64,
 ) -> anyhow::Result<()> {
-    sqlx::query(
-        "UPDATE characters SET pos_x = ?1, pos_y = ?2, pos_z = ?3 WHERE id = ?4",
-    )
-    .bind(x)
-    .bind(y)
-    .bind(z)
-    .bind(char_id)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE characters SET pos_x = ?1, pos_y = ?2, pos_z = ?3 WHERE id = ?4")
+        .bind(x)
+        .bind(y)
+        .bind(z)
+        .bind(char_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1232,10 +1229,7 @@ pub struct InventoryRow {
 /// Load every inventory row for a character. Returns an empty Vec for
 /// freshly-created characters (which never wrote any rows). Callers
 /// project this into the in-memory `PlayerInventory` shape.
-pub async fn load_inventory(
-    pool: &SqlitePool,
-    char_id: i64,
-) -> AuthResult<Vec<InventoryRow>> {
+pub async fn load_inventory(pool: &SqlitePool, char_id: i64) -> AuthResult<Vec<InventoryRow>> {
     let rows: Vec<InventoryRow> = sqlx::query_as(
         "SELECT location, slot, item_path, count
          FROM character_items
@@ -1507,14 +1501,16 @@ pub async fn apply_corpse_loot(
         .await?;
     }
     // Looter wallet (corpse coins credited back to the owner).
-    sqlx::query("UPDATE characters SET platinum = ?1, gold = ?2, silver = ?3, copper = ?4 WHERE id = ?5")
-        .bind(looter_coins.platinum)
-        .bind(looter_coins.gold)
-        .bind(looter_coins.silver)
-        .bind(looter_coins.copper)
-        .bind(char_id)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE characters SET platinum = ?1, gold = ?2, silver = ?3, copper = ?4 WHERE id = ?5",
+    )
+    .bind(looter_coins.platinum)
+    .bind(looter_coins.gold)
+    .bind(looter_coins.silver)
+    .bind(looter_coins.copper)
+    .bind(char_id)
+    .execute(&mut *tx)
+    .await?;
     // Corpse — clear its items, then either DELETE the body (looted fully empty)
     // or rewrite its shrunk items + coins. Both happen in THIS tx so the corpse
     // change commits together with the inventory write, never half-applied.
@@ -1821,10 +1817,7 @@ pub struct SkillRow {
     pub score: i32,
 }
 
-pub async fn load_skills(
-    pool: &SqlitePool,
-    char_id: i64,
-) -> AuthResult<Vec<SkillRow>> {
+pub async fn load_skills(pool: &SqlitePool, char_id: i64) -> AuthResult<Vec<SkillRow>> {
     let rows: Vec<SkillRow> = sqlx::query_as(
         "SELECT kind, key, score
          FROM character_skills
@@ -1841,11 +1834,7 @@ pub async fn load_skills(
 /// (same shape as `save_inventory`); ≤ 21 rows per character so
 /// rewriting the whole set is cheap. Called from the same checkpoint
 /// + disconnect cadence the inventory uses.
-pub async fn save_skills(
-    pool: &SqlitePool,
-    char_id: i64,
-    rows: &[SkillRow],
-) -> AuthResult<()> {
+pub async fn save_skills(pool: &SqlitePool, char_id: i64, rows: &[SkillRow]) -> AuthResult<()> {
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM character_skills WHERE char_id = ?1")
         .bind(char_id)
@@ -1963,7 +1952,9 @@ mod invite_tests {
     #[tokio::test]
     async fn an_invite_makes_one_account_and_is_spent_by_it() {
         let (pool, _tmp) = fresh_pool().await;
-        let codes = create_invites(&pool, 2, Some("for Sam")).await.expect("mint");
+        let codes = create_invites(&pool, 2, Some("for Sam"))
+            .await
+            .expect("mint");
         assert_eq!(codes.len(), 2);
         assert!(codes[0].len() == INVITE_CODE_BYTES * 2 && codes[0] != codes[1]);
 
@@ -2001,7 +1992,10 @@ mod invite_tests {
     #[tokio::test]
     async fn two_registrations_racing_on_one_code_make_one_account() {
         let (pool, _tmp) = fresh_pool().await;
-        let code = create_invites(&pool, 1, None).await.expect("mint").remove(0);
+        let code = create_invites(&pool, 1, None)
+            .await
+            .expect("mint")
+            .remove(0);
         let (a, b) = tokio::join!(
             create_account_with_invite(&pool, "racer_a", "longpassword", None, &code),
             create_account_with_invite(&pool, "racer_b", "longpassword", None, &code),
@@ -2010,7 +2004,10 @@ mod invite_tests {
         assert_eq!(won, 1, "one winner: {a:?} / {b:?}");
         for r in [&a, &b] {
             if let Err(e) = r {
-                assert!(matches!(e, AuthError::InviteInvalid(_)), "the loser is refused as spent: {e}");
+                assert!(
+                    matches!(e, AuthError::InviteInvalid(_)),
+                    "the loser is refused as spent: {e}"
+                );
             }
         }
         let accounts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM accounts")
@@ -2023,8 +2020,13 @@ mod invite_tests {
     #[tokio::test]
     async fn a_refused_name_leaves_the_code_unspent() {
         let (pool, _tmp) = fresh_pool().await;
-        create_account(&pool, "taken", "longpassword", None).await.expect("existing");
-        let code = create_invites(&pool, 1, None).await.expect("mint").remove(0);
+        create_account(&pool, "taken", "longpassword", None)
+            .await
+            .expect("existing");
+        let code = create_invites(&pool, 1, None)
+            .await
+            .expect("mint")
+            .remove(0);
         assert!(
             matches!(
                 create_account_with_invite(&pool, "TAKEN", "longpassword", None, &code).await,
@@ -2046,13 +2048,24 @@ mod invite_tests {
     #[tokio::test]
     async fn revoked_unknown_and_malformed_codes_are_refused() {
         let (pool, _tmp) = fresh_pool().await;
-        let code = create_invites(&pool, 1, None).await.expect("mint").remove(0);
-        assert_eq!(revoke_invite(&pool, &code).await.expect("revoke"), RevokeOutcome::Revoked);
+        let code = create_invites(&pool, 1, None)
+            .await
+            .expect("mint")
+            .remove(0);
+        assert_eq!(
+            revoke_invite(&pool, &code).await.expect("revoke"),
+            RevokeOutcome::Revoked
+        );
         assert_eq!(
             revoke_invite(&pool, &code).await.expect("revoke again"),
             RevokeOutcome::AlreadyRevoked
         );
-        for bad in [code.as_str(), "00000000000000000000000000000000", "not-a-code", ""] {
+        for bad in [
+            code.as_str(),
+            "00000000000000000000000000000000",
+            "not-a-code",
+            "",
+        ] {
             assert!(
                 matches!(
                     create_account_with_invite(&pool, "nobody", "longpassword", None, bad).await,
@@ -2084,7 +2097,10 @@ mod ban_tests {
             .await
             .expect("create");
         let session = issue_session(&pool, 1).await.expect("session");
-        assert!(touch_session(&pool, &session).await.is_ok(), "live before the ban");
+        assert!(
+            touch_session(&pool, &session).await.is_ok(),
+            "live before the ban"
+        );
 
         let out = set_account_banned(&pool, "GRIEFER", true, Some("  corpse camping  "))
             .await
@@ -2113,7 +2129,11 @@ mod ban_tests {
             touch_session(&pool, &session).await.is_err(),
             "a session minted before the ban must not outlive it"
         );
-        assert_eq!(out.reason.as_deref(), Some("corpse camping"), "the outcome reports what is stored");
+        assert_eq!(
+            out.reason.as_deref(),
+            Some("corpse camping"),
+            "the outcome reports what is stored"
+        );
         assert!(account_is_banned(&pool, 1).await.expect("read flag"));
         assert_eq!(
             banned_account_ids(&pool).await.expect("sweep query"),
@@ -2157,7 +2177,10 @@ mod ban_tests {
         assert_eq!(reason, None, "an unban clears the reason");
         assert!(!account_is_banned(&pool, 1).await.expect("read flag"));
         assert!(
-            banned_account_ids(&pool).await.expect("sweep query").is_empty(),
+            banned_account_ids(&pool)
+                .await
+                .expect("sweep query")
+                .is_empty(),
             "an unban takes the account out of the sweep"
         );
         assert!(
@@ -2170,7 +2193,9 @@ mod ban_tests {
     async fn ban_of_an_unknown_account_is_none_and_the_reason_is_bounded() {
         let (pool, _tmp) = fresh_pool().await;
         assert_eq!(
-            set_account_banned(&pool, "nobody", true, Some("x")).await.expect("query"),
+            set_account_banned(&pool, "nobody", true, Some("x"))
+                .await
+                .expect("query"),
             None
         );
 
@@ -2233,7 +2258,9 @@ mod gm_audit_tests {
             .await
             .expect("create character");
 
-        record_gm_actions(&pool, &[]).await.expect("an empty batch is a no-op");
+        record_gm_actions(&pool, &[])
+            .await
+            .expect("an empty batch is a no-op");
         record_gm_actions(
             &pool,
             &[
@@ -2257,7 +2284,10 @@ mod gm_audit_tests {
         assert_eq!(rows[0].get::<i64, _>("target_char"), char_id);
         assert_eq!(rows[0].get::<String, _>("command"), "heal_self");
         assert_eq!(rows[1].get::<String, _>("command"), "give");
-        assert_eq!(rows[1].get::<String, _>("args"), "item=\"Bread Loaf\" qty=1 via=gm");
+        assert_eq!(
+            rows[1].get::<String, _>("args"),
+            "item=\"Bread Loaf\" qty=1 via=gm"
+        );
     }
 
     #[tokio::test]
@@ -2273,7 +2303,10 @@ mod gm_audit_tests {
         // Account 999 does not exist: the foreign key refuses it.
         let result = record_gm_actions(
             &pool,
-            &[row(1, char_id, "heal_self", "amount=1"), row(999, char_id, "give", "x")],
+            &[
+                row(1, char_id, "heal_self", "amount=1"),
+                row(999, char_id, "give", "x"),
+            ],
         )
         .await;
         assert!(result.is_err(), "an unknown actor account must be refused");
@@ -2303,7 +2336,9 @@ mod reset_password_tests {
         let s1 = issue_session(&pool, 1).await.expect("session 1");
         let _s2 = issue_session(&pool, 1).await.expect("session 2");
         assert!(
-            verify_login(&pool, "forgetful", "oldpassword").await.is_ok(),
+            verify_login(&pool, "forgetful", "oldpassword")
+                .await
+                .is_ok(),
             "the old password works before the reset"
         );
 
@@ -2318,11 +2353,15 @@ mod reset_password_tests {
         assert_eq!(purged, 3, "every session for the account is purged");
 
         assert!(
-            verify_login(&pool, "forgetful", "brandnewpassword").await.is_ok(),
+            verify_login(&pool, "forgetful", "brandnewpassword")
+                .await
+                .is_ok(),
             "the new password works"
         );
         assert!(
-            verify_login(&pool, "forgetful", "oldpassword").await.is_err(),
+            verify_login(&pool, "forgetful", "oldpassword")
+                .await
+                .is_err(),
             "the old password must stop working"
         );
         // The purged session token can no longer be redeemed.
@@ -2346,7 +2385,9 @@ mod reset_password_tests {
             verify_login(&pool, "someone", "oldpassword").await.is_ok(),
             "a refused reset leaves the old password intact"
         );
-        assert!(reset_password(&pool, "nobody", "brandnewpassword").await.is_err());
+        assert!(reset_password(&pool, "nobody", "brandnewpassword")
+            .await
+            .is_err());
     }
 }
 
@@ -2434,7 +2475,10 @@ mod corpse_loot_tests {
         assert_eq!(corpses.len(), 1);
         // The worn slot survives a partial loot, so a later loot can still
         // put the shield back on (corpse auto-re-equip).
-        assert_eq!(corpses[0].items, vec![("res://items/shield.tres".to_string(), 1, Some(1))]);
+        assert_eq!(
+            corpses[0].items,
+            vec![("res://items/shield.tres".to_string(), 1, Some(1))]
+        );
         assert_eq!(corpses[0].coins, protocol::world::Coins::ZERO);
     }
 
@@ -2473,7 +2517,10 @@ mod corpse_loot_tests {
 
         // Corpse + its items are gone.
         let corpses = load_corpses(&pool).await.expect("corpses");
-        assert!(corpses.is_empty(), "corpse should be deleted after a full loot");
+        assert!(
+            corpses.is_empty(),
+            "corpse should be deleted after a full loot"
+        );
         let leftover: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM corpse_items WHERE corpse_id = ?1")
                 .bind(corpse_id)
@@ -2560,7 +2607,9 @@ mod corpse_loot_tests {
         );
 
         // ...and the player holds none of it. Anything else is a duplication.
-        let inv = load_inventory(&pool, char_id).await.expect("load inventory");
+        let inv = load_inventory(&pool, char_id)
+            .await
+            .expect("load inventory");
         assert!(
             inv.is_empty(),
             "owner inventory must be empty after the strip, got {inv:?}"
@@ -2599,7 +2648,10 @@ mod corpse_loot_tests {
 
         let loaded = load_corpses(&pool).await.expect("load");
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].lost_xp, 500, "lost_xp must survive a save/load round-trip");
+        assert_eq!(
+            loaded[0].lost_xp, 500,
+            "lost_xp must survive a save/load round-trip"
+        );
         assert!(!loaded[0].resurrected, "a fresh corpse is not resurrected");
     }
 
@@ -2617,16 +2669,28 @@ mod corpse_loot_tests {
             .expect("char");
 
         let spawn = load_character(&pool, char_id).await.expect("load");
-        assert!(spawn.completed_quests.is_empty(), "fresh char has no completions");
+        assert!(
+            spawn.completed_quests.is_empty(),
+            "fresh char has no completions"
+        );
 
-        record_quest_completion(&pool, char_id, "wolf_threat").await.expect("record");
-        record_quest_completion(&pool, char_id, "wolf_threat").await.expect("repeat is a no-op");
-        record_quest_completion(&pool, char_id, "rotfang_hunt").await.expect("record 2nd");
+        record_quest_completion(&pool, char_id, "wolf_threat")
+            .await
+            .expect("record");
+        record_quest_completion(&pool, char_id, "wolf_threat")
+            .await
+            .expect("repeat is a no-op");
+        record_quest_completion(&pool, char_id, "rotfang_hunt")
+            .await
+            .expect("record 2nd");
 
         let spawn = load_character(&pool, char_id).await.expect("reload");
         let mut done = spawn.completed_quests.clone();
         done.sort();
-        assert_eq!(done, vec!["rotfang_hunt".to_string(), "wolf_threat".to_string()]);
+        assert_eq!(
+            done,
+            vec!["rotfang_hunt".to_string(), "wolf_threat".to_string()]
+        );
     }
 
     // Quest phase 2 (PD_W0024) — the active journal round-trips: an accept
@@ -2645,12 +2709,21 @@ mod corpse_loot_tests {
             .expect("char");
 
         let spawn = load_character(&pool, char_id).await.expect("load");
-        assert!(spawn.active_quests.is_empty(), "fresh char has an empty journal");
+        assert!(
+            spawn.active_quests.is_empty(),
+            "fresh char has an empty journal"
+        );
 
         // Accept seeds zeros; a counted kill upserts the new counts.
-        save_quest_progress(&pool, char_id, "wolf_threat", &[0]).await.expect("accept");
-        save_quest_progress(&pool, char_id, "wolf_threat", &[3]).await.expect("upsert");
-        save_quest_progress(&pool, char_id, "rat_infestation", &[0]).await.expect("accept 2nd");
+        save_quest_progress(&pool, char_id, "wolf_threat", &[0])
+            .await
+            .expect("accept");
+        save_quest_progress(&pool, char_id, "wolf_threat", &[3])
+            .await
+            .expect("upsert");
+        save_quest_progress(&pool, char_id, "rat_infestation", &[0])
+            .await
+            .expect("accept 2nd");
 
         let spawn = load_character(&pool, char_id).await.expect("reload");
         let mut active = spawn.active_quests.clone();
@@ -2664,10 +2737,17 @@ mod corpse_loot_tests {
         );
 
         // Abandon / turn-in drops the row; deleting twice is a no-op.
-        delete_active_quest(&pool, char_id, "wolf_threat").await.expect("delete");
-        delete_active_quest(&pool, char_id, "wolf_threat").await.expect("repeat no-op");
+        delete_active_quest(&pool, char_id, "wolf_threat")
+            .await
+            .expect("delete");
+        delete_active_quest(&pool, char_id, "wolf_threat")
+            .await
+            .expect("repeat no-op");
         let spawn = load_character(&pool, char_id).await.expect("reload 2");
-        assert_eq!(spawn.active_quests, vec![("rat_infestation".to_string(), vec![0])]);
+        assert_eq!(
+            spawn.active_quests,
+            vec![("rat_infestation".to_string(), vec![0])]
+        );
 
         // A hand-corrupted progress blob must not fail the load — it comes
         // back as empty progress (not met), never as a free turn-in.
@@ -2676,8 +2756,13 @@ mod corpse_loot_tests {
             .execute(&pool)
             .await
             .expect("corrupt");
-        let spawn = load_character(&pool, char_id).await.expect("load survives corruption");
-        assert_eq!(spawn.active_quests, vec![("rat_infestation".to_string(), Vec::new())]);
+        let spawn = load_character(&pool, char_id)
+            .await
+            .expect("load survives corruption");
+        assert_eq!(
+            spawn.active_quests,
+            vec![("rat_infestation".to_string(), Vec::new())]
+        );
     }
 
     // XP curve — a character saved on a previous curve (the old 1.5x geometric
@@ -2707,13 +2792,22 @@ mod corpse_loot_tests {
 
         let spawn = load_character(&pool, char_id).await.expect("load");
         let cap = crate::world::skills::MAX_LEVEL;
-        assert_eq!(spawn.level, cap, "a stored level above the cap clamps to it");
+        assert_eq!(
+            spawn.level, cap,
+            "a stored level above the cap clamps to it"
+        );
         assert_eq!(
             spawn.xp_to_next,
             crate::char_data::xp_to_next_for(cap),
             "the band must be the live cubic band, not the stale i32::MAX value",
         );
-        assert_eq!(spawn.xp, spawn.xp_to_next, "over-band stored xp clamps to a full bar");
-        assert!(spawn.xp_to_next < 100_000_000, "the new band is tens of millions, not billions");
+        assert_eq!(
+            spawn.xp, spawn.xp_to_next,
+            "over-band stored xp clamps to a full bar"
+        );
+        assert!(
+            spawn.xp_to_next < 100_000_000,
+            "the new band is tens of millions, not billions"
+        );
     }
 }

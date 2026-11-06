@@ -24,7 +24,12 @@ pub enum BuffEffect {
     /// Damage-over-time on a PLAYER (spell batch step 5; mobs and pets
     /// carry theirs on `Entity::active_dots`). `dps` dealt in whole ticks
     /// of `DOT_TICK_SECS`, named for `caster`'s "<spell> for N" line.
-    Dot { dps: f32, caster: u64, dmg_type: protocol::world::DamageType, duration: f32 },
+    Dot {
+        dps: f32,
+        caster: u64,
+        dmg_type: protocol::world::DamageType,
+        duration: f32,
+    },
     /// Mana-over-time. `mps` MP restored per second.
     MpRegen { mps: f32 },
     /// Lich Form toggle. Disables natural HP regen, grants
@@ -135,7 +140,12 @@ impl ActiveBuff {
     ) -> Self {
         Self {
             name,
-            effect: BuffEffect::Dot { dps, caster, dmg_type, duration },
+            effect: BuffEffect::Dot {
+                dps,
+                caster,
+                dmg_type,
+                duration,
+            },
             remaining: duration,
             tick_acc: 0.0,
             applied_at: now,
@@ -202,7 +212,13 @@ impl ActiveBuff {
         }
     }
 
-    pub fn new_accuracy_crit(name: String, accuracy: f32, crit: f32, duration: f32, now: Instant) -> Self {
+    pub fn new_accuracy_crit(
+        name: String,
+        accuracy: f32,
+        crit: f32,
+        duration: f32,
+        now: Instant,
+    ) -> Self {
         Self {
             name,
             effect: BuffEffect::AccuracyCrit { accuracy, crit },
@@ -213,11 +229,23 @@ impl ActiveBuff {
     }
 
     pub fn new_mez(name: String, duration: f32, now: Instant) -> Self {
-        Self { name, effect: BuffEffect::Mez, remaining: duration, tick_acc: 0.0, applied_at: now }
+        Self {
+            name,
+            effect: BuffEffect::Mez,
+            remaining: duration,
+            tick_acc: 0.0,
+            applied_at: now,
+        }
     }
 
     pub fn new_root(name: String, duration: f32, now: Instant) -> Self {
-        Self { name, effect: BuffEffect::Root, remaining: duration, tick_acc: 0.0, applied_at: now }
+        Self {
+            name,
+            effect: BuffEffect::Root,
+            remaining: duration,
+            tick_acc: 0.0,
+            applied_at: now,
+        }
     }
 
     pub fn new_snare(name: String, amount: f32, duration: f32, now: Instant) -> Self {
@@ -241,7 +269,13 @@ impl ActiveBuff {
     }
 
     pub fn new_silence(name: String, duration: f32, now: Instant) -> Self {
-        Self { name, effect: BuffEffect::Silence, remaining: duration, tick_acc: 0.0, applied_at: now }
+        Self {
+            name,
+            effect: BuffEffect::Silence,
+            remaining: duration,
+            tick_acc: 0.0,
+            applied_at: now,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -278,7 +312,9 @@ impl ActiveBuff {
 /// Returns true if `conn` currently has Lich Form active. The regen
 /// tick uses this to skip natural HP regeneration.
 pub fn is_lich_form_active(buffs: &[ActiveBuff]) -> bool {
-    buffs.iter().any(|b| matches!(b.effect, BuffEffect::LichForm { .. }))
+    buffs
+        .iter()
+        .any(|b| matches!(b.effect, BuffEffect::LichForm { .. }))
 }
 
 /// Track 6 sub-task 4c — highest active Speed multiplier (1.0 if no
@@ -302,10 +338,13 @@ pub fn speed_mult(buffs: &[ActiveBuff]) -> f32 {
 /// manager's behaviour: only one damage shield slot, but if the
 /// data model is ever extended to allow multiple, this sums them).
 pub fn damage_shield_total(buffs: &[ActiveBuff]) -> f32 {
-    buffs.iter().filter_map(|b| match b.effect {
-        BuffEffect::DamageShield { amount } => Some(amount),
-        _ => None,
-    }).sum()
+    buffs
+        .iter()
+        .filter_map(|b| match b.effect {
+            BuffEffect::DamageShield { amount } => Some(amount),
+            _ => None,
+        })
+        .sum()
 }
 
 /// Track 6 — name of the first active DamageShield buff, for combat
@@ -350,7 +389,9 @@ pub fn is_rooted(buffs: &[ActiveBuff]) -> bool {
 /// Track 6 sub-task 4d — true if the bearer is Silenced. Server
 /// drops CastSpell intents (still allows Move + Attack).
 pub fn is_silenced(buffs: &[ActiveBuff]) -> bool {
-    buffs.iter().any(|b| matches!(b.effect, BuffEffect::Silence))
+    buffs
+        .iter()
+        .any(|b| matches!(b.effect, BuffEffect::Silence))
 }
 
 /// Track 6 sub-task 4d — highest active snare amount (0.0 if none).
@@ -380,11 +421,16 @@ pub fn first_dispellable_index(buffs: &[ActiveBuff]) -> Option<usize> {
     // stat / speed / haste / shield / absorb / accuracy+crit /
     // Lich. Cc / Snare / Silence / Mez / Root / AttackSlow are
     // hostile and shouldn't be stripped by a friendly dispel.
-    buffs.iter().position(|b| !matches!(
-        b.effect,
-        BuffEffect::Mez | BuffEffect::Root | BuffEffect::Snare { .. }
-            | BuffEffect::AttackSlow { .. } | BuffEffect::Silence
-    ))
+    buffs.iter().position(|b| {
+        !matches!(
+            b.effect,
+            BuffEffect::Mez
+                | BuffEffect::Root
+                | BuffEffect::Snare { .. }
+                | BuffEffect::AttackSlow { .. }
+                | BuffEffect::Silence
+        )
+    })
 }
 
 /// Track 6 sub-task 4c — consume up to `incoming` damage from the

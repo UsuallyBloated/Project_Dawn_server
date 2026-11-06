@@ -82,10 +82,18 @@ pub struct Vec3f {
 }
 
 impl Vec3f {
-    pub const ZERO: Self = Self { x: 0.0, y: 0.0, z: 0.0 };
+    pub const ZERO: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
 
     pub fn from_tuple(t: (f32, f32, f32)) -> Self {
-        Self { x: t.0, y: t.1, z: t.2 }
+        Self {
+            x: t.0,
+            y: t.1,
+            z: t.2,
+        }
     }
 
     pub fn into_tuple(self) -> (f32, f32, f32) {
@@ -102,14 +110,22 @@ impl Vec3f {
         let len = self.length();
         if len > max && len > 0.0 {
             let s = max / len;
-            Self { x: self.x * s, y: self.y * s, z: self.z * s }
+            Self {
+                x: self.x * s,
+                y: self.y * s,
+                z: self.z * s,
+            }
         } else {
             self
         }
     }
 
     pub fn sub(self, other: Self) -> Self {
-        Self { x: self.x - other.x, y: self.y - other.y, z: self.z - other.z }
+        Self {
+            x: self.x - other.x,
+            y: self.y - other.y,
+            z: self.z - other.z,
+        }
     }
 
     pub fn distance_to(self, other: Self) -> f32 {
@@ -122,7 +138,11 @@ impl Vec3f {
     pub fn normalize_or_zero(self) -> Self {
         let len = self.length();
         if len > 0.0 {
-            Self { x: self.x / len, y: self.y / len, z: self.z / len }
+            Self {
+                x: self.x / len,
+                y: self.y / len,
+                z: self.z / len,
+            }
         } else {
             Self::ZERO
         }
@@ -135,7 +155,11 @@ impl Vec3f {
         let delta = target.sub(self);
         let dist = delta.length();
         if dist <= step || dist <= f32::EPSILON {
-            Self { x: target.x, y: self.y, z: target.z }
+            Self {
+                x: target.x,
+                y: self.y,
+                z: target.z,
+            }
         } else {
             let dir = delta.normalize_or_zero();
             Self {
@@ -688,7 +712,9 @@ impl PerConnection {
             bank_dirty: false,
             bank_items: super::inventory::ItemVault::new(super::inventory::BANK_VAULT_SLOTS),
             bank_items_dirty: false,
-            account_bank_items: super::inventory::ItemVault::new(super::inventory::ACCOUNT_VAULT_SLOTS),
+            account_bank_items: super::inventory::ItemVault::new(
+                super::inventory::ACCOUNT_VAULT_SLOTS,
+            ),
             account_bank_items_dirty: false,
             autosplit: true,
             equip_stat_bonuses: super::inventory::EquipStatBonuses::default(),
@@ -774,8 +800,11 @@ impl PerConnection {
         if !self.can_use_dev_cmds() {
             return DevCmdAuth::Denied;
         }
-        let elapsed = now.saturating_duration_since(self.gm_cmd_refill_at).as_secs_f32();
-        self.gm_cmd_tokens = (self.gm_cmd_tokens + elapsed * GM_CMD_REFILL_PER_SEC).min(GM_CMD_BURST);
+        let elapsed = now
+            .saturating_duration_since(self.gm_cmd_refill_at)
+            .as_secs_f32();
+        self.gm_cmd_tokens =
+            (self.gm_cmd_tokens + elapsed * GM_CMD_REFILL_PER_SEC).min(GM_CMD_BURST);
         self.gm_cmd_refill_at = now;
         if self.gm_cmd_tokens < 1.0 {
             self.gm_cmd_refused = self.gm_cmd_refused.saturating_add(1);
@@ -951,19 +980,34 @@ mod tests {
         // Equip a main-hand and an off-hand weapon.
         conn.inventory.equipment.insert(
             0,
-            InventoryEntry { item_path: "res://items/iron_short_sword.tres".into(), count: 1 },
+            InventoryEntry {
+                item_path: "res://items/iron_short_sword.tres".into(),
+                count: 1,
+            },
         );
         conn.inventory.equipment.insert(
             1,
-            InventoryEntry { item_path: "res://items/rusty_dagger.tres".into(), count: 1 },
+            InventoryEntry {
+                item_path: "res://items/rusty_dagger.tres".into(),
+                count: 1,
+            },
         );
-        assert_eq!(conn.equipped_weapon_path(false), "res://items/iron_short_sword.tres");
-        assert_eq!(conn.equipped_weapon_path(true), "res://items/rusty_dagger.tres");
+        assert_eq!(
+            conn.equipped_weapon_path(false),
+            "res://items/iron_short_sword.tres"
+        );
+        assert_eq!(
+            conn.equipped_weapon_path(true),
+            "res://items/rusty_dagger.tres"
+        );
         // An off-hand swing with an empty off-hand is unarmed, NOT the main-hand
         // weapon — a client can't fabricate an off-hand hit it isn't geared for.
         conn.inventory.equipment.remove(&1);
         assert_eq!(conn.equipped_weapon_path(true), "");
-        assert_eq!(conn.equipped_weapon_path(false), "res://items/iron_short_sword.tres");
+        assert_eq!(
+            conn.equipped_weapon_path(false),
+            "res://items/iron_short_sword.tres"
+        );
     }
 
     // Respawn must never leave the player where they died. An unbound character
@@ -972,18 +1016,33 @@ mod tests {
     fn respawn_destination_prefers_bind_then_starter_spawn() {
         let mut conn = PerConnection::from_spawn(test_spawn(), Instant::now());
         // Simulate having died somewhere dangerous.
-        conn.pos = Vec3f { x: 120.0, y: 4.0, z: -80.0 };
+        conn.pos = Vec3f {
+            x: 120.0,
+            y: 4.0,
+            z: -80.0,
+        };
 
         // Unbound -> starter spawn, NOT the death position.
         assert!(conn.bind.is_none(), "fixture starts unbound");
         let d = conn.respawn_destination();
-        assert_eq!((d.x, d.y, d.z), (super::super::STARTER_SPAWN.x,
-                                     super::super::STARTER_SPAWN.y,
-                                     super::super::STARTER_SPAWN.z));
-        assert_ne!((d.x, d.z), (conn.pos.x, conn.pos.z), "must not respawn at the death site");
+        assert_eq!(
+            (d.x, d.y, d.z),
+            (
+                super::super::STARTER_SPAWN.x,
+                super::super::STARTER_SPAWN.y,
+                super::super::STARTER_SPAWN.z
+            )
+        );
+        assert_ne!(
+            (d.x, d.z),
+            (conn.pos.x, conn.pos.z),
+            "must not respawn at the death site"
+        );
 
         // Bound -> the bind point.
-        conn.bind = Some(crate::db::BindPoint { pos: (10.0, 1.0, -5.0) });
+        conn.bind = Some(crate::db::BindPoint {
+            pos: (10.0, 1.0, -5.0),
+        });
         let d2 = conn.respawn_destination();
         assert_eq!((d2.x, d2.y, d2.z), (10.0, 1.0, -5.0));
     }
@@ -1017,7 +1076,10 @@ mod tests {
             conn.authorize_dev_cmd(now, "heal_self", "amount=50".to_string()),
             DevCmdAuth::Denied
         );
-        assert!(conn.gm_audit.is_empty(), "a refused attempt must queue no write");
+        assert!(
+            conn.gm_audit.is_empty(),
+            "a refused attempt must queue no write"
+        );
         assert_eq!(conn.gm_cmd_tokens, GM_CMD_BURST, "nor spend any budget");
 
         conn.is_gm = true;
@@ -1027,7 +1089,10 @@ mod tests {
         );
         assert_eq!(
             conn.gm_audit,
-            vec![GmAuditEntry { command: "heal_self", args: "amount=50 via=gm".to_string() }]
+            vec![GmAuditEntry {
+                command: "heal_self",
+                args: "amount=50 via=gm".to_string()
+            }]
         );
 
         // A GM on a dev server must not read as a clean hosted row.
@@ -1051,16 +1116,26 @@ mod tests {
         let t0 = Instant::now();
         let mut conn = PerConnection::from_spawn(test_spawn(), t0);
         for i in 0..COSMETIC_BURST as u32 {
-            assert!(conn.take_intent_token(IntentClass::Cosmetic, t0), "cosmetic {i} in the burst");
+            assert!(
+                conn.take_intent_token(IntentClass::Cosmetic, t0),
+                "cosmetic {i} in the burst"
+            );
         }
-        assert!(!conn.take_intent_token(IntentClass::Cosmetic, t0), "the burst is the ceiling");
+        assert!(
+            !conn.take_intent_token(IntentClass::Cosmetic, t0),
+            "the burst is the ceiling"
+        );
         assert!(
             conn.take_intent_token(IntentClass::Inventory, t0),
             "the inventory bucket is untouched by a cosmetic flood"
         );
         assert_eq!(conn.take_drop_report(t0), Some(1), "one drop, reported");
         assert!(!conn.take_intent_token(IntentClass::Cosmetic, t0));
-        assert_eq!(conn.take_drop_report(t0), None, "not again inside the second");
+        assert_eq!(
+            conn.take_drop_report(t0),
+            None,
+            "not again inside the second"
+        );
         assert_eq!(
             conn.take_drop_report(t0 + Duration::from_millis(1100)),
             Some(1),
@@ -1070,12 +1145,18 @@ mod tests {
         let t1 = t0 + Duration::from_millis(500);
         let bought = (COSMETIC_PER_SEC / 2.0) as u32;
         for i in 0..bought {
-            assert!(conn.take_intent_token(IntentClass::Cosmetic, t1), "refilled {i}");
+            assert!(
+                conn.take_intent_token(IntentClass::Cosmetic, t1),
+                "refilled {i}"
+            );
         }
         assert!(!conn.take_intent_token(IntentClass::Cosmetic, t1));
         // A Stack All across every bag fits the inventory burst in one frame.
         for i in 1..INVENTORY_OPS_BURST as u32 {
-            assert!(conn.take_intent_token(IntentClass::Inventory, t0), "move {i}");
+            assert!(
+                conn.take_intent_token(IntentClass::Inventory, t0),
+                "move {i}"
+            );
         }
         assert!(!conn.take_intent_token(IntentClass::Inventory, t0));
     }
@@ -1110,7 +1191,11 @@ mod tests {
             DevCmdAuth::RateLimited { notify: true },
             "the command hidden behind the flood is refused, not granted"
         );
-        assert_eq!(conn.gm_audit.len(), recorded, "and nothing was queued for it");
+        assert_eq!(
+            conn.gm_audit.len(),
+            recorded,
+            "and nothing was queued for it"
+        );
         assert_eq!(conn.gm_cmd_refused, 1);
         assert_eq!(
             conn.authorize_dev_cmd(t0, "heal_self", "amount=0".to_string()),
@@ -1142,10 +1227,10 @@ mod tests {
         let mut spawn = test_spawn();
         spawn.completed_quests = vec!["rat_infestation".into()];
         spawn.active_quests = vec![
-            ("wolf_threat".into(), vec![-2]),        // negative -> clamps to 0
-            ("rat_infestation".into(), vec![8]),     // also completed -> drops
-            ("deleted_old_quest".into(), vec![1]),   // not in quests.toml -> drops
-            ("test_q1".into(), Vec::new()),          // short (corrupt row) -> pads to len 1
+            ("wolf_threat".into(), vec![-2]),      // negative -> clamps to 0
+            ("rat_infestation".into(), vec![8]),   // also completed -> drops
+            ("deleted_old_quest".into(), vec![1]), // not in quests.toml -> drops
+            ("test_q1".into(), Vec::new()),        // short (corrupt row) -> pads to len 1
         ];
         let conn = PerConnection::from_spawn(spawn, Instant::now());
         assert_eq!(conn.active_quests.len(), 2);

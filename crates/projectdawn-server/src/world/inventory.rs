@@ -144,25 +144,25 @@ pub fn recompute_equipped_stats(
         let Some(item) = items::lookup(&entry.item_path) else {
             continue;
         };
-        next.strength     += item.str_bonus;
-        next.dexterity    += item.dex_bonus;
-        next.agility      += item.agi_bonus;
+        next.strength += item.str_bonus;
+        next.dexterity += item.dex_bonus;
+        next.agility += item.agi_bonus;
         next.intelligence += item.int_bonus;
-        next.wisdom       += item.wis_bonus;
-        next.charisma     += item.cha_bonus;
+        next.wisdom += item.wis_bonus;
+        next.charisma += item.cha_bonus;
         next.constitution += item.con_bonus;
-        next.max_hp       += item.max_hp_bonus;
-        next.max_mp       += item.max_mp_bonus;
-        next.max_stamina  += item.max_stamina_bonus;
-        next.armor        += item.armor;
+        next.max_hp += item.max_hp_bonus;
+        next.max_mp += item.max_mp_bonus;
+        next.max_stamina += item.max_stamina_bonus;
+        next.armor += item.armor;
     }
     // Stats — straight signed-delta apply.
-    conn.strength     += next.strength     - prev.strength;
-    conn.dexterity    += next.dexterity    - prev.dexterity;
-    conn.agility      += next.agility      - prev.agility;
+    conn.strength += next.strength - prev.strength;
+    conn.dexterity += next.dexterity - prev.dexterity;
+    conn.agility += next.agility - prev.agility;
     conn.intelligence += next.intelligence - prev.intelligence;
-    conn.wisdom       += next.wisdom       - prev.wisdom;
-    conn.charisma     += next.charisma     - prev.charisma;
+    conn.wisdom += next.wisdom - prev.wisdom;
+    conn.charisma += next.charisma - prev.charisma;
     conn.constitution += next.constitution - prev.constitution;
 
     // Resource maxes — signed delta + floor. Current is clamped down
@@ -170,8 +170,8 @@ pub fn recompute_equipped_stats(
     let prev_max_hp = conn.max_hp;
     let prev_max_mp = conn.max_mp;
     let prev_max_stamina = conn.max_stamina;
-    conn.max_hp      = (conn.max_hp      + (next.max_hp      - prev.max_hp     )).max(1.0);
-    conn.max_mp      = (conn.max_mp      + (next.max_mp      - prev.max_mp     )).max(0.0);
+    conn.max_hp = (conn.max_hp + (next.max_hp - prev.max_hp)).max(1.0);
+    conn.max_mp = (conn.max_mp + (next.max_mp - prev.max_mp)).max(0.0);
     conn.max_stamina = (conn.max_stamina + (next.max_stamina - prev.max_stamina)).max(1.0);
     if conn.hp > conn.max_hp {
         conn.hp = conn.max_hp;
@@ -187,8 +187,8 @@ pub fn recompute_equipped_stats(
     conn.equip_stat_bonuses = next;
 
     RecomputeResult {
-        max_hp_changed:      conn.max_hp      != prev_max_hp,
-        max_mp_changed:      conn.max_mp      != prev_max_mp,
+        max_hp_changed: conn.max_hp != prev_max_hp,
+        max_mp_changed: conn.max_mp != prev_max_mp,
         max_stamina_changed: conn.max_stamina != prev_max_stamina,
     }
 }
@@ -263,7 +263,9 @@ pub struct ItemVault {
 
 impl ItemVault {
     pub fn new(n: usize) -> Self {
-        Self { slots: vec![None; n] }
+        Self {
+            slots: vec![None; n],
+        }
     }
 
     /// Hydrate from DB rows; out-of-range / empty rows are dropped (same
@@ -306,7 +308,8 @@ impl ItemVault {
             .iter()
             .enumerate()
             .filter_map(|(i, slot)| {
-                slot.as_ref().map(|e| (i as u32, e.item_path.clone(), e.count))
+                slot.as_ref()
+                    .map(|e| (i as u32, e.item_path.clone(), e.count))
             })
             .collect()
     }
@@ -608,7 +611,12 @@ impl PlayerInventory {
             }
         }
         if let Some(entry) = &self.cursor {
-            out.push(("cursor".to_string(), 0, entry.item_path.clone(), entry.count));
+            out.push((
+                "cursor".to_string(),
+                0,
+                entry.item_path.clone(),
+                entry.count,
+            ));
         }
         out
     }
@@ -684,7 +692,10 @@ impl PlayerInventory {
         }
         self.equipment.insert(
             slot,
-            InventoryEntry { item_path: path.to_string(), count },
+            InventoryEntry {
+                item_path: path.to_string(),
+                count,
+            },
         );
         true
     }
@@ -935,10 +946,7 @@ impl PlayerInventory {
     /// unsupported or the slot is empty.
     pub fn peek_at(&self, loc: &str, slot: u32) -> Option<(String, u32)> {
         match parse_slot_ref(loc, slot).ok()? {
-            SlotRefInt::Cursor => self
-                .cursor
-                .as_ref()
-                .map(|e| (e.item_path.clone(), e.count)),
+            SlotRefInt::Cursor => self.cursor.as_ref().map(|e| (e.item_path.clone(), e.count)),
             SlotRefInt::Base(s) => self
                 .base
                 .get(s)
@@ -1133,10 +1141,7 @@ impl PlayerInventory {
         // Take src, swap with paperdoll.
         let src_entry = match src {
             SlotRefInt::Base(s) => self.base[s].take().expect("checked above"),
-            SlotRefInt::Bag(b, s) => self
-                .bags
-                .get_mut(&b)
-                .expect("checked above")[s]
+            SlotRefInt::Bag(b, s) => self.bags.get_mut(&b).expect("checked above")[s]
                 .take()
                 .expect("checked above"),
             SlotRefInt::Cursor => self.cursor.take().expect("checked above"),
@@ -1251,11 +1256,7 @@ impl PlayerInventory {
     /// `is_drink`) before calling — this just performs the
     /// inventory mutation. Returns the consumed `item_path` so the
     /// apply phase can look up the effect deltas.
-    pub fn decrement_at(
-        &mut self,
-        loc: &str,
-        slot: u32,
-    ) -> Result<String, &'static str> {
+    pub fn decrement_at(&mut self, loc: &str, slot: u32) -> Result<String, &'static str> {
         let parsed = parse_slot_ref(loc, slot)?;
         reject_held_bag_slot(&parsed)?;
         match parsed {
@@ -1440,9 +1441,7 @@ impl PlayerInventory {
             (SlotRefInt::Bag(b1, s), SlotRefInt::Bag(b2, d)) if b1 == b2 => {
                 self.move_bag(b1 as usize, s, d)
             }
-            (SlotRefInt::Bag(b1, s), SlotRefInt::Bag(b2, d)) => {
-                self.move_bag_to_bag(b1, s, b2, d)
-            }
+            (SlotRefInt::Bag(b1, s), SlotRefInt::Bag(b2, d)) => self.move_bag_to_bag(b1, s, b2, d),
             (SlotRefInt::Base(s), SlotRefInt::Bag(base_idx, d)) => {
                 self.move_base_to_bag(s, base_idx, d)
             }
@@ -1477,10 +1476,8 @@ impl PlayerInventory {
             return Err("source slot empty");
         }
         let src_key = src as u8;
-        let mut touched: Vec<(String, u32)> = vec![
-            ("base".to_string(), src as u32),
-            ("cursor".to_string(), 0),
-        ];
+        let mut touched: Vec<(String, u32)> =
+            vec![("base".to_string(), src as u32), ("cursor".to_string(), 0)];
         let pre_src = self.occupied_inner_slots(src_key);
         let pre_held = self.occupied_inner_slots(CURSOR_BAG_KEY);
         let src_vec = self.bags.remove(&src_key);
@@ -1532,10 +1529,8 @@ impl PlayerInventory {
             return Err("source slot empty");
         }
         let dst_key = dst as u8;
-        let mut touched: Vec<(String, u32)> = vec![
-            ("cursor".to_string(), 0),
-            ("base".to_string(), dst as u32),
-        ];
+        let mut touched: Vec<(String, u32)> =
+            vec![("cursor".to_string(), 0), ("base".to_string(), dst as u32)];
         let pre_held = self.occupied_inner_slots(CURSOR_BAG_KEY);
         let pre_dst = self.occupied_inner_slots(dst_key);
         let held_vec = self.bags.remove(&CURSOR_BAG_KEY);
@@ -1583,7 +1578,10 @@ impl PlayerInventory {
         if let Some(held) = &self.cursor {
             // Only a swap or merge can follow; pre-check the swap ban
             // before mutating anything.
-            let arr = self.bags.get(&base_idx).ok_or("source bag does not exist")?;
+            let arr = self
+                .bags
+                .get(&base_idx)
+                .ok_or("source bag does not exist")?;
             let src_entry = arr
                 .get(src)
                 .and_then(|s| s.as_ref())
@@ -1893,11 +1891,23 @@ mod tests {
     #[test]
     fn item_vault_rows_roundtrip_and_take_all() {
         let mut v = ItemVault::new(BANK_VAULT_SLOTS);
-        v.slots[0] = Some(InventoryEntry { item_path: "a".into(), count: 3 });
-        v.slots[2] = Some(InventoryEntry { item_path: "b".into(), count: 1 });
+        v.slots[0] = Some(InventoryEntry {
+            item_path: "a".into(),
+            count: 3,
+        });
+        v.slots[2] = Some(InventoryEntry {
+            item_path: "b".into(),
+            count: 1,
+        });
         let v2 = ItemVault::from_rows(BANK_VAULT_SLOTS, &v.to_rows());
-        assert_eq!(v2.peek(0).map(|e| (e.item_path.as_str(), e.count)), Some(("a", 3)));
-        assert_eq!(v2.peek(2).map(|e| (e.item_path.as_str(), e.count)), Some(("b", 1)));
+        assert_eq!(
+            v2.peek(0).map(|e| (e.item_path.as_str(), e.count)),
+            Some(("a", 3))
+        );
+        assert_eq!(
+            v2.peek(2).map(|e| (e.item_path.as_str(), e.count)),
+            Some(("b", 1))
+        );
         assert!(v2.peek(1).is_none());
         let mut v3 = v2.clone();
         assert_eq!(v3.take_all(0), Some(("a".to_string(), 3)));
@@ -1908,9 +1918,21 @@ mod tests {
     #[test]
     fn item_vault_from_rows_drops_out_of_range_and_empty() {
         let rows = vec![
-            BankItemRow { slot: 0, item_path: "a".into(), count: 2 },
-            BankItemRow { slot: 99, item_path: "b".into(), count: 1 }, // out of range
-            BankItemRow { slot: 1, item_path: "c".into(), count: 0 },  // empty
+            BankItemRow {
+                slot: 0,
+                item_path: "a".into(),
+                count: 2,
+            },
+            BankItemRow {
+                slot: 99,
+                item_path: "b".into(),
+                count: 1,
+            }, // out of range
+            BankItemRow {
+                slot: 1,
+                item_path: "c".into(),
+                count: 0,
+            }, // empty
         ];
         let v = ItemVault::from_rows(ACCOUNT_VAULT_SLOTS, &rows);
         assert_eq!(v.slots.len(), ACCOUNT_VAULT_SLOTS);
@@ -1950,8 +1972,12 @@ mod tests {
     #[test]
     fn add_item_uses_first_empty_slot() {
         let mut inv = PlayerInventory::new();
-        inv.add_item("res://items/cloth.tres", 3).expect("first add");
-        assert_eq!(inv.base[0].as_ref().unwrap().item_path, "res://items/cloth.tres");
+        inv.add_item("res://items/cloth.tres", 3)
+            .expect("first add");
+        assert_eq!(
+            inv.base[0].as_ref().unwrap().item_path,
+            "res://items/cloth.tres"
+        );
         assert_eq!(inv.base[0].as_ref().unwrap().count, 3);
         assert!(inv.base[1].is_none());
     }
@@ -1962,7 +1988,10 @@ mod tests {
         inv.add_item("res://items/cloth.tres", 3).unwrap();
         inv.add_item("res://items/cloth.tres", 5).unwrap();
         assert_eq!(inv.total_count_of("res://items/cloth.tres"), 8);
-        assert!(inv.base[1].is_none(), "second add stacks; doesn't claim a new slot");
+        assert!(
+            inv.base[1].is_none(),
+            "second add stacks; doesn't claim a new slot"
+        );
     }
 
     #[test]
@@ -1970,8 +1999,14 @@ mod tests {
         let mut inv = PlayerInventory::new();
         inv.add_item("res://items/cloth.tres", 3).unwrap();
         inv.add_item("res://items/iron.tres", 2).unwrap();
-        assert_eq!(inv.base[0].as_ref().unwrap().item_path, "res://items/cloth.tres");
-        assert_eq!(inv.base[1].as_ref().unwrap().item_path, "res://items/iron.tres");
+        assert_eq!(
+            inv.base[0].as_ref().unwrap().item_path,
+            "res://items/cloth.tres"
+        );
+        assert_eq!(
+            inv.base[1].as_ref().unwrap().item_path,
+            "res://items/iron.tres"
+        );
     }
 
     #[test]
@@ -2007,7 +2042,10 @@ mod tests {
         let touched = inv.split_base(0, 5, 3).expect("split");
         assert_eq!(touched, vec![0, 5]);
         assert_eq!(inv.base[0].as_ref().unwrap().count, 7);
-        assert_eq!(inv.base[5].as_ref().unwrap().item_path, "res://items/cloth.tres");
+        assert_eq!(
+            inv.base[5].as_ref().unwrap().item_path,
+            "res://items/cloth.tres"
+        );
         assert_eq!(inv.base[5].as_ref().unwrap().count, 3);
     }
 
@@ -2032,8 +2070,16 @@ mod tests {
         inv.add_item("res://items/iron.tres", 2).unwrap();
         let err = inv.split_base(0, 1, 1);
         assert!(err.is_err(), "different item paths must reject split");
-        assert_eq!(inv.base[0].as_ref().unwrap().count, 5, "src unchanged on reject");
-        assert_eq!(inv.base[1].as_ref().unwrap().count, 2, "dst unchanged on reject");
+        assert_eq!(
+            inv.base[0].as_ref().unwrap().count,
+            5,
+            "src unchanged on reject"
+        );
+        assert_eq!(
+            inv.base[1].as_ref().unwrap().count,
+            2,
+            "dst unchanged on reject"
+        );
     }
 
     #[test]
@@ -2106,7 +2152,11 @@ mod tests {
         ];
         let inv = PlayerInventory::from_rows(&rows);
         assert_eq!(inv.total_count_of("res://items/cloth.tres"), 5);
-        assert_eq!(inv.total_count_of("res://items/iron.tres"), 0, "bag_* still skipped");
+        assert_eq!(
+            inv.total_count_of("res://items/iron.tres"),
+            0,
+            "bag_* still skipped"
+        );
         assert_eq!(
             inv.equipment.get(&4).map(|e| e.item_path.as_str()),
             Some("res://items/sword.tres"),
@@ -2127,7 +2177,10 @@ mod tests {
         let mut inv = PlayerInventory::new();
         inv.add_item(SWORD, 1).unwrap();
         let touched = inv.equip_from_location("base", 0, 0).expect("equip");
-        assert_eq!(touched, vec![("base".to_string(), 0u32), ("equip".to_string(), 0u32)]);
+        assert_eq!(
+            touched,
+            vec![("base".to_string(), 0u32), ("equip".to_string(), 0u32)]
+        );
         assert!(inv.base[0].is_none());
         assert_eq!(inv.equipment.get(&0).unwrap().item_path, SWORD);
     }
@@ -2137,7 +2190,10 @@ mod tests {
         let mut inv = PlayerInventory::new();
         inv.equipment.insert(
             0,
-            InventoryEntry { item_path: "res://data/loot/items/iron_dagger.tres".into(), count: 1 },
+            InventoryEntry {
+                item_path: "res://data/loot/items/iron_dagger.tres".into(),
+                count: 1,
+            },
         );
         inv.add_item(SWORD, 1).unwrap();
         inv.equip_from_location("base", 0, 0).expect("equip-swap");
@@ -2160,8 +2216,12 @@ mod tests {
     fn equip_rejects_out_of_range_slots() {
         let mut inv = PlayerInventory::new();
         inv.add_item(SWORD, 1).unwrap();
-        assert!(inv.equip_from_location("base", 0, EQUIP_SLOT_COUNT).is_err());
-        assert!(inv.equip_from_location("base", BASE_SLOT_COUNT as u32, 0).is_err());
+        assert!(inv
+            .equip_from_location("base", 0, EQUIP_SLOT_COUNT)
+            .is_err());
+        assert!(inv
+            .equip_from_location("base", BASE_SLOT_COUNT as u32, 0)
+            .is_err());
     }
 
     #[test]
@@ -2177,7 +2237,10 @@ mod tests {
             ROBE,
             "source unchanged on reject"
         );
-        assert!(inv.equipment.get(&0).is_none(), "paperdoll unchanged on reject");
+        assert!(
+            inv.equipment.get(&0).is_none(),
+            "paperdoll unchanged on reject"
+        );
     }
 
     #[test]
@@ -2218,7 +2281,10 @@ mod tests {
                 count: 1,
             });
         }
-        assert!(inv.can_accept(&[(SWORD.to_string(), 1)]), "1 free slot fits 1 item");
+        assert!(
+            inv.can_accept(&[(SWORD.to_string(), 1)]),
+            "1 free slot fits 1 item"
+        );
         // Two distinct non-stacking items need two slots -> only one free.
         assert!(
             !inv.can_accept(&[(SWORD.to_string(), 1), (ROBE.to_string(), 1)]),
@@ -2226,7 +2292,10 @@ mod tests {
         );
         // A stackable partial fits in the last empty slot up to its cap.
         assert!(inv.can_accept(&[(POTION.to_string(), 10)]));
-        assert!(!inv.can_accept(&[(POTION.to_string(), 11)]), "11 > one slot of cap 10");
+        assert!(
+            !inv.can_accept(&[(POTION.to_string(), 11)]),
+            "11 > one slot of cap 10"
+        );
         // Fill the last slot -> nothing fits.
         inv.base[7] = Some(InventoryEntry {
             item_path: "res://data/loot/items/filler_7.tres".to_string(),
@@ -2246,11 +2315,12 @@ mod tests {
         // Minor healing potion has stack_size=10. Adding 15 should
         // fill slot 0 to 10, slot 1 to 5.
         let mut inv = PlayerInventory::new();
-        let (touched, leftover) = inv
-            .add_item_locating(POTION, 15)
-            .expect("add 15 potions");
+        let (touched, leftover) = inv.add_item_locating(POTION, 15).expect("add 15 potions");
         assert_eq!(leftover, 0);
-        assert_eq!(touched, vec![("base".to_string(), 0u32), ("base".to_string(), 1u32)]);
+        assert_eq!(
+            touched,
+            vec![("base".to_string(), 0u32), ("base".to_string(), 1u32)]
+        );
         assert_eq!(inv.base[0].as_ref().unwrap().count, 10);
         assert_eq!(inv.base[1].as_ref().unwrap().count, 5);
     }
@@ -2277,15 +2347,32 @@ mod tests {
         let spawn = CharacterSpawn {
             hunger: 14400.0,
             thirst: 14400.0,
-            char_id: 1, account_id: 1,
-            name: "Test".into(), race: "Human".into(), class: "Warrior".into(),
-            level: 1, xp: 0, xp_to_next: 100,
-            strength: 10, dexterity: 10, agility: 10, intelligence: 10,
-            wisdom: 10, charisma: 10, constitution: 10,
-            max_hp: 100.0, max_mp: 100.0, max_stamina: 100.0,
-            hp: 100.0, mp: 100.0, stamina: 100.0,
-            coins: protocol::world::Coins::ZERO, bank_coins: protocol::world::Coins::ZERO, zone: None,
-            pos: (0.0, 0.0, 0.0), yaw: 0.0,
+            char_id: 1,
+            account_id: 1,
+            name: "Test".into(),
+            race: "Human".into(),
+            class: "Warrior".into(),
+            level: 1,
+            xp: 0,
+            xp_to_next: 100,
+            strength: 10,
+            dexterity: 10,
+            agility: 10,
+            intelligence: 10,
+            wisdom: 10,
+            charisma: 10,
+            constitution: 10,
+            max_hp: 100.0,
+            max_mp: 100.0,
+            max_stamina: 100.0,
+            hp: 100.0,
+            mp: 100.0,
+            stamina: 100.0,
+            coins: protocol::world::Coins::ZERO,
+            bank_coins: protocol::world::Coins::ZERO,
+            zone: None,
+            pos: (0.0, 0.0, 0.0),
+            yaw: 0.0,
             completed_quests: Vec::new(),
             active_quests: Vec::new(),
             bind: None,
@@ -2461,7 +2548,10 @@ mod tests {
                 count: 10,
             });
         }
-        inv.base[7] = Some(InventoryEntry { item_path: SWORD.into(), count: 1 });
+        inv.base[7] = Some(InventoryEntry {
+            item_path: SWORD.into(),
+            count: 1,
+        });
         let (touched, leftover) = inv.add_item_locating(POTION, 25).unwrap();
         assert!(touched.is_empty());
         assert_eq!(leftover, 25);
@@ -2470,11 +2560,20 @@ mod tests {
     #[test]
     fn unequip_moves_to_base() {
         let mut inv = PlayerInventory::new();
-        inv.equipment.insert(0, InventoryEntry { item_path: "res://items/sword.tres".into(), count: 1 });
+        inv.equipment.insert(
+            0,
+            InventoryEntry {
+                item_path: "res://items/sword.tres".into(),
+                count: 1,
+            },
+        );
         let touched = inv.unequip_to_base(0, 3).expect("unequip");
         assert_eq!(touched, vec![("base", 3u32), ("equip", 0u32)]);
         assert!(inv.equipment.get(&0).is_none());
-        assert_eq!(inv.base[3].as_ref().unwrap().item_path, "res://items/sword.tres");
+        assert_eq!(
+            inv.base[3].as_ref().unwrap().item_path,
+            "res://items/sword.tres"
+        );
     }
 
     #[test]
@@ -2484,9 +2583,13 @@ mod tests {
         let mut inv = PlayerInventory::new();
         inv.equipment.insert(
             0,
-            InventoryEntry { item_path: SWORD.into(), count: 1 },
+            InventoryEntry {
+                item_path: SWORD.into(),
+                count: 1,
+            },
         );
-        inv.add_item("res://data/loot/items/iron_dagger.tres", 1).unwrap();
+        inv.add_item("res://data/loot/items/iron_dagger.tres", 1)
+            .unwrap();
         inv.unequip_to_base(0, 0).expect("unequip-swap");
         assert_eq!(inv.base[0].as_ref().unwrap().item_path, SWORD);
         assert_eq!(
@@ -2502,7 +2605,10 @@ mod tests {
         let mut inv = PlayerInventory::new();
         inv.equipment.insert(
             0,
-            InventoryEntry { item_path: SWORD.into(), count: 1 },
+            InventoryEntry {
+                item_path: SWORD.into(),
+                count: 1,
+            },
         );
         inv.add_item(POTION, 1).unwrap();
         let err = inv.unequip_to_base(0, 0);
@@ -2612,8 +2718,14 @@ mod tests {
         let arr = inv.bags.get(&4u8).expect("contents re-keyed to dst");
         assert_eq!(arr[0].as_ref().unwrap().item_path, POTION);
         assert_eq!(arr[0].as_ref().unwrap().count, 2);
-        assert!(touched.contains(&("bag_0".to_string(), 0)), "old inner cleared");
-        assert!(touched.contains(&("bag_4".to_string(), 0)), "new inner fanned");
+        assert!(
+            touched.contains(&("bag_0".to_string(), 0)),
+            "old inner cleared"
+        );
+        assert!(
+            touched.contains(&("bag_4".to_string(), 0)),
+            "new inner fanned"
+        );
     }
 
     #[test]
@@ -2632,8 +2744,14 @@ mod tests {
         }
         // Same item_path on both sides — bags never merge, so this swaps.
         inv.move_base(0, 4).expect("two full bags swap");
-        assert_eq!(inv.bags.get(&0u8).unwrap()[0].as_ref().unwrap().item_path, BREAD);
-        assert_eq!(inv.bags.get(&4u8).unwrap()[0].as_ref().unwrap().item_path, POTION);
+        assert_eq!(
+            inv.bags.get(&0u8).unwrap()[0].as_ref().unwrap().item_path,
+            BREAD
+        );
+        assert_eq!(
+            inv.bags.get(&4u8).unwrap()[0].as_ref().unwrap().item_path,
+            POTION
+        );
         assert_eq!(inv.base[0].as_ref().unwrap().count, 1, "no phantom merge");
         assert_eq!(inv.base[4].as_ref().unwrap().count, 1);
     }
@@ -2771,9 +2889,7 @@ mod tests {
             item_path: POTION.into(),
             count: 5,
         });
-        let touched = inv
-            .move_across("base", 1, "bag_0", 2)
-            .expect("transfer");
+        let touched = inv.move_across("base", 1, "bag_0", 2).expect("transfer");
         assert_eq!(touched.len(), 2);
         assert!(inv.base[1].is_none(), "source cleared");
         assert_eq!(
@@ -2833,7 +2949,10 @@ mod tests {
             });
         }
         let (touched, leftover) = inv.add_item_locating(POUCH, 1).unwrap();
-        assert!(touched.is_empty(), "bag-in-bag stays banned on the grant path");
+        assert!(
+            touched.is_empty(),
+            "bag-in-bag stays banned on the grant path"
+        );
         assert_eq!(leftover, 1);
     }
 
@@ -2847,7 +2966,10 @@ mod tests {
                 count: 1,
             });
         }
-        assert!(inv.can_accept(&[(POTION.to_string(), 5)]), "pouch space counts");
+        assert!(
+            inv.can_accept(&[(POTION.to_string(), 5)]),
+            "pouch space counts"
+        );
         assert!(
             !inv.can_accept(&[(POUCH.to_string(), 1)]),
             "a bag can only go to base, and base is full"
@@ -2873,10 +2995,7 @@ mod tests {
         let touched = inv.move_across("cursor", 0, "bag_0", 2).expect("place");
         assert_eq!(touched.len(), 2);
         assert!(inv.cursor.is_none(), "cursor cleared after place");
-        assert_eq!(
-            inv.bags.get(&0u8).unwrap()[2].as_ref().unwrap().count,
-            5
-        );
+        assert_eq!(inv.bags.get(&0u8).unwrap()[2].as_ref().unwrap().count, 5);
     }
 
     #[test]
@@ -2924,11 +3043,15 @@ mod tests {
             item_path: POTION.into(),
             count: 1,
         });
-        inv.move_across("base", 0, "cursor", 0).expect("full bag lifts now");
+        inv.move_across("base", 0, "cursor", 0)
+            .expect("full bag lifts now");
         assert_eq!(inv.cursor.as_ref().unwrap().item_path, POUCH);
         assert!(!inv.bags.contains_key(&0u8), "old key gone while held");
         assert_eq!(
-            inv.bags.get(&CURSOR_BAG_KEY).unwrap()[0].as_ref().unwrap().item_path,
+            inv.bags.get(&CURSOR_BAG_KEY).unwrap()[0]
+                .as_ref()
+                .unwrap()
+                .item_path,
             POTION,
             "contents ride the cursor"
         );
@@ -2946,17 +3069,25 @@ mod tests {
         assert_eq!(leftover, 1);
         // Held-bag inners are not addressable from the wire.
         assert_eq!(
-            inv.move_across(&format!("bag_{CURSOR_BAG_KEY}"), 0, "base", 1).unwrap_err(),
+            inv.move_across(&format!("bag_{CURSOR_BAG_KEY}"), 0, "base", 1)
+                .unwrap_err(),
             "that bag is in your hand"
         );
         // Destroy/drop of the held non-empty bag refuses (contents would
         // orphan or strand).
-        assert_eq!(inv.destroy_at("cursor", 0, 0).unwrap_err(), "bag must be emptied first");
+        assert_eq!(
+            inv.destroy_at("cursor", 0, 0).unwrap_err(),
+            "bag must be emptied first"
+        );
         // Place it back down (swap with the sword now in base 0).
-        inv.move_across("cursor", 0, "base", 0).expect("swap-place the full bag");
+        inv.move_across("cursor", 0, "base", 0)
+            .expect("swap-place the full bag");
         assert_eq!(inv.base[0].as_ref().unwrap().item_path, POUCH);
         assert_eq!(inv.cursor.as_ref().unwrap().item_path, SWORD);
-        assert!(!inv.bags.contains_key(&CURSOR_BAG_KEY), "cursor key vacated");
+        assert!(
+            !inv.bags.contains_key(&CURSOR_BAG_KEY),
+            "cursor key vacated"
+        );
         assert_eq!(
             inv.bags.get(&0u8).unwrap()[0].as_ref().unwrap().item_path,
             POTION,
@@ -2974,13 +3105,23 @@ mod tests {
             item_path: POTION.into(),
             count: 3,
         });
-        inv.move_across("base", 0, "cursor", 0).expect("lift the full bag");
+        inv.move_across("base", 0, "cursor", 0)
+            .expect("lift the full bag");
         let stacks = inv.all_stacks();
-        assert!(stacks.contains(&(POUCH.to_string(), 1)), "bag reaches the corpse");
-        assert!(stacks.contains(&(POTION.to_string(), 3)), "contents reach the corpse");
+        assert!(
+            stacks.contains(&(POUCH.to_string(), 1)),
+            "bag reaches the corpse"
+        );
+        assert!(
+            stacks.contains(&(POTION.to_string(), 3)),
+            "contents reach the corpse"
+        );
         inv.clear_all();
         assert!(inv.cursor.is_none());
-        assert!(inv.bags.is_empty(), "no orphaned held-bag contents after death");
+        assert!(
+            inv.bags.is_empty(),
+            "no orphaned held-bag contents after death"
+        );
         assert!(inv.all_stacks().is_empty());
     }
 
@@ -2999,7 +3140,10 @@ mod tests {
         let reloaded = PlayerInventory::from_rows(&rows);
         assert_eq!(reloaded.cursor.as_ref().unwrap().item_path, POUCH);
         assert_eq!(
-            reloaded.bags.get(&CURSOR_BAG_KEY).unwrap()[0].as_ref().unwrap().count,
+            reloaded.bags.get(&CURSOR_BAG_KEY).unwrap()[0]
+                .as_ref()
+                .unwrap()
+                .count,
             2,
             "held-bag contents survive the round trip"
         );
@@ -3156,7 +3300,10 @@ mod tests {
             inv.destroy_at("base", 0, 0).is_err(),
             "removing a non-empty bag is rejected"
         );
-        assert!(inv.base[0].is_some(), "bag still in base after rejected removal");
+        assert!(
+            inv.base[0].is_some(),
+            "bag still in base after rejected removal"
+        );
     }
 
     #[test]
@@ -3196,9 +3343,9 @@ mod tests {
         let has_pouch = entries
             .iter()
             .any(|(loc, slot, p, _)| loc == "base" && *slot == 0 && p == POUCH);
-        let has_potion = entries.iter().any(|(loc, slot, p, c)| {
-            loc == "bag_0" && *slot == 1 && p == POTION && *c == 2
-        });
+        let has_potion = entries
+            .iter()
+            .any(|(loc, slot, p, c)| loc == "bag_0" && *slot == 1 && p == POTION && *c == 2);
         assert!(has_pouch);
         assert!(has_potion);
     }
@@ -3212,19 +3359,47 @@ mod tests {
     #[test]
     fn corpse_stacks_mark_worn_gear_with_its_slot() {
         let mut inv = PlayerInventory::new();
-        inv.equipment.insert(3, InventoryEntry { item_path: ROBE.into(), count: 1 });
-        inv.equipment.insert(2, InventoryEntry { item_path: CAP.into(), count: 1 });
-        inv.base[0] = Some(InventoryEntry { item_path: VAULT_ITEM.into(), count: 4 });
-        inv.cursor = Some(InventoryEntry { item_path: VAULT_ITEM.into(), count: 1 });
+        inv.equipment.insert(
+            3,
+            InventoryEntry {
+                item_path: ROBE.into(),
+                count: 1,
+            },
+        );
+        inv.equipment.insert(
+            2,
+            InventoryEntry {
+                item_path: CAP.into(),
+                count: 1,
+            },
+        );
+        inv.base[0] = Some(InventoryEntry {
+            item_path: VAULT_ITEM.into(),
+            count: 4,
+        });
+        inv.cursor = Some(InventoryEntry {
+            item_path: VAULT_ITEM.into(),
+            count: 1,
+        });
         let stacks = inv.corpse_stacks();
-        assert_eq!(stacks[0], (CAP.to_string(), 1, Some(2)), "worn gear first, by slot");
+        assert_eq!(
+            stacks[0],
+            (CAP.to_string(), 1, Some(2)),
+            "worn gear first, by slot"
+        );
         assert_eq!(stacks[1], (ROBE.to_string(), 1, Some(3)));
-        assert!(stacks[2..].iter().all(|(_, _, worn)| worn.is_none()), "the rest was carried");
+        assert!(
+            stacks[2..].iter().all(|(_, _, worn)| worn.is_none()),
+            "the rest was carried"
+        );
         let mut flat: Vec<(String, u32)> = stacks.into_iter().map(|(p, n, _)| (p, n)).collect();
         let mut all = inv.all_stacks();
         flat.sort();
         all.sort();
-        assert_eq!(flat, all, "the same stacks as all_stacks, no more and no fewer");
+        assert_eq!(
+            flat, all,
+            "the same stacks as all_stacks, no more and no fewer"
+        );
     }
 
     /// Gear goes back on only where it was worn, only if that slot is empty,
@@ -3233,14 +3408,26 @@ mod tests {
     #[test]
     fn restore_worn_puts_gear_back_only_on_an_empty_slot_that_takes_it() {
         let mut inv = PlayerInventory::new();
-        assert!(inv.restore_worn(ROBE, 1, 3), "an empty chest slot takes the robe");
+        assert!(
+            inv.restore_worn(ROBE, 1, 3),
+            "an empty chest slot takes the robe"
+        );
         assert_eq!(inv.equipment.get(&3).unwrap().item_path, ROBE);
         assert!(!inv.restore_worn(ROBE, 1, 3), "an occupied slot refuses");
         assert_eq!(inv.equipment.len(), 1, "and the worn robe is untouched");
-        assert!(!inv.restore_worn(ROBE, 1, 2), "a robe does not go on the head");
-        assert!(!inv.restore_worn(CAP, 1, EQUIP_SLOT_COUNT), "a slot past the paperdoll refuses");
+        assert!(
+            !inv.restore_worn(ROBE, 1, 2),
+            "a robe does not go on the head"
+        );
+        assert!(
+            !inv.restore_worn(CAP, 1, EQUIP_SLOT_COUNT),
+            "a slot past the paperdoll refuses"
+        );
         assert!(!inv.restore_worn(CAP, 0, 2), "nothing to put on refuses");
-        assert!(!inv.restore_worn("res://data/loot/items/no_such_item.tres", 1, 2), "an unknown item refuses");
+        assert!(
+            !inv.restore_worn("res://data/loot/items/no_such_item.tres", 1, 2),
+            "an unknown item refuses"
+        );
         assert!(inv.restore_worn(CAP, 1, 2));
     }
 }

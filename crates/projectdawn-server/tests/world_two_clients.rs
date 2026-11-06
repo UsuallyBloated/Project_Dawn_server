@@ -1,4 +1,4 @@
-﻿//! Two-client end-to-end test for Track 3 multi-player replication.
+//! Two-client end-to-end test for Track 3 multi-player replication.
 //!
 //! Brings up auth + world in-process, drives two independent renet
 //! clients through the full handshake, and asserts the multi-player
@@ -16,7 +16,10 @@
 use bincode::config::standard as bincode_cfg;
 use futures_util::{SinkExt, StreamExt};
 use projectdawn_server::{auth, db, world, Config};
-use protocol::world::{ClientWorldMsg, DamageType, ServerWorldMsg, SkillKind, SlotRef, Vec3, ENEMY_ID_BASE, PET_ID_BASE};
+use protocol::world::{
+    ClientWorldMsg, DamageType, ServerWorldMsg, SkillKind, SlotRef, Vec3, ENEMY_ID_BASE,
+    PET_ID_BASE,
+};
 use renet::{ConnectionConfig, RenetClient};
 use renet_netcode::{ClientAuthentication, ConnectToken, NetcodeClientTransport};
 use std::{
@@ -115,8 +118,20 @@ async fn a_restart_request_checkpoints_everyone_tells_them_and_exits() {
     let mut a = WorldClient::start(token, &session, char_id).await;
     // Walk west so there is unsaved position to lose (the -X axis is clear).
     let mut seq = 1u32;
-    walk_dir(&mut a, &mut seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 }, 6.0).await;
-    let moved = own_position(&mut a, char_id).await.expect("a position after the walk");
+    walk_dir(
+        &mut a,
+        &mut seq,
+        Vec3 {
+            x: -1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        6.0,
+    )
+    .await;
+    let moved = own_position(&mut a, char_id)
+        .await
+        .expect("a position after the walk");
     assert!(moved.x < -4.0, "walked west: x = {}", moved.x);
 
     h.restart.request(world::RESTART_FOR_ADDRESS_CHANGE);
@@ -129,7 +144,13 @@ async fn a_restart_request_checkpoints_everyone_tells_them_and_exits() {
     assert!(told.is_some(), "everyone is told why, in chat");
     let kicked = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::Kick { code: protocol::world::KickCode::Restart, .. })
+            matches!(
+                m,
+                ServerWorldMsg::Kick {
+                    code: protocol::world::KickCode::Restart,
+                    ..
+                }
+            )
         })
         .await;
     assert!(kicked.is_some(), "the kick carries the Restart code");
@@ -138,7 +159,10 @@ async fn a_restart_request_checkpoints_everyone_tells_them_and_exits() {
         .await
         .expect("the world loop exits within seconds")
         .expect("the loop task joined");
-    assert!(exit.is_err(), "the loop ends with an error so the process exits non-zero");
+    assert!(
+        exit.is_err(),
+        "the loop ends with an error so the process exits non-zero"
+    );
 
     // And the walk was written before the exit: the character loads where
     // it stood, not at the spawn.
@@ -200,7 +224,10 @@ async fn a_dead_character_stays_dead_on_relogin_and_pays_once() {
             matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp <= 0.01)
         })
         .await;
-    assert!(seeded_dead.is_some(), "the client is told it is dead by the HP seed");
+    assert!(
+        seeded_dead.is_some(),
+        "the client is told it is dead by the HP seed"
+    );
     b.pump_for(Duration::from_millis(600)).await;
     b.send_disconnect();
     b.pump_for(Duration::from_millis(500)).await;
@@ -244,7 +271,9 @@ async fn a_flood_of_cosmetic_broadcasts_is_capped_per_connection() {
         send_msg(
             &mut a.client,
             CHANNEL_SYSTEM,
-            &ClientWorldMsg::MissBroadcast { target: b_char as u64 },
+            &ClientWorldMsg::MissBroadcast {
+                target: b_char as u64,
+            },
         );
     }
     let mut seen = 0u32;
@@ -282,38 +311,60 @@ async fn provision_client(
         .await
         .expect("auth ws connect");
 
-    let resp = rpc(&mut ws, serde_json::json!({
-        "type": "Register",
-        "username": username,
-        "password": "hunter2!",
-    })).await;
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "Register",
+            "username": username,
+            "password": "hunter2!",
+        }),
+    )
+    .await;
     assert_eq!(resp["type"], "RegisterOk", "register {username}: {resp}");
 
-    let resp = rpc(&mut ws, serde_json::json!({
-        "type": "Login",
-        "username": username,
-        "password": "hunter2!",
-        "client_version": "0.1.0",
-    })).await;
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "Login",
+            "username": username,
+            "password": "hunter2!",
+            "client_version": "0.1.0",
+        }),
+    )
+    .await;
     assert_eq!(resp["type"], "LoginOk", "login {username}: {resp}");
     let session = resp["session_token"].as_str().unwrap().to_string();
 
-    let resp = rpc(&mut ws, serde_json::json!({
-        "type": "CharCreate",
-        "session_token": session,
-        "name": char_name,
-        "race": race,
-        "class": class,
-    })).await;
-    assert_eq!(resp["type"], "CharCreated", "charcreate {char_name}: {resp}");
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "CharCreate",
+            "session_token": session,
+            "name": char_name,
+            "race": race,
+            "class": class,
+        }),
+    )
+    .await;
+    assert_eq!(
+        resp["type"], "CharCreated",
+        "charcreate {char_name}: {resp}"
+    );
     let char_id = resp["char_id"].as_i64().unwrap();
 
-    let resp = rpc(&mut ws, serde_json::json!({
-        "type": "RequestWorldToken",
-        "session_token": session,
-        "char_id": char_id,
-    })).await;
-    assert_eq!(resp["type"], "WorldConnectToken", "request token {char_name}: {resp}");
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "RequestWorldToken",
+            "session_token": session,
+            "char_id": char_id,
+        }),
+    )
+    .await;
+    assert_eq!(
+        resp["type"], "WorldConnectToken",
+        "request token {char_name}: {resp}"
+    );
     let token_bytes: Vec<u8> = resp["token_bytes"]
         .as_array()
         .expect("token_bytes is array")
@@ -339,7 +390,9 @@ async fn provision_client(
 /// mp high lets the loader clamp it to the new maximum, i.e. "full mana at the
 /// new level".
 async fn set_char_level(db_url: &str, char_id: i64, level: i32) {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
     sqlx::query("UPDATE characters SET level = ?1, mp = 99999.0 WHERE id = ?2")
         .bind(level)
         .bind(char_id)
@@ -351,20 +404,33 @@ async fn set_char_level(db_url: &str, char_id: i64, level: i32) {
 /// Food and water: set a character's counters (seconds of fullness) and,
 /// optionally, its HP, before it logs in (the row is read at login).
 async fn set_char_appetite(db_url: &str, char_id: i64, hunger: f32, thirst: f32, hp: Option<f32>) {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
-    sqlx::query("UPDATE characters SET hunger = ?1, thirst = ?2, hp = COALESCE(?3, hp) WHERE id = ?4")
-        .bind(hunger)
-        .bind(thirst)
-        .bind(hp)
-        .bind(char_id)
-        .execute(&pool)
+    let pool = projectdawn_server::db::open(db_url)
         .await
-        .expect("set appetite");
+        .expect("open pool");
+    sqlx::query(
+        "UPDATE characters SET hunger = ?1, thirst = ?2, hp = COALESCE(?3, hp) WHERE id = ?4",
+    )
+    .bind(hunger)
+    .bind(thirst)
+    .bind(hp)
+    .bind(char_id)
+    .execute(&pool)
+    .await
+    .expect("set appetite");
 }
 
 /// Put a stack straight into a character's inventory row (read at login).
-async fn give_char_item(db_url: &str, char_id: i64, location: &str, slot: u32, path: &str, count: u32) {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+async fn give_char_item(
+    db_url: &str,
+    char_id: i64,
+    location: &str,
+    slot: u32,
+    path: &str,
+    count: u32,
+) {
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
     sqlx::query(
         "INSERT OR REPLACE INTO character_items (char_id, location, slot, item_path, count)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -380,7 +446,9 @@ async fn give_char_item(db_url: &str, char_id: i64, location: &str, slot: u32, p
 }
 
 async fn read_char_appetite(db_url: &str, char_id: i64) -> (f32, f32) {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
     let row: (f32, f32) = sqlx::query_as("SELECT hunger, thirst FROM characters WHERE id = ?1")
         .bind(char_id)
         .fetch_one(&pool)
@@ -411,13 +479,9 @@ struct WorldClient {
 
 impl WorldClient {
     /// Drive renet handshake + send app-layer Connect; spin until ConnectOk.
-    async fn start(
-        token_bytes: Vec<u8>,
-        session_token_hex: &str,
-        char_id: i64,
-    ) -> Self {
-        let connect_token = ConnectToken::read(&mut Cursor::new(&token_bytes[..]))
-            .expect("ConnectToken::read");
+    async fn start(token_bytes: Vec<u8>, session_token_hex: &str, char_id: i64) -> Self {
+        let connect_token =
+            ConnectToken::read(&mut Cursor::new(&token_bytes[..])).expect("ConnectToken::read");
         let socket = UdpSocket::bind("127.0.0.1:0").expect("udp bind");
         socket.set_nonblocking(true).expect("nonblocking");
 
@@ -445,7 +509,11 @@ impl WorldClient {
         };
         send_msg(&mut client, CHANNEL_SYSTEM, &msg);
 
-        let mut this = Self { client, transport, _char_id: char_id };
+        let mut this = Self {
+            client,
+            transport,
+            _char_id: char_id,
+        };
         this.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(m, ServerWorldMsg::ConnectOk { .. })
         })
@@ -458,7 +526,11 @@ impl WorldClient {
         // otherwise the bytes sit in the outgoing buffer until the next
         // wait_for ticks the client, which may be after the test has
         // moved on to another client's setup.
-        send_msg(&mut this.client, CHANNEL_SYSTEM, &ClientWorldMsg::EnterWorld);
+        send_msg(
+            &mut this.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::EnterWorld,
+        );
         for _ in 0..4 {
             tick_one(&mut this.client, &mut this.transport);
             tokio::time::sleep(TICK_DT).await;
@@ -467,12 +539,20 @@ impl WorldClient {
     }
 
     fn send_move(&mut self, sequence: u32, direction: Vec3) {
-        let msg = ClientWorldMsg::Move { sequence, direction, jumping: false };
+        let msg = ClientWorldMsg::Move {
+            sequence,
+            direction,
+            jumping: false,
+        };
         send_msg(&mut self.client, CHANNEL_POSITION, &msg);
     }
 
     fn send_disconnect(&mut self) {
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::Disconnect);
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::Disconnect,
+        );
     }
 
     fn send_cast_start(&mut self, spell_name: &str, duration: f32) {
@@ -514,7 +594,11 @@ impl WorldClient {
     }
 
     fn send_death(&mut self) {
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::DeathBroadcast);
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::DeathBroadcast,
+        );
     }
 
     fn send_respawn(&mut self) {
@@ -522,14 +606,20 @@ impl WorldClient {
     }
 
     fn send_loot_all(&mut self, bag_id: u64) {
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::LootAll { bag_id });
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::LootAll { bag_id },
+        );
     }
 
     fn send_group_invite(&mut self, name: &str) {
         send_msg(
             &mut self.client,
             CHANNEL_SYSTEM,
-            &ClientWorldMsg::GroupInvite { name: name.to_string() },
+            &ClientWorldMsg::GroupInvite {
+                name: name.to_string(),
+            },
         );
     }
 
@@ -547,7 +637,11 @@ impl WorldClient {
 
     /// Dev/GM command: take `amount` damage. Gated like the other dev tools.
     fn send_damage_self(&mut self, amount: i32) {
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::DamageSelf { amount });
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::DamageSelf { amount },
+        );
     }
 
     fn send_inspect_player(&mut self, target_char_id: i64) {
@@ -558,7 +652,13 @@ impl WorldClient {
         );
     }
 
-    fn send_attack(&mut self, target_id: u64, weapon_path: &str, is_offhand: bool, dmg_type: DamageType) {
+    fn send_attack(
+        &mut self,
+        target_id: u64,
+        weapon_path: &str,
+        is_offhand: bool,
+        dmg_type: DamageType,
+    ) {
         let msg = ClientWorldMsg::Attack {
             target_id,
             weapon_path: weapon_path.into(),
@@ -569,7 +669,11 @@ impl WorldClient {
     }
 
     fn send_pvp_toggle(&mut self, on: bool) {
-        send_msg(&mut self.client, CHANNEL_SYSTEM, &ClientWorldMsg::PvpToggle { on });
+        send_msg(
+            &mut self.client,
+            CHANNEL_SYSTEM,
+            &ClientWorldMsg::PvpToggle { on },
+        );
     }
 
     /// Dev/GM command probe: awards xp through the server's authoritative path.
@@ -587,7 +691,15 @@ impl WorldClient {
     /// mob exactly 3 m behind the requester. Requires the connection to be
     /// dev or GM â€” grant `is_gm` via `db::set_account_gm` and mint a FRESH
     /// token, as `is_gm_gates_dev_commands` does.
-    fn send_dev_spawn(&mut self, name: &str, level: u32, hp: f32, dmg: i32, speed: f32, aggro: f32) {
+    fn send_dev_spawn(
+        &mut self,
+        name: &str,
+        level: u32,
+        hp: f32,
+        dmg: i32,
+        speed: f32,
+        aggro: f32,
+    ) {
         send_msg(
             &mut self.client,
             CHANNEL_SYSTEM,
@@ -611,7 +723,9 @@ impl WorldClient {
         send_msg(
             &mut self.client,
             CHANNEL_SYSTEM,
-            &ClientWorldMsg::UseConsumable { slot: SlotRef::BaseSlot { idx } },
+            &ClientWorldMsg::UseConsumable {
+                slot: SlotRef::BaseSlot { idx },
+            },
         );
     }
 
@@ -728,10 +842,9 @@ impl WorldClient {
                 return None;
             }
             while let Some(bytes) = self.client.receive_message(channel) {
-                if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(
-                    &bytes,
-                    bincode_cfg(),
-                ) {
+                if let Ok((msg, _)) =
+                    bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+                {
                     if pred(&msg) {
                         return Some(msg);
                     }
@@ -760,12 +873,21 @@ async fn two_clients_see_each_other() {
     // A also gets EntitySpawn for itself? No â€” fan-out skips the subject;
     // A's own ConnectOk is the own-self signal. So only spawn(B) at A.
     let spawn_b_at_a = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == b_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == b_char_id as u64),
+        )
         .await
         .expect("A receives EntitySpawn for B");
-    if let ServerWorldMsg::EntitySpawn { name, race, class, level, .. } = &spawn_b_at_a {
+    if let ServerWorldMsg::EntitySpawn {
+        name,
+        race,
+        class,
+        level,
+        ..
+    } = &spawn_b_at_a
+    {
         assert_eq!(name, "Betacha", "B's name in spawn");
         assert_eq!(race, "Elf", "B's race in spawn");
         assert_eq!(class, "Cleric", "B's class in spawn");
@@ -773,12 +895,17 @@ async fn two_clients_see_each_other() {
     }
 
     let spawn_a_at_b = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == a_char_id as u64),
+        )
         .await
         .expect("B receives EntitySpawn for A");
-    if let ServerWorldMsg::EntitySpawn { name, race, class, .. } = &spawn_a_at_b {
+    if let ServerWorldMsg::EntitySpawn {
+        name, race, class, ..
+    } = &spawn_a_at_b
+    {
         assert_eq!(name, "Alphacha");
         assert_eq!(race, "Human");
         assert_eq!(class, "Warrior");
@@ -786,20 +913,38 @@ async fn two_clients_see_each_other() {
 
     // â”€â”€ 2. Position fan-out â”€â”€
     // Each client moves; both should see Positions for both ids.
-    a.send_move(1, Vec3 { x: 1.0, y: 0.0, z: 0.0 });
-    b.send_move(1, Vec3 { x: 0.0, y: 0.0, z: 1.0 });
+    a.send_move(
+        1,
+        Vec3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+    );
+    b.send_move(
+        1,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 1.0,
+        },
+    );
 
     let _pos_b_at_a = a
-        .wait_for(CHANNEL_POSITION, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::Position { id, .. } if *id == b_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_POSITION,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::Position { id, .. } if *id == b_char_id as u64),
+        )
         .await
         .expect("A sees a Position broadcast for B");
 
     let _pos_a_at_b = b
-        .wait_for(CHANNEL_POSITION, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::Position { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_POSITION,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::Position { id, .. } if *id == a_char_id as u64),
+        )
         .await
         .expect("B sees a Position broadcast for A");
 
@@ -819,9 +964,11 @@ async fn two_clients_see_each_other() {
         tokio::time::sleep(TICK_DT).await;
     }
 
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == b_char_id as u64)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == b_char_id as u64),
+    )
     .await
     .expect("A receives EntityDespawn for B");
 }
@@ -861,9 +1008,11 @@ async fn two_clients_server_authoritative_resources() {
     // max_mp=100 (BASE_MP 100 + 0), max_stamina=120 (BASE_ST 100 +
     // Warrior 20). `create_character` seeds current = max.
     let h_at_b = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_char_id as u64),
+        )
         .await
         .expect("B receives HealthUpdate for A via DB-seeded fan-out");
     if let ServerWorldMsg::HealthUpdate { hp, max_hp, .. } = h_at_b {
@@ -872,9 +1021,11 @@ async fn two_clients_server_authoritative_resources() {
     }
 
     let m_at_b = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == a_char_id as u64),
+        )
         .await
         .expect("B receives ManaUpdate for A via DB-seeded fan-out");
     if let ServerWorldMsg::ManaUpdate { mp, max_mp, .. } = m_at_b {
@@ -883,9 +1034,11 @@ async fn two_clients_server_authoritative_resources() {
     }
 
     let s_at_b = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::StaminaUpdate { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::StaminaUpdate { id, .. } if *id == a_char_id as u64),
+        )
         .await
         .expect("B receives StaminaUpdate for A via DB-seeded fan-out");
     if let ServerWorldMsg::StaminaUpdate { stamina, max, .. } = s_at_b {
@@ -928,7 +1081,10 @@ async fn two_clients_cast_fanout() {
     } = cast_at_b
     {
         assert_eq!(spell_name, "Frostbolt");
-        assert!((duration - 2.5).abs() < 0.01, "duration roundtrip: {duration}");
+        assert!(
+            (duration - 2.5).abs() < 0.01,
+            "duration roundtrip: {duration}"
+        );
     }
 
     a.send_cast_complete("Frostbolt");
@@ -999,9 +1155,11 @@ async fn two_clients_hit_fanout() {
     }
 
     let echoed = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
-            matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_millis(500),
+            |m| matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == a_char_id as u64),
+        )
         .await;
     assert!(echoed.is_none(), "A should not receive own Hit echo");
 }
@@ -1028,17 +1186,21 @@ async fn two_clients_death_fanout() {
     }
 
     let died_at_b = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::EntityDied { id } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::EntityDied { id } if *id == a_char_id as u64),
+        )
         .await
         .expect("B receives EntityDied for A");
     assert!(matches!(died_at_b, ServerWorldMsg::EntityDied { .. }));
 
     let echoed = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
-            matches!(m, ServerWorldMsg::EntityDied { id } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_millis(500),
+            |m| matches!(m, ServerWorldMsg::EntityDied { id } if *id == a_char_id as u64),
+        )
         .await;
     assert!(echoed.is_none(), "A should not receive own EntityDied echo");
     let _ = b_char_id; // silence unused if test order changes
@@ -1124,7 +1286,11 @@ async fn enemy_aggros_chases_and_attacks_player() {
     // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
     // pack, and standing in it turns every cast into interrupt rolls.
     let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
-    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
+    let dir = Vec3 {
+        x: -16.0 / len,
+        y: 0.0,
+        z: -14.0 / len,
+    };
 
     // Walk for ~2 s at 50 ms cadence. Each Move refreshes the server-side
     // stale-move clock so integration continues until we stop sending.
@@ -1165,17 +1331,28 @@ async fn enemy_aggros_chases_and_attacks_player() {
     }
 
     let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
-            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(35),
+            |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64),
+        )
         .await
         .expect("enemy fires a melee swing on the player");
-    if let ServerWorldMsg::Hit { attacker, amount, dmg_type, .. } = hit_evt {
+    if let ServerWorldMsg::Hit {
+        attacker,
+        amount,
+        dmg_type,
+        ..
+    } = hit_evt
+    {
         assert!(
             attacker >= ENEMY_ID_BASE,
             "Hit attacker must be an enemy id (got {attacker}, base {ENEMY_ID_BASE})"
         );
-        assert!(amount > 0, "enemy hit amount must be positive (got {amount})");
+        assert!(
+            amount > 0,
+            "enemy hit amount must be positive (got {amount})"
+        );
         assert!(
             matches!(dmg_type, DamageType::Physical),
             "enemy melee broadcasts as Physical damage (got {dmg_type:?})"
@@ -1219,7 +1396,11 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
     // pack, and standing in it turns every cast into interrupt rolls.
     let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
-    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
+    let dir = Vec3 {
+        x: -16.0 / len,
+        y: 0.0,
+        z: -14.0 / len,
+    };
     // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
     // whether an enemy locks on before the wait expires depended on where it
     // happened to be wandering. Walking fully in makes the pull deterministic.
@@ -1237,9 +1418,11 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
     // the enemy partition). Generous timeout because parallel tests
     // in this file contend for CPU; isolated runtime is ~5 s.
     let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
-            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(35),
+            |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64),
+        )
         .await
         .expect("an enemy locks on and swings");
     let enemy_id: u64 = match hit_evt {
@@ -1292,9 +1475,11 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
         assert!(hp <= 0.0, "killed enemy must broadcast hp <= 0 (got {hp})");
     }
 
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::EntityDied { id } if *id == enemy_id)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::EntityDied { id } if *id == enemy_id),
+    )
     .await
     .expect("EntityDied arrives for the killed enemy");
 
@@ -1314,9 +1499,11 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
 
     // ENEMY_DESPAWN_LINGER_SECS is 5 s; budget extra for tick jitter and
     // parallel contention.
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(15), |m| {
-        matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(15),
+        |m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id),
+    )
     .await
     .expect("EntityDespawn arrives after the corpse linger window");
 }
@@ -1345,7 +1532,15 @@ async fn enemies_visible_after_enter_world() {
         .await
         .expect("A receives at least one EnemySpawn after EnterWorld");
 
-    if let ServerWorldMsg::EnemySpawn { id, mob_name, level, max_hp, hp, .. } = spawn {
+    if let ServerWorldMsg::EnemySpawn {
+        id,
+        mob_name,
+        level,
+        max_hp,
+        hp,
+        ..
+    } = spawn
+    {
         assert!(
             id >= ENEMY_ID_BASE,
             "enemy id must be in the reserved partition (got {id}, base {ENEMY_ID_BASE})"
@@ -1386,9 +1581,11 @@ async fn aoi_far_apart_clients_dont_see_each_other() {
     // 2 s is far beyond the 1-tick fanout window; if EntitySpawn were
     // going to arrive it would do so within ~100 ms.
     let spawn_b_at_a = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == b_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == b_char_id as u64),
+        )
         .await;
     assert!(
         spawn_b_at_a.is_none(),
@@ -1396,9 +1593,11 @@ async fn aoi_far_apart_clients_dont_see_each_other() {
     );
 
     let spawn_a_at_b = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == a_char_id as u64),
+        )
         .await;
     assert!(
         spawn_a_at_b.is_none(),
@@ -1439,7 +1638,14 @@ async fn aoi_approaching_client_triggers_entity_spawn() {
     let mut seq: u32 = 1;
     let mut heartbeat_tick: u32 = 0;
     while Instant::now() < walk_end {
-        b.send_move(seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 });
+        b.send_move(
+            seq,
+            Vec3 {
+                x: -1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        );
         seq += 1;
         // A sends a Heartbeat every ~4 s (80 ticks) to satisfy the
         // server's 10 s app-layer idle timeout while B walks.
@@ -1454,15 +1660,19 @@ async fn aoi_approaching_client_triggers_entity_spawn() {
 
     // At this point B is at ~x = 210 (cell 1). EntitySpawn messages
     // arrived at both clients during the walk; wait_for drains the queue.
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == b_char_id as u64)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == b_char_id as u64),
+    )
     .await
     .expect("A receives EntitySpawn for B once B enters A's 3Ã—3 neighbourhood");
 
-    b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == a_char_id as u64)
-    })
+    b.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::EntitySpawn { id, .. } if *id == a_char_id as u64),
+    )
     .await
     .expect("B receives EntitySpawn for A when it crosses into A's neighbourhood");
 }
@@ -1492,7 +1702,9 @@ async fn aoe_spell_damages_nearby_enemies() {
     // Inferno requires level 12; provisioned characters start at 1.
     set_char_level(&h.db_url, a_char_id, 12).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "ino", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "ino", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
@@ -1605,9 +1817,11 @@ async fn cast_spell_rejected_before_cast_time() {
     // application. (Target id was a stub anyway; we want to confirm
     // no side effects, not target resolution.)
     let stray = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(500), |m| {
-            matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_millis(500),
+            |m| matches!(m, ServerWorldMsg::Hit { attacker, .. } if *attacker == a_char_id as u64),
+        )
         .await;
     assert!(stray.is_none(), "rejected cast must not fan a Hit");
 }
@@ -1671,11 +1885,16 @@ async fn cast_spell_accepted_after_cast_time() {
 
     // No CastFail should have fired.
     let fail = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(300), |m| {
-            matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_millis(300),
+            |m| matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64),
+        )
         .await;
-    assert!(fail.is_none(), "well-timed cast must not produce a CastFail");
+    assert!(
+        fail.is_none(),
+        "well-timed cast must not produce a CastFail"
+    );
 }
 
 /// Track 11 â€” server-side pet summon. Necromancer A casts Summon
@@ -1723,12 +1942,23 @@ async fn pet_summon_visible_to_peer() {
     }
 
     let pet_spawn = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("B receives PetSpawn fanned from A's Summon Skeleton cast");
-    if let ServerWorldMsg::PetSpawn { id, owner, pet_name, level, max_hp, hp, .. } = pet_spawn {
+    if let ServerWorldMsg::PetSpawn {
+        id,
+        owner,
+        pet_name,
+        level,
+        max_hp,
+        hp,
+        ..
+    } = pet_spawn
+    {
         assert!(
             id >= PET_ID_BASE,
             "pet id must be in the pet partition (got {id}, base {PET_ID_BASE})"
@@ -1796,9 +2026,11 @@ async fn pet_follows_owner() {
     }
 
     let pet_id: u64 = match b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("B sees A's pet spawn")
     {
@@ -1812,7 +2044,11 @@ async fn pet_follows_owner() {
     // for the pet id with x > 0 (it spawned at owner_pos + 1.5 east,
     // so x starts > 0; we want to see x KEEP increasing as the owner
     // walks).
-    let dir = Vec3 { x: 1.0, y: 0.0, z: 0.0 };
+    let dir = Vec3 {
+        x: 1.0,
+        y: 0.0,
+        z: 0.0,
+    };
     let walk_end = Instant::now() + Duration::from_millis(2_500);
     let mut seq: u32 = 1;
     let mut max_pet_x: f32 = f32::MIN;
@@ -1824,10 +2060,9 @@ async fn pet_follows_owner() {
         // Drain CHANNEL_POSITION on B for pet position updates as we
         // walk; latch the highest x value we see.
         while let Some(bytes) = b.client.receive_message(CHANNEL_POSITION) {
-            if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(
-                &bytes,
-                bincode_cfg(),
-            ) {
+            if let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
                 if let ServerWorldMsg::Position { id, pos, .. } = msg {
                     if id == pet_id {
                         max_pet_x = max_pet_x.max(pos.x);
@@ -1907,7 +2142,11 @@ async fn pet_attacks_owners_target() {
     // overlaps no other, so exactly ONE slow level 1 Decrepit Skeleton
     // pulls, the single-puller semantics this test was written against.
     let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
-    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
+    let dir = Vec3 {
+        x: -16.0 / len,
+        y: 0.0,
+        z: -14.0 / len,
+    };
     let walk_end = Instant::now() + Duration::from_millis(3_500);
     let mut seq: u32 = 1;
     while Instant::now() < walk_end {
@@ -1920,9 +2159,11 @@ async fn pet_attacks_owners_target() {
     // Wait for an enemy hit on us â€” proves the AI walked an enemy into
     // melee with us.
     let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
-            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(35),
+            |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64),
+        )
         .await
         .expect("an enemy locks on and swings");
     let enemy_id: u64 = match hit_evt {
@@ -2023,7 +2264,11 @@ async fn pet_command_attack_locks_onto_target() {
     // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
     // pack, and standing in it turns every cast into interrupt rolls.
     let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
-    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
+    let dir = Vec3 {
+        x: -16.0 / len,
+        y: 0.0,
+        z: -14.0 / len,
+    };
     // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
     // whether an enemy locks on before the wait expires depended on where it
     // happened to be wandering. Walking fully in makes the pull deterministic.
@@ -2036,9 +2281,11 @@ async fn pet_command_attack_locks_onto_target() {
         tokio::time::sleep(TICK_DT).await;
     }
     let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
-            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(35),
+            |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64),
+        )
         .await
         .expect("an enemy aggros and hits the player");
     let enemy_id: u64 = match hit_evt {
@@ -2104,9 +2351,11 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
         tokio::time::sleep(TICK_DT).await;
     }
     let pet_id: u64 = match a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("PetSpawn for own pet")
     {
@@ -2120,7 +2369,11 @@ async fn pet_pulls_aggro_via_threat_reaggro() {
     // Decrepit Skeleton pulls, the single-puller semantics this test was
     // written against.
     let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
-    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
+    let dir = Vec3 {
+        x: -16.0 / len,
+        y: 0.0,
+        z: -14.0 / len,
+    };
     let walk_end = Instant::now() + Duration::from_millis(3_500);
     let mut seq: u32 = 1;
     while Instant::now() < walk_end {
@@ -2196,7 +2449,9 @@ async fn charm_converts_enemy_to_pet() {
     set_char_level(&h.db_url, a_char_id, 20).await;
     // GM for the dev spawn below; re-mint the token so the flag rides it.
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "ench", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "ench", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
 
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
@@ -2235,17 +2490,21 @@ async fn charm_converts_enemy_to_pet() {
     }
 
     let despawn = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id),
+        )
         .await
         .expect("old enemy id is despawned on charm");
     let _ = despawn;
 
     let pet_spawn = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("a fresh pet id spawns for the caster");
     if let ServerWorldMsg::PetSpawn { id, pet_name, .. } = pet_spawn {
@@ -2258,11 +2517,16 @@ async fn charm_converts_enemy_to_pet() {
         // landed (seen in play 2026-10-06). Charm lasts 60 s; nothing may
         // despawn the pet in the next second and a half.
         let early_release = a
-            .wait_for(CHANNEL_SYSTEM, Duration::from_millis(1500), |m| {
-                matches!(m, ServerWorldMsg::EntityDespawn { id: gone } if *gone == id)
-            })
+            .wait_for(
+                CHANNEL_SYSTEM,
+                Duration::from_millis(1500),
+                |m| matches!(m, ServerWorldMsg::EntityDespawn { id: gone } if *gone == id),
+            )
             .await;
-        assert!(early_release.is_none(), "a fresh charm must not release on the next tick");
+        assert!(
+            early_release.is_none(),
+            "a fresh charm must not release on the next tick"
+        );
     }
 }
 
@@ -2281,7 +2545,9 @@ async fn a_mob_nuked_from_beyond_its_old_leash_turns_on_the_caster() {
     let (a_session, a_char_id, _stale_token) =
         provision_client(&h.auth_url, "leashnuke", "Leashnuke", "Human", "Cleric").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "leashnuke", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "leashnuke", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
@@ -2304,7 +2570,14 @@ async fn a_mob_nuked_from_beyond_its_old_leash_turns_on_the_caster() {
     // 7.5 m/s, 50 ms each.
     let mut seq: u32 = 1;
     for _ in 0..46 {
-        a.send_move(seq, Vec3 { x: 0.0, y: 0.0, z: 1.0 });
+        a.send_move(
+            seq,
+            Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0,
+            },
+        );
         seq += 1;
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
@@ -2334,10 +2607,18 @@ async fn a_mob_nuked_from_beyond_its_old_leash_turns_on_the_caster() {
     // from the setup would answer for the nuke (the first cut of this test
     // passed on the old code for exactly that reason).
     while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
-        if let Ok((ServerWorldMsg::EntityTarget { id, target: Some(_) }, _)) =
-            bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+        if let Ok((
+            ServerWorldMsg::EntityTarget {
+                id,
+                target: Some(_),
+            },
+            _,
+        )) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
         {
-            assert_ne!(id, mob, "test setup: the mob targeted someone before the nuke");
+            assert_ne!(
+                id, mob,
+                "test setup: the mob targeted someone before the nuke"
+            );
         }
     }
 
@@ -2368,7 +2649,9 @@ async fn an_expired_charm_hands_the_mob_back_and_it_turns_on_the_charmer() {
     // Siren's Song is Bard level 14.
     set_char_level(&h.db_url, a_char_id, 14).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "siren", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "siren", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
@@ -2391,9 +2674,11 @@ async fn an_expired_charm_hands_the_mob_back_and_it_turns_on_the_charmer() {
     a.pump_for(Duration::from_millis(1700)).await;
     a.send_cast_spell("Siren's Song", Some(enemy_id));
     let pet_spawn = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("the charm lands");
     let pet_id: u64 = match pet_spawn {
@@ -2408,12 +2693,17 @@ async fn an_expired_charm_hands_the_mob_back_and_it_turns_on_the_charmer() {
     while released.is_none() && Instant::now() < deadline {
         a.send_heartbeat();
         released = a
-            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-                matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == pet_id)
-            })
+            .wait_for(
+                CHANNEL_SYSTEM,
+                Duration::from_secs(3),
+                |m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == pet_id),
+            )
             .await;
     }
-    assert!(released.is_some(), "the charm ends and the pet is despawned");
+    assert!(
+        released.is_some(),
+        "the charm ends and the pet is despawned"
+    );
 
     let back = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
@@ -2425,8 +2715,14 @@ async fn an_expired_charm_hands_the_mob_back_and_it_turns_on_the_charmer() {
         ServerWorldMsg::EnemySpawn { id, hp, .. } => (id, hp),
         _ => unreachable!(),
     };
-    assert_ne!(mob_id, enemy_id, "a fresh enemy id; the old one is never reused");
-    assert!((hp - 500.0).abs() < 1e-3, "it keeps the HP it had, got {hp}");
+    assert_ne!(
+        mob_id, enemy_id,
+        "a fresh enemy id; the old one is never reused"
+    );
+    assert!(
+        (hp - 500.0).abs() < 1e-3,
+        "it keeps the HP it had, got {hp}"
+    );
 
     a.send_heartbeat();
     let turned = a
@@ -2435,14 +2731,20 @@ async fn an_expired_charm_hands_the_mob_back_and_it_turns_on_the_charmer() {
                 if *id == mob_id && *t == a_char_id as u64)
         })
         .await;
-    assert!(turned.is_some(), "the returned mob targets its former charmer");
+    assert!(
+        turned.is_some(),
+        "the returned mob targets its former charmer"
+    );
     let hit = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(10), |m| {
             matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
                 if *attacker == mob_id && *target == a_char_id as u64)
         })
         .await;
-    assert!(hit.is_some(), "and comes for them: a hit on the bard within seconds");
+    assert!(
+        hit.is_some(),
+        "and comes for them: a hit on the bard within seconds"
+    );
 }
 
 /// Track 12 Piece B â€” Beast Masters auto-summon a Wolf warder when
@@ -2462,13 +2764,25 @@ async fn beast_master_auto_summons_warder() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     let pet_spawn = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("Beast Master receives an auto-summoned warder on EnterWorld");
-    if let ServerWorldMsg::PetSpawn { pet_name, level, max_hp, hp, .. } = pet_spawn {
-        assert_eq!(pet_name, "Wolf", "Beast Master's auto-summon is a Wolf warder");
+    if let ServerWorldMsg::PetSpawn {
+        pet_name,
+        level,
+        max_hp,
+        hp,
+        ..
+    } = pet_spawn
+    {
+        assert_eq!(
+            pet_name, "Wolf",
+            "Beast Master's auto-summon is a Wolf warder"
+        );
         // Deterministic owner - 1: the free auto-summon takes no variance
         // roll (pet interim A).
         assert_eq!(level, 21, "warder tracks its owner: 22 - 1");
@@ -2495,9 +2809,11 @@ async fn warders_mend_heals_the_beast_masters_own_warder() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     let pet_spawn = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("the warder auto-summons");
     let pet_id: u64 = match pet_spawn {
@@ -2510,14 +2826,19 @@ async fn warders_mend_heals_the_beast_masters_own_warder() {
     a.pump_for(Duration::from_millis(1700)).await;
     a.send_cast_spell("Warder's Mend", None);
     let mended = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == pet_id)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == pet_id),
+        )
         .await;
     let Some(ServerWorldMsg::HealthUpdate { hp, max_hp, .. }) = mended else {
         panic!("the server mends the warder and fans its health");
     };
-    assert!((hp - max_hp).abs() < 0.01, "an unhurt warder stays at full, got {hp}/{max_hp}");
+    assert!(
+        (hp - max_hp).abs() < 0.01,
+        "an unhurt warder stays at full, got {hp}/{max_hp}"
+    );
 }
 
 /// Spell batch step 0: a corpse casts nothing. The dead-state gate at message
@@ -2534,7 +2855,9 @@ async fn a_dead_caster_casts_nothing() {
     let (a_session, a_char_id, _stale) =
         provision_client(&h.auth_url, "deadcaster", "Morbid", "Human", "Cleric").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "deadcaster", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "deadcaster", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
@@ -2591,7 +2914,10 @@ async fn a_finished_cast_cannot_be_held() {
                 if *caster == a_char_id as u64 && reason.contains("lapsed"))
         })
         .await;
-    assert!(lapsed.is_some(), "a bar held 4 s past a 1.2 s cast is refused");
+    assert!(
+        lapsed.is_some(),
+        "a bar held 4 s past a 1.2 s cast is refused"
+    );
 
     // Released on time, the same cast lands: a ManaUpdate carrying the spend.
     a.send_cast_start("Healing Light", 1.2);
@@ -2603,7 +2929,10 @@ async fn a_finished_cast_cannot_be_held() {
                 if *id == a_char_id as u64 && *mp < *max_mp)
         })
         .await;
-    assert!(charged.is_some(), "released in time, the cast lands and costs mana");
+    assert!(
+        charged.is_some(),
+        "released in time, the cast lands and costs mana"
+    );
 }
 
 /// Spell batch step 0: a refusal reaches only the caster and carries the
@@ -2618,7 +2947,9 @@ async fn a_refusal_reaches_only_the_caster_with_the_true_mana() {
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "bystander", "Bystan", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "private", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "private", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
@@ -2652,20 +2983,33 @@ async fn a_refusal_reaches_only_the_caster_with_the_true_mana() {
                 if *caster == a_char_id as u64 && reason.contains("cooldown"))
         })
         .await;
-    assert!(refused.is_some(), "the second, inside the cooldown, is refused to the caster");
+    assert!(
+        refused.is_some(),
+        "the second, inside the cooldown, is refused to the caster"
+    );
     let settled = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::ManaUpdate { id, .. } if *id == a_char_id as u64),
+        )
         .await;
-    assert!(settled.is_some(), "and the refusal carries the caster's true mana");
+    assert!(
+        settled.is_some(),
+        "and the refusal carries the caster's true mana"
+    );
 
     let leaked = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(1), |m| {
-            matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(1),
+            |m| matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64),
+        )
         .await;
-    assert!(leaked.is_none(), "a bystander hears nothing of another player's refusal");
+    assert!(
+        leaked.is_none(),
+        "a bystander hears nothing of another player's refusal"
+    );
 }
 
 /// Shared setup for the share-range tests: A (a GM Cleric at spawn) and B (a
@@ -2682,7 +3026,9 @@ async fn grouped_pair_with_dummy(
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, b_user, "Farmate", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, a_user, true).await.expect("set is_gm");
+    db::set_account_gm(&pool, a_user, true)
+        .await
+        .expect("set is_gm");
     set_char_pos(&h.db_url, b_char_id, b_x, 0.0).await;
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
@@ -2723,15 +3069,19 @@ async fn an_xp_share_reaches_a_group_mate_150_m_away() {
     // `amount > 0`: the server also seeds each client's xp state on entering
     // the world as an XpGained of 0, which is not a share.
     let a_gain = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0),
+        )
         .await;
     assert!(a_gain.is_some(), "the killer is paid");
     let b_gain = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0),
+        )
         .await;
     assert!(b_gain.is_some(), "a group-mate 150 m away shares the kill");
 }
@@ -2745,15 +3095,19 @@ async fn an_xp_share_stops_past_200_m() {
         grouped_pair_with_dummy(&h, "sharer250", "mate250", 250.0).await;
     a.send_cast_spell("Smite", Some(dummy));
     let a_gain = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0),
+        )
         .await;
     assert!(a_gain.is_some(), "the killer is paid");
     let b_gain = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0),
+        )
         .await;
     assert!(b_gain.is_none(), "a group-mate 250 m away shares nothing");
 }
@@ -2790,7 +3144,14 @@ async fn heals_reach_30_m_and_not_past_it() {
     // 5 s, so the second cast waits it out.
     let mut seq: u32 = 1;
     for _ in 0..16 {
-        b.send_move(seq, Vec3 { x: 1.0, y: 0.0, z: 0.0 });
+        b.send_move(
+            seq,
+            Vec3 {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        );
         seq += 1;
         tick_one(&mut b.client, &mut b.transport);
         tokio::time::sleep(TICK_DT).await;
@@ -2806,7 +3167,10 @@ async fn heals_reach_30_m_and_not_past_it() {
                 if *caster == a_char_id as u64 && reason.contains("too far"))
         })
         .await;
-    assert!(refused.is_some(), "a heal at about 34 m is refused as too far");
+    assert!(
+        refused.is_some(),
+        "a heal at about 34 m is refused as too far"
+    );
 }
 
 /// Spell batch step 1: one attack slow at a time, strongest wins. A Shaman
@@ -2819,7 +3183,9 @@ async fn a_weaker_slow_is_refused_while_a_stronger_one_holds() {
         provision_client(&h.auth_url, "slower", "Torpid", "Human", "Shaman").await;
     set_char_level(&h.db_url, a_char_id, 20).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "slower", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "slower", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
@@ -2857,12 +3223,25 @@ async fn a_weaker_slow_is_refused_while_a_stronger_one_holds() {
                 if *caster == a_char_id as u64 && reason.contains("stronger"))
         })
         .await;
-    assert!(refused.is_some(), "Slow is refused while Torpor holds the target");
+    assert!(
+        refused.is_some(),
+        "Slow is refused while Torpor holds the target"
+    );
 }
 
 /// Walk `metres` east in 7.5 m/s Moves, then let the park settle.
 async fn walk_east(c: &mut WorldClient, seq: &mut u32, metres: f32) {
-    walk_dir(c, seq, Vec3 { x: 1.0, y: 0.0, z: 0.0 }, metres).await;
+    walk_dir(
+        c,
+        seq,
+        Vec3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        metres,
+    )
+    .await;
 }
 
 /// Walk about `metres` along the unit direction `dir`, one Move per tick,
@@ -2914,7 +3293,14 @@ async fn walk_until_within(
             Instant::now() < deadline,
             "walk_until_within: still {dist:.2} m from the target after 8 s"
         );
-        c.send_move(*seq, Vec3 { x: dx / dist, y: 0.0, z: dz / dist });
+        c.send_move(
+            *seq,
+            Vec3 {
+                x: dx / dist,
+                y: 0.0,
+                z: dz / dist,
+            },
+        );
         *seq += 1;
         tick_one(&mut c.client, &mut c.transport);
         while let Some(bytes) = c.client.receive_message(CHANNEL_POSITION) {
@@ -2931,7 +3317,14 @@ async fn walk_until_within(
     // Park. A zero direction is held like any other, so one Move would do;
     // the position channel is unreliable, so send a few.
     for _ in 0..3 {
-        c.send_move(*seq, Vec3 { x: 0.0, y: 0.0, z: 0.0 });
+        c.send_move(
+            *seq,
+            Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        );
         *seq += 1;
         tick_one(&mut c.client, &mut c.transport);
         tokio::time::sleep(TICK_DT).await;
@@ -2952,7 +3345,9 @@ async fn gate_returns_the_caster_to_their_bind_and_wipes_hate() {
         provision_client(&h.auth_url, "gater", "Gatrix", "Human", "Cleric").await;
     set_char_level(&h.db_url, a_char_id, 8).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "gater", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "gater", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -2963,26 +3358,36 @@ async fn gate_returns_the_caster_to_their_bind_and_wipes_hate() {
     // aggro reaches z = 0, and four gnolls on the caster interrupt a 5 s bar
     // every time (the channeling roll is real).
     walk_east(&mut a, &mut seq, 10.0).await;
-    let bind_pos = own_position(&mut a, a_char_id).await.expect("the caster's own Position");
+    let bind_pos = own_position(&mut a, a_char_id)
+        .await
+        .expect("the caster's own Position");
     a.send_cast_start("Bind Affinity", 3.0);
     a.pump_for(Duration::from_millis(3_200)).await;
     a.send_cast_spell("Bind Affinity", None);
     let bound = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("bound"))
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("bound")),
+        )
         .await;
-    assert!(bound.is_some(), "Bind Affinity binds the caster where they stand");
+    assert!(
+        bound.is_some(),
+        "Bind Affinity binds the caster where they stand"
+    );
 
     // Walk on, and provoke a mob so it holds the caster as its target. The
     // dummy cannot move or hit (speed 0, dmg 0), so the bar is never
     // interrupted; its hate is the only thing being tested.
     walk_east(&mut a, &mut seq, 10.0).await;
-    let far_pos = own_position(&mut a, a_char_id).await.expect("the caster's own Position");
+    let far_pos = own_position(&mut a, a_char_id)
+        .await
+        .expect("the caster's own Position");
     assert!(
         far_pos.x - bind_pos.x > 7.0,
         "the caster walked on from the bind ({} to {})",
-        bind_pos.x, far_pos.x
+        bind_pos.x,
+        far_pos.x
     );
     a.send_dev_spawn("Charm Dummy", 1, 500.0, 0, 0.0, 1.0);
     let spawn = a
@@ -3033,7 +3438,10 @@ async fn gate_returns_the_caster_to_their_bind_and_wipes_hate() {
     assert!(
         (pos.x - bind_pos.x).abs() < 1.0 && (pos.z - bind_pos.z).abs() < 1.0,
         "Gate lands at the bind ({}, {}), got ({}, {})",
-        bind_pos.x, bind_pos.z, pos.x, pos.z
+        bind_pos.x,
+        bind_pos.z,
+        pos.x,
+        pos.z
     );
     assert!(dropped, "the mob drops the caster as its target: no train");
 
@@ -3049,7 +3457,10 @@ async fn gate_returns_the_caster_to_their_bind_and_wipes_hate() {
                 if *caster == a_char_id as u64 && reason.contains("cooldown"))
         })
         .await;
-    assert!(refused.is_some(), "a second Gate inside the cooldown is refused");
+    assert!(
+        refused.is_some(),
+        "a second Gate inside the cooldown is refused"
+    );
 }
 
 /// Ledger item 2: the class gate. A Warrior naming Gate is refused.
@@ -3118,7 +3529,10 @@ async fn a_group_member_is_bound_only_in_a_safe_area() {
                 if *caster == a_char_id as u64 && reason.contains("safe place"))
         })
         .await;
-    assert!(refused.is_some(), "a group member outside the safe area cannot be bound");
+    assert!(
+        refused.is_some(),
+        "a group member outside the safe area cannot be bound"
+    );
 
     a.send_cast_start("Bind Affinity", 3.0);
     pump_all_for(&mut [&mut a, &mut b, &mut c], Duration::from_millis(3_200)).await;
@@ -3127,11 +3541,16 @@ async fn a_group_member_is_bound_only_in_a_safe_area() {
     // message to leave before another seat is watched for the answer.
     a.pump_for(Duration::from_millis(300)).await;
     let bound = c
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("bound"))
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("bound")),
+        )
         .await;
-    assert!(bound.is_some(), "a group member in the town square is bound where they stand");
+    assert!(
+        bound.is_some(),
+        "a group member in the town square is bound where they stand"
+    );
 
     // The bind written is C's OWN position, persisted; B's was never touched.
     pump_all_for(&mut [&mut a, &mut b, &mut c], Duration::from_millis(600)).await;
@@ -3202,7 +3621,11 @@ async fn evacuate_moves_the_group_in_reach_and_nobody_else() {
     }
 
     a.send_cast_start("Evacuate", 5.0);
-    pump_all_for(&mut [&mut a, &mut b, &mut c, &mut d], Duration::from_millis(5_200)).await;
+    pump_all_for(
+        &mut [&mut a, &mut b, &mut c, &mut d],
+        Duration::from_millis(5_200),
+    )
+    .await;
     a.send_cast_spell("Evacuate", None);
     let a_tp = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
@@ -3212,7 +3635,12 @@ async fn evacuate_moves_the_group_in_reach_and_nobody_else() {
     let Some(ServerWorldMsg::Teleport { pos }) = a_tp else {
         panic!("Evacuate moves the caster");
     };
-    assert!(pos.x.abs() < 1.0 && pos.z.abs() < 1.0, "to the town square, got ({}, {})", pos.x, pos.z);
+    assert!(
+        pos.x.abs() < 1.0 && pos.z.abs() < 1.0,
+        "to the town square, got ({}, {})",
+        pos.x,
+        pos.z
+    );
     let b_tp = b
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
             matches!(m, ServerWorldMsg::Teleport { .. })
@@ -3230,7 +3658,10 @@ async fn evacuate_moves_the_group_in_reach_and_nobody_else() {
             matches!(m, ServerWorldMsg::Teleport { .. })
         })
         .await;
-    assert!(d_tp.is_none(), "a grouped member 40 m out, past friendly reach, stays");
+    assert!(
+        d_tp.is_none(),
+        "a grouped member 40 m out, past friendly reach, stays"
+    );
 }
 
 /// Track 12 Piece B â€” non-Beast-Master classes do NOT get an
@@ -3246,11 +3677,16 @@ async fn non_beast_master_gets_no_auto_warder() {
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     let stray = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await;
-    assert!(stray.is_none(), "Warrior must not receive an auto-summoned pet");
+    assert!(
+        stray.is_none(),
+        "Warrior must not receive an auto-summoned pet"
+    );
 }
 
 /// Track 13.2 â€” on EnterWorld the server seeds the client with a
@@ -3291,7 +3727,9 @@ async fn split_stack_carves_off_count() {
     // connects to the world server. This bypasses needing a real
     // loot-drop flow to populate items in test time.
     let db_url = h.db_url.clone();
-    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&db_url)
+        .await
+        .expect("open pool");
     projectdawn_server::db::save_inventory(
         &pool,
         a_char_id,
@@ -3338,7 +3776,13 @@ async fn split_stack_carves_off_count() {
             })
             .await
         {
-            if let ServerWorldMsg::InventoryDelta { slot, item_path, count, .. } = msg {
+            if let ServerWorldMsg::InventoryDelta {
+                slot,
+                item_path,
+                count,
+                ..
+            } = msg
+            {
                 let path = item_path.unwrap_or_default();
                 if slot == 0 && path == "res://items/cloth.tres" && count == 7 {
                     saw_src = true;
@@ -3349,7 +3793,10 @@ async fn split_stack_carves_off_count() {
             }
         }
     }
-    assert!(saw_src && saw_dst, "expected both src and dst Deltas (src={saw_src}, dst={saw_dst})");
+    assert!(
+        saw_src && saw_dst,
+        "expected both src and dst Deltas (src={saw_src}, dst={saw_dst})"
+    );
 }
 
 /// Track 13.2.b â€” DropItem removes from inventory and spawns a
@@ -3362,7 +3809,9 @@ async fn drop_item_creates_loot_bag_at_player_pos() {
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "drp", "Dropper", "Human", "Warrior").await;
     let db_url = h.db_url.clone();
-    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&db_url)
+        .await
+        .expect("open pool");
     projectdawn_server::db::save_inventory(
         &pool,
         a_char_id,
@@ -3422,7 +3871,9 @@ async fn equip_item_moves_base_to_paperdoll() {
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "eq1", "Equipper", "Human", "Warrior").await;
     let db_url = h.db_url.clone();
-    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&db_url)
+        .await
+        .expect("open pool");
     projectdawn_server::db::save_inventory(
         &pool,
         a_char_id,
@@ -3459,14 +3910,17 @@ async fn equip_item_moves_base_to_paperdoll() {
             })
             .await
         {
-            if let ServerWorldMsg::InventoryDelta { location, slot, item_path, .. } = msg {
+            if let ServerWorldMsg::InventoryDelta {
+                location,
+                slot,
+                item_path,
+                ..
+            } = msg
+            {
                 if location == "base" && slot == 0 && item_path.is_none() {
                     saw_base_clear = true;
                 }
-                if location == "equip"
-                    && slot == 0
-                    && item_path.as_deref() == Some(WEAPON)
-                {
+                if location == "equip" && slot == 0 && item_path.as_deref() == Some(WEAPON) {
                     saw_equip_set = true;
                 }
             }
@@ -3489,7 +3943,9 @@ async fn buy_item_charges_coins_and_grants_stack() {
     let h = start_both().await;
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "buy1", "Buyer", "Human", "Warrior").await;
-    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&h.db_url)
+        .await
+        .expect("open pool");
     sqlx::query("UPDATE characters SET copper = 100 WHERE id = ?1")
         .bind(a_char_id)
         .execute(&pool)
@@ -3528,9 +3984,11 @@ async fn buy_item_charges_coins_and_grants_stack() {
 
     // Coins update: 100 - (12 * 3) = 64.
     let coins = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.total_copper() == 64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.total_copper() == 64),
+        )
         .await
         .expect("CoinsUpdate at 64");
     let _ = coins;
@@ -3547,7 +4005,9 @@ async fn buy_item_rejected_when_no_vendor_in_range() {
     let h = start_both().await;
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "farbuy", "Wanderer", "Human", "Warrior").await;
-    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&h.db_url)
+        .await
+        .expect("open pool");
     // Plenty of coin, but stranded 200 m out â€” well beyond the 15 m service range.
     sqlx::query("UPDATE characters SET copper = 1000, pos_x = 200.0, pos_z = 200.0 WHERE id = ?1")
         .bind(a_char_id)
@@ -3579,7 +4039,10 @@ async fn buy_item_rejected_when_no_vendor_in_range() {
             matches!(m, ServerWorldMsg::CoinsUpdate { .. })
         })
         .await;
-    assert!(coins.is_none(), "a buy with no vendor in range must not charge coin");
+    assert!(
+        coins.is_none(),
+        "a buy with no vendor in range must not charge coin"
+    );
 }
 
 /// The same character, moved to the town spawn (origin, in range of Brom the
@@ -3590,7 +4053,9 @@ async fn buy_item_succeeds_at_the_town_vendor() {
     let h = start_both().await;
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "nearbuy", "Townie", "Human", "Warrior").await;
-    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&h.db_url)
+        .await
+        .expect("open pool");
     // At spawn (0,0,0), ~8 m from Brom â€” inside service range.
     sqlx::query("UPDATE characters SET copper = 1000, pos_x = 0.0, pos_z = 0.0 WHERE id = ?1")
         .bind(a_char_id)
@@ -3622,7 +4087,9 @@ async fn buy_item_rejects_insufficient_coins() {
     let h = start_both().await;
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "buy2", "Poorguy", "Human", "Warrior").await;
-    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&h.db_url)
+        .await
+        .expect("open pool");
     sqlx::query("UPDATE characters SET coins = 5 WHERE id = ?1")
         .bind(a_char_id)
         .execute(&pool)
@@ -3670,7 +4137,9 @@ async fn sell_item_credits_coins_and_removes_stack() {
     let h = start_both().await;
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "sell1", "Seller", "Human", "Warrior").await;
-    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&h.db_url)
+        .await
+        .expect("open pool");
     // Seed inventory: 4 potions in base[0].
     projectdawn_server::db::save_inventory(
         &pool,
@@ -3718,9 +4187,11 @@ async fn sell_item_credits_coins_and_removes_stack() {
     let _ = delta;
 
     let coins = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.total_copper() == 24)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::CoinsUpdate { coins } if coins.total_copper() == 24),
+        )
         .await
         .expect("CoinsUpdate at 24");
     let _ = coins;
@@ -3741,7 +4212,9 @@ async fn lifesteal_spell_heals_caster() {
     let h = start_both().await;
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "lsk", "Lifedrinker", "Human", "Shadow Knight").await;
-    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&h.db_url)
+        .await
+        .expect("open pool");
     sqlx::query("UPDATE characters SET level = 10, hp = 5.0 WHERE id = ?1")
         .bind(a_char_id)
         .execute(&pool)
@@ -3759,7 +4232,11 @@ async fn lifesteal_spell_heals_caster() {
     // were written against. Do NOT aim at the Wolf Run: it is a four-wolf
     // pack, and standing in it turns every cast into interrupt rolls.
     let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
-    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
+    let dir = Vec3 {
+        x: -16.0 / len,
+        y: 0.0,
+        z: -14.0 / len,
+    };
     // 3.5 s, not 2 s: at 2 s the player only clips camp 0's aggro radius, so
     // whether an enemy locks on before the wait expires depended on where it
     // happened to be wandering. Walking fully in makes the pull deterministic.
@@ -3775,9 +4252,11 @@ async fn lifesteal_spell_heals_caster() {
     // Wait for an enemy hit to confirm an enemy is in range. The
     // attacker id is the spell target.
     let hit_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(35), |m| {
-            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(35),
+            |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == a_char_id as u64),
+        )
         .await
         .expect("enemy hits player");
     let enemy_id: u64 = match hit_evt {
@@ -3791,9 +4270,11 @@ async fn lifesteal_spell_heals_caster() {
     // is the baseline we need to compare against post-cast.
     let mut baseline_hp: f32 = 0.0;
     while let Some(msg) = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_millis(200), |m| {
-            matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_millis(200),
+            |m| matches!(m, ServerWorldMsg::HealthUpdate { id, .. } if *id == a_char_id as u64),
+        )
         .await
     {
         if let ServerWorldMsg::HealthUpdate { hp, .. } = msg {
@@ -3852,7 +4333,9 @@ async fn bag_contents_persist_across_reconnect() {
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "bag1", "Bagholder", "Human", "Warrior").await;
     let db_url = h.db_url.clone();
-    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&db_url)
+        .await
+        .expect("open pool");
     projectdawn_server::db::save_inventory(
         &pool,
         a_char_id,
@@ -3911,7 +4394,9 @@ async fn equip_increases_max_hp() {
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "eq4", "Vestguy", "Human", "Warrior").await;
     let db_url = h.db_url.clone();
-    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&db_url)
+        .await
+        .expect("open pool");
     projectdawn_server::db::save_inventory(
         &pool,
         a_char_id,
@@ -3983,7 +4468,10 @@ async fn equip_item_empty_source_drops_silently() {
             matches!(m, ServerWorldMsg::InventoryDelta { .. })
         })
         .await;
-    assert!(stray.is_none(), "EquipItem on empty source must not fan a Delta");
+    assert!(
+        stray.is_none(),
+        "EquipItem on empty source must not fan a Delta"
+    );
 }
 
 /// Track 13.3 â€” InventorySnapshot on EnterWorld includes persisted
@@ -3996,7 +4484,9 @@ async fn snapshot_includes_persisted_equipment() {
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "eq3", "Equipsnap", "Human", "Warrior").await;
     let db_url = h.db_url.clone();
-    let pool = projectdawn_server::db::open(&db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&db_url)
+        .await
+        .expect("open pool");
     projectdawn_server::db::save_inventory(
         &pool,
         a_char_id,
@@ -4026,14 +4516,12 @@ async fn snapshot_includes_persisted_equipment() {
         .await
         .expect("snapshot");
     if let ServerWorldMsg::InventorySnapshot { entries } = snap {
-        let has_base = entries
-            .iter()
-            .any(|(loc, _, path, count)| loc == "base" && path == "res://items/cloth.tres" && *count == 5);
-        let has_equip = entries
-            .iter()
-            .any(|(loc, slot, path, count)| {
-                loc == "equip" && *slot == 0 && path == "res://items/sword.tres" && *count == 1
-            });
+        let has_base = entries.iter().any(|(loc, _, path, count)| {
+            loc == "base" && path == "res://items/cloth.tres" && *count == 5
+        });
+        let has_equip = entries.iter().any(|(loc, slot, path, count)| {
+            loc == "equip" && *slot == 0 && path == "res://items/sword.tres" && *count == 1
+        });
         assert!(has_base, "snapshot must include the base cloth row");
         assert!(has_equip, "snapshot must include the equipped sword row");
     }
@@ -4212,7 +4700,14 @@ async fn cast_spell_rejected_when_caster_moved_during_cast() {
     // Walk forward for the full cast duration. MAX_MOVE_SPEED Ã— 1.1 s
     // â‰ˆ 8 m on the server â€” well past the 1 m gate.
     for seq in 1..=22u32 {
-        a.send_move(seq, Vec3 { x: 0.0, y: 0.0, z: 1.0 });
+        a.send_move(
+            seq,
+            Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 1.0,
+            },
+        );
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -4242,7 +4737,10 @@ async fn cast_spell_rejected_when_caster_moved_during_cast() {
                     && buffs.iter().any(|(n, _)| n == "Healing Wave"))
         })
         .await;
-    assert!(snap.is_none(), "movement-interrupted cast must not apply the buff");
+    assert!(
+        snap.is_none(),
+        "movement-interrupted cast must not apply the buff"
+    );
 }
 
 /// Track 19A â€” a hit on a casting player rolls the channeling-based
@@ -4328,7 +4826,12 @@ async fn skill_progress_snapshot_seeded_on_enter_world() {
         .await
         .expect("SkillProgressSnapshot arrives on EnterWorld");
 
-    if let ServerWorldMsg::SkillProgressSnapshot { weapon, armor, casting } = snap {
+    if let ServerWorldMsg::SkillProgressSnapshot {
+        weapon,
+        armor,
+        casting,
+    } = snap
+    {
         // Shape: 10 weapon keys, 5 armor keys, 7 casting keys (one per
         // GDScript definition entry, regardless of whether the class
         // can train it). Casting went 6 -> 7 on 2026-07-20 when the
@@ -4346,8 +4849,20 @@ async fn skill_progress_snapshot_seeded_on_enter_world() {
         assert_eq!(armor_map.get("plate").copied(), Some(1));
         // Warrior has no casting; all six rows present at 0.
         let casting_map: std::collections::HashMap<String, u32> = casting.into_iter().collect();
-        for key in &["evocation", "alteration", "abjuration", "conjuration", "divination", "channeling"] {
-            assert_eq!(casting_map.get(*key).copied(), Some(0), "warrior casting {} is 0", key);
+        for key in &[
+            "evocation",
+            "alteration",
+            "abjuration",
+            "conjuration",
+            "divination",
+            "channeling",
+        ] {
+            assert_eq!(
+                casting_map.get(*key).copied(),
+                Some(0),
+                "warrior casting {} is 0",
+                key
+            );
         }
     }
 }
@@ -4368,7 +4883,9 @@ async fn skill_progress_persists_load_path() {
     // the server's save path would write at checkpoint / disconnect
     // after an in-flight advance â€” proves the load + snapshot path
     // independently of the rng-driven try_advance roll.
-    let pool = projectdawn_server::db::open(&h.db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(&h.db_url)
+        .await
+        .expect("open pool");
     sqlx::query(
         "INSERT INTO character_skills (char_id, kind, key, score)
          VALUES (?1, 'casting', 'alteration', 17)",
@@ -4526,9 +5043,11 @@ async fn is_gm_gates_dev_commands() {
     // GM sends the dev command â†’ the server applies it and fans the gain back.
     gm.send_grant_quest_xp(PROBE_XP);
     let gm_xp = gm
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount == PROBE_XP)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount == PROBE_XP),
+        )
         .await;
     assert!(
         gm_xp.is_some(),
@@ -4539,9 +5058,11 @@ async fn is_gm_gates_dev_commands() {
     // (only the connect-time seed, which the amount filter excludes).
     plain.send_grant_quest_xp(PROBE_XP);
     let plain_xp = plain
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount == PROBE_XP)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount == PROBE_XP),
+        )
         .await;
     assert!(
         plain_xp.is_none(),
@@ -4583,7 +5104,10 @@ async fn respawn_requires_being_dead() {
             matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. } if *id == cid && *hp <= 0.01)
         })
         .await;
-    assert!(dead.is_some(), "DeathBroadcast should kill the player (hp -> 0)");
+    assert!(
+        dead.is_some(),
+        "DeathBroadcast should kill the player (hp -> 0)"
+    );
 
     // ... then Respawn now restores HP to ~25%.
     c.send_respawn();
@@ -4598,7 +5122,6 @@ async fn respawn_requires_being_dead() {
         "a dead player's Respawn should still restore HP to ~25%"
     );
 }
-
 
 /// Playtest 2026-09-23 â€” the dead-state gate. A dead player could loot
 /// their own corpse before respawning and keep all the gear, voiding the
@@ -4626,7 +5149,10 @@ async fn dead_players_cannot_loot_or_touch_inventory() {
                 if text.contains("while dead"))
         })
         .await;
-    assert!(refusal.is_some(), "dead MoveItem must be refused with a chat line");
+    assert!(
+        refusal.is_some(),
+        "dead MoveItem must be refused with a chat line"
+    );
 
     // Loot intent while dead: refused BEFORE any bag lookup (id need not exist).
     a.send_loot_all(999_999);
@@ -4636,7 +5162,10 @@ async fn dead_players_cannot_loot_or_touch_inventory() {
                 if text.contains("while dead"))
         })
         .await;
-    assert!(refusal2.is_some(), "dead LootAll must be refused with a chat line");
+    assert!(
+        refusal2.is_some(),
+        "dead LootAll must be refused with a chat line"
+    );
 
     // Respawn is still allowed and clears the gate: the bind/spawn Teleport
     // arrives, and a subsequent inventory intent is no longer dead-refused.
@@ -4676,11 +5205,20 @@ async fn nan_move_direction_is_dropped() {
     let _ = b_char_id;
 
     // Baseline: an honest move fans a finite Position for A at B.
-    a.send_move(1, Vec3 { x: 1.0, y: 0.0, z: 0.0 });
+    a.send_move(
+        1,
+        Vec3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+    );
     let baseline = b
-        .wait_for(CHANNEL_POSITION, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::Position { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_POSITION,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::Position { id, .. } if *id == a_char_id as u64),
+        )
         .await
         .expect("B sees A's baseline Position");
     if let ServerWorldMsg::Position { pos, .. } = &baseline {
@@ -4693,8 +5231,22 @@ async fn nan_move_direction_is_dropped() {
     // Stop, then send the forgery: NaN x, Infinity z. If the guard is
     // missing, the tick integrates this into conn.pos and every Position
     // broadcast for A goes NaN from here on.
-    a.send_move(2, Vec3 { x: 0.0, y: 0.0, z: 0.0 });
-    a.send_move(3, Vec3 { x: f32::NAN, y: 0.0, z: f32::INFINITY });
+    a.send_move(
+        2,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+    );
+    a.send_move(
+        3,
+        Vec3 {
+            x: f32::NAN,
+            y: 0.0,
+            z: f32::INFINITY,
+        },
+    );
     for _ in 0..8 {
         tick_one(&mut a.client, &mut a.transport);
         tick_one(&mut b.client, &mut b.transport);
@@ -4704,11 +5256,20 @@ async fn nan_move_direction_is_dropped() {
     // The forged packet must not have consumed its sequence number (it was
     // dropped before bookkeeping), so an honest move re-using seq 3 applies â€”
     // and the Position it produces is still finite.
-    a.send_move(3, Vec3 { x: 0.0, y: 0.0, z: 1.0 });
+    a.send_move(
+        3,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 1.0,
+        },
+    );
     let after = b
-        .wait_for(CHANNEL_POSITION, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::Position { id, .. } if *id == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_POSITION,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::Position { id, .. } if *id == a_char_id as u64),
+        )
         .await
         .expect("A still moves after the forged packet");
     if let ServerWorldMsg::Position { pos, .. } = &after {
@@ -4737,7 +5298,9 @@ async fn dead_group_member_gets_no_xp_share() {
     let (a_session, a_char_id, _stale_token) =
         provision_client(&h.auth_url, "xpsolo", "Xpsolo", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "xpsolo", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "xpsolo", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "xpdead", "Xpdead", "Elf", "Cleric").await;
@@ -4765,9 +5328,11 @@ async fn dead_group_member_gets_no_xp_share() {
         tick_one(&mut b.client, &mut b.transport);
         tokio::time::sleep(TICK_DT).await;
     }
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::GroupRoster { members, .. } if members.len() == 2)
-    })
+    a.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::GroupRoster { members, .. } if members.len() == 2),
+    )
     .await
     .expect("A sees the two-member roster");
 
@@ -4808,12 +5373,10 @@ async fn dead_group_member_gets_no_xp_share() {
         tick_one(&mut a.client, &mut a.transport);
         tick_one(&mut b.client, &mut b.transport);
         while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
-            if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(
-                &bytes,
-                bincode_cfg(),
-            ) {
-                if matches!(msg, ServerWorldMsg::Hit { attacker, .. } if attacker == enemy_id)
-                {
+            if let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
+                if matches!(msg, ServerWorldMsg::Hit { attacker, .. } if attacker == enemy_id) {
                     adjacent = true;
                     break 'adjacency;
                 }
@@ -4837,9 +5400,11 @@ async fn dead_group_member_gets_no_xp_share() {
     // A collects the FULL solo amount: the dead member neither shares nor
     // dilutes (263 = kill_xp(1); a leaked two-way split would pay 157).
     let xp_evt = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0),
+        )
         .await
         .expect("the living killer still collects");
     if let ServerWorldMsg::XpGained { amount, .. } = xp_evt {
@@ -4852,11 +5417,16 @@ async fn dead_group_member_gets_no_xp_share() {
     // B (dead, still connected under the death lock) gets nothing. The
     // connect-time bar seed is amount 0, so filter on positive amounts.
     let leak = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
-            matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(2),
+            |m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0),
+        )
         .await;
-    assert!(leak.is_none(), "a dead group member must receive no XP share");
+    assert!(
+        leak.is_none(),
+        "a dead group member must receive no XP share"
+    );
 }
 
 // Silent-refusals closeout (2026-09-30): the cast resolver deducts mana at
@@ -4931,7 +5501,9 @@ async fn idle_enemy_position_fan_is_gated() {
     let (a_session, a_char_id, _stale_token) =
         provision_client(&h.auth_url, "idlefan", "Idlefan", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "idlefan", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "idlefan", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
@@ -4955,10 +5527,9 @@ async fn idle_enemy_position_fan_is_gated() {
     while Instant::now() < end {
         tick_one(&mut a.client, &mut a.transport);
         while let Some(bytes) = a.client.receive_message(CHANNEL_POSITION) {
-            if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(
-                &bytes,
-                bincode_cfg(),
-            ) {
+            if let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
                 if let ServerWorldMsg::Position { id, sequence, .. } = msg {
                     if id == statue_id {
                         count += 1;
@@ -4994,7 +5565,9 @@ async fn idle_enemy_position_fan_is_gated() {
 /// Pre-seed a character's world position before it connects, the same slot
 /// `set_char_level` uses.
 async fn set_char_pos(db_url: &str, char_id: i64, x: f32, z: f32) {
-    let pool = projectdawn_server::db::open(db_url).await.expect("open pool");
+    let pool = projectdawn_server::db::open(db_url)
+        .await
+        .expect("open pool");
     sqlx::query("UPDATE characters SET pos_x = ?1, pos_y = 0.0, pos_z = ?2 WHERE id = ?3")
         .bind(x as f64)
         .bind(z as f64)
@@ -5042,10 +5615,9 @@ async fn wait_on_a_pumping_b(
             b.send_heartbeat();
         }
         while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
-            if let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(
-                &bytes,
-                bincode_cfg(),
-            ) {
+            if let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            {
                 if pred(&msg) {
                     return Some(msg);
                 }
@@ -5094,9 +5666,11 @@ async fn own_position(c: &mut WorldClient, char_id: i64) -> Option<Vec3> {
     while Instant::now() < deadline {
         let left = deadline.saturating_duration_since(Instant::now());
         match c
-            .wait_for(CHANNEL_POSITION, left, |m| {
-                matches!(m, ServerWorldMsg::Position { id, .. } if *id == char_id as u64)
-            })
+            .wait_for(
+                CHANNEL_POSITION,
+                left,
+                |m| matches!(m, ServerWorldMsg::Position { id, .. } if *id == char_id as u64),
+            )
             .await
         {
             Some(ServerWorldMsg::Position { pos, .. }) => last = Some(pos),
@@ -5134,9 +5708,11 @@ async fn summon_skeleton(b: &mut WorldClient, a: &mut WorldClient, b_char_id: i6
     pump_both_for(a, b, Duration::from_millis(3100)).await;
     b.send_cast_spell("Summon Skeleton", None);
     let evt = b
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == b_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == b_char_id as u64),
+        )
         .await
         .expect("B sees its own PetSpawn");
     match evt {
@@ -5158,7 +5734,9 @@ async fn enemy_crossing_a_cell_boundary_spawns_and_despawns_for_players() {
     let (b_session, b_char_id, _stale_token) =
         provision_client(&h.auth_url, "aoipull", "Aoipull", "Elf", "Cleric").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "aoipull", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "aoipull", true)
+        .await
+        .expect("set is_gm");
     set_char_pos(&h.db_url, b_char_id, 248.0, 60.0).await;
     let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
 
@@ -5182,27 +5760,61 @@ async fn enemy_crossing_a_cell_boundary_spawns_and_despawns_for_players() {
         ServerWorldMsg::EnemySpawn { id, .. } => id,
         _ => unreachable!(),
     };
-    let early = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_millis(300), |m| {
-        matches!(m, ServerWorldMsg::EnemySpawn { id, .. } if *id == runner_id)
-    })
+    let early = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_millis(300),
+        |m| matches!(m, ServerWorldMsg::EnemySpawn { id, .. } if *id == runner_id),
+    )
     .await;
-    assert!(early.is_none(), "a mob two cells away must not be seeded to A");
+    assert!(
+        early.is_none(),
+        "a mob two cells away must not be seeded to A"
+    );
 
     let mut seq: u32 = 1;
-    walk_pumping(&mut b, &mut a, &mut seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 }, 40).await;
-    let spawned = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(15), |m| {
-        matches!(m, ServerWorldMsg::EnemySpawn { id, .. } if *id == runner_id)
-    })
+    walk_pumping(
+        &mut b,
+        &mut a,
+        &mut seq,
+        Vec3 {
+            x: -1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        40,
+    )
+    .await;
+    let spawned = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(15),
+        |m| matches!(m, ServerWorldMsg::EnemySpawn { id, .. } if *id == runner_id),
+    )
     .await;
     assert!(
         spawned.is_some(),
         "A must get an EnemySpawn when the chasing mob crosses into a cell adjacent to A's"
     );
 
-    walk_pumping(&mut b, &mut a, &mut seq, Vec3 { x: 1.0, y: 0.0, z: 0.0 }, 50).await;
-    let despawned = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(15), |m| {
-        matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == runner_id)
-    })
+    walk_pumping(
+        &mut b,
+        &mut a,
+        &mut seq,
+        Vec3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        50,
+    )
+    .await;
+    let despawned = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(15),
+        |m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == runner_id),
+    )
     .await;
     assert!(
         despawned.is_some(),
@@ -5228,14 +5840,31 @@ async fn pet_following_its_owner_across_a_cell_spawns_for_players() {
 
     let pet_id = summon_skeleton(&mut b, &mut a, b_char_id).await;
     assert!(pet_id >= PET_ID_BASE);
-    let early = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_millis(300), |m| {
-        matches!(m, ServerWorldMsg::PetSpawn { id, .. } if *id == pet_id)
-    })
+    let early = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_millis(300),
+        |m| matches!(m, ServerWorldMsg::PetSpawn { id, .. } if *id == pet_id),
+    )
     .await;
-    assert!(early.is_none(), "a pet two cells away must not be seeded to A");
+    assert!(
+        early.is_none(),
+        "a pet two cells away must not be seeded to A"
+    );
 
     let mut seq: u32 = 1;
-    walk_pumping(&mut b, &mut a, &mut seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 }, 40).await;
+    walk_pumping(
+        &mut b,
+        &mut a,
+        &mut seq,
+        Vec3 {
+            x: -1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        40,
+    )
+    .await;
     let spawned = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(15), |m| {
         matches!(m, ServerWorldMsg::PetSpawn { id, owner, .. }
             if *id == pet_id && *owner == b_char_id as u64)
@@ -5265,14 +5894,31 @@ async fn player_crossing_into_view_of_an_existing_pet_gets_pet_spawn() {
     pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
 
     let pet_id = summon_skeleton(&mut b, &mut a, b_char_id).await;
-    let early = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_millis(300), |m| {
-        matches!(m, ServerWorldMsg::PetSpawn { id, .. } if *id == pet_id)
-    })
+    let early = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_millis(300),
+        |m| matches!(m, ServerWorldMsg::PetSpawn { id, .. } if *id == pet_id),
+    )
     .await;
-    assert!(early.is_none(), "A starts two cells from the pet and must not have it yet");
+    assert!(
+        early.is_none(),
+        "A starts two cells from the pet and must not have it yet"
+    );
 
     let mut seq: u32 = 1;
-    walk_pumping(&mut a, &mut b, &mut seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 }, 40).await;
+    walk_pumping(
+        &mut a,
+        &mut b,
+        &mut seq,
+        Vec3 {
+            x: -1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        40,
+    )
+    .await;
     let spawned = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(10), |m| {
         matches!(m, ServerWorldMsg::PetSpawn { id, owner, .. }
             if *id == pet_id && *owner == b_char_id as u64)
@@ -5319,8 +5965,15 @@ async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
     let mut b_x: f32 = 119.0;
     let mut pet_despawned = false;
     let mut last_pet_pos: Option<Vec3> = None;
-    let west = Vec3 { x: -1.0, y: 0.0, z: 0.0 };
-    let drain_b = |b: &mut WorldClient, b_x: &mut f32, pet_despawned: &mut bool, last_pet_pos: &mut Option<Vec3>| {
+    let west = Vec3 {
+        x: -1.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    let drain_b = |b: &mut WorldClient,
+                   b_x: &mut f32,
+                   pet_despawned: &mut bool,
+                   last_pet_pos: &mut Option<Vec3>| {
         while let Some(bytes) = b.client.receive_message(CHANNEL_POSITION) {
             if let Ok((msg, _)) =
                 bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
@@ -5346,7 +5999,10 @@ async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
     };
     let mut ticks: u32 = 0;
     while b_x > -2.0 {
-        assert!(ticks < 800, "B never reached cell (-1,0): x = {b_x} after {ticks} moves");
+        assert!(
+            ticks < 800,
+            "B never reached cell (-1,0): x = {b_x} after {ticks} moves"
+        );
         b.send_move(seq, west);
         seq += 1;
         ticks += 1;
@@ -5359,7 +6015,10 @@ async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
         drain_b(&mut b, &mut b_x, &mut pet_despawned, &mut last_pet_pos);
         tokio::time::sleep(TICK_DT).await;
     }
-    assert!(!pet_despawned, "B was sent an EntityDespawn for its own pet on walking out of view");
+    assert!(
+        !pet_despawned,
+        "B was sent an EntityDespawn for its own pet on walking out of view"
+    );
 
     // Out here only the owner rule delivers the parked pet's keepalives:
     // the pet's cell (1,0) is not adjacent to B's (-1,0). Wait for the next
@@ -5376,13 +6035,17 @@ async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
         drain_b(&mut b, &mut b_x, &mut pet_despawned, &mut last_pet_pos);
         tokio::time::sleep(TICK_DT).await;
     }
-    let parked = last_pet_pos.expect("the parked pet's Position must keep reaching its owner two cells away");
+    let parked = last_pet_pos
+        .expect("the parked pet's Position must keep reaching its owner two cells away");
     assert!(
         (parked.x - 120.5).abs() < 1.0,
         "a guarding pet should still be where it was parked, got x = {}",
         parked.x
     );
-    assert!(!pet_despawned, "B was sent an EntityDespawn for its own pet while parked out of view");
+    assert!(
+        !pet_despawned,
+        "B was sent an EntityDespawn for its own pet while parked out of view"
+    );
 
     // The point of the rule: the pet can be called back from out of view.
     // The proof is that the owner SEES it set off (a few metres west of
@@ -5414,7 +6077,10 @@ async fn owner_keeps_seeing_a_pet_parked_two_cells_away() {
         "after /pet follow the owner must watch the pet set off toward them (last pet x = {:?})",
         last_pet_pos.map(|p| p.x)
     );
-    assert!(!pet_despawned, "B was sent an EntityDespawn for its own pet during the walk back");
+    assert!(
+        !pet_despawned,
+        "B was sent an EntityDespawn for its own pet during the walk back"
+    );
 }
 
 // ── The world clock ───────────────────────────────────────────────────────
@@ -5458,7 +6124,10 @@ async fn every_player_is_told_the_same_hour_on_entering_the_world() {
     );
 
     for (who, hour) in [("A", a_hour), ("B", b_hour)] {
-        assert!((0.0..24.0).contains(&hour), "{who} was told hour {hour}, outside the day");
+        assert!(
+            (0.0..24.0).contains(&hour),
+            "{who} was told hour {hour}, outside the day"
+        );
     }
     // B entered a second or two after A; a game hour is 50 real seconds, so
     // the two differ by a few hundredths of an hour at most. Compare around
@@ -5514,7 +6183,10 @@ async fn inspect_player_refuses_beyond_range() {
         })
         .await
         .unwrap_or_else(|| panic!("a {label} inspect still closes the client's waiting state"));
-        if let ServerWorldMsg::InspectResult { target_name, slots, .. } = result {
+        if let ServerWorldMsg::InspectResult {
+            target_name, slots, ..
+        } = result
+        {
             assert!(target_name.is_empty(), "a {label} inspect names nobody");
             assert!(slots.is_empty(), "a {label} inspect discloses no slots");
         }
@@ -5567,7 +6239,9 @@ async fn gm_commands_are_audited_only_when_authorized() {
     let (gm_session, gm_char, _stale_token) =
         provision_client(&h.auth_url, "auditgm", "Auditgm", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "auditgm", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "auditgm", true)
+        .await
+        .expect("set is_gm");
     let gm_token = request_world_token(&h.auth_url, &gm_session, gm_char).await;
     let (pl_session, pl_char, pl_token) =
         provision_client(&h.auth_url, "auditpl", "Auditpl", "Human", "Warrior").await;
@@ -5587,9 +6261,12 @@ async fn gm_commands_are_audited_only_when_authorized() {
 
     // Wait on effects, not on a clock. The GM's dev spawn is fanned in the
     // same tick as the flush that records it, after it.
-    wait_on_a_pumping_b(&mut gm, &mut plain, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Audit Dummy")
-    })
+    wait_on_a_pumping_b(
+        &mut gm,
+        &mut plain,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Audit Dummy"),
+    )
     .await
     .expect("the GM's dev spawn takes effect");
     wait_on_a_pumping_b(&mut plain, &mut gm, Duration::from_secs(5), |m| {
@@ -5609,20 +6286,33 @@ async fn gm_commands_are_audited_only_when_authorized() {
     .expect("read gm_actions");
     let seen: Vec<(String, i64, String, String)> = rows
         .iter()
-        .map(|r| (r.get("actor"), r.get("target_char"), r.get("command"), r.get("args")))
+        .map(|r| {
+            (
+                r.get("actor"),
+                r.get("target_char"),
+                r.get("command"),
+                r.get("args"),
+            )
+        })
         .collect();
-    assert_eq!(seen.len(), 2, "exactly the GM's two commands are recorded, got {seen:?}");
+    assert_eq!(
+        seen.len(),
+        2,
+        "exactly the GM's two commands are recorded, got {seen:?}"
+    );
     for (actor, target_char, _, args) in &seen {
         assert_eq!(actor, "auditgm", "only the authorized account appears");
         assert_eq!(*target_char, gm_char);
-        assert!(args.ends_with("via=gm"), "the row names the authority: {args}");
+        assert!(
+            args.ends_with("via=gm"),
+            "the row names the authority: {args}"
+        );
     }
     assert_eq!(seen[0].2, "grant_xp");
     assert!(seen[0].3.starts_with("amount=250"));
     assert_eq!(seen[1].2, "dev_spawn_mob");
     assert!(seen[1].3.contains("Audit Dummy"));
 }
-
 
 /// The Test Panel's crafting-materials button sends about 34 dev commands in
 /// one frame. Every one of them must be recorded (the first cut of the audit
@@ -5638,7 +6328,9 @@ async fn gm_command_burst_is_recorded_whole() {
     let (gm_session, gm_char, _stale_token) =
         provision_client(&h.auth_url, "burstgm", "Burstgm", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "burstgm", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "burstgm", true)
+        .await
+        .expect("set is_gm");
     let gm_token = request_world_token(&h.auth_url, &gm_session, gm_char).await;
     let mut gm = WorldClient::start(gm_token, &gm_session, gm_char).await;
 
@@ -5647,9 +6339,11 @@ async fn gm_command_burst_is_recorded_whole() {
     }
     // Marker: ordered after the burst, fanned after the flush that records it.
     gm.send_dev_spawn("Burst Marker", 1, 10.0, 0, 0.0, 0.0);
-    gm.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Burst Marker")
-    })
+    gm.wait_for(
+        CHANNEL_SYSTEM,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Burst Marker"),
+    )
     .await
     .expect("the marker spawn takes effect");
 
@@ -5732,8 +6426,12 @@ async fn charm_refuses_a_target_out_of_range() {
         provision_client(&h.auth_url, "farspawn", "Farspawn", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
     // Both are GMs: B conjures the far dummy, A conjures a near one at the end.
-    db::set_account_gm(&pool, "farench", true).await.expect("set is_gm");
-    db::set_account_gm(&pool, "farspawn", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "farench", true)
+        .await
+        .expect("set is_gm");
+    db::set_account_gm(&pool, "farspawn", true)
+        .await
+        .expect("set is_gm");
     set_char_pos(&h.db_url, b_char_id, 248.0, 60.0).await;
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let b_token = request_world_token(&h.auth_url, &b_session, b_char_id).await;
@@ -5743,9 +6441,12 @@ async fn charm_refuses_a_target_out_of_range() {
     pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
 
     b.send_dev_spawn("Far Dummy", 1, 30.0, 0, 0.0, 0.0);
-    let spawn_evt = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Far Dummy")
-    })
+    let spawn_evt = wait_on_a_pumping_b(
+        &mut b,
+        &mut a,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Far Dummy"),
+    )
     .await
     .expect("the dummy spawns beside B");
     let enemy_id: u64 = match spawn_evt {
@@ -5756,31 +6457,46 @@ async fn charm_refuses_a_target_out_of_range() {
     a.send_cast_start("Charm", 2.0);
     pump_both_for(&mut a, &mut b, Duration::from_millis(2150)).await;
     a.send_cast_spell("Charm", Some(enemy_id));
-    wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::CastFail { reason, .. } if reason.contains("too far away"))
-    })
+    wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::CastFail { reason, .. } if reason.contains("too far away")),
+    )
     .await
     .expect("an out-of-range charm is refused with the line");
 
     // Nothing was charmed: no pet for A, and B never sees its dummy despawn.
-    let pet = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_millis(600), |m| {
-        matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-    })
+    let pet = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_millis(600),
+        |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+    )
     .await;
     assert!(pet.is_none(), "nothing is charmed from out of range");
-    let gone = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_millis(300), |m| {
-        matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id)
-    })
+    let gone = wait_on_a_pumping_b(
+        &mut b,
+        &mut a,
+        Duration::from_millis(300),
+        |m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id),
+    )
     .await;
-    assert!(gone.is_none(), "the dummy is still standing where B conjured it");
+    assert!(
+        gone.is_none(),
+        "the dummy is still standing where B conjured it"
+    );
 
     // A refused cast costs NOTHING, cooldown included. Charm's cooldown is
     // 60 s; when refusals were handled after the stamp, the cast above would
     // have locked Charm out for a minute. A charms a dummy at its feet at once.
     a.send_dev_spawn("Near Dummy", 1, 30.0, 0, 0.0, 0.0);
-    let near_evt = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Near Dummy")
-    })
+    let near_evt = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Near Dummy"),
+    )
     .await
     .expect("the near dummy spawns beside A");
     let near_id: u64 = match near_evt {
@@ -5790,9 +6506,12 @@ async fn charm_refuses_a_target_out_of_range() {
     a.send_cast_start("Charm", 2.0);
     pump_both_for(&mut a, &mut b, Duration::from_millis(2150)).await;
     a.send_cast_spell("Charm", Some(near_id));
-    wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-    })
+    wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+    )
     .await
     .expect("the refused cast burned no cooldown: the next Charm lands");
 }
@@ -5821,14 +6540,28 @@ async fn charm_converts_a_camp_mob_that_is_fighting_someone_else() {
     // fight then happens under 20 m from A, who stays at spawn, outside that
     // circle and inside charm range (25 m).
     let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
-    let dir = Vec3 { x: -16.0 / len, y: 0.0, z: -14.0 / len };
+    let dir = Vec3 {
+        x: -16.0 / len,
+        y: 0.0,
+        z: -14.0 / len,
+    };
     let mut seq: u32 = 1;
     walk_pumping(&mut b, &mut a, &mut seq, dir, 48).await;
-    b.send_move(seq, Vec3 { x: 0.0, y: 0.0, z: 0.0 });
+    b.send_move(
+        seq,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+    );
 
-    let hit_evt = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_secs(35), |m| {
-        matches!(m, ServerWorldMsg::Hit { target, .. } if *target == b_char_id as u64)
-    })
+    let hit_evt = wait_on_a_pumping_b(
+        &mut b,
+        &mut a,
+        Duration::from_secs(35),
+        |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == b_char_id as u64),
+    )
     .await
     .expect("the skeleton engages B");
     let enemy_id: u64 = match hit_evt {
@@ -5840,22 +6573,30 @@ async fn charm_converts_a_camp_mob_that_is_fighting_someone_else() {
     pump_both_for(&mut a, &mut b, Duration::from_millis(2150)).await;
     a.send_cast_spell("Charm", Some(enemy_id));
 
-    wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id)
-    })
+    wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == enemy_id),
+    )
     .await
     .expect("the fighting mob's enemy id despawns on charm");
-    let pet_spawn = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(5), |m| {
-        matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-    })
+    let pet_spawn = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(5),
+        |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+    )
     .await
     .expect("it comes back as the caster's pet");
     if let ServerWorldMsg::PetSpawn { id, pet_name, .. } = pet_spawn {
-        assert!(id >= PET_ID_BASE, "charmed pet id must be in the pet partition");
+        assert!(
+            id >= PET_ID_BASE,
+            "charmed pet id must be in the pet partition"
+        );
         assert_eq!(pet_name, "Decrepit Skeleton");
     }
 }
-
 
 // ── Cast target pre-flight: reach, and refusals that cost nothing ─────────
 
@@ -5873,7 +6614,9 @@ async fn ally_heal_refuses_out_of_range_and_costs_nothing() {
     let (b_session, b_char_id, _stale_token) =
         provision_client(&h.auth_url, "farhurt", "Farhurt", "Human", "Warrior").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "farhurt", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "farhurt", true)
+        .await
+        .expect("set is_gm");
     // (248, 60): two cells from spawn and clear of every camp. Not (200, 0),
     // which sits inside the Ancient Wraith's aggro circle.
     set_char_pos(&h.db_url, b_char_id, 248.0, 60.0).await;
@@ -5900,9 +6643,12 @@ async fn ally_heal_refuses_out_of_range_and_costs_nothing() {
     pump_both_for(&mut a, &mut b, Duration::from_millis(1150)).await;
     a.send_cast_spell("Healing Wave", Some(b_char_id as u64));
 
-    wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::CastFail { reason, .. } if reason.contains("too far away"))
-    })
+    wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::CastFail { reason, .. } if reason.contains("too far away")),
+    )
     .await
     .expect("an out-of-range heal is refused with the line");
     // "Costs no mana" means the mana never DIPS: not deducted and handed back,
@@ -5913,14 +6659,20 @@ async fn ally_heal_refuses_out_of_range_and_costs_nothing() {
             if *id == a_char_id as u64 && *mp < *max_mp - 1.0)
     })
     .await;
-    assert!(dipped.is_none(), "a refused heal never takes the mana (saw {dipped:?})");
+    assert!(
+        dipped.is_none(),
+        "a refused heal never takes the mana (saw {dipped:?})"
+    );
     // B was not healed (Healing Wave lands 15 at once; regen is 1 or 2 a tick).
     let healed = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_millis(700), |m| {
         matches!(m, ServerWorldMsg::HealthUpdate { id, hp, .. }
             if *id == b_char_id as u64 && *hp >= hurt_hp + 10.0)
     })
     .await;
-    assert!(healed.is_none(), "a target two cells away must not be healed");
+    assert!(
+        healed.is_none(),
+        "a target two cells away must not be healed"
+    );
 
     // And no cooldown was burned: A heals ITSELF straight away, inside what
     // would have been Healing Wave's 6 s cooldown.
@@ -5959,17 +6711,26 @@ async fn pvp_nuke_refuses_out_of_range() {
     pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
 
     a.send_cast_spell("Smite", Some(b_char_id as u64));
-    let line = wait_on_a_pumping_b(&mut a, &mut b, Duration::from_secs(3), |m| {
-        matches!(m, ServerWorldMsg::CastFail { reason, .. } if reason.contains("too far away"))
-    })
+    let line = wait_on_a_pumping_b(
+        &mut a,
+        &mut b,
+        Duration::from_secs(3),
+        |m| matches!(m, ServerWorldMsg::CastFail { reason, .. } if reason.contains("too far away")),
+    )
     .await
     .expect("an out-of-range PvP nuke is refused with the line");
     if let ServerWorldMsg::CastFail { reason, .. } = line {
-        assert!(!reason.contains("Farmark"), "a target out of reach is not named (got {reason:?})");
+        assert!(
+            !reason.contains("Farmark"),
+            "a target out of reach is not named (got {reason:?})"
+        );
     }
-    let hit = wait_on_a_pumping_b(&mut b, &mut a, Duration::from_millis(700), |m| {
-        matches!(m, ServerWorldMsg::Hit { target, .. } if *target == b_char_id as u64)
-    })
+    let hit = wait_on_a_pumping_b(
+        &mut b,
+        &mut a,
+        Duration::from_millis(700),
+        |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == b_char_id as u64),
+    )
     .await;
     assert!(hit.is_none(), "a player two cells away must not be hit");
 }
@@ -6030,9 +6791,11 @@ async fn banned_account_is_kicked_out_of_the_world() {
         tick_one(&mut a.client, &mut a.transport);
         tokio::time::sleep(TICK_DT).await;
     }
-    assert!(a.client.is_disconnected(), "the kicked connection is dropped by the server");
+    assert!(
+        a.client.is_disconnected(),
+        "the kicked connection is dropped by the server"
+    );
 }
-
 
 /// A cast the server was always going to refuse must cost NOTHING. Until the
 /// bind sprint, Bind Affinity had no server arm and the cast took 30 mana,
@@ -6105,18 +6868,23 @@ async fn a_pet_stays_with_its_owner_after_gate() {
     set_char_level(&h.db_url, a_char_id, 8).await;
     set_char_pos(&h.db_url, a_char_id, 15.0, 0.0).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "petgate", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "petgate", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
 
     a.send_cast_start("Summon Skeleton", 3.0);
-    a.pump_for(Duration::from_millis(3_000) + CAST_RELEASE_MARGIN).await;
+    a.pump_for(Duration::from_millis(3_000) + CAST_RELEASE_MARGIN)
+        .await;
     a.send_cast_spell("Summon Skeleton", None);
     let pet_spawn = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("the skeleton is summoned");
     let pet_id: u64 = match pet_spawn {
@@ -6143,7 +6911,11 @@ async fn a_pet_stays_with_its_owner_after_gate() {
     // suite ran it out of reach: the swing missed and the pet had nothing
     // to inherit.
     let mut seq: u32 = 1;
-    let start = Vec3 { x: 15.0, y: 0.0, z: 0.0 };
+    let start = Vec3 {
+        x: 15.0,
+        y: 0.0,
+        z: 0.0,
+    };
     walk_until_within(&mut a, &mut seq, a_char_id, start, dummy_pos, 1.5).await;
     a.send_attack(dummy, "", false, DamageType::Physical);
     let engaged = a
@@ -6153,22 +6925,34 @@ async fn a_pet_stays_with_its_owner_after_gate() {
                     && ((pos.x - dummy_pos.x).powi(2) + (pos.z - dummy_pos.z).powi(2)).sqrt() < 3.0)
         })
         .await;
-    assert!(engaged.is_some(), "the pet inherits the owner's target and closes on the dummy");
+    assert!(
+        engaged.is_some(),
+        "the pet inherits the owner's target and closes on the dummy"
+    );
 
     // Gate home. The dummy cannot interrupt (no damage, no legs). The summon
     // started the global cooldown; let it pass first, with the same margin,
     // since the server starts that clock when IT accepts the summon.
-    a.pump_for(Duration::from_millis(2_000) + CAST_RELEASE_MARGIN).await;
+    a.pump_for(Duration::from_millis(2_000) + CAST_RELEASE_MARGIN)
+        .await;
     a.send_cast_start("Gate", 5.0);
-    a.pump_for(Duration::from_millis(5_000) + CAST_RELEASE_MARGIN).await;
+    a.pump_for(Duration::from_millis(5_000) + CAST_RELEASE_MARGIN)
+        .await;
     a.send_cast_spell("Gate", None);
     let tp = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| matches!(m, ServerWorldMsg::Teleport { .. }))
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::Teleport { .. })
+        })
         .await;
     let Some(ServerWorldMsg::Teleport { pos: dest }) = tp else {
         panic!("Gate teleports the owner");
     };
-    assert!(dest.x.abs() < 1.0 && dest.z.abs() < 1.0, "to the birth bind at the spawn, got ({}, {})", dest.x, dest.z);
+    assert!(
+        dest.x.abs() < 1.0 && dest.z.abs() < 1.0,
+        "to the birth bind at the spawn, got ({}, {})",
+        dest.x,
+        dest.z
+    );
 
     // For the next three seconds every Position of the pet stays beside the
     // owner. On the previous code it is walking back to the dummy at 3 m/s,
@@ -6182,9 +6966,11 @@ async fn a_pet_stays_with_its_owner_after_gate() {
     while Instant::now() < end {
         let left = end.saturating_duration_since(Instant::now());
         let Some(ServerWorldMsg::Position { pos, .. }) = a
-            .wait_for(CHANNEL_POSITION, left, |m| {
-                matches!(m, ServerWorldMsg::Position { id, .. } if *id == pet_id)
-            })
+            .wait_for(
+                CHANNEL_POSITION,
+                left,
+                |m| matches!(m, ServerWorldMsg::Position { id, .. } if *id == pet_id),
+            )
             .await
         else {
             break;
@@ -6194,9 +6980,15 @@ async fn a_pet_stays_with_its_owner_after_gate() {
         }
         pet_positions += 1;
         let off = ((pos.x - dest.x).powi(2) + (pos.z - dest.z).powi(2)).sqrt();
-        assert!(off < 6.0, "the pet stays with its owner after Gate; it was {off:.1} m away");
+        assert!(
+            off < 6.0,
+            "the pet stays with its owner after Gate; it was {off:.1} m away"
+        );
     }
-    assert!(pet_positions > 0, "the pet's position is still fanned to its owner after the port");
+    assert!(
+        pet_positions > 0,
+        "the pet's position is still fanned to its owner after the port"
+    );
 }
 
 /// The review's other find: a CHARMED mob rode Gate into the town square and,
@@ -6212,7 +7004,9 @@ async fn a_charmed_mob_is_released_in_place_when_its_charmer_gates() {
     set_char_level(&h.db_url, a_char_id, 14).await;
     set_char_pos(&h.db_url, a_char_id, 15.0, 0.0).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "charmgate", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "charmgate", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -6233,9 +7027,11 @@ async fn a_charmed_mob_is_released_in_place_when_its_charmer_gates() {
     a.pump_for(Duration::from_millis(1_700)).await;
     a.send_cast_spell("Siren's Song", Some(dummy));
     let pet_spawn = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
-            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
         .await
         .expect("the charm lands");
     let pet_id: u64 = match pet_spawn {
@@ -6298,7 +7094,9 @@ async fn an_interrupted_cast_costs_mana_in_proportion() {
         provision_client(&h.auth_url, "channel", "Channa", "Human", "Cleric").await;
     set_char_level(&h.db_url, a_char_id, 10).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "channel", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "channel", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -6318,7 +7116,9 @@ async fn an_interrupted_cast_costs_mana_in_proportion() {
         while Instant::now() < end {
             tick_one(&mut a.client, &mut a.transport);
             while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
-                let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) else {
+                let Ok((msg, _)) =
+                    bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+                else {
                     continue;
                 };
                 match msg {
@@ -6327,7 +7127,9 @@ async fn an_interrupted_cast_costs_mana_in_proportion() {
                     {
                         interrupted = true;
                     }
-                    ServerWorldMsg::ChatMessage { text, .. } if text.contains("concentration breaks") => {
+                    ServerWorldMsg::ChatMessage { text, .. }
+                        if text.contains("concentration breaks") =>
+                    {
                         let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
                         charged = digits.parse().ok();
                     }
@@ -6350,7 +7152,10 @@ async fn an_interrupted_cast_costs_mana_in_proportion() {
     }
     assert!(interrupted, "a hit during the bar interrupts the cast");
     let n = charged.expect("the caster is told what the interrupt cost");
-    assert!((1..=30).contains(&n), "the charge is a fraction of Bind Affinity's 30 mana, got {n}");
+    assert!(
+        (1..=30).contains(&n),
+        "the charge is a fraction of Bind Affinity's 30 mana, got {n}"
+    );
     let (mp, max_mp) = settled.expect("the true mana follows the CastFail");
     assert!(
         ((max_mp - mp) - n as f32).abs() < 1.5,
@@ -6372,7 +7177,9 @@ async fn a_cast_inside_the_global_cooldown_is_refused_at_its_start() {
         provision_client(&h.auth_url, "gcd", "Hasty", "Human", "Cleric").await;
     set_char_level(&h.db_url, a_char_id, 8).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "gcd", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "gcd", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -6391,9 +7198,11 @@ async fn a_cast_inside_the_global_cooldown_is_refused_at_its_start() {
     };
     a.send_cast_spell("Smite", Some(dummy));
     let hit = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::Hit { target, .. } if *target == dummy)
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::Hit { target, .. } if *target == dummy),
+        )
         .await;
     assert!(hit.is_some(), "the first Smite lands");
 
@@ -6406,7 +7215,10 @@ async fn a_cast_inside_the_global_cooldown_is_refused_at_its_start() {
                 if *caster == a_char_id as u64 && reason.contains("cannot cast again yet"))
         })
         .await;
-    assert!(refused.is_some(), "a cast started inside the global cooldown is refused at its start");
+    assert!(
+        refused.is_some(),
+        "a cast started inside the global cooldown is refused at its start"
+    );
     // The client that sends the CastSpell anyway finds no bar on file.
     a.pump_for(Duration::from_millis(3_200)).await;
     a.send_cast_spell("Bind Affinity", None);
@@ -6416,16 +7228,21 @@ async fn a_cast_inside_the_global_cooldown_is_refused_at_its_start() {
                 if *caster == a_char_id as u64 && reason.contains("not ready"))
         })
         .await;
-    assert!(no_bar.is_some(), "with nothing cached the release fails the cast-time gate");
+    assert!(
+        no_bar.is_some(),
+        "with nothing cached the release fails the cast-time gate"
+    );
 
     // Past the cooldown (the Smite was over 3.5 s ago) the same cast lands.
     a.send_cast_start("Bind Affinity", 3.0);
     a.pump_for(Duration::from_millis(3_200)).await;
     a.send_cast_spell("Bind Affinity", None);
     let bound = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("bound"))
-        })
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text.contains("bound")),
+        )
         .await;
     assert!(bound.is_some(), "after the cooldown the cast goes through");
 
@@ -6440,7 +7257,10 @@ async fn a_cast_inside_the_global_cooldown_is_refused_at_its_start() {
                 if *caster == a_char_id as u64 && reason.contains("cannot cast again yet"))
         })
         .await;
-    assert!(instant_refused.is_some(), "an instant cast inside the global cooldown is refused");
+    assert!(
+        instant_refused.is_some(),
+        "an instant cast inside the global cooldown is refused"
+    );
 }
 
 /// Bard songs neither start nor honour the global cooldown, or twisting
@@ -6464,8 +7284,11 @@ async fn bard_songs_ignore_the_global_cooldown() {
         while Instant::now() < end {
             tick_one(&mut a.client, &mut a.transport);
             while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
-                match bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) {
-                    Ok((ServerWorldMsg::CastFail { caster, .. }, _)) if caster == a_char_id as u64 => {
+                match bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+                {
+                    Ok((ServerWorldMsg::CastFail { caster, .. }, _))
+                        if caster == a_char_id as u64 =>
+                    {
                         refusals += 1;
                     }
                     Ok((ServerWorldMsg::ManaUpdate { id, mp, max_mp }, _))
@@ -6480,7 +7303,10 @@ async fn bard_songs_ignore_the_global_cooldown() {
         }
     }
     assert_eq!(refusals, 0, "no song is refused for the global cooldown");
-    assert!(mana_dips >= 2, "the songs were accepted and paid for (saw {mana_dips} dips)");
+    assert!(
+        mana_dips >= 2,
+        "the songs were accepted and paid for (saw {mana_dips} dips)"
+    );
 }
 
 /// Spell batch step 5: a DoT ticks on the server every three seconds, the
@@ -6496,7 +7322,9 @@ async fn a_dot_kills_with_the_same_rewards_as_a_hit() {
         provision_client(&h.auth_url, "dotter", "Vinessa", "Human", "Druid").await;
     set_char_level(&h.db_url, a_char_id, 6).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "dotter", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "dotter", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -6519,13 +7347,18 @@ async fn a_dot_kills_with_the_same_rewards_as_a_hit() {
     while Instant::now() < end && !(died && xp > 0) {
         tick_one(&mut a.client, &mut a.transport);
         while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
-            let Ok((msg, _)) = bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) else {
+            let Ok((msg, _)) =
+                bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg())
+            else {
                 continue;
             };
             match msg {
-                ServerWorldMsg::ProcTriggered { target, proc_name, amount, .. }
-                    if target == dummy && proc_name == "Entangle" =>
-                {
+                ServerWorldMsg::ProcTriggered {
+                    target,
+                    proc_name,
+                    amount,
+                    ..
+                } if target == dummy && proc_name == "Entangle" => {
                     assert_eq!(amount, 15, "a tick is dps x 3");
                     ticks_seen += 1;
                 }
@@ -6536,7 +7369,10 @@ async fn a_dot_kills_with_the_same_rewards_as_a_hit() {
         }
         tokio::time::sleep(TICK_DT).await;
     }
-    assert!(ticks_seen >= 2, "the caster saw the ticks as named lines (saw {ticks_seen})");
+    assert!(
+        ticks_seen >= 2,
+        "the caster saw the ticks as named lines (saw {ticks_seen})"
+    );
     assert!(died, "the second tick kills the dummy");
     assert!(xp > 0, "a DoT kill pays XP like a direct hit");
 }
@@ -6552,7 +7388,9 @@ async fn a_dot_ends_when_its_caster_gates() {
     set_char_level(&h.db_url, a_char_id, 8).await;
     set_char_pos(&h.db_url, a_char_id, 15.0, 0.0).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "dotgate", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "dotgate", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -6581,7 +7419,9 @@ async fn a_dot_ends_when_its_caster_gates() {
     a.pump_for(Duration::from_millis(5_200)).await;
     a.send_cast_spell("Gate", None);
     let tp = a
-        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| matches!(m, ServerWorldMsg::Teleport { .. }))
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::Teleport { .. })
+        })
         .await;
     assert!(tp.is_some(), "Gate teleports the caster");
     // Entangle runs 18 s; eight more seconds would hold two more ticks.
@@ -6605,7 +7445,9 @@ async fn a_dot_ends_when_the_mob_leashes() {
         provision_client(&h.auth_url, "dotleash", "Fern", "Human", "Druid").await;
     set_char_level(&h.db_url, a_char_id, 6).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "dotleash", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "dotleash", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -6629,15 +7471,29 @@ async fn a_dot_ends_when_the_mob_leashes() {
     // camps; east past x = 28 is the gnoll camp): about 7 s. The first tick,
     // at three seconds, lands on the way out and is queued; drain it before
     // watching, so only ticks after the leash count.
-    walk_dir(&mut a, &mut seq, Vec3 { x: -1.0, y: 0.0, z: 0.0 }, 50.0).await;
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_millis(200), |_| false).await;
+    walk_dir(
+        &mut a,
+        &mut seq,
+        Vec3 {
+            x: -1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        50.0,
+    )
+    .await;
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_millis(200), |_| false)
+        .await;
     let late = a
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(8), |m| {
             matches!(m, ServerWorldMsg::ProcTriggered { target, proc_name, .. }
                 if *target == dummy && proc_name == "Entangle")
         })
         .await;
-    assert!(late.is_none(), "a mob walking home carries no DoT: no tick after the leash");
+    assert!(
+        late.is_none(),
+        "a mob walking home carries no DoT: no tick after the leash"
+    );
 }
 
 /// Design review item (f): a mob finished off by a damage shield paid
@@ -6652,7 +7508,9 @@ async fn a_damage_shield_kill_pays_like_any_other() {
         provision_client(&h.auth_url, "thorny", "Bramble", "Human", "Druid").await;
     set_char_level(&h.db_url, a_char_id, 10).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "thorny", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "thorny", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -6687,7 +7545,9 @@ async fn a_damage_shield_kill_pays_like_any_other() {
         while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
             match bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) {
                 Ok((ServerWorldMsg::EntityDied { id }, _)) if id == dummy => died = true,
-                Ok((ServerWorldMsg::XpGained { amount, .. }, _)) if amount > 0 => xp += amount as i64,
+                Ok((ServerWorldMsg::XpGained { amount, .. }, _)) if amount > 0 => {
+                    xp += amount as i64
+                }
                 _ => {}
             }
         }
@@ -6708,7 +7568,9 @@ async fn a_ported_spell_lands_on_its_target() {
         provision_client(&h.auth_url, "bloodfire", "Bloodfire", "Human", "Sorcerer").await;
     set_char_level(&h.db_url, a_char_id, 4).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "bloodfire", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "bloodfire", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
@@ -6731,7 +7593,10 @@ async fn a_ported_spell_lands_on_its_target() {
                 if *attacker == a_char_id as u64 && *target == dummy)
         })
         .await;
-    assert!(hit.is_some(), "Bloodfire must land on the dummy now that the server knows it");
+    assert!(
+        hit.is_some(),
+        "Bloodfire must land on the dummy now that the server knows it"
+    );
 }
 
 /// One cast bar authorises ONE cast. Every CastSpell in a batch used to read
@@ -6745,7 +7610,9 @@ async fn one_cast_per_caster_per_tick() {
     let (a_session, a_char_id, _stale_token) =
         provision_client(&h.auth_url, "twocast", "Twocast", "Human", "Cleric").await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "twocast", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "twocast", true)
+        .await
+        .expect("set is_gm");
     let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
@@ -6770,9 +7637,12 @@ async fn one_cast_per_caster_per_tick() {
         tick_one(&mut a.client, &mut a.transport);
         while let Some(bytes) = a.client.receive_message(CHANNEL_SYSTEM) {
             match bincode::serde::decode_from_slice::<ServerWorldMsg, _>(&bytes, bincode_cfg()) {
-                Ok((ServerWorldMsg::Hit { attacker, target, .. }, _))
-                    if attacker == a_char_id as u64 && target == dummy =>
-                {
+                Ok((
+                    ServerWorldMsg::Hit {
+                        attacker, target, ..
+                    },
+                    _,
+                )) if attacker == a_char_id as u64 && target == dummy => {
                     hits += 1;
                 }
                 Ok((ServerWorldMsg::CastFail { reason, .. }, _))
@@ -6786,9 +7656,11 @@ async fn one_cast_per_caster_per_tick() {
         tokio::time::sleep(TICK_DT).await;
     }
     assert_eq!(hits, 1, "exactly one of the two casts resolves");
-    assert!(told, "the extra cast in the same tick is answered, not silently dropped");
+    assert!(
+        told,
+        "the extra cast in the same tick is answered, not silently dropped"
+    );
 }
-
 
 // ── Food and water, the EQ way (docs/design/food_and_water.md) ─────────────
 
@@ -6803,8 +7675,24 @@ async fn a_famished_character_eats_the_first_food_in_slot_order_and_regenerates_
         provision_client(&h.auth_url, "hungry", "Hungrus", "Human", "Warrior").await;
     // Out of both, at 1 HP, with bread in a bag AND in a later base slot.
     set_char_appetite(&h.db_url, char_id, 0.0, 0.0, Some(1.0)).await;
-    give_char_item(&h.db_url, char_id, "base", 0, "res://data/loot/items/small_pouch.tres", 1).await;
-    give_char_item(&h.db_url, char_id, "base", 1, "res://data/loot/items/cloth_cap.tres", 1).await;
+    give_char_item(
+        &h.db_url,
+        char_id,
+        "base",
+        0,
+        "res://data/loot/items/small_pouch.tres",
+        1,
+    )
+    .await;
+    give_char_item(
+        &h.db_url,
+        char_id,
+        "base",
+        1,
+        "res://data/loot/items/cloth_cap.tres",
+        1,
+    )
+    .await;
     give_char_item(&h.db_url, char_id, "base", 3, BREAD, 2).await;
     give_char_item(&h.db_url, char_id, "bag_0", 0, BREAD, 2).await;
     let token = request_world_token(&h.auth_url, &session, char_id).await;
@@ -6847,7 +7735,10 @@ async fn a_famished_character_eats_the_first_food_in_slot_order_and_regenerates_
     drop(a);
     tokio::time::sleep(Duration::from_millis(500)).await;
     let (hunger, thirst) = read_char_appetite(&h.db_url, char_id).await;
-    assert!(hunger > 2880.0 - 60.0 && hunger <= 2880.0, "a meal of twenty units, less what ran: {hunger}");
+    assert!(
+        hunger > 2880.0 - 60.0 && hunger <= 2880.0,
+        "a meal of twenty units, less what ran: {hunger}"
+    );
     assert_eq!(thirst, 0.0, "no drink was carried, so still out of water");
 }
 
@@ -6896,7 +7787,10 @@ async fn out_of_food_means_no_hp_regen_and_the_dead_do_not_starve() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let (_, thirst) = read_char_appetite(&h.db_url, char_id).await;
     assert!(thirst < 1000.0 - 10.0, "thirst ran while alive: {thirst}");
-    assert!(thirst > 1000.0 - 25.0, "and stopped at death (15 s dead would have taken 15 more): {thirst}");
+    assert!(
+        thirst > 1000.0 - 25.0,
+        "and stopped at death (15 s dead would have taken 15 more): {thirst}"
+    );
 }
 
 /// Eating by hand: refused with EQ's line when full (nothing taken), and an
@@ -6961,7 +7855,10 @@ async fn hand_eating_is_refused_when_full_and_halved_when_early() {
 /// third is a real answer and not a harness failure.
 enum ConnectOutcome {
     Connected(WorldClient),
-    Kicked { code: protocol::world::KickCode, reconnect_after_secs: Option<u32> },
+    Kicked {
+        code: protocol::world::KickCode,
+        reconnect_after_secs: Option<u32>,
+    },
     HandshakeTimedOut,
 }
 
@@ -6999,27 +7896,47 @@ async fn try_connect(
         client_version: "0.1.0".into(),
     };
     send_msg(&mut client, CHANNEL_SYSTEM, &msg);
-    let mut this = WorldClient { client, transport, _char_id: char_id };
+    let mut this = WorldClient {
+        client,
+        transport,
+        _char_id: char_id,
+    };
     let answer = this
         .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::ConnectOk { .. } | ServerWorldMsg::Kick { .. })
+            matches!(
+                m,
+                ServerWorldMsg::ConnectOk { .. } | ServerWorldMsg::Kick { .. }
+            )
         })
         .await;
     match answer {
-        Some(ServerWorldMsg::Kick { code, reconnect_after_secs, .. }) => {
+        Some(ServerWorldMsg::Kick {
+            code,
+            reconnect_after_secs,
+            ..
+        }) => {
             this.transport.disconnect();
             tokio::time::sleep(TICK_DT).await;
-            ConnectOutcome::Kicked { code, reconnect_after_secs }
+            ConnectOutcome::Kicked {
+                code,
+                reconnect_after_secs,
+            }
         }
         Some(_) => {
-            send_msg(&mut this.client, CHANNEL_SYSTEM, &ClientWorldMsg::EnterWorld);
+            send_msg(
+                &mut this.client,
+                CHANNEL_SYSTEM,
+                &ClientWorldMsg::EnterWorld,
+            );
             for _ in 0..4 {
                 tick_one(&mut this.client, &mut this.transport);
                 tokio::time::sleep(TICK_DT).await;
             }
             ConnectOutcome::Connected(this)
         }
-        None => panic!("the server answered the Connect with neither ConnectOk nor Kick within 3 s"),
+        None => {
+            panic!("the server answered the Connect with neither ConnectOk nor Kick within 3 s")
+        }
     }
 }
 
@@ -7074,7 +7991,10 @@ async fn an_unclean_drop_refuses_relogin_until_the_body_is_reaped() {
             ConnectOutcome::HandshakeTimedOut => {
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
-            ConnectOutcome::Kicked { code, reconnect_after_secs } => {
+            ConnectOutcome::Kicked {
+                code,
+                reconnect_after_secs,
+            } => {
                 assert!(
                     matches!(code, protocol::world::KickCode::DuplicateLogin),
                     "a relogin during the linger is refused as a duplicate login, got {code:?}"
@@ -7092,8 +8012,9 @@ async fn an_unclean_drop_refuses_relogin_until_the_body_is_reaped() {
             }
         }
     }
-    let (secs, told_at) = countdown
-        .expect("within 25 s of the drop the body is linkdead and a relogin is refused with a countdown");
+    let (secs, told_at) = countdown.expect(
+        "within 25 s of the drop the body is linkdead and a relogin is refused with a countdown",
+    );
 
     // Phase 3: the window is the body's clock, not the relogin's. Knock every
     // few seconds through the countdown the server itself announced (each a
@@ -7122,7 +8043,12 @@ async fn an_unclean_drop_refuses_relogin_until_the_body_is_reaped() {
     );
     assert!(
         b.wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
-            matches!(m, ServerWorldMsg::HealthUpdate { .. } | ServerWorldMsg::Position { .. } | ServerWorldMsg::TimeOfDay { .. })
+            matches!(
+                m,
+                ServerWorldMsg::HealthUpdate { .. }
+                    | ServerWorldMsg::Position { .. }
+                    | ServerWorldMsg::TimeOfDay { .. }
+            )
         })
         .await
         .is_some(),
@@ -7151,7 +8077,9 @@ async fn looting_your_own_corpse_puts_your_gear_back_on() {
     give_char_item(&h.db_url, char_id, "equip", 3, ROBE, 1).await;
     give_char_item(&h.db_url, char_id, "base", 0, BREAD, 2).await;
     let pool = db::open(&h.db_url).await.expect("open pool");
-    db::set_account_gm(&pool, "rewear", true).await.expect("set is_gm");
+    db::set_account_gm(&pool, "rewear", true)
+        .await
+        .expect("set is_gm");
     let token = request_world_token(&h.auth_url, &session, char_id).await;
     let mut a = WorldClient::start(token, &session, char_id).await;
     a.pump_for(Duration::from_millis(300)).await;
@@ -7163,17 +8091,29 @@ async fn looting_your_own_corpse_puts_your_gear_back_on() {
         })
         .await
         .expect("dying leaves a corpse and its owner is told what is on it");
-    let ServerWorldMsg::CorpseContents { corpse_id, items, .. } = contents else {
+    let ServerWorldMsg::CorpseContents {
+        corpse_id, items, ..
+    } = contents
+    else {
         unreachable!()
     };
-    assert_eq!(items.len(), 3, "cap, robe and bread are on the corpse: {items:?}");
-    assert_eq!(items[0].0, CAP, "worn gear first on the corpse, in paperdoll order");
+    assert_eq!(
+        items.len(),
+        3,
+        "cap, robe and bread are on the corpse: {items:?}"
+    );
+    assert_eq!(
+        items[0].0, CAP,
+        "worn gear first on the corpse, in paperdoll order"
+    );
     assert_eq!(items[1].0, ROBE);
 
     a.send_respawn();
-    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| matches!(m, ServerWorldMsg::Teleport { .. }))
-        .await
-        .expect("respawned at the bind, beside the corpse");
+    a.wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+        matches!(m, ServerWorldMsg::Teleport { .. })
+    })
+    .await
+    .expect("respawned at the bind, beside the corpse");
 
     a.send_loot_all(corpse_id);
     let mut msgs = Vec::new();
@@ -7190,19 +8130,25 @@ async fn looting_your_own_corpse_puts_your_gear_back_on() {
         tokio::time::sleep(TICK_DT).await;
     }
     let equip_delta = |slot: u32, path: &str| {
-        msgs.iter().any(|m| matches!(m, ServerWorldMsg::InventoryDelta { location, slot: s, item_path: Some(p), .. }
-            if location == "equip" && *s == slot && p == path))
+        msgs.iter().any(|m| {
+            matches!(m, ServerWorldMsg::InventoryDelta { location, slot: s, item_path: Some(p), .. }
+            if location == "equip" && *s == slot && p == path)
+        })
     };
     assert!(equip_delta(2, CAP), "the cap goes back on the head");
     assert!(equip_delta(3, ROBE), "the robe goes back on the chest");
     assert!(
-        msgs.iter().any(|m| matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), .. }
-            if location == "base" && p == BREAD)),
+        msgs.iter().any(
+            |m| matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), .. }
+            if location == "base" && p == BREAD)
+        ),
         "the carried bread goes to the bags"
     );
     assert!(
-        !msgs.iter().any(|m| matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), .. }
-            if location != "equip" && (p == CAP || p == ROBE))),
+        !msgs.iter().any(
+            |m| matches!(m, ServerWorldMsg::InventoryDelta { location, item_path: Some(p), .. }
+            if location != "equip" && (p == CAP || p == ROBE))
+        ),
         "the worn gear does not also land in the bags"
     );
 
@@ -7214,7 +8160,11 @@ async fn looting_your_own_corpse_puts_your_gear_back_on() {
     .fetch_all(&pool)
     .await
     .expect("read worn rows");
-    assert_eq!(worn, vec![(2, CAP.to_string()), (3, ROBE.to_string())], "the database holds the gear as worn");
+    assert_eq!(
+        worn,
+        vec![(2, CAP.to_string()), (3, ROBE.to_string())],
+        "the database holds the gear as worn"
+    );
     a.send_disconnect();
     a.pump_for(Duration::from_millis(200)).await;
 }

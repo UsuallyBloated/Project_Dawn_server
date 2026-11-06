@@ -63,7 +63,9 @@ fn parse_args(args: &[String]) -> Action {
                 usage();
             }
             // A code pasted with spaces or dashes arrives as several words.
-            Action::Revoke { code: args[1..].concat() }
+            Action::Revoke {
+                code: args[1..].concat(),
+            }
         }
         Some(other) => {
             eprintln!("unknown subcommand '{other}'");

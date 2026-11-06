@@ -172,13 +172,16 @@ pub struct Spell {
     pub is_dispel: bool,
 }
 
-fn default_min_level() -> i32 { 1 }
+fn default_min_level() -> i32 {
+    1
+}
 
 fn spells() -> &'static HashMap<String, Spell> {
     static SPELLS: OnceLock<HashMap<String, Spell>> = OnceLock::new();
     SPELLS.get_or_init(|| {
-        let parsed: SpellsFile = toml::from_str(SPELLS_TOML)
-            .expect("spells.toml must parse — fix the embedded file or re-run tools/export_spells.gd");
+        let parsed: SpellsFile = toml::from_str(SPELLS_TOML).expect(
+            "spells.toml must parse — fix the embedded file or re-run tools/export_spells.gd",
+        );
         parsed
             .spells
             .into_iter()
@@ -266,7 +269,11 @@ mod tests {
             assert_eq!(s.target_type, "ENEMY", "{name}");
             assert_eq!(s.damage_type, dtype, "{name}");
             assert_eq!(s.min_level, level, "{name}");
-            assert!((s.base_damage - damage).abs() < 0.01, "{name} damage {}", s.base_damage);
+            assert!(
+                (s.base_damage - damage).abs() < 0.01,
+                "{name} damage {}",
+                s.base_damage
+            );
             assert_eq!(s.classes, vec![class.to_string()], "{name}");
             assert!(s.mana_cost > 0.0, "{name} must cost mana");
         }
@@ -295,7 +302,10 @@ mod tests {
         assert_eq!(torpor.classes, vec!["Shaman".to_string()]);
         let aria = lookup("Aria of Dismay").expect("Aria");
         assert!((aria.attack_slow_amount - 0.08).abs() < 1e-6);
-        assert!(aria.attack_slow_duration > 0.0, "the server applies it for a while");
+        assert!(
+            aria.attack_slow_duration > 0.0,
+            "the server applies it for a while"
+        );
     }
 
     /// Warder's Mend, the one client-only pet spell, resolves (2026-10-07).
@@ -331,7 +341,10 @@ mod tests {
                 "Wanderer's Chord",
             ]
         );
-        assert!(!lookup("Chorus of Misery").unwrap().is_song, "a Bard nuke is not a song");
+        assert!(
+            !lookup("Chorus of Misery").unwrap().is_song,
+            "a Bard nuke is not a song"
+        );
     }
 
     #[test]
@@ -374,7 +387,10 @@ mod tests {
         // HEALING(4) / NONE(9) / unknown -> Physical (no elemental flash).
         assert!(matches!(proc_damage_type_to_wire(4), DamageType::Physical));
         assert!(matches!(proc_damage_type_to_wire(9), DamageType::Physical));
-        assert!(matches!(proc_damage_type_to_wire(200), DamageType::Physical));
+        assert!(matches!(
+            proc_damage_type_to_wire(200),
+            DamageType::Physical
+        ));
     }
 
     #[test]
@@ -389,8 +405,14 @@ mod tests {
         ] {
             let s = lookup(name).unwrap_or_else(|| panic!("{name} missing from spells.toml"));
             assert_eq!(s.target_type, "CORPSE", "{name} must target a corpse");
-            assert!((s.res_xp_percent - pct).abs() < 0.01, "{name} refund percent");
-            assert!(s.classes.iter().any(|c| c == class), "{name} castable by {class}");
+            assert!(
+                (s.res_xp_percent - pct).abs() < 0.01,
+                "{name} refund percent"
+            );
+            assert!(
+                s.classes.iter().any(|c| c == class),
+                "{name} castable by {class}"
+            );
         }
     }
 
@@ -407,7 +429,12 @@ mod tests {
                 "{} has no classes — cast gate would reject all casters",
                 s.name
             );
-            assert!(s.min_level >= 1, "{} has min_level {} (< 1)", s.name, s.min_level);
+            assert!(
+                s.min_level >= 1,
+                "{} has min_level {} (< 1)",
+                s.name,
+                s.min_level
+            );
         }
     }
 
@@ -426,7 +453,10 @@ mod tests {
         // Wrong class: a max-level Cleric still can't cast the Magician's Fireball.
         assert!(!eligible("Fireball", "Cleric", 60));
         // Level gate: Meteor is Wizard, min_level 18.
-        assert!(!eligible("Meteor", "Wizard", 17), "below min_level must fail");
+        assert!(
+            !eligible("Meteor", "Wizard", 17),
+            "below min_level must fail"
+        );
         assert!(eligible("Meteor", "Wizard", 18), "at min_level must pass");
         // Wrong class trumps level entirely.
         assert!(!eligible("Meteor", "Cleric", 60));

@@ -193,7 +193,10 @@ struct Window {
 
 impl Window {
     fn fresh(now: Instant) -> Self {
-        Self { count: 0, start: now }
+        Self {
+            count: 0,
+            start: now,
+        }
     }
 
     /// Restart the window when `len` has passed since it opened.
@@ -655,7 +658,9 @@ where
 {
     match tokio::time::timeout(limit, sink.send(msg)).await {
         Ok(r) => Ok(r?),
-        Err(_) => Err(anyhow::anyhow!("send timed out: the client stopped reading")),
+        Err(_) => Err(anyhow::anyhow!(
+            "send timed out: the client stopped reading"
+        )),
     }
 }
 
@@ -705,10 +710,7 @@ async fn dispatch(
             // so one code makes one account even when two registrations race,
             // and a refused name leaves the code unspent. When the policy
             // requires one, a missing code is refused before any DB work.
-            let invite = invite
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
+            let invite = invite.as_deref().map(str::trim).filter(|s| !s.is_empty());
             let id = match invite {
                 Some(code) => {
                     db::create_account_with_invite(
@@ -737,11 +739,12 @@ async fn dispatch(
             // Version check first — an outdated client is not a credential guess,
             // so it must not consume a rate-limit slot. The echo is cut short:
             // a reply must never mirror a client-sized string back.
-            let cv = crate::config::semver::Version::parse(&client_version)
-                .ok_or_else(|| AuthError::InvalidInput(format!(
+            let cv = crate::config::semver::Version::parse(&client_version).ok_or_else(|| {
+                AuthError::InvalidInput(format!(
                     "client_version is not semver: {}",
                     client_version.chars().take(32).collect::<String>()
-                )))?;
+                ))
+            })?;
             // A name no account could have is refused before it becomes a key
             // in the account budget (the map is pruned by time, not size, and
             // the string came from a stranger). A format check, not an
@@ -763,8 +766,7 @@ async fn dispatch(
             // accumulates — only a burst of BAD logins throttles, and it clears
             // after the window.
             let now = Instant::now();
-            if let Err(hit) =
-                limiter.try_acquire(client_ip, AuthKind::Login, Some(&username), now)
+            if let Err(hit) = limiter.try_acquire(client_ip, AuthKind::Login, Some(&username), now)
             {
                 log_throttle(client_ip, AuthKind::Login, hit);
                 return Err(AuthError::RateLimited(
@@ -871,7 +873,10 @@ mod tests {
         // consume is atomic, back-to-back calls at the SAME instant still cap at
         // MAX (this is what defeats the concurrent-burst TOCTOU).
         for i in 0..MAX_LOGIN_ATTEMPTS {
-            assert!(lim.try_acquire(ip, Login, None, t0).is_ok(), "attempt {i} within budget");
+            assert!(
+                lim.try_acquire(ip, Login, None, t0).is_ok(),
+                "attempt {i} within budget"
+            );
         }
         assert_eq!(lim.try_acquire(ip, Login, None, t0), Err(LimitHit::Source));
         // A different IP has its own budget.
@@ -906,12 +911,18 @@ mod tests {
         // Simulate register-then-login-success MAX times: each register consumes a
         // Register slot; each login success clears only the Login budget.
         for i in 0..MAX_LOGIN_ATTEMPTS {
-            assert!(lim.try_acquire(ip, Register, None, t).is_ok(), "register {i} within budget");
+            assert!(
+                lim.try_acquire(ip, Register, None, t).is_ok(),
+                "register {i} within budget"
+            );
             assert!(lim.try_acquire(ip, Login, Some("someone"), t).is_ok()); // the auto-login
             lim.clear(ip, Login, Some("someone")); // login succeeded -> clears LOGIN only
         }
         // Register budget is now exhausted despite all the login-success clears.
-        assert_eq!(lim.try_acquire(ip, Register, None, t), Err(LimitHit::Source));
+        assert_eq!(
+            lim.try_acquire(ip, Register, None, t),
+            Err(LimitHit::Source)
+        );
         // And Login is still freely available (its budget was cleared each time).
         assert!(lim.try_acquire(ip, Login, Some("someone"), t).is_ok());
     }
@@ -936,7 +947,10 @@ mod tests {
             Err(LimitHit::Source),
             "a fresh address in the same /64 is not a fresh budget"
         );
-        assert!(lim.try_acquire(other, Login, None, t).is_ok(), "the next /64 is");
+        assert!(
+            lim.try_acquire(other, Login, None, t).is_ok(),
+            "the next /64 is"
+        );
         // IPv4 keys on the address itself.
         let v4: IpAddr = "203.0.113.7".parse().unwrap();
         assert_eq!(source_key(v4), v4);
@@ -957,21 +971,43 @@ mod tests {
             assert!(lim.try_acquire(ip, Login, None, t).is_ok(), "attempt {i}");
         }
         let fresh: IpAddr = "192.0.2.1".parse().unwrap();
-        assert_eq!(lim.try_acquire(fresh, Login, None, t), Err(LimitHit::Global));
+        assert_eq!(
+            lim.try_acquire(fresh, Login, None, t),
+            Err(LimitHit::Global)
+        );
         // One of the earlier attempts succeeds: its slot comes back, and only its.
         let earlier: IpAddr = "10.0.0.0".parse().unwrap();
         lim.clear(earlier, Login, Some("someone"));
-        assert!(lim.try_acquire(fresh, Login, None, t).is_ok(), "the refunded slot");
-        assert_eq!(lim.try_acquire(fresh, Login, None, t), Err(LimitHit::Global));
+        assert!(
+            lim.try_acquire(fresh, Login, None, t).is_ok(),
+            "the refunded slot"
+        );
+        assert_eq!(
+            lim.try_acquire(fresh, Login, None, t),
+            Err(LimitHit::Global)
+        );
         // Register has its own, tighter global budget.
         for i in 0..MAX_GLOBAL_REGISTER_ATTEMPTS {
-            let ip: IpAddr = format!("10.9.{}.{}", (i / 256) % 256, i % 256).parse().unwrap();
-            assert!(lim.try_acquire(ip, AuthKind::Register, None, t).is_ok(), "register {i}");
+            let ip: IpAddr = format!("10.9.{}.{}", (i / 256) % 256, i % 256)
+                .parse()
+                .unwrap();
+            assert!(
+                lim.try_acquire(ip, AuthKind::Register, None, t).is_ok(),
+                "register {i}"
+            );
         }
-        assert_eq!(lim.try_acquire(fresh, AuthKind::Register, None, t), Err(LimitHit::Global));
+        assert_eq!(
+            lim.try_acquire(fresh, AuthKind::Register, None, t),
+            Err(LimitHit::Global)
+        );
         // The window rolls over like the others.
         assert!(lim
-            .try_acquire(fresh, Login, None, t + LOGIN_WINDOW + Duration::from_secs(1))
+            .try_acquire(
+                fresh,
+                Login,
+                None,
+                t + LOGIN_WINDOW + Duration::from_secs(1)
+            )
             .is_ok());
     }
 
@@ -992,10 +1028,16 @@ mod tests {
         // Strangers spend the account budget on the name.
         for i in 0..MAX_ACCOUNT_ATTEMPTS {
             let ip: IpAddr = format!("203.0.113.{}", i + 1).parse().unwrap();
-            assert!(lim.try_acquire(ip, Login, Some("victim"), t).is_ok(), "guess {i}");
+            assert!(
+                lim.try_acquire(ip, Login, Some("victim"), t).is_ok(),
+                "guess {i}"
+            );
         }
         let stranger: IpAddr = "203.0.113.200".parse().unwrap();
-        assert_eq!(lim.try_acquire(stranger, Login, Some("victim"), t), Err(LimitHit::Account));
+        assert_eq!(
+            lim.try_acquire(stranger, Login, Some("victim"), t),
+            Err(LimitHit::Account)
+        );
         // The owner from home still gets through.
         assert!(lim.try_acquire(home, Login, Some("VICTIM"), t).is_ok());
         // Even with the global ceiling spent by a crowd.
@@ -1005,8 +1047,14 @@ mod tests {
                 .unwrap();
             let _ = lim.try_acquire(ip, Login, None, t);
         }
-        assert_eq!(lim.try_acquire(stranger, Login, Some("bystander"), t), Err(LimitHit::Global));
-        assert!(lim.try_acquire(home, Login, Some("victim"), t).is_ok(), "home is exempt");
+        assert_eq!(
+            lim.try_acquire(stranger, Login, Some("bystander"), t),
+            Err(LimitHit::Global)
+        );
+        assert!(
+            lim.try_acquire(home, Login, Some("victim"), t).is_ok(),
+            "home is exempt"
+        );
         // The exemption is per account: home gets no pass on another name.
         assert_eq!(
             lim.try_acquire(home, Login, Some("bystander"), t),
@@ -1017,7 +1065,10 @@ mod tests {
         for _ in 0..MAX_LOGIN_ATTEMPTS {
             let _ = lim.try_acquire(home, Login, Some("victim"), t);
         }
-        assert_eq!(lim.try_acquire(home, Login, Some("victim"), t), Err(LimitHit::Source));
+        assert_eq!(
+            lim.try_acquire(home, Login, Some("victim"), t),
+            Err(LimitHit::Source)
+        );
         // And it expires: a day on, with the global ceiling spent again by a
         // crowd, home is held to it like anyone.
         let stale = t + TRUSTED_SOURCE_TTL + Duration::from_secs(1);
@@ -1027,7 +1078,10 @@ mod tests {
                 .unwrap();
             let _ = lim.try_acquire(ip, Login, None, stale);
         }
-        assert_eq!(lim.try_acquire(home, Login, Some("victim"), stale), Err(LimitHit::Global));
+        assert_eq!(
+            lim.try_acquire(home, Login, Some("victim"), stale),
+            Err(LimitHit::Global)
+        );
     }
 
     /// Guesses at ONE account from many sources meet the account budget; the
@@ -1042,10 +1096,16 @@ mod tests {
             // A new source every time, so only the account budget can refuse.
             let ip: IpAddr = format!("198.51.100.{}", i + 1).parse().unwrap();
             let name = if i % 2 == 0 { "Victim" } else { "victim" };
-            assert!(lim.try_acquire(ip, Login, Some(name), t).is_ok(), "guess {i}");
+            assert!(
+                lim.try_acquire(ip, Login, Some(name), t).is_ok(),
+                "guess {i}"
+            );
         }
         let next: IpAddr = "198.51.100.200".parse().unwrap();
-        assert_eq!(lim.try_acquire(next, Login, Some("VICTIM"), t), Err(LimitHit::Account));
+        assert_eq!(
+            lim.try_acquire(next, Login, Some("VICTIM"), t),
+            Err(LimitHit::Account)
+        );
         // Someone else's account is untouched.
         assert!(lim.try_acquire(next, Login, Some("bystander"), t).is_ok());
         // The owner logs in (from anywhere): the account budget clears, and
@@ -1068,7 +1128,12 @@ mod tests {
             "the account window is longer than the source window"
         );
         assert!(lim
-            .try_acquire(untrusted, Login, Some("victim"), later + ACCOUNT_WINDOW + Duration::from_secs(1))
+            .try_acquire(
+                untrusted,
+                Login,
+                Some("victim"),
+                later + ACCOUNT_WINDOW + Duration::from_secs(1)
+            )
             .is_ok());
     }
 

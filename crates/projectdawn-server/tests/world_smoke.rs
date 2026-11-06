@@ -11,9 +11,7 @@
 use bincode::config::standard as bincode_cfg;
 use futures_util::{SinkExt, StreamExt};
 use projectdawn_server::{auth, db, world, Config};
-use protocol::world::{
-    ClientWorldMsg, ServerWorldMsg, Vec3, WORLD_PROTOCOL_ID,
-};
+use protocol::world::{ClientWorldMsg, ServerWorldMsg, Vec3, WORLD_PROTOCOL_ID};
 use renet::{ConnectionConfig, RenetClient};
 use renet_netcode::{ClientAuthentication, ConnectToken, NetcodeClientTransport};
 use std::{
@@ -71,8 +69,7 @@ async fn start_both() -> Harness {
         .await
         .expect("world serve_with_socket");
 
-    let (auth_addr, _auth_handle) =
-        auth::serve_bound(cfg, pool).await.expect("auth bind");
+    let (auth_addr, _auth_handle) = auth::serve_bound(cfg, pool).await.expect("auth bind");
 
     Harness {
         auth_url: format!("ws://{auth_addr}"),
@@ -181,8 +178,8 @@ async fn world_connect_move_position_disconnect() {
 
     // ─── World phase ────────────────────────────────────────────────────
     // Decode the token bytes and build a Secure-mode client.
-    let connect_token = ConnectToken::read(&mut Cursor::new(&token_bytes[..]))
-        .expect("ConnectToken::read");
+    let connect_token =
+        ConnectToken::read(&mut Cursor::new(&token_bytes[..])).expect("ConnectToken::read");
     assert_eq!(
         connect_token.client_id, char_id as u64,
         "minted token client_id == char_id"
@@ -250,7 +247,11 @@ async fn world_connect_move_position_disconnect() {
     // assert "we got a Position with our id and pos.x > 0".
     let move_msg = ClientWorldMsg::Move {
         sequence: 1,
-        direction: Vec3 { x: 1.0, y: 0.0, z: 0.0 },
+        direction: Vec3 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        },
         jumping: false,
     };
     send_client_msg(&mut client, CHANNEL_POSITION, &move_msg);

@@ -91,8 +91,8 @@ struct NamedFile {
 fn table() -> &'static HashMap<String, NamedMob> {
     static NAMED: OnceLock<HashMap<String, NamedMob>> = OnceLock::new();
     NAMED.get_or_init(|| {
-        let parsed: NamedFile = toml::from_str(NAMED_TOML)
-            .expect("named_mobs.toml must parse — fix the embedded file");
+        let parsed: NamedFile =
+            toml::from_str(NAMED_TOML).expect("named_mobs.toml must parse — fix the embedded file");
         parsed
             .named
             .into_iter()
@@ -190,7 +190,9 @@ mod tests {
 
         // A mob with no subtitle has both spellings identical.
         assert_eq!(
-            resolve_for_dev_spawn("Ancient Crawler").expect("crawler").id,
+            resolve_for_dev_spawn("Ancient Crawler")
+                .expect("crawler")
+                .id,
             "ancient_crawler"
         );
 
@@ -215,7 +217,11 @@ mod tests {
                 assert!(p.starts_with("res://data/loot/items/"), "{id}: {p}");
             }
             for r in &m.rare_loot {
-                assert!(r.path.starts_with("res://data/loot/items/"), "{id}: {}", r.path);
+                assert!(
+                    r.path.starts_with("res://data/loot/items/"),
+                    "{id}: {}",
+                    r.path
+                );
                 assert!(
                     r.drop_chance > 0.0 && r.drop_chance <= 1.0,
                     "{id}: drop_chance out of range"

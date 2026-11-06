@@ -5,28 +5,19 @@
 use super::{
     aoi::{self, AoiGrid},
     buffs::{self, ActiveBuff},
-    clock,
-    combat,
+    clock, combat,
     connection::{PerConnection, Vec3f},
-    entity::{self, ActiveCc, Entity, EnemyState, HitIntent},
+    entity::{self, ActiveCc, EnemyState, Entity, HitIntent},
     groups::{self, GroupManager},
     handlers::{self, Outcome},
-    inventory,
-    items,
+    hunger, inventory, items,
     loot::{self, LootBag},
-    persistence,
-    pet_templates,
-    hunger, regen,
-    skills,
+    persistence, pet_templates, regen, skills,
     spawn_points::Spawner,
-    spells,
-    ATTACK_RANGE_TOLERANCE, BAN_SWEEP_INTERVAL, CAMP_SECS, CHANNEL_POSITION, CHANNEL_SYSTEM,
-    CHECKPOINT_INTERVAL, ENEMY_FAN_REPORT_INTERVAL,
-    ENEMY_DESPAWN_LINGER_SECS, GROUP_SHARE_RANGE, INSPECT_RANGE, KICK_FLUSH_GRACE,
-    LINKDEAD_SECS,
-    LOOT_BAG_LINGER_SECS,
-    LOOT_PICKUP_RANGE, MAX_MOVE_SPEED,
-    RANGED_ATTACK_RANGE, STALE_MOVE_THRESHOLD, TICK_DT,
+    spells, ATTACK_RANGE_TOLERANCE, BAN_SWEEP_INTERVAL, CAMP_SECS, CHANNEL_POSITION,
+    CHANNEL_SYSTEM, CHECKPOINT_INTERVAL, ENEMY_DESPAWN_LINGER_SECS, ENEMY_FAN_REPORT_INTERVAL,
+    GROUP_SHARE_RANGE, INSPECT_RANGE, KICK_FLUSH_GRACE, LINKDEAD_SECS, LOOT_BAG_LINGER_SECS,
+    LOOT_PICKUP_RANGE, MAX_MOVE_SPEED, RANGED_ATTACK_RANGE, STALE_MOVE_THRESHOLD, TICK_DT,
 };
 use crate::{db, Config};
 use protocol::world::{DamageType, EntityId, KickCode};
@@ -144,8 +135,13 @@ enum InterruptOutcome {
     NotCasting,
     /// The cast cache was cleared; `mana_charged` is what the interrupt
     /// cost (spell batch step 3), already taken off the caster.
-    Interrupted { spell_name: String, mana_charged: f32 },
-    Survived { advanced_to: Option<i32> },
+    Interrupted {
+        spell_name: String,
+        mana_charged: f32,
+    },
+    Survived {
+        advanced_to: Option<i32>,
+    },
 }
 
 /// Track 19A — roll the channeling-based interrupt on a target who
@@ -156,7 +152,11 @@ enum InterruptOutcome {
 /// interrupt charges the spell's mana in proportion to how far the bar
 /// had run (`cast_gate::interrupt_charge`), and a hit that did nothing
 /// charges nothing.
-fn roll_cast_interrupt(conn: &mut PerConnection, now: Instant, damage_applied: i32) -> InterruptOutcome {
+fn roll_cast_interrupt(
+    conn: &mut PerConnection,
+    now: Instant,
+    damage_applied: i32,
+) -> InterruptOutcome {
     if conn.cast_spell_name.is_empty() || conn.cast_set_at.is_none() {
         return InterruptOutcome::NotCasting;
     }
@@ -174,7 +174,15 @@ fn roll_cast_interrupt(conn: &mut PerConnection, now: Instant, damage_applied: i
         // fraction is elapsed over the spell's own duration.
         let elapsed_ms = conn.cast_set_at.map(|t| now.duration_since(t).as_millis());
         let mana_charged = spells::lookup(&spell_name)
-            .map(|s| super::cast_gate::interrupt_charge(s.mana_cost, s.cast_time, elapsed_ms, damage_applied, conn.mp))
+            .map(|s| {
+                super::cast_gate::interrupt_charge(
+                    s.mana_cost,
+                    s.cast_time,
+                    elapsed_ms,
+                    damage_applied,
+                    conn.mp,
+                )
+            })
             .unwrap_or(0.0);
         if mana_charged > 0.0 {
             conn.mp = (conn.mp - mana_charged).max(0.0);
@@ -186,7 +194,10 @@ fn roll_cast_interrupt(conn: &mut PerConnection, now: Instant, damage_applied: i
         // Stamped so a CastSpell for this bar that is already in the tick's
         // queue is refused too (`cast_gate::beaten_by_interrupt`).
         conn.cast_interrupted_at = Some(now);
-        InterruptOutcome::Interrupted { spell_name, mana_charged }
+        InterruptOutcome::Interrupted {
+            spell_name,
+            mana_charged,
+        }
     } else {
         let advanced_to = skills::try_advance(conn, skills::Skill::Casting, "channeling");
         InterruptOutcome::Survived { advanced_to }
@@ -208,11 +219,7 @@ struct CastSpellIntent {
 /// `autoloads/buff_manager.gd::add_hot`'s behaviour). Caller is
 /// responsible for fanning a BuffSnapshot afterwards.
 fn apply_buff(conn: &mut PerConnection, buff: ActiveBuff) {
-    if let Some(existing) = conn
-        .active_buffs
-        .iter_mut()
-        .find(|b| b.name == buff.name)
-    {
+    if let Some(existing) = conn.active_buffs.iter_mut().find(|b| b.name == buff.name) {
         existing.effect = buff.effect;
         existing.remaining = buff.remaining;
         existing.tick_acc = 0.0;
@@ -230,9 +237,22 @@ fn apply_stat_buff(conn: &mut PerConnection, buff: ActiveBuff) {
     // Pull deltas out of the incoming buff.
     let (str_d, agi_d, int_d, wis_d, con_d, hp_d, mp_d) = match buff.effect {
         buffs::BuffEffect::StatBuff {
-            strength, agility, intelligence, wisdom, constitution,
-            max_hp_delta, max_mp_delta,
-        } => (strength, agility, intelligence, wisdom, constitution, max_hp_delta, max_mp_delta),
+            strength,
+            agility,
+            intelligence,
+            wisdom,
+            constitution,
+            max_hp_delta,
+            max_mp_delta,
+        } => (
+            strength,
+            agility,
+            intelligence,
+            wisdom,
+            constitution,
+            max_hp_delta,
+            max_mp_delta,
+        ),
         _ => return,
     };
     // If an existing same-named stat buff is present, undo its
@@ -240,13 +260,24 @@ fn apply_stat_buff(conn: &mut PerConnection, buff: ActiveBuff) {
     // conn.strength etc. = base + sum(active stat buffs).
     if let Some(idx) = conn.active_buffs.iter().position(|b| b.name == buff.name) {
         if let buffs::BuffEffect::StatBuff {
-            strength, agility, intelligence, wisdom, constitution,
-            max_hp_delta, max_mp_delta,
+            strength,
+            agility,
+            intelligence,
+            wisdom,
+            constitution,
+            max_hp_delta,
+            max_mp_delta,
         } = conn.active_buffs[idx].effect
         {
             buffs::undo_stat_deltas(
-                conn, strength, agility, intelligence, wisdom, constitution,
-                max_hp_delta, max_mp_delta,
+                conn,
+                strength,
+                agility,
+                intelligence,
+                wisdom,
+                constitution,
+                max_hp_delta,
+                max_mp_delta,
             );
         }
         conn.active_buffs.remove(idx);
@@ -329,7 +360,12 @@ fn apply_player_spell_buffs(conn: &mut PerConnection, spell: &spells::Spell, now
     if spell.haste_amount > 0.0 && spell.haste_duration > 0.0 {
         apply_buff(
             conn,
-            ActiveBuff::new_haste(spell.name.clone(), spell.haste_amount, spell.haste_duration, now),
+            ActiveBuff::new_haste(
+                spell.name.clone(),
+                spell.haste_amount,
+                spell.haste_duration,
+                now,
+            ),
         );
         changed = true;
     }
@@ -408,36 +444,59 @@ fn apply_pet_spell_buffs(pet: &mut Entity, spell: &spells::Spell, now: Instant) 
     let mut changed = false;
     if spell.hot_hps > 0.0 && spell.hot_duration > 0.0 {
         pet.apply_buff(ActiveBuff::new_hot(
-            spell.name.clone(), spell.hot_hps, spell.hot_duration, now,
+            spell.name.clone(),
+            spell.hot_hps,
+            spell.hot_duration,
+            now,
         ));
         changed = true;
     }
     if spell.move_speed_mult > 0.0 && spell.move_speed_duration > 0.0 {
         pet.apply_buff(ActiveBuff::new_speed(
-            spell.name.clone(), spell.move_speed_mult, spell.move_speed_duration, now,
+            spell.name.clone(),
+            spell.move_speed_mult,
+            spell.move_speed_duration,
+            now,
         ));
         changed = true;
     }
     if spell.haste_amount > 0.0 && spell.haste_duration > 0.0 {
         pet.apply_buff(ActiveBuff::new_haste(
-            spell.name.clone(), spell.haste_amount, spell.haste_duration, now,
+            spell.name.clone(),
+            spell.haste_amount,
+            spell.haste_duration,
+            now,
         ));
         changed = true;
     }
     if spell.damage_shield_amount > 0.0 && spell.damage_shield_duration > 0.0 {
         pet.apply_buff(ActiveBuff::new_damage_shield(
-            spell.name.clone(), spell.damage_shield_amount, spell.damage_shield_duration, now,
+            spell.name.clone(),
+            spell.damage_shield_amount,
+            spell.damage_shield_duration,
+            now,
         ));
         changed = true;
     }
     if spell.primary_stat_buff_duration > 0.0 {
-        let any_nonzero = spell.str_buff != 0 || spell.agi_buff != 0 || spell.int_buff != 0
-            || spell.wis_buff != 0 || spell.con_buff != 0 || spell.max_hp_buff != 0.0;
+        let any_nonzero = spell.str_buff != 0
+            || spell.agi_buff != 0
+            || spell.int_buff != 0
+            || spell.wis_buff != 0
+            || spell.con_buff != 0
+            || spell.max_hp_buff != 0.0;
         if any_nonzero {
             pet.apply_buff(ActiveBuff::new_stat_buff(
-                spell.name.clone(), spell.str_buff, spell.agi_buff, spell.int_buff,
-                spell.wis_buff, spell.con_buff, spell.max_hp_buff, spell.max_mp_buff,
-                spell.primary_stat_buff_duration, now,
+                spell.name.clone(),
+                spell.str_buff,
+                spell.agi_buff,
+                spell.int_buff,
+                spell.wis_buff,
+                spell.con_buff,
+                spell.max_hp_buff,
+                spell.max_mp_buff,
+                spell.primary_stat_buff_duration,
+                now,
             ));
             changed = true;
         }
@@ -545,9 +604,7 @@ fn award_kill(
     let alive = |c: &PerConnection| !c.death_processed && c.hp > 0.0;
     // XP share: alive + in range (creditor exempt from the range half only).
     let xp_eligible = |cid: ClientId, c: &PerConnection| -> bool {
-        alive(c)
-            && (cid == credit_cid
-                || c.pos.distance_to(victim_pos) <= GROUP_SHARE_RANGE)
+        alive(c) && (cid == credit_cid || c.pos.distance_to(victim_pos) <= GROUP_SHARE_RANGE)
     };
     // The candidate set: the group, or the solo creditor. Liveness check on
     // the solo killer too — they may have disconnected (or died to a last
@@ -558,7 +615,12 @@ fn award_kill(
     };
     let xp_members: Vec<ClientId> = group_members
         .iter()
-        .filter(|&&m| connections.get(&m).map(|c| xp_eligible(m, c)).unwrap_or(false))
+        .filter(|&&m| {
+            connections
+                .get(&m)
+                .map(|c| xp_eligible(m, c))
+                .unwrap_or(false)
+        })
         .copied()
         .collect();
     // Quest kill-credit: the same alive-and-in-range test (see doc comment).
@@ -596,7 +658,9 @@ fn award_kill(
                     continue; // normalized at login; stay defensive anyway
                 };
                 for (i, obj) in quest.objectives.iter().enumerate() {
-                    let Some(p) = progress.get_mut(i) else { continue };
+                    let Some(p) = progress.get_mut(i) else {
+                        continue;
+                    };
                     if *p < obj.count && super::quests::kill_matches(&obj.target, mob_name) {
                         *p += 1;
                         updates.push((quest_id.clone(), i as u32, *p));
@@ -659,7 +723,8 @@ fn kill_enemy(
             .map(|(&id, _)| id);
         // EQ quadratic per-kill award, derived from the mob's level (not the
         // legacy flat mob.xp constant). See progression::kill_xp.
-        let mob_xp = super::progression::kill_xp(entity.mob.level as i32, super::progression::ZEM_NORMAL);
+        let mob_xp =
+            super::progression::kill_xp(entity.mob.level as i32, super::progression::ZEM_NORMAL);
         let warder_owner_opt: Option<EntityId> =
             if super::pet_templates::is_warder_template(&entity.mob.name) {
                 entity.owner
@@ -670,7 +735,15 @@ fn kill_enemy(
         // credit — the warder is literally named "Wolf", so a respawning
         // PvP warder would farm the wolf quest otherwise.
         let victim_owned = entity.owner.is_some();
-        (credit_id_opt, mob_xp, entity.mob.level, entity.pos, entity.mob.name.clone(), warder_owner_opt, victim_owned)
+        (
+            credit_id_opt,
+            mob_xp,
+            entity.mob.level,
+            entity.pos,
+            entity.mob.name.clone(),
+            warder_owner_opt,
+            victim_owned,
+        )
     };
 
     // Warder respawn — mirrors the melee path. If the dying entity is a
@@ -719,7 +792,14 @@ fn kill_enemy(
         let owner_cid_opt = credit_id_opt
             .filter(|&id| id < protocol::world::ENEMY_ID_BASE)
             .map(|id| id as ClientId);
-        let bag = LootBag::new(death_pos, loot_items, loot_coins, mob_name.clone(), owner_cid_opt, now);
+        let bag = LootBag::new(
+            death_pos,
+            loot_items,
+            loot_coins,
+            mob_name.clone(),
+            owner_cid_opt,
+            now,
+        );
         let bag_id = bag.id;
         let bag_cell = aoi::cell_for(bag.pos.x, bag.pos.z);
         aoi.insert(bag_id, bag_cell);
@@ -1148,16 +1228,29 @@ fn despawn_owned_pets(
         };
         if pet.charm_expires_at.is_some() {
             let mob_id = return_charmed_mob(server, aoi, enemies, &in_world, pet, None, now);
-            tracing::info!(owner = owner_entity, pet_id, mob_id, "charm broken by owner leaving — mob returned");
+            tracing::info!(
+                owner = owner_entity,
+                pet_id,
+                mob_id,
+                "charm broken by owner leaving — mob returned"
+            );
             continue;
         }
         let pet_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
         aoi.remove(pet_id, pet_cell);
         let pet_visible = aoi.entities_visible_from(pet_cell);
-        for peer_id in in_world.iter().copied().filter(|id| pet_visible.contains(id)) {
+        for peer_id in in_world
+            .iter()
+            .copied()
+            .filter(|id| pet_visible.contains(id))
+        {
             handlers::send_entity_despawn(server, peer_id, pet_id);
         }
-        tracing::info!(owner = owner_entity, pet_id, "pet despawned on owner disconnect");
+        tracing::info!(
+            owner = owner_entity,
+            pet_id,
+            "pet despawned on owner disconnect"
+        );
     }
 }
 
@@ -1271,14 +1364,7 @@ async fn reap_connection(
             // Group dissolved. Survivors (0 or 1) get an empty roster so their
             // HUD clears. The leaver's transport is already torn down.
             for m in &remaining {
-                handlers::fan_group_roster(
-                    server,
-                    std::slice::from_ref(m),
-                    gid,
-                    *m,
-                    Vec::new(),
-                    0,
-                );
+                handlers::fan_group_roster(server, std::slice::from_ref(m), gid, *m, Vec::new(), 0);
             }
         } else if let Some(g) = group_manager.groups.get(&gid) {
             // Re-fetch the group with name lookups for the survivor fan-out.
@@ -1534,19 +1620,29 @@ pub async fn run(
                 let items: Vec<super::loot::LootItemStack> = r
                     .items
                     .into_iter()
-                    .map(|(item_path, count, equip_slot)| super::loot::LootItemStack {
-                        item_path,
-                        count,
-                        equip_slot,
-                    })
+                    .map(
+                        |(item_path, count, equip_slot)| super::loot::LootItemStack {
+                            item_path,
+                            count,
+                            equip_slot,
+                        },
+                    )
                     .collect();
                 aoi.insert(id, aoi::cell_for(pos.x, pos.z));
                 max_id = max_id.max(id);
                 corpses.insert(
                     id,
                     super::corpses::Corpse::new(
-                        id, r.char_id, r.owner_name, r.zone, pos, items, r.coins,
-                        r.lost_xp, r.resurrected, boot,
+                        id,
+                        r.char_id,
+                        r.owner_name,
+                        r.zone,
+                        pos,
+                        items,
+                        r.coins,
+                        r.lost_xp,
+                        r.resurrected,
+                        boot,
                     ),
                 );
             }
@@ -1681,7 +1777,9 @@ pub async fn run(
                                         .as_secs() as u32
                                 });
                                 tracing::info!(
-                                    account_id, char_id, ?reconnect_after_secs,
+                                    account_id,
+                                    char_id,
+                                    ?reconnect_after_secs,
                                     "duplicate login refused — account already in-world"
                                 );
                                 // The EQ phrasing, plus a "try again in ~Ns"
@@ -1733,7 +1831,11 @@ pub async fn run(
                                 }
                             };
                             if banned {
-                                tracing::info!(account_id, char_id, "banned account refused at world connect");
+                                tracing::info!(
+                                    account_id,
+                                    char_id,
+                                    "banned account refused at world connect"
+                                );
                                 handlers::send_kick(
                                     &mut server,
                                     client_id,
@@ -1783,18 +1885,18 @@ pub async fn run(
                                     Vec::new()
                                 }
                             };
-                            let account_bank_item_rows =
-                                match db::load_account_bank_items(&pool, account_id).await {
-                                    Ok(r) => r,
-                                    Err(e) => {
-                                        tracing::warn!(account_id, error = %e, "load_account_bank_items failed; empty");
-                                        Vec::new()
-                                    }
-                                };
-                            connections.insert(
-                                client_id,
-                                PerConnection::from_spawn(spawn, now),
-                            );
+                            let account_bank_item_rows = match db::load_account_bank_items(
+                                &pool, account_id,
+                            )
+                            .await
+                            {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    tracing::warn!(account_id, error = %e, "load_account_bank_items failed; empty");
+                                    Vec::new()
+                                }
+                            };
+                            connections.insert(client_id, PerConnection::from_spawn(spawn, now));
                             // Set the real AOI cell from spawn position +
                             // populate the inventory snapshot. Track 14.2:
                             // run the stat recompute pass so persisted
@@ -1885,12 +1987,14 @@ pub async fn run(
                     // disconnecting.
                     if let Some(conn) = connections.get_mut(&client_id) {
                         for &channel in &[CHANNEL_SYSTEM, CHANNEL_POSITION] {
-                            while let Some(bytes) =
-                                server.receive_message(client_id, channel)
-                            {
+                            while let Some(bytes) = server.receive_message(client_id, channel) {
                                 if let Some(msg) = handlers::decode_client(&bytes) {
                                     let _ = handlers::handle_message(
-                                        &mut server, conn, client_id, msg, now,
+                                        &mut server,
+                                        conn,
+                                        client_id,
+                                        msg,
+                                        now,
                                     );
                                 }
                             }
@@ -1991,7 +2095,13 @@ pub async fn run(
         // so the drain step can exclude the sender from broadcast
         // recipients and resolve the sender's connection for Tell
         // bounce-backs when the target name doesn't match.
-        let mut chat_fanouts: Vec<(ClientId, protocol::world::ChatChannel, String, String, Option<String>)> = Vec::new();
+        let mut chat_fanouts: Vec<(
+            ClientId,
+            protocol::world::ChatChannel,
+            String,
+            String,
+            Option<String>,
+        )> = Vec::new();
         // Player-inspect requests. `(inspector_client_id, target_char_id)`.
         let mut inspect_intents: Vec<(ClientId, i64)> = Vec::new();
         // Track 5 sub-task 3 — player → server attack intents queued for
@@ -2006,13 +2116,33 @@ pub async fn run(
         // post-dispatch sweep. The sweep needs the full connections
         // map (to resolve names to ids + fan rosters to multiple
         // members), so we can't process inline in handle_message.
-        struct GroupInviteI { inviter: u64, target_name: String }
-        struct GroupAcceptI { invitee: u64, from: u64 }
-        struct GroupLeaveI { member: u64 }
-        struct GroupKickI { leader: u64, target_name: String }
-        struct GroupLootModeI { leader: u64, mode: u8 }
-        struct GroupPassLeadershipI { leader: u64, new_leader: u64 }
-        struct AutosplitNoticeI { char_id: u64, on: bool }
+        struct GroupInviteI {
+            inviter: u64,
+            target_name: String,
+        }
+        struct GroupAcceptI {
+            invitee: u64,
+            from: u64,
+        }
+        struct GroupLeaveI {
+            member: u64,
+        }
+        struct GroupKickI {
+            leader: u64,
+            target_name: String,
+        }
+        struct GroupLootModeI {
+            leader: u64,
+            mode: u8,
+        }
+        struct GroupPassLeadershipI {
+            leader: u64,
+            new_leader: u64,
+        }
+        struct AutosplitNoticeI {
+            char_id: u64,
+            on: bool,
+        }
         let mut group_invite_intents: Vec<GroupInviteI> = Vec::new();
         let mut group_accept_intents: Vec<GroupAcceptI> = Vec::new();
         let mut group_leave_intents: Vec<GroupLeaveI> = Vec::new();
@@ -2055,7 +2185,11 @@ pub async fn run(
         // message dispatch so we can mutate `enemies` (where pets
         // live) without overlapping the handler's mutable
         // `connections` borrow.
-        struct PetCommandI { owner: u64, command: u8, target_id: Option<EntityId> }
+        struct PetCommandI {
+            owner: u64,
+            command: u8,
+            target_id: Option<EntityId>,
+        }
         let mut pet_command_intents: Vec<PetCommandI> = Vec::new();
         // Track 13.2 — move-item intents. Buffered like pet commands;
         // dispatch runs after the message-drain so we don't overlap
@@ -2137,16 +2271,36 @@ pub async fn run(
         }
         let mut sell_item_intents: Vec<SellItemI> = Vec::new();
         // PD_W0015 — Banker, slice 1 (coins): deposit / withdraw / exchange.
-        struct BankDepositI { owner: u64, coins: protocol::world::Coins }
+        struct BankDepositI {
+            owner: u64,
+            coins: protocol::world::Coins,
+        }
         let mut bank_deposit_intents: Vec<BankDepositI> = Vec::new();
-        struct BankWithdrawI { owner: u64, coins: protocol::world::Coins }
+        struct BankWithdrawI {
+            owner: u64,
+            coins: protocol::world::Coins,
+        }
         let mut bank_withdraw_intents: Vec<BankWithdrawI> = Vec::new();
-        struct BankExchangeI { owner: u64, from_tier: u8, to_tier: u8, qty: u32 }
+        struct BankExchangeI {
+            owner: u64,
+            from_tier: u8,
+            to_tier: u8,
+            qty: u32,
+        }
         let mut bank_exchange_intents: Vec<BankExchangeI> = Vec::new();
         // PD_W0016 — Banker, slice 2 (item vaults): store / withdraw whole stacks.
-        struct BankStoreItemI { owner: u64, src_location: String, src_slot: u32, shared: bool }
+        struct BankStoreItemI {
+            owner: u64,
+            src_location: String,
+            src_slot: u32,
+            shared: bool,
+        }
         let mut bank_store_item_intents: Vec<BankStoreItemI> = Vec::new();
-        struct BankWithdrawItemI { owner: u64, shared: bool, vault_slot: u32 }
+        struct BankWithdrawItemI {
+            owner: u64,
+            shared: bool,
+            vault_slot: u32,
+        }
         let mut bank_withdraw_item_intents: Vec<BankWithdrawItemI> = Vec::new();
         for client_id in client_ids {
             // Skip clients whose Connected event is in the queue but whose
@@ -2177,14 +2331,10 @@ pub async fn run(
                             ));
                         }
                         Outcome::CastCompleteFanOut { spell_name } => {
-                            cast_fanouts.push((
-                                client_id,
-                                CastEvent::Complete { spell_name },
-                            ));
+                            cast_fanouts.push((client_id, CastEvent::Complete { spell_name }));
                         }
                         Outcome::CastFailFanOut { reason } => {
-                            cast_fanouts
-                                .push((client_id, CastEvent::Fail { reason }));
+                            cast_fanouts.push((client_id, CastEvent::Fail { reason }));
                         }
                         Outcome::BuffSnapshotFanOut => {
                             if !buff_fanouts.contains(&client_id) {
@@ -2225,7 +2375,12 @@ pub async fn run(
                             // other fan-outs.
                             player_target_fanouts.push((client_id, target));
                         }
-                        Outcome::ChatFanOut { channel, text, speaker, target_name } => {
+                        Outcome::ChatFanOut {
+                            channel,
+                            text,
+                            speaker,
+                            target_name,
+                        } => {
                             chat_fanouts.push((client_id, channel, text, speaker, target_name));
                         }
                         Outcome::InspectIntent { target_char_id } => {
@@ -2292,8 +2447,16 @@ pub async fn run(
                                 });
                             }
                         }
-                        Outcome::PetCommandIntent { owner, command, target_id } => {
-                            pet_command_intents.push(PetCommandI { owner, command, target_id });
+                        Outcome::PetCommandIntent {
+                            owner,
+                            command,
+                            target_id,
+                        } => {
+                            pet_command_intents.push(PetCommandI {
+                                owner,
+                                command,
+                                target_id,
+                            });
                         }
                         Outcome::MoveItemIntent {
                             owner,
@@ -2423,23 +2586,51 @@ pub async fn run(
                         Outcome::BankWithdrawIntent { owner, coins } => {
                             bank_withdraw_intents.push(BankWithdrawI { owner, coins });
                         }
-                        Outcome::BankExchangeIntent { owner, from_tier, to_tier, qty } => {
+                        Outcome::BankExchangeIntent {
+                            owner,
+                            from_tier,
+                            to_tier,
+                            qty,
+                        } => {
                             bank_exchange_intents.push(BankExchangeI {
-                                owner, from_tier, to_tier, qty,
+                                owner,
+                                from_tier,
+                                to_tier,
+                                qty,
                             });
                         }
-                        Outcome::BankStoreItemIntent { owner, src_location, src_slot, shared } => {
+                        Outcome::BankStoreItemIntent {
+                            owner,
+                            src_location,
+                            src_slot,
+                            shared,
+                        } => {
                             bank_store_item_intents.push(BankStoreItemI {
-                                owner, src_location, src_slot, shared,
+                                owner,
+                                src_location,
+                                src_slot,
+                                shared,
                             });
                         }
-                        Outcome::BankWithdrawItemIntent { owner, shared, vault_slot } => {
+                        Outcome::BankWithdrawItemIntent {
+                            owner,
+                            shared,
+                            vault_slot,
+                        } => {
                             bank_withdraw_item_intents.push(BankWithdrawItemI {
-                                owner, shared, vault_slot,
+                                owner,
+                                shared,
+                                vault_slot,
                             });
                         }
-                        Outcome::GroupInviteIntent { inviter, target_name } => {
-                            group_invite_intents.push(GroupInviteI { inviter, target_name });
+                        Outcome::GroupInviteIntent {
+                            inviter,
+                            target_name,
+                        } => {
+                            group_invite_intents.push(GroupInviteI {
+                                inviter,
+                                target_name,
+                            });
                         }
                         Outcome::GroupAcceptIntent { invitee, from } => {
                             group_accept_intents.push(GroupAcceptI { invitee, from });
@@ -2447,8 +2638,14 @@ pub async fn run(
                         Outcome::GroupLeaveIntent { member } => {
                             group_leave_intents.push(GroupLeaveI { member });
                         }
-                        Outcome::GroupKickIntent { leader, target_name } => {
-                            group_kick_intents.push(GroupKickI { leader, target_name });
+                        Outcome::GroupKickIntent {
+                            leader,
+                            target_name,
+                        } => {
+                            group_kick_intents.push(GroupKickI {
+                                leader,
+                                target_name,
+                            });
                         }
                         Outcome::SetGroupLootModeIntent { leader, mode } => {
                             group_loot_mode_intents.push(GroupLootModeI { leader, mode });
@@ -2458,8 +2655,7 @@ pub async fn run(
                                 .push(GroupPassLeadershipI { leader, new_leader });
                         }
                         Outcome::AutosplitNoticeIntent { char_id, on } => {
-                            autosplit_notice_intents
-                                .push(AutosplitNoticeI { char_id, on });
+                            autosplit_notice_intents.push(AutosplitNoticeI { char_id, on });
                         }
                         Outcome::LootItemIntent {
                             looter,
@@ -2482,7 +2678,11 @@ pub async fn run(
                         Outcome::LootToCursorIntent { looter, bag_id } => {
                             loot_to_cursor_intents.push((looter, bag_id));
                         }
-                        Outcome::ResurrectAcceptIntent { responder, corpse_id, accept } => {
+                        Outcome::ResurrectAcceptIntent {
+                            responder,
+                            corpse_id,
+                            accept,
+                        } => {
                             resurrect_accept_intents.push((responder, corpse_id, accept));
                         }
                         Outcome::BindIntent { char_id, zone, pos } => {
@@ -2498,14 +2698,31 @@ pub async fn run(
                         Outcome::DevSpawnMobIntent { pos, mob } => {
                             dev_spawn_intents.push((pos, mob));
                         }
-                        Outcome::CompleteQuestIntent { responder, quest_id } => {
+                        Outcome::CompleteQuestIntent {
+                            responder,
+                            quest_id,
+                        } => {
                             complete_quest_intents.push((responder, quest_id));
                         }
-                        Outcome::AcceptQuestIntent { responder, quest_id } => {
-                            quest_lifecycle_intents.push((responder, QuestLifecycle::Accept, quest_id));
+                        Outcome::AcceptQuestIntent {
+                            responder,
+                            quest_id,
+                        } => {
+                            quest_lifecycle_intents.push((
+                                responder,
+                                QuestLifecycle::Accept,
+                                quest_id,
+                            ));
                         }
-                        Outcome::AbandonQuestIntent { responder, quest_id } => {
-                            quest_lifecycle_intents.push((responder, QuestLifecycle::Abandon, quest_id));
+                        Outcome::AbandonQuestIntent {
+                            responder,
+                            quest_id,
+                        } => {
+                            quest_lifecycle_intents.push((
+                                responder,
+                                QuestLifecycle::Abandon,
+                                quest_id,
+                            ));
                         }
                         Outcome::Continue => {}
                     }
@@ -2714,7 +2931,9 @@ pub async fn run(
                 if !entity.is_pet() || !entity.is_alive() {
                     continue;
                 }
-                let Some(owner_id) = entity.owner else { continue };
+                let Some(owner_id) = entity.owner else {
+                    continue;
+                };
                 // Keyed on the PET's own cell (`visible_to_new` is every id
                 // in the joiner's 3x3), the same key step 6b Positions and
                 // the cell-crossing fans use. Keying on the owner's cell
@@ -2725,11 +2944,7 @@ pub async fn run(
                 if !visible_to_new.contains(entity_id) {
                     continue;
                 }
-                handlers::fan_out_pet_spawn(
-                    &mut server,
-                    std::slice::from_ref(new_id),
-                    entity,
-                );
+                handlers::fan_out_pet_spawn(&mut server, std::slice::from_ref(new_id), entity);
                 tracing::debug!(
                     new_client = *new_id as u64,
                     pet_id = *entity_id,
@@ -2804,14 +3019,16 @@ pub async fn run(
                     .iter()
                     .map(|(id, p)| (id.clone(), p.clone()))
                     .collect();
-                let completed: Vec<String> =
-                    new_conn.completed_quests.iter().cloned().collect();
+                let completed: Vec<String> = new_conn.completed_quests.iter().cloned().collect();
                 handlers::send_quest_snapshot(&mut server, *new_id, active, completed);
             }
             // Track 5 sub-task 1B — seed the new joiner with alive enemies
             // in their AOI neighbourhood. Track 7: filter by aoi.can_see
             // so only nearby enemies are seeded on enter-world.
-            let joiner_cell = connections.get(new_id).map(|c| c.aoi_cell).unwrap_or((0, 0));
+            let joiner_cell = connections
+                .get(new_id)
+                .map(|c| c.aoi_cell)
+                .unwrap_or((0, 0));
             for entity in enemies.values() {
                 // Pets share this map and were seeded here as EnemySpawn on
                 // top of their PetSpawn above; the client's enemy manager
@@ -2918,18 +3135,12 @@ pub async fn run(
                     spell_name,
                     duration,
                 ),
-                CastEvent::Complete { spell_name } => handlers::fan_out_cast_complete(
-                    &mut server,
-                    &recipients,
-                    caster,
-                    spell_name,
-                ),
-                CastEvent::Fail { reason } => handlers::fan_out_cast_fail(
-                    &mut server,
-                    &recipients,
-                    caster,
-                    reason,
-                ),
+                CastEvent::Complete { spell_name } => {
+                    handlers::fan_out_cast_complete(&mut server, &recipients, caster, spell_name)
+                }
+                CastEvent::Fail { reason } => {
+                    handlers::fan_out_cast_fail(&mut server, &recipients, caster, reason)
+                }
             }
         }
 
@@ -3041,7 +3252,13 @@ pub async fn run(
                         })
                         .map(|(id, _)| *id)
                         .collect();
-                    handlers::fan_out_chat_message(&mut server, &recipients, &speaker, channel, &text);
+                    handlers::fan_out_chat_message(
+                        &mut server,
+                        &recipients,
+                        &speaker,
+                        channel,
+                        &text,
+                    );
                 }
                 ChatChannel::Shout | ChatChannel::Ooc => {
                     let recipients: Vec<ClientId> = in_world_recipients
@@ -3049,7 +3266,13 @@ pub async fn run(
                         .filter(|id| **id != sender_id)
                         .copied()
                         .collect();
-                    handlers::fan_out_chat_message(&mut server, &recipients, &speaker, channel, &text);
+                    handlers::fan_out_chat_message(
+                        &mut server,
+                        &recipients,
+                        &speaker,
+                        channel,
+                        &text,
+                    );
                 }
                 ChatChannel::Group => {
                     // Fan to every member of the sender's group (except
@@ -3057,15 +3280,21 @@ pub async fn run(
                     let Some(group) = group_manager.group_of(sender_id) else {
                         continue; // sender isn't in a group
                     };
-                    let recipients: Vec<ClientId> = group.members
+                    let recipients: Vec<ClientId> = group
+                        .members
                         .iter()
                         .filter(|id| {
-                            **id != sender_id
-                                && connections.get(*id).map_or(false, |c| c.in_world)
+                            **id != sender_id && connections.get(*id).map_or(false, |c| c.in_world)
                         })
                         .copied()
                         .collect();
-                    handlers::fan_out_chat_message(&mut server, &recipients, &speaker, channel, &text);
+                    handlers::fan_out_chat_message(
+                        &mut server,
+                        &recipients,
+                        &speaker,
+                        channel,
+                        &text,
+                    );
                 }
                 ChatChannel::Tell => {
                     let Some(target) = target_name.as_deref() else {
@@ -3077,7 +3306,13 @@ pub async fn run(
                         .find(|(_, c)| c.in_world && c.name.to_lowercase() == target_lower)
                         .map(|(id, _)| *id);
                     if let Some(rid) = recipient_id {
-                        handlers::fan_out_chat_message(&mut server, &[rid], &speaker, channel, &text);
+                        handlers::fan_out_chat_message(
+                            &mut server,
+                            &[rid],
+                            &speaker,
+                            channel,
+                            &text,
+                        );
                     } else {
                         // Bounce: tell the sender the target isn't online.
                         // Use System channel so the client can colour it
@@ -3181,11 +3416,7 @@ pub async fn run(
                             .filter(|id| visible.contains(id))
                             .collect();
                         if !aoi_recipients.is_empty() {
-                            handlers::fan_out_enemy_spawn(
-                                &mut server,
-                                &aoi_recipients,
-                                &entity,
-                            );
+                            handlers::fan_out_enemy_spawn(&mut server, &aoi_recipients, &entity);
                         }
                     }
                     enemies.insert(entity.id, entity);
@@ -3286,7 +3517,9 @@ pub async fn run(
         let due_warder_respawns: Vec<(EntityId, Vec3f, u32)> = connections
             .iter()
             .filter_map(|(_, c)| {
-                if !c.in_world { return None; }
+                if !c.in_world {
+                    return None;
+                }
                 let due = c.warder_respawn_at?;
                 // `Instant::duration_since` saturates to zero when the
                 // argument is in the future, so the previous
@@ -3463,11 +3696,8 @@ pub async fn run(
                 // Track 6 sub-task 2: server computes the damage roll.
                 // Client-supplied amount is ignored — even a malicious
                 // client can't claim 999 damage anymore.
-                let swing = combat::calc_swing(
-                    attacker_conn,
-                    &server_weapon_path,
-                    intent.is_offhand,
-                );
+                let swing =
+                    combat::calc_swing(attacker_conn, &server_weapon_path, intent.is_offhand);
                 // Swing accepted at a legal cadence — advance THIS hand's timer.
                 // Stamped here on cadence-acceptance (before the range / hit / PvP
                 // resolution below) because the client paces by swing attempt, not
@@ -3492,31 +3722,27 @@ pub async fn run(
                         continue;
                     }
                     let target_cid = intent.target_id as ClientId;
-                    let target_zone = connections
-                        .get(&target_cid)
-                        .and_then(|c| c.zone.clone());
-                    let allowed_pvp = match (
-                        connections.get(&attacker_cid),
-                        connections.get(&target_cid),
-                    ) {
-                        (Some(a), Some(t)) => combat::can_attack(
-                            a, t,
-                            attacker_zone.as_deref(),
-                            target_zone.as_deref(),
-                        ),
-                        _ => false,
-                    };
+                    let target_zone = connections.get(&target_cid).and_then(|c| c.zone.clone());
+                    let allowed_pvp =
+                        match (connections.get(&attacker_cid), connections.get(&target_cid)) {
+                            (Some(a), Some(t)) => combat::can_attack(
+                                a,
+                                t,
+                                attacker_zone.as_deref(),
+                                target_zone.as_deref(),
+                            ),
+                            _ => false,
+                        };
                     let target_in_range_alive = connections
                         .get(&target_cid)
                         .map(|t| {
                             t.in_world
                                 && t.hp > 0.0
-                                && t.pos.distance_to(attacker_pos) <= match items::lookup(
-                                    &server_weapon_path,
-                                ) {
-                                    Some(w) if w.is_ranged => RANGED_ATTACK_RANGE,
-                                    _ => 3.0 * ATTACK_RANGE_TOLERANCE,
-                                }
+                                && t.pos.distance_to(attacker_pos)
+                                    <= match items::lookup(&server_weapon_path) {
+                                        Some(w) if w.is_ranged => RANGED_ATTACK_RANGE,
+                                        _ => 3.0 * ATTACK_RANGE_TOLERANCE,
+                                    }
                         })
                         .unwrap_or(false);
                     if !allowed_pvp {
@@ -3567,17 +3793,25 @@ pub async fn run(
                             buffs::consume_absorb(&mut target_conn.active_buffs, amount);
                         amount = after_absorb;
                         if exhausted {
-                            absorb_strip_pvp = target_conn.active_buffs.iter().position(|b| {
-                                matches!(b.effect, buffs::BuffEffect::Absorb { .. })
-                            });
+                            absorb_strip_pvp = target_conn
+                                .active_buffs
+                                .iter()
+                                .position(|b| matches!(b.effect, buffs::BuffEffect::Absorb { .. }));
                         }
                         shield_to_attacker_pvp =
                             buffs::damage_shield_total(&target_conn.active_buffs);
-                        shield_name_pvp = buffs::first_damage_shield_name(&target_conn.active_buffs).map(|s| s.to_string());
+                        shield_name_pvp =
+                            buffs::first_damage_shield_name(&target_conn.active_buffs)
+                                .map(|s| s.to_string());
                         target_conn.hp = (target_conn.hp - amount as f32).max(0.0);
                         regen::mark_dirty(target_conn);
                         target_conn.note_damage_taken(now); // camp breaks on damage
-                        (target_conn.hp, target_conn.max_hp, amount, target_conn.equipped_armor)
+                        (
+                            target_conn.hp,
+                            target_conn.max_hp,
+                            amount,
+                            target_conn.equipped_armor,
+                        )
                     };
                     // Strip exhausted absorb buff + fan snapshot.
                     if let Some(idx) = absorb_strip_pvp {
@@ -3587,11 +3821,7 @@ pub async fn run(
                             }
                         }
                         if let Some(tc) = connections.get(&target_cid) {
-                            fan_out_server_buff_snapshot(
-                                &mut server,
-                                &in_world_recipients_now,
-                                tc,
-                            );
+                            fan_out_server_buff_snapshot(&mut server, &in_world_recipients_now, tc);
                         }
                     }
                     // Damage shield reflects damage to the attacker
@@ -3631,14 +3861,24 @@ pub async fn run(
                                 let outcome = roll_cast_interrupt(att, now, reflect_dmg);
                                 let (att_mp, att_max_mp) = (att.mp, att.max_mp);
                                 match &outcome {
-                                    InterruptOutcome::Interrupted { spell_name, mana_charged } => {
+                                    InterruptOutcome::Interrupted {
+                                        spell_name,
+                                        mana_charged,
+                                    } => {
                                         handlers::fan_out_cast_fail(
                                             &mut server,
                                             &in_world_recipients_now,
                                             intent.attacker,
                                             "interrupted (hit during cast)".to_string(),
                                         );
-                                        tell_interrupt_charge(&mut server, attacker_cid, intent.attacker, att_mp, att_max_mp, *mana_charged);
+                                        tell_interrupt_charge(
+                                            &mut server,
+                                            attacker_cid,
+                                            intent.attacker,
+                                            att_mp,
+                                            att_max_mp,
+                                            *mana_charged,
+                                        );
                                         tracing::info!(
                                             caster = intent.attacker,
                                             spell = %spell_name,
@@ -3679,14 +3919,24 @@ pub async fn run(
                         let interrupt_outcome = roll_cast_interrupt(tc, now, amount as i32);
                         let (tc_mp, tc_max_mp) = (tc.mp, tc.max_mp);
                         match &interrupt_outcome {
-                            InterruptOutcome::Interrupted { spell_name, mana_charged } => {
+                            InterruptOutcome::Interrupted {
+                                spell_name,
+                                mana_charged,
+                            } => {
                                 handlers::fan_out_cast_fail(
                                     &mut server,
                                     &in_world_recipients_now,
                                     intent.target_id,
                                     "interrupted (hit during cast)".to_string(),
                                 );
-                                tell_interrupt_charge(&mut server, target_cid, intent.target_id, tc_mp, tc_max_mp, *mana_charged);
+                                tell_interrupt_charge(
+                                    &mut server,
+                                    target_cid,
+                                    intent.target_id,
+                                    tc_mp,
+                                    tc_max_mp,
+                                    *mana_charged,
+                                );
                                 tracing::info!(
                                     caster = intent.target_id,
                                     spell = %spell_name,
@@ -3741,17 +3991,12 @@ pub async fn run(
                     if let Some(owner_id) = pet_owner {
                         let owner_cid = owner_id as ClientId;
                         let allowed = if owner_cid == attacker_cid {
-                            false  // attacking your own pet — defensive guard
+                            false // attacking your own pet — defensive guard
                         } else {
-                            match (
-                                connections.get(&attacker_cid),
-                                connections.get(&owner_cid),
-                            ) {
-                                (Some(a), Some(o)) => combat::can_attack(
-                                    a, o,
-                                    a.zone.as_deref(),
-                                    o.zone.as_deref(),
-                                ),
+                            match (connections.get(&attacker_cid), connections.get(&owner_cid)) {
+                                (Some(a), Some(o)) => {
+                                    combat::can_attack(a, o, a.zone.as_deref(), o.zone.as_deref())
+                                }
                                 _ => false,
                             }
                         };
@@ -3963,11 +4208,7 @@ pub async fn run(
                 );
                 if entity.hp <= 0.0 {
                     entity.transition(EnemyState::Dead, now);
-                    handlers::fan_out_entity_died(
-                        &mut server,
-                        &in_world_recipients_now,
-                        entity.id,
-                    );
+                    handlers::fan_out_entity_died(&mut server, &in_world_recipients_now, entity.id);
                     // Warder respawn — if a player kill (PvP or
                     // accidental) drops a Beast Master warder, schedule
                     // the same retreat-and-respawn the enemy-kill path
@@ -3976,8 +4217,7 @@ pub async fn run(
                     if super::pet_templates::is_warder_template(&entity.mob.name) {
                         if let Some(owner_id) = entity.owner {
                             const WARDER_RETREAT_SECS: f32 = 15.0;
-                            let due = now
-                                + std::time::Duration::from_secs_f32(WARDER_RETREAT_SECS);
+                            let due = now + std::time::Duration::from_secs_f32(WARDER_RETREAT_SECS);
                             let owner_cid = owner_id as ClientId;
                             if let Some(conn) = connections.get_mut(&owner_cid) {
                                 conn.warder_respawn_at = Some(due);
@@ -4001,16 +4241,16 @@ pub async fn run(
                     if let Some((&credit_id, _)) = entity
                         .aggro
                         .iter()
-                        .max_by(|a, b| {
-                            a.1.partial_cmp(b.1)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        })
+                        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                     {
                         // EQ quadratic per-kill award from the mob's level (see
                         // progression::kill_xp), split across the killer's
                         // group + quest credit via the shared helper (same
                         // path as spell and pet kills).
-                        let base_xp = super::progression::kill_xp(entity.mob.level as i32, super::progression::ZEM_NORMAL);
+                        let base_xp = super::progression::kill_xp(
+                            entity.mob.level as i32,
+                            super::progression::ZEM_NORMAL,
+                        );
                         let mob_name = entity.mob.name.clone();
                         // Owned victims (pets / charmed mobs) grant no quest
                         // credit — the warder is literally named "Wolf".
@@ -4041,10 +4281,7 @@ pub async fn run(
                     let owner_cid_opt: Option<ClientId> = entity
                         .aggro
                         .iter()
-                        .max_by(|a, b| {
-                            a.1.partial_cmp(b.1)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        })
+                        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                         .map(|(&id, _)| id)
                         .filter(|&id| id < protocol::world::ENEMY_ID_BASE)
                         .map(|id| id as ClientId);
@@ -4086,11 +4323,7 @@ pub async fn run(
                             .filter(|id| visible.contains(id))
                             .collect();
                         if !bag_recipients.is_empty() {
-                            handlers::fan_out_loot_bag_spawn(
-                                &mut server,
-                                &bag_recipients,
-                                &bag,
-                            );
+                            handlers::fan_out_loot_bag_spawn(&mut server, &bag_recipients, &bag);
                         }
                         loot_bags.insert(bag.id, bag);
                         tracing::info!(
@@ -4153,7 +4386,13 @@ pub async fn run(
                         spell = %spell.name,
                         "CastSpell rejected — caster is dead"
                     );
-                    refuse_cast(&mut server, &connections, caster_cid, intent.caster, "You are dead.");
+                    refuse_cast(
+                        &mut server,
+                        &connections,
+                        caster_cid,
+                        intent.caster,
+                        "You are dead.",
+                    );
                     continue;
                 }
                 // Phase 1 exploit gate — class/level eligibility. Any cast that
@@ -4227,7 +4466,13 @@ pub async fn run(
                                 in_flight = %intent.cast_name_at_dispatch,
                                 "CastSpell rejected — cast-time gate (no matching CastStart or too early)"
                             );
-                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, "cast not ready");
+                            refuse_cast(
+                                &mut server,
+                                &connections,
+                                caster_cid,
+                                intent.caster,
+                                "cast not ready",
+                            );
                             continue;
                         }
                         CastTiming::Held => {
@@ -4246,7 +4491,13 @@ pub async fn run(
                                 cc.cast_total_duration = 0.0;
                                 cc.cast_set_at = None;
                             }
-                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, "That cast has lapsed.");
+                            refuse_cast(
+                                &mut server,
+                                &connections,
+                                caster_cid,
+                                intent.caster,
+                                "That cast has lapsed.",
+                            );
                             continue;
                         }
                     }
@@ -4259,13 +4510,22 @@ pub async fn run(
                     let interrupted_at = connections
                         .get(&caster_cid)
                         .and_then(|c| c.cast_interrupted_at);
-                    if cast_gate::beaten_by_interrupt(interrupted_at, intent.cast_set_at_at_dispatch) {
+                    if cast_gate::beaten_by_interrupt(
+                        interrupted_at,
+                        intent.cast_set_at_at_dispatch,
+                    ) {
                         tracing::info!(
                             caster = intent.caster,
                             spell = %spell.name,
                             "CastSpell rejected — interrupted after the bar began"
                         );
-                        refuse_cast(&mut server, &connections, caster_cid, intent.caster, "interrupted (hit during cast)");
+                        refuse_cast(
+                            &mut server,
+                            &connections,
+                            caster_cid,
+                            intent.caster,
+                            "interrupted (hit during cast)",
+                        );
                         continue;
                     }
                     // Track 17.2 — movement-during-cast gate. Compare
@@ -4309,7 +4569,13 @@ pub async fn run(
                                 cc.cast_total_duration = 0.0;
                                 cc.cast_set_at = None;
                             }
-                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, "interrupted (moved)");
+                            refuse_cast(
+                                &mut server,
+                                &connections,
+                                caster_cid,
+                                intent.caster,
+                                "interrupted (moved)",
+                            );
                             continue;
                         }
                     }
@@ -4328,7 +4594,13 @@ pub async fn run(
                                 remaining_secs = remaining,
                                 "CastSpell rejected — on cooldown"
                             );
-                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, "Spell is on cooldown.");
+                            refuse_cast(
+                                &mut server,
+                                &connections,
+                                caster_cid,
+                                intent.caster,
+                                "Spell is on cooldown.",
+                            );
                             continue;
                         }
                     }
@@ -4345,7 +4617,13 @@ pub async fn run(
                                     remaining_ms = until.duration_since(now).as_millis(),
                                     "CastSpell rejected — inside the global cooldown"
                                 );
-                                refuse_cast(&mut server, &connections, caster_cid, intent.caster, "You cannot cast again yet.");
+                                refuse_cast(
+                                    &mut server,
+                                    &connections,
+                                    caster_cid,
+                                    intent.caster,
+                                    "You cannot cast again yet.",
+                                );
                                 continue;
                             }
                         }
@@ -4368,7 +4646,13 @@ pub async fn run(
                     // Tell the caster so they see "Cast failed: Not enough
                     // mana." instead of a silent no-op behind the optimistic
                     // local "You cast X" line, with the mana they really have.
-                    refuse_cast(&mut server, &connections, caster_cid, intent.caster, "Not enough mana.");
+                    refuse_cast(
+                        &mut server,
+                        &connections,
+                        caster_cid,
+                        intent.caster,
+                        "Not enough mana.",
+                    );
                     continue;
                 }
                 let caster_pos = caster_conn.pos;
@@ -4515,7 +4799,13 @@ pub async fn run(
                         // (consistent with the rest of the cast pipeline).
                         let Some(corpse_id) = intent.target_id else {
                             tracing::info!(caster = intent.caster, spell = %spell.name, "resurrection rejected — no corpse targeted (target_id 0)");
-                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, "No corpse targeted.");
+                            refuse_cast(
+                                &mut server,
+                                &connections,
+                                caster_cid,
+                                intent.caster,
+                                "No corpse targeted.",
+                            );
                             continue;
                         };
                         tracing::info!(caster = intent.caster, spell = %spell.name, corpse_id, "resurrection cast received");
@@ -4523,46 +4813,101 @@ pub async fn run(
                         // Paladin) at the required level may cast it. The client
                         // gates this, but don't trust a forged client with a free
                         // xp grant.
-                        let caster_class_level = connections.get(&caster_cid).map(|c| (c.class.clone(), c.level));
-                        let caster_ok = caster_class_level.as_ref().map(|(class, level)| {
-                            spell.classes.iter().any(|cl| cl == class) && *level >= spell.min_level
-                        }).unwrap_or(false);
+                        let caster_class_level = connections
+                            .get(&caster_cid)
+                            .map(|c| (c.class.clone(), c.level));
+                        let caster_ok = caster_class_level
+                            .as_ref()
+                            .map(|(class, level)| {
+                                spell.classes.iter().any(|cl| cl == class)
+                                    && *level >= spell.min_level
+                            })
+                            .unwrap_or(false);
                         if !caster_ok {
                             if let Some((class, level)) = &caster_class_level {
                                 tracing::info!(caster = intent.caster, spell = %spell.name, class = %class, level, required = spell.min_level, "resurrection rejected — caster class/level");
                             }
-                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, "You cannot cast that.");
+                            refuse_cast(
+                                &mut server,
+                                &connections,
+                                caster_cid,
+                                intent.caster,
+                                "You cannot cast that.",
+                            );
                             continue;
                         }
                         // Validate the corpse: exists, in range, not already rezzed.
                         let mut reason: Option<&str> = None;
                         let corpse_owner = match corpses.get(&corpse_id) {
-                            None => { reason = Some("That is not a corpse."); 0 }
-                            Some(c) if !(c.pos.distance_to(caster_pos) <= RES_CAST_RANGE) => { reason = Some("You are too far from the corpse."); 0 }
-                            Some(c) if c.resurrected => { reason = Some("That corpse has already been resurrected."); 0 }
+                            None => {
+                                reason = Some("That is not a corpse.");
+                                0
+                            }
+                            Some(c) if !(c.pos.distance_to(caster_pos) <= RES_CAST_RANGE) => {
+                                reason = Some("You are too far from the corpse.");
+                                0
+                            }
+                            Some(c) if c.resurrected => {
+                                reason = Some("That corpse has already been resurrected.");
+                                0
+                            }
                             Some(c) => c.owner_char,
                         };
                         if let Some(r) = reason {
-                            tracing::info!(caster = intent.caster, corpse_id, reason = r, "resurrection rejected — corpse");
+                            tracing::info!(
+                                caster = intent.caster,
+                                corpse_id,
+                                reason = r,
+                                "resurrection rejected — corpse"
+                            );
                             refuse_cast(&mut server, &connections, caster_cid, intent.caster, r);
                             continue;
                         }
                         // The owner must be in-world to receive + accept the offer.
                         let owner_cid = corpse_owner as ClientId;
-                        if !connections.get(&owner_cid).map(|c| c.in_world).unwrap_or(false) {
-                            tracing::info!(caster = intent.caster, corpse_id, owner = corpse_owner, "resurrection rejected — owner not in world");
-                            refuse_cast(&mut server, &connections, caster_cid, intent.caster, "Their spirit is not present.");
+                        if !connections
+                            .get(&owner_cid)
+                            .map(|c| c.in_world)
+                            .unwrap_or(false)
+                        {
+                            tracing::info!(
+                                caster = intent.caster,
+                                corpse_id,
+                                owner = corpse_owner,
+                                "resurrection rejected — owner not in world"
+                            );
+                            refuse_cast(
+                                &mut server,
+                                &connections,
+                                caster_cid,
+                                intent.caster,
+                                "Their spirit is not present.",
+                            );
                             continue;
                         }
                         let xp_percent = spell.res_xp_percent.round() as u32;
-                        let caster_name = connections.get(&caster_cid).map(|c| c.name.clone()).unwrap_or_default();
+                        let caster_name = connections
+                            .get(&caster_cid)
+                            .map(|c| c.name.clone())
+                            .unwrap_or_default();
                         // Record the pending offer on the owner so the accept can't
                         // forge the refund %, then send the offer privately.
                         if let Some(owner_conn) = connections.get_mut(&owner_cid) {
                             owner_conn.pending_res_offer = Some((corpse_id, xp_percent));
                         }
-                        handlers::send_resurrect_offer(&mut server, owner_cid, corpse_id, caster_name, xp_percent);
-                        tracing::info!(caster = intent.caster, corpse_id, xp_percent, "resurrection offered");
+                        handlers::send_resurrect_offer(
+                            &mut server,
+                            owner_cid,
+                            corpse_id,
+                            caster_name,
+                            xp_percent,
+                        );
+                        tracing::info!(
+                            caster = intent.caster,
+                            corpse_id,
+                            xp_percent,
+                            "resurrection offered"
+                        );
                     }
                     "SELF" => {
                         tracing::info!(
@@ -4610,10 +4955,9 @@ pub async fn run(
                             // Toggle semantics — second cast clears.
                             let cc = connections.get_mut(&caster_cid).expect("checked");
                             let was_active = buffs::is_lich_form_active(&cc.active_buffs);
-                            cc.active_buffs.retain(|b| !matches!(
-                                b.effect,
-                                buffs::BuffEffect::LichForm { .. }
-                            ));
+                            cc.active_buffs.retain(|b| {
+                                !matches!(b.effect, buffs::BuffEffect::LichForm { .. })
+                            });
                             if !was_active {
                                 cc.active_buffs.push(ActiveBuff::new_lich_form(
                                     spell.name.clone(),
@@ -4666,9 +5010,7 @@ pub async fn run(
                             // gate as direct attacks, just mirrored.
                             // Stops a healer from topping up the duel
                             // partner's warder mid-fight.
-                            let pet_owner = enemies
-                                .get(&raw_target)
-                                .and_then(|p| p.owner);
+                            let pet_owner = enemies.get(&raw_target).and_then(|p| p.owner);
                             if let Some(owner_id) = pet_owner {
                                 if owner_id != intent.caster {
                                     let owner_cid = owner_id as ClientId;
@@ -4677,7 +5019,8 @@ pub async fn run(
                                         connections.get(&owner_cid),
                                     ) {
                                         (Some(a), Some(o)) => combat::can_attack(
-                                            a, o,
+                                            a,
+                                            o,
                                             a.zone.as_deref(),
                                             o.zone.as_deref(),
                                         ),
@@ -4696,8 +5039,12 @@ pub async fn run(
                                             .get(&raw_target)
                                             .map(|p| p.mob.name.clone())
                                             .unwrap_or_default();
-                                        let line = if !owner_name.is_empty() && !pet_name.is_empty() {
-                                            format!("You cannot heal {}'s {}.", owner_name, pet_name)
+                                        let line = if !owner_name.is_empty() && !pet_name.is_empty()
+                                        {
+                                            format!(
+                                                "You cannot heal {}'s {}.",
+                                                owner_name, pet_name
+                                            )
                                         } else {
                                             "You cannot heal an enemy's pet.".to_string()
                                         };
@@ -4824,7 +5171,9 @@ pub async fn run(
                                 hp_cost,
                             );
                             handlers::send_refusal(
-                                &mut server, caster_cid, "That target is no longer here.",
+                                &mut server,
+                                caster_cid,
+                                "That target is no longer here.",
                             );
                             continue;
                         }
@@ -4838,11 +5187,9 @@ pub async fn run(
                                 connections.get(&caster_cid),
                                 connections.get(&target_cid),
                             ) {
-                                (Some(a), Some(t)) => combat::can_attack(
-                                    a, t,
-                                    a.zone.as_deref(),
-                                    t.zone.as_deref(),
-                                ),
+                                (Some(a), Some(t)) => {
+                                    combat::can_attack(a, t, a.zone.as_deref(), t.zone.as_deref())
+                                }
                                 _ => false,
                             };
                             // Group-mates can always heal/buff each other; a
@@ -4877,8 +5224,7 @@ pub async fn run(
                         let heal = spell.heal_amount;
                         if heal > 0.0 {
                             let (final_hp, max_hp) = {
-                                let tc =
-                                    connections.get_mut(&target_cid).expect("checked");
+                                let tc = connections.get_mut(&target_cid).expect("checked");
                                 tc.hp = (tc.hp + heal).min(tc.max_hp);
                                 regen::mark_dirty(tc);
                                 (tc.hp, tc.max_hp)
@@ -4942,7 +5288,9 @@ pub async fn run(
                                 hp_cost,
                             );
                             handlers::send_refusal(
-                                &mut server, caster_cid, "You need a target for that spell.",
+                                &mut server,
+                                caster_cid,
+                                "You need a target for that spell.",
                             );
                             continue;
                         };
@@ -4971,11 +5319,9 @@ pub async fn run(
                                 connections.get(&caster_cid),
                                 connections.get(&target_cid),
                             ) {
-                                (Some(a), Some(t)) => combat::can_attack(
-                                    a, t,
-                                    a.zone.as_deref(),
-                                    t.zone.as_deref(),
-                                ),
+                                (Some(a), Some(t)) => {
+                                    combat::can_attack(a, t, a.zone.as_deref(), t.zone.as_deref())
+                                }
                                 _ => false,
                             };
                             if !pvp_ok {
@@ -5019,7 +5365,9 @@ pub async fn run(
                                     hp_cost,
                                 );
                                 handlers::send_refusal(
-                                    &mut server, caster_cid, "That target is no longer here.",
+                                    &mut server,
+                                    caster_cid,
+                                    "That target is no longer here.",
                                 );
                                 continue;
                             }
@@ -5038,7 +5386,9 @@ pub async fn run(
                                     });
                                 }
                                 shield_back = buffs::damage_shield_total(&tc.active_buffs);
-                                shield_back_name = buffs::first_damage_shield_name(&tc.active_buffs).map(|s| s.to_string());
+                                shield_back_name =
+                                    buffs::first_damage_shield_name(&tc.active_buffs)
+                                        .map(|s| s.to_string());
                                 tc.hp = (tc.hp - dmg as f32).max(0.0);
                                 regen::mark_dirty(tc);
                                 tc.note_damage_taken(now); // camp breaks on damage
@@ -5088,14 +5438,24 @@ pub async fn run(
                                 let outcome = roll_cast_interrupt(tc, now, applied);
                                 let (tc_mp, tc_max_mp) = (tc.mp, tc.max_mp);
                                 match &outcome {
-                                    InterruptOutcome::Interrupted { spell_name, mana_charged } => {
+                                    InterruptOutcome::Interrupted {
+                                        spell_name,
+                                        mana_charged,
+                                    } => {
                                         handlers::fan_out_cast_fail(
                                             &mut server,
                                             &in_world_recipients_now,
                                             target_id,
                                             "interrupted (hit during cast)".to_string(),
                                         );
-                                        tell_interrupt_charge(&mut server, target_cid, target_id, tc_mp, tc_max_mp, *mana_charged);
+                                        tell_interrupt_charge(
+                                            &mut server,
+                                            target_cid,
+                                            target_id,
+                                            tc_mp,
+                                            tc_max_mp,
+                                            *mana_charged,
+                                        );
                                         tracing::info!(
                                             caster = target_id,
                                             spell = %spell_name,
@@ -5158,14 +5518,25 @@ pub async fn run(
                                         // the cache populated.
                                         let outcome = roll_cast_interrupt(att, now, reflect_dmg);
                                         let (att_mp, att_max_mp) = (att.mp, att.max_mp);
-                                        if let InterruptOutcome::Interrupted { spell_name, mana_charged } = &outcome {
+                                        if let InterruptOutcome::Interrupted {
+                                            spell_name,
+                                            mana_charged,
+                                        } = &outcome
+                                        {
                                             handlers::fan_out_cast_fail(
                                                 &mut server,
                                                 &in_world_recipients_now,
                                                 intent.caster,
                                                 "interrupted (hit during cast)".to_string(),
                                             );
-                                            tell_interrupt_charge(&mut server, caster_cid, intent.caster, att_mp, att_max_mp, *mana_charged);
+                                            tell_interrupt_charge(
+                                                &mut server,
+                                                caster_cid,
+                                                intent.caster,
+                                                att_mp,
+                                                att_max_mp,
+                                                *mana_charged,
+                                            );
                                             tracing::info!(
                                                 caster = intent.caster,
                                                 spell = %spell_name,
@@ -5203,31 +5574,68 @@ pub async fn run(
                             }
                             if spell.cc_duration > 0.0 {
                                 if let Some(tc) = connections.get_mut(&target_cid) {
-                                    apply_buff(tc, ActiveBuff::new_mez(spell.name.clone(), spell.cc_duration, now));
+                                    apply_buff(
+                                        tc,
+                                        ActiveBuff::new_mez(
+                                            spell.name.clone(),
+                                            spell.cc_duration,
+                                            now,
+                                        ),
+                                    );
                                     cc_changed = true;
                                 }
                             }
                             if spell.root_duration > 0.0 {
                                 if let Some(tc) = connections.get_mut(&target_cid) {
-                                    apply_buff(tc, ActiveBuff::new_root(spell.name.clone(), spell.root_duration, now));
+                                    apply_buff(
+                                        tc,
+                                        ActiveBuff::new_root(
+                                            spell.name.clone(),
+                                            spell.root_duration,
+                                            now,
+                                        ),
+                                    );
                                     cc_changed = true;
                                 }
                             }
                             if spell.slow_amount > 0.0 && spell.slow_duration > 0.0 {
                                 if let Some(tc) = connections.get_mut(&target_cid) {
-                                    apply_buff(tc, ActiveBuff::new_snare(spell.name.clone(), spell.slow_amount, spell.slow_duration, now));
+                                    apply_buff(
+                                        tc,
+                                        ActiveBuff::new_snare(
+                                            spell.name.clone(),
+                                            spell.slow_amount,
+                                            spell.slow_duration,
+                                            now,
+                                        ),
+                                    );
                                     cc_changed = true;
                                 }
                             }
                             if spell.attack_slow_amount > 0.0 && spell.attack_slow_duration > 0.0 {
                                 if let Some(tc) = connections.get_mut(&target_cid) {
-                                    apply_buff(tc, ActiveBuff::new_attack_slow(spell.name.clone(), spell.attack_slow_amount, spell.attack_slow_duration, now));
+                                    apply_buff(
+                                        tc,
+                                        ActiveBuff::new_attack_slow(
+                                            spell.name.clone(),
+                                            spell.attack_slow_amount,
+                                            spell.attack_slow_duration,
+                                            now,
+                                        ),
+                                    );
                                     cc_changed = true;
                                 }
                             }
                             if spell.silence_duration > 0.0 {
                                 if let Some(tc) = connections.get_mut(&target_cid) {
-                                    apply_buff(tc, ActiveBuff::new_silence(spell.name.clone(), spell.silence_duration, now));
+                                    apply_buff(
+                                        tc,
+                                        ActiveBuff::new_silence(
+                                            spell.name.clone(),
+                                            spell.silence_duration,
+                                            now,
+                                        ),
+                                    );
                                     cc_changed = true;
                                 }
                             }
@@ -5236,16 +5644,28 @@ pub async fn run(
                                 // Stat buffs need their deltas undone
                                 // first.
                                 if let Some(tc) = connections.get_mut(&target_cid) {
-                                    if let Some(idx) = buffs::first_dispellable_index(&tc.active_buffs) {
+                                    if let Some(idx) =
+                                        buffs::first_dispellable_index(&tc.active_buffs)
+                                    {
                                         if let buffs::BuffEffect::StatBuff {
-                                            strength, agility, intelligence, wisdom, constitution,
-                                            max_hp_delta, max_mp_delta,
+                                            strength,
+                                            agility,
+                                            intelligence,
+                                            wisdom,
+                                            constitution,
+                                            max_hp_delta,
+                                            max_mp_delta,
                                         } = tc.active_buffs[idx].effect
                                         {
                                             buffs::undo_stat_deltas(
                                                 tc,
-                                                strength, agility, intelligence, wisdom, constitution,
-                                                max_hp_delta, max_mp_delta,
+                                                strength,
+                                                agility,
+                                                intelligence,
+                                                wisdom,
+                                                constitution,
+                                                max_hp_delta,
+                                                max_mp_delta,
                                             );
                                             regen::mark_dirty(tc);
                                         }
@@ -5307,7 +5727,9 @@ pub async fn run(
                                 hp_cost,
                             );
                             handlers::send_refusal(
-                                &mut server, caster_cid, "That target is too far away.",
+                                &mut server,
+                                caster_cid,
+                                "That target is too far away.",
                             );
                             continue;
                         }
@@ -5320,14 +5742,15 @@ pub async fn run(
                             if let Some(owner_id) = pet_owner {
                                 let owner_cid = owner_id as ClientId;
                                 let allowed = if owner_cid == caster_cid {
-                                    false  // own pet — defensive guard
+                                    false // own pet — defensive guard
                                 } else {
                                     match (
                                         connections.get(&caster_cid),
                                         connections.get(&owner_cid),
                                     ) {
                                         (Some(a), Some(o)) => combat::can_attack(
-                                            a, o,
+                                            a,
+                                            o,
                                             a.zone.as_deref(),
                                             o.zone.as_deref(),
                                         ),
@@ -5430,7 +5853,9 @@ pub async fn run(
                                 hp_cost,
                             );
                             handlers::send_refusal(
-                                &mut server, caster_cid, "That magic has no effect here yet.",
+                                &mut server,
+                                caster_cid,
+                                "That magic has no effect here yet.",
                             );
                             continue;
                         }
@@ -5471,7 +5896,8 @@ pub async fn run(
                                             connections.get(&owner_cid),
                                         ) {
                                             (Some(a), Some(o)) => combat::can_attack(
-                                                a, o,
+                                                a,
+                                                o,
                                                 a.zone.as_deref(),
                                                 o.zone.as_deref(),
                                             ),
@@ -5540,7 +5966,9 @@ pub async fn run(
                                 hp_cost,
                             );
                             handlers::send_refusal(
-                                &mut server, caster_cid, "That magic has no effect here yet.",
+                                &mut server,
+                                caster_cid,
+                                "That magic has no effect here yet.",
                             );
                             continue;
                         }
@@ -5602,7 +6030,9 @@ pub async fn run(
                                 hp_cost,
                             );
                             handlers::send_refusal(
-                                &mut server, caster_cid, "That magic has no effect here yet.",
+                                &mut server,
+                                caster_cid,
+                                "That magic has no effect here yet.",
                             );
                             continue;
                         };
@@ -5639,14 +6069,20 @@ pub async fn run(
                                 hp_cost,
                             );
                             handlers::send_refusal(
-                                &mut server, caster_cid, "You need a target for that spell.",
+                                &mut server,
+                                caster_cid,
+                                "You need a target for that spell.",
                             );
                             continue;
                         };
                         if target_id < protocol::world::ENEMY_ID_BASE
                             || target_id >= protocol::world::LOOT_BAG_ID_BASE
                         {
-                            tracing::info!(caster = intent.caster, target = target_id, "PET_CHARM dropped — target id not in enemy partition");
+                            tracing::info!(
+                                caster = intent.caster,
+                                target = target_id,
+                                "PET_CHARM dropped — target id not in enemy partition"
+                            );
                             refund_spell_cost(
                                 &mut server,
                                 &mut connections,
@@ -5657,19 +6093,44 @@ pub async fn run(
                                 hp_cost,
                             );
                             handlers::send_refusal(
-                                &mut server, caster_cid, "You cannot charm that.",
+                                &mut server,
+                                caster_cid,
+                                "You cannot charm that.",
                             );
                             continue;
                         }
                         let owner_id = intent.caster;
                         // Look up the target; copy out the stats we
                         // need then remove it from the map + AOI.
-                        let extracted: Option<(crate::world::zones::MobTemplate, f32, f32, Vec3f, f32, usize, Vec3f)> = enemies
+                        let extracted: Option<(
+                            crate::world::zones::MobTemplate,
+                            f32,
+                            f32,
+                            Vec3f,
+                            f32,
+                            usize,
+                            Vec3f,
+                        )> = enemies
                             .get(&target_id)
                             .filter(|e| e.is_alive() && !e.is_pet())
-                            .map(|e| (e.mob.clone(), e.hp, e.max_hp, e.pos, e.yaw, e.spawn_point_idx, e.spawn_pos));
-                        let Some((mob, hp, max_hp, pos, yaw, slot_idx, home_pos)) = extracted else {
-                            tracing::info!(caster = owner_id, target = target_id, "PET_CHARM dropped — target gone or not a live enemy");
+                            .map(|e| {
+                                (
+                                    e.mob.clone(),
+                                    e.hp,
+                                    e.max_hp,
+                                    e.pos,
+                                    e.yaw,
+                                    e.spawn_point_idx,
+                                    e.spawn_pos,
+                                )
+                            });
+                        let Some((mob, hp, max_hp, pos, yaw, slot_idx, home_pos)) = extracted
+                        else {
+                            tracing::info!(
+                                caster = owner_id,
+                                target = target_id,
+                                "PET_CHARM dropped — target gone or not a live enemy"
+                            );
                             refund_spell_cost(
                                 &mut server,
                                 &mut connections,
@@ -5680,7 +6141,9 @@ pub async fn run(
                                 hp_cost,
                             );
                             handlers::send_refusal(
-                                &mut server, caster_cid, "That target is no longer here.",
+                                &mut server,
+                                caster_cid,
+                                "That target is no longer here.",
                             );
                             continue;
                         };
@@ -5690,7 +6153,11 @@ pub async fn run(
                         // Kept-only-when-in-range, so a non-finite distance
                         // refuses.
                         if !(pos.distance_to(caster_pos) <= RANGED_ATTACK_RANGE) {
-                            tracing::info!(caster = owner_id, target = target_id, "PET_CHARM dropped — out of range");
+                            tracing::info!(
+                                caster = owner_id,
+                                target = target_id,
+                                "PET_CHARM dropped — out of range"
+                            );
                             refund_spell_cost(
                                 &mut server,
                                 &mut connections,
@@ -5701,7 +6168,9 @@ pub async fn run(
                                 hp_cost,
                             );
                             handlers::send_refusal(
-                                &mut server, caster_cid, "That target is too far away.",
+                                &mut server,
+                                caster_cid,
+                                "That target is too far away.",
                             );
                             continue;
                         }
@@ -5735,8 +6204,13 @@ pub async fn run(
                         pet.yaw = yaw;
                         pet.spawn_point_idx = slot_idx;
                         pet.spawn_pos = home_pos;
-                        let duration = if spell.duration > 0.0 { spell.duration } else { 30.0 };
-                        pet.charm_expires_at = Some(now + std::time::Duration::from_secs_f32(duration));
+                        let duration = if spell.duration > 0.0 {
+                            spell.duration
+                        } else {
+                            30.0
+                        };
+                        pet.charm_expires_at =
+                            Some(now + std::time::Duration::from_secs_f32(duration));
                         let pet_id = pet.id;
                         let pet_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
                         aoi.insert(pet_id, pet_cell);
@@ -5778,7 +6252,11 @@ pub async fn run(
                                 mana_cost,
                                 hp_cost,
                             );
-                            handlers::send_refusal(&mut server, caster_cid, "You have no pet to mend.");
+                            handlers::send_refusal(
+                                &mut server,
+                                caster_cid,
+                                "You have no pet to mend.",
+                            );
                             continue;
                         };
                         let heal = spell.heal_amount.max(0.0);
@@ -5806,12 +6284,14 @@ pub async fn run(
                         // group member the pre-flight admitted) where THEY
                         // stand, and persist it like the Soul Binder does.
                         let raw = intent.target_id.unwrap_or(0);
-                        let bound_cid: ClientId =
-                            if raw == 0 || raw == intent.caster || raw >= protocol::world::ENEMY_ID_BASE {
-                                caster_cid
-                            } else {
-                                raw as ClientId
-                            };
+                        let bound_cid: ClientId = if raw == 0
+                            || raw == intent.caster
+                            || raw >= protocol::world::ENEMY_ID_BASE
+                        {
+                            caster_cid
+                        } else {
+                            raw as ClientId
+                        };
                         let Some(bc) = connections.get_mut(&bound_cid) else {
                             continue;
                         };
@@ -5821,12 +6301,22 @@ pub async fn run(
                         tracing::info!(
                             caster = intent.caster,
                             bound = bound_cid as u64,
-                            x = pos.0, y = pos.1, z = pos.2,
+                            x = pos.0,
+                            y = pos.1,
+                            z = pos.2,
                             "BIND applied"
                         );
-                        handlers::send_system_line(&mut server, bound_cid, "Your soul is bound to this place.");
+                        handlers::send_system_line(
+                            &mut server,
+                            bound_cid,
+                            "Your soul is bound to this place.",
+                        );
                         if bound_cid != caster_cid {
-                            handlers::send_system_line(&mut server, caster_cid, "Their soul is bound to this place.");
+                            handlers::send_system_line(
+                                &mut server,
+                                caster_cid,
+                                "Their soul is bound to this place.",
+                            );
                         }
                     }
                     "PORT" => {
@@ -5862,7 +6352,8 @@ pub async fn run(
                                             && c.linkdead_since.is_none()
                                             && c.hp > 0.0
                                             && !c.death_processed
-                                            && c.pos.distance_to(caster_pos_now) <= super::FRIENDLY_SPELL_RANGE
+                                            && c.pos.distance_to(caster_pos_now)
+                                                <= super::FRIENDLY_SPELL_RANGE
                                     });
                                     if eligible {
                                         movers.push(m);
@@ -5870,7 +6361,8 @@ pub async fn run(
                                 }
                             }
                         }
-                        let mover_ids: Vec<EntityId> = movers.iter().map(|m| *m as EntityId).collect();
+                        let mover_ids: Vec<EntityId> =
+                            movers.iter().map(|m| *m as EntityId).collect();
                         for mob_id in wipe_hate(&mut enemies, &mover_ids) {
                             handlers::fan_out_entity_target(
                                 &mut server,
@@ -5881,7 +6373,11 @@ pub async fn run(
                         }
                         for bearer in clear_player_dots_from(&mut connections, &mover_ids) {
                             if let Some(conn) = connections.get(&bearer) {
-                                fan_out_server_buff_snapshot(&mut server, &in_world_recipients_now, conn);
+                                fan_out_server_buff_snapshot(
+                                    &mut server,
+                                    &in_world_recipients_now,
+                                    conn,
+                                );
                             }
                         }
                         for &m in &movers {
@@ -5912,7 +6408,10 @@ pub async fn run(
                                 .map(|(id, _)| *id)
                                 .collect();
                             for pet_id in pets {
-                                if enemies.get(&pet_id).is_some_and(|e| e.charm_expires_at.is_some()) {
+                                if enemies
+                                    .get(&pet_id)
+                                    .is_some_and(|e| e.charm_expires_at.is_some())
+                                {
                                     if let Some(pet) = enemies.remove(&pet_id) {
                                         let mob_id = return_charmed_mob(
                                             &mut server,
@@ -5933,9 +6432,15 @@ pub async fn run(
                                     continue;
                                 }
                                 let (old_cell, new_cell) = {
-                                    let Some(pet) = enemies.get_mut(&pet_id) else { continue };
+                                    let Some(pet) = enemies.get_mut(&pet_id) else {
+                                        continue;
+                                    };
                                     let old_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
-                                    pet.pos = Vec3f { x: dest.x + 1.5, y: dest.y, z: dest.z };
+                                    pet.pos = Vec3f {
+                                        x: dest.x + 1.5,
+                                        y: dest.y,
+                                        z: dest.z,
+                                    };
                                     // last_bcast_pos is left where it was, so the
                                     // move fans on the next tick instead of
                                     // waiting for the keepalive.
@@ -5946,7 +6451,14 @@ pub async fn run(
                                 if new_cell != old_cell {
                                     let (gained, lost) = aoi.update(pet_id, old_cell, new_cell);
                                     if let Some(pet) = enemies.get(&pet_id) {
-                                        fan_entity_cell_crossing(&mut server, &aoi, &connections, pet, &gained, &lost);
+                                        fan_entity_cell_crossing(
+                                            &mut server,
+                                            &aoi,
+                                            &connections,
+                                            pet,
+                                            &gained,
+                                            &lost,
+                                        );
                                     }
                                 }
                             }
@@ -6007,50 +6519,51 @@ pub async fn run(
         // Helper to fan the current roster of a group with names
         // looked up from the connections map. Empty members = group
         // dissolved (last-member signal).
-        let fan_roster =
-            |srv: &mut renet::RenetServer,
-             conns: &HashMap<ClientId, PerConnection>,
-             gm: &GroupManager,
-             gid: groups::GroupId,
-             also_notify_dissolved: Option<ClientId>| {
-                if let Some(g) = gm.groups.get(&gid) {
-                    let members_with_names: Vec<(u64, String)> = g.members.iter()
-                        .filter_map(|m| conns.get(m).map(|c| (*m, c.name.clone())))
-                        .collect();
-                    let recipients: Vec<ClientId> = g.members.clone();
-                    handlers::fan_group_roster(
-                        srv,
-                        &recipients,
-                        gid,
-                        g.leader,
-                        members_with_names,
-                        g.loot_mode.to_u8(),
-                    );
-                    // Seed the group panel rows (playtest 2026-08-27: rows
-                    // build zeroed client-side and resources otherwise fan
-                    // only on CHANGE, so a full-HP idle member showed blank
-                    // bars until something moved). One shot of the ordinary
-                    // resource updates per member, sent to the group, fills
-                    // every row the moment the roster lands. Existing
-                    // message types; no protocol change.
-                    for m in &g.members {
-                        if let Some(c) = conns.get(m) {
-                            handlers::fan_out_resources(srv, &recipients, c);
-                        }
+        let fan_roster = |srv: &mut renet::RenetServer,
+                          conns: &HashMap<ClientId, PerConnection>,
+                          gm: &GroupManager,
+                          gid: groups::GroupId,
+                          also_notify_dissolved: Option<ClientId>| {
+            if let Some(g) = gm.groups.get(&gid) {
+                let members_with_names: Vec<(u64, String)> = g
+                    .members
+                    .iter()
+                    .filter_map(|m| conns.get(m).map(|c| (*m, c.name.clone())))
+                    .collect();
+                let recipients: Vec<ClientId> = g.members.clone();
+                handlers::fan_group_roster(
+                    srv,
+                    &recipients,
+                    gid,
+                    g.leader,
+                    members_with_names,
+                    g.loot_mode.to_u8(),
+                );
+                // Seed the group panel rows (playtest 2026-08-27: rows
+                // build zeroed client-side and resources otherwise fan
+                // only on CHANGE, so a full-HP idle member showed blank
+                // bars until something moved). One shot of the ordinary
+                // resource updates per member, sent to the group, fills
+                // every row the moment the roster lands. Existing
+                // message types; no protocol change.
+                for m in &g.members {
+                    if let Some(c) = conns.get(m) {
+                        handlers::fan_out_resources(srv, &recipients, c);
                     }
-                } else if let Some(last) = also_notify_dissolved {
-                    // Group dissolved — send an empty roster to the
-                    // last member as a "your group dissolved" signal.
-                    handlers::fan_group_roster(
-                        srv,
-                        std::slice::from_ref(&last),
-                        gid,
-                        last,
-                        Vec::new(),
-                        0,
-                    );
                 }
-            };
+            } else if let Some(last) = also_notify_dissolved {
+                // Group dissolved — send an empty roster to the
+                // last member as a "your group dissolved" signal.
+                handlers::fan_group_roster(
+                    srv,
+                    std::slice::from_ref(&last),
+                    gid,
+                    last,
+                    Vec::new(),
+                    0,
+                );
+            }
+        };
 
         for intent in group_invite_intents.drain(..) {
             // Resolve target by name (case-insensitive). The
@@ -6078,16 +6591,12 @@ pub async fn run(
             if target_cid as u64 == intent.inviter {
                 continue; // can't invite self
             }
-            let from_name = connections.get(&(intent.inviter as ClientId))
+            let from_name = connections
+                .get(&(intent.inviter as ClientId))
                 .map(|c| c.name.clone())
                 .unwrap_or_default();
             let _gid = group_manager.record_invite(intent.inviter as ClientId, target_cid);
-            handlers::send_group_invited(
-                &mut server,
-                target_cid,
-                intent.inviter,
-                from_name,
-            );
+            handlers::send_group_invited(&mut server, target_cid, intent.inviter, from_name);
             tracing::info!(
                 inviter = intent.inviter,
                 invitee = target_cid as u64,
@@ -6171,12 +6680,12 @@ pub async fn run(
             }
             let gid = group.id;
             // Resolve target name within the group's roster.
-            let target_cid: Option<ClientId> = group.members.iter().copied()
-                .find(|m| {
-                    connections.get(m)
-                        .map(|c| c.name.eq_ignore_ascii_case(&intent.target_name))
-                        .unwrap_or(false)
-                });
+            let target_cid: Option<ClientId> = group.members.iter().copied().find(|m| {
+                connections
+                    .get(m)
+                    .map(|c| c.name.eq_ignore_ascii_case(&intent.target_name))
+                    .unwrap_or(false)
+            });
             let Some(target_cid) = target_cid else {
                 // Had neither log nor reply: a misspelled /kick simply did
                 // nothing, visibly or in server.log.
@@ -6196,7 +6705,9 @@ pub async fn run(
                 // Reachable from the UI by typing your own name, unlike the
                 // non-leader case, so it earns a reply.
                 handlers::send_refusal(
-                    &mut server, leader_cid, "Use /leave to leave your own group.",
+                    &mut server,
+                    leader_cid,
+                    "Use /leave to leave your own group.",
                 );
                 continue;
             }
@@ -6323,13 +6834,20 @@ pub async fn run(
                     .find(|(_, e)| e.owner == Some(intent.owner) && e.is_alive())
                     .map(|(id, _)| *id);
                 let Some(pet_id) = pet_id_opt else {
-                    tracing::debug!(owner = intent.owner, command = intent.command, "PetCommand dropped — no live pet");
+                    tracing::debug!(
+                        owner = intent.owner,
+                        command = intent.command,
+                        "PetCommand dropped — no live pet"
+                    );
                     continue;
                 };
                 match intent.command {
                     cmd::ATTACK => {
                         let Some(target_id) = intent.target_id else {
-                            tracing::debug!(owner = intent.owner, "PetCommand ATTACK dropped — no target_id");
+                            tracing::debug!(
+                                owner = intent.owner,
+                                "PetCommand ATTACK dropped — no target_id"
+                            );
                             continue;
                         };
                         // Pet-on-player engage: target ids below
@@ -6342,15 +6860,15 @@ pub async fn run(
                             let allowed = if target_cid == owner_cid {
                                 false
                             } else {
-                                match (
-                                    connections.get(&owner_cid),
-                                    connections.get(&target_cid),
-                                ) {
-                                    (Some(a), Some(t)) if t.in_world && t.hp > 0.0 => combat::can_attack(
-                                        a, t,
-                                        a.zone.as_deref(),
-                                        t.zone.as_deref(),
-                                    ),
+                                match (connections.get(&owner_cid), connections.get(&target_cid)) {
+                                    (Some(a), Some(t)) if t.in_world && t.hp > 0.0 => {
+                                        combat::can_attack(
+                                            a,
+                                            t,
+                                            a.zone.as_deref(),
+                                            t.zone.as_deref(),
+                                        )
+                                    }
                                     _ => false,
                                 }
                             };
@@ -6383,7 +6901,12 @@ pub async fn run(
                                 pet.command_at = Some(now);
                                 pet.stance = entity::PetStance::Follow;
                             }
-                            tracing::info!(owner = intent.owner, pet_id, target = target_id, "PetCommand ATTACK (player)");
+                            tracing::info!(
+                                owner = intent.owner,
+                                pet_id,
+                                target = target_id,
+                                "PetCommand ATTACK (player)"
+                            );
                             continue;
                         }
                         // Resolve target's liveness, owner (for pet
@@ -6396,7 +6919,11 @@ pub async fn run(
                                 None => (false, None, false),
                             };
                         if !target_alive {
-                            tracing::debug!(owner = intent.owner, target = target_id, "PetCommand ATTACK dropped — target not alive");
+                            tracing::debug!(
+                                owner = intent.owner,
+                                target = target_id,
+                                "PetCommand ATTACK dropped — target not alive"
+                            );
                             continue;
                         }
                         // Pet-on-pet engage: owner cannot point their
@@ -6423,12 +6950,10 @@ pub async fn run(
                             let allowed = match target_owner_opt {
                                 Some(t_owner) => {
                                     let t_cid = t_owner as ClientId;
-                                    match (
-                                        connections.get(&owner_cid),
-                                        connections.get(&t_cid),
-                                    ) {
+                                    match (connections.get(&owner_cid), connections.get(&t_cid)) {
                                         (Some(a), Some(b)) => combat::can_attack(
-                                            a, b,
+                                            a,
+                                            b,
                                             a.zone.as_deref(),
                                             b.zone.as_deref(),
                                         ),
@@ -6439,7 +6964,9 @@ pub async fn run(
                             };
                             if !allowed {
                                 let t_owner_name = target_owner_opt
-                                    .and_then(|id| connections.get(&(id as ClientId)).map(|c| c.name.clone()))
+                                    .and_then(|id| {
+                                        connections.get(&(id as ClientId)).map(|c| c.name.clone())
+                                    })
                                     .unwrap_or_default();
                                 let pet_name = enemies
                                     .get(&target_id)
@@ -6475,7 +7002,12 @@ pub async fn run(
                             // the owner after the kill.
                             pet.stance = entity::PetStance::Follow;
                         }
-                        tracing::info!(owner = intent.owner, pet_id, target = target_id, "PetCommand ATTACK");
+                        tracing::info!(
+                            owner = intent.owner,
+                            pet_id,
+                            target = target_id,
+                            "PetCommand ATTACK"
+                        );
                     }
                     cmd::BACK | cmd::FOLLOW => {
                         if let Some(pet) = enemies.get_mut(&pet_id) {
@@ -6509,7 +7041,11 @@ pub async fn run(
                         tracing::info!(owner = intent.owner, pet_id, "PetCommand SIT");
                     }
                     _ => {
-                        tracing::debug!(owner = intent.owner, command = intent.command, "PetCommand variant not yet implemented");
+                        tracing::debug!(
+                            owner = intent.owner,
+                            command = intent.command,
+                            "PetCommand variant not yet implemented"
+                        );
                     }
                 }
             }
@@ -6650,7 +7186,11 @@ pub async fn run(
                             error = %e,
                             "SplitStack rejected"
                         );
-                        handlers::send_refusal(&mut server, owner_cid, "That stack won't split like that.");
+                        handlers::send_refusal(
+                            &mut server,
+                            owner_cid,
+                            "That stack won't split like that.",
+                        );
                         continue;
                     }
                 };
@@ -6681,7 +7221,13 @@ pub async fn run(
                         count,
                     );
                 }
-                tracing::debug!(owner = intent.owner, src, dst, count = intent.count, "SplitStack applied");
+                tracing::debug!(
+                    owner = intent.owner,
+                    src,
+                    dst,
+                    count = intent.count,
+                    "SplitStack applied"
+                );
             }
         }
 
@@ -6701,25 +7247,26 @@ pub async fn run(
                     // Bag-aware removal (base or bag_<i>); mirrors the
                     // DestroyItem apply path. Rejects a non-empty
                     // bag-typed slot (the bag must be emptied first).
-                    dropped = match conn
-                        .inventory
-                        .destroy_at(&intent.location, intent.slot, intent.count)
-                    {
-                        Ok(d) => {
-                            conn.inventory_dirty = true;
-                            Some(d)
-                        }
-                        Err(e) => {
-                            tracing::debug!(
-                                owner = intent.owner,
-                                loc = %intent.location,
-                                slot = intent.slot,
-                                error = %e,
-                                "DropItem rejected"
-                            );
-                            None
-                        }
-                    };
+                    dropped =
+                        match conn
+                            .inventory
+                            .destroy_at(&intent.location, intent.slot, intent.count)
+                        {
+                            Ok(d) => {
+                                conn.inventory_dirty = true;
+                                Some(d)
+                            }
+                            Err(e) => {
+                                tracing::debug!(
+                                    owner = intent.owner,
+                                    loc = %intent.location,
+                                    slot = intent.slot,
+                                    error = %e,
+                                    "DropItem rejected"
+                                );
+                                None
+                            }
+                        };
                 } else {
                     handlers::send_refusal(&mut server, owner_cid, "You can't drop that.");
                     continue;
@@ -6752,7 +7299,11 @@ pub async fn run(
                 // range may pick them up, as before.
                 let bag = loot::LootBag::new(
                     drop_pos,
-                    vec![loot::LootItemStack { item_path: item_path.clone(), count, equip_slot: None }],
+                    vec![loot::LootItemStack {
+                        item_path: item_path.clone(),
+                        count,
+                        equip_slot: None,
+                    }],
                     protocol::world::Coins::ZERO,
                     String::new(), // player-dropped public bag — no creature, keep the sack visual
                     None,
@@ -6768,11 +7319,7 @@ pub async fn run(
                     .filter(|id| visible.contains(id))
                     .collect();
                 if !bag_recipients.is_empty() {
-                    handlers::fan_out_loot_bag_spawn(
-                        &mut server,
-                        &bag_recipients,
-                        &bag,
-                    );
+                    handlers::fan_out_loot_bag_spawn(&mut server, &bag_recipients, &bag);
                 }
                 loot_bags.insert(bag_id, bag);
                 tracing::info!(
@@ -6801,10 +7348,11 @@ pub async fn run(
                 let Some(conn) = connections.get_mut(&owner_cid) else {
                     continue;
                 };
-                let touched = match conn
-                    .inventory
-                    .equip_from_location(&intent.src_location, intent.src_slot, intent.equip_slot)
-                {
+                let touched = match conn.inventory.equip_from_location(
+                    &intent.src_location,
+                    intent.src_slot,
+                    intent.equip_slot,
+                ) {
                     Ok(t) => t,
                     Err(e) => {
                         tracing::info!(
@@ -6815,7 +7363,11 @@ pub async fn run(
                             error = %e,
                             "EquipItem rejected"
                         );
-                        handlers::send_refusal(&mut server, owner_cid, "You can't equip that there.");
+                        handlers::send_refusal(
+                            &mut server,
+                            owner_cid,
+                            "You can't equip that there.",
+                        );
                         continue;
                     }
                 };
@@ -6857,11 +7409,7 @@ pub async fn run(
                     );
                 }
                 if recompute.any_resource_max_changed() {
-                    handlers::fan_out_resources(
-                        &mut server,
-                        &in_world_recipients_now,
-                        conn,
-                    );
+                    handlers::fan_out_resources(&mut server, &in_world_recipients_now, conn);
                 }
                 tracing::info!(
                     owner = intent.owner,
@@ -6969,11 +7517,7 @@ pub async fn run(
                     );
                 }
                 if recompute.any_resource_max_changed() {
-                    handlers::fan_out_resources(
-                        &mut server,
-                        &in_world_recipients_now,
-                        conn,
-                    );
+                    handlers::fan_out_resources(&mut server, &in_world_recipients_now, conn);
                 }
                 tracing::info!(
                     owner = intent.owner,
@@ -6999,23 +7543,28 @@ pub async fn run(
                 let Some(conn) = connections.get_mut(&owner_cid) else {
                     continue;
                 };
-                let destroyed = match conn
-                    .inventory
-                    .destroy_at(&intent.location, intent.slot, intent.count)
-                {
-                    Ok(d) => d,
-                    Err(e) => {
-                        tracing::debug!(
-                            owner = intent.owner,
-                            loc = %intent.location,
-                            slot = intent.slot,
-                            error = %e,
-                            "DestroyItem rejected"
-                        );
-                        handlers::send_refusal(&mut server, owner_cid, "You can't destroy that.");
-                        continue;
-                    }
-                };
+                let destroyed =
+                    match conn
+                        .inventory
+                        .destroy_at(&intent.location, intent.slot, intent.count)
+                    {
+                        Ok(d) => d,
+                        Err(e) => {
+                            tracing::debug!(
+                                owner = intent.owner,
+                                loc = %intent.location,
+                                slot = intent.slot,
+                                error = %e,
+                                "DestroyItem rejected"
+                            );
+                            handlers::send_refusal(
+                                &mut server,
+                                owner_cid,
+                                "You can't destroy that.",
+                            );
+                            continue;
+                        }
+                    };
                 conn.inventory_dirty = true;
                 let (item_path, count) = destroyed;
                 let payload = conn.inventory.peek_at(&intent.location, intent.slot);
@@ -7122,7 +7671,11 @@ pub async fn run(
                             error = %e,
                             "UseConsumable rejected — decrement failed"
                         );
-                        handlers::send_refusal(&mut server, owner_cid, "You can't use that right now.");
+                        handlers::send_refusal(
+                            &mut server,
+                            owner_cid,
+                            "You can't use that right now.",
+                        );
                         continue;
                     }
                 };
@@ -7172,12 +7725,28 @@ pub async fn run(
                 // lasts half as long if you click it"); there is no buff any
                 // more, a fed character simply regenerates.
                 if is_food && food_dur > 0.0 {
-                    hunger::feed(conn, hunger::Need::Food, food_dur * hunger::HAND_EAT_FRACTION);
-                    handlers::send_system_line(&mut server, owner_cid, &format!("You eat a {}.", item.name));
+                    hunger::feed(
+                        conn,
+                        hunger::Need::Food,
+                        food_dur * hunger::HAND_EAT_FRACTION,
+                    );
+                    handlers::send_system_line(
+                        &mut server,
+                        owner_cid,
+                        &format!("You eat a {}.", item.name),
+                    );
                 }
                 if is_drink && food_dur > 0.0 {
-                    hunger::feed(conn, hunger::Need::Drink, food_dur * hunger::HAND_EAT_FRACTION);
-                    handlers::send_system_line(&mut server, owner_cid, &format!("You drink a {}.", item.name));
+                    hunger::feed(
+                        conn,
+                        hunger::Need::Drink,
+                        food_dur * hunger::HAND_EAT_FRACTION,
+                    );
+                    handlers::send_system_line(
+                        &mut server,
+                        owner_cid,
+                        &format!("You drink a {}.", item.name),
+                    );
                 }
                 tracing::info!(
                     owner = intent.owner,
@@ -7284,7 +7853,11 @@ pub async fn run(
                         pos = ?conn.pos,
                         "BuyItem rejected — no vendor within range"
                     );
-                    handlers::send_refusal(&mut server, owner_cid, "There is no merchant near you.");
+                    handlers::send_refusal(
+                        &mut server,
+                        owner_cid,
+                        "There is no merchant near you.",
+                    );
                     continue;
                 }
                 let Some(item) = items::lookup_by_name(&intent.item_name) else {
@@ -7294,7 +7867,9 @@ pub async fn run(
                         "BuyItem rejected — unknown item name"
                     );
                     handlers::send_refusal(
-                        &mut server, owner_cid, "The merchant doesn't stock that.",
+                        &mut server,
+                        owner_cid,
+                        "The merchant doesn't stock that.",
                     );
                     continue;
                 };
@@ -7305,9 +7880,7 @@ pub async fn run(
                         item_name = %intent.item_name,
                         "BuyItem rejected — item has no vendor_price"
                     );
-                    handlers::send_refusal(
-                        &mut server, owner_cid, "That isn't for sale.",
-                    );
+                    handlers::send_refusal(&mut server, owner_cid, "That isn't for sale.");
                     continue;
                 }
                 let total_cost = unit_price.saturating_mul(intent.qty as i64);
@@ -7319,9 +7892,7 @@ pub async fn run(
                         cost = total_cost,
                         "BuyItem rejected — insufficient coins"
                     );
-                    handlers::send_refusal(
-                        &mut server, owner_cid, "You can't afford that.",
-                    );
+                    handlers::send_refusal(&mut server, owner_cid, "You can't afford that.");
                     continue;
                 }
                 let item_path = item.path.clone();
@@ -7335,9 +7906,7 @@ pub async fn run(
                                 error = %e,
                                 "BuyItem rejected — add_item_locating error"
                             );
-                            handlers::send_refusal(
-                                &mut server, owner_cid, "You can't carry that.",
-                            );
+                            handlers::send_refusal(&mut server, owner_cid, "You can't carry that.");
                             continue;
                         }
                     };
@@ -7351,9 +7920,7 @@ pub async fn run(
                     // The case a tester hit on 2026-08-21: the client had already
                     // said "Ordered", so with no reply the item looked like it
                     // vanished. Nothing was charged.
-                    handlers::send_refusal(
-                        &mut server, owner_cid, "Your bags are full.",
-                    );
+                    handlers::send_refusal(&mut server, owner_cid, "Your bags are full.");
                     continue;
                 }
                 // Charge only for what we actually placed. The pre-flight
@@ -7424,7 +7991,11 @@ pub async fn run(
                         pos = ?conn.pos,
                         "SellItem rejected — no vendor within range"
                     );
-                    handlers::send_refusal(&mut server, owner_cid, "There is no merchant near you.");
+                    handlers::send_refusal(
+                        &mut server,
+                        owner_cid,
+                        "There is no merchant near you.",
+                    );
                     continue;
                 }
                 // Resolve the slot reference + read the held item
@@ -7442,7 +8013,11 @@ pub async fn run(
                                 owner = intent.owner,
                                 "SellItem rejected — base slot empty"
                             );
-                            handlers::send_refusal(&mut server, owner_cid, "There's nothing in that slot to sell.");
+                            handlers::send_refusal(
+                                &mut server,
+                                owner_cid,
+                                "There's nothing in that slot to sell.",
+                            );
                             continue;
                         };
                         (
@@ -7463,16 +8038,23 @@ pub async fn run(
                                 owner = intent.owner,
                                 "SellItem rejected — bag slot has no bag at base"
                             );
-                            handlers::send_refusal(&mut server, owner_cid, "There's nothing in that slot to sell.");
+                            handlers::send_refusal(
+                                &mut server,
+                                owner_cid,
+                                "There's nothing in that slot to sell.",
+                            );
                             continue;
                         };
-                        let Some(entry) = arr.get(slot as usize).and_then(|s| s.as_ref())
-                        else {
+                        let Some(entry) = arr.get(slot as usize).and_then(|s| s.as_ref()) else {
                             tracing::info!(
                                 owner = intent.owner,
                                 "SellItem rejected — bag slot empty"
                             );
-                            handlers::send_refusal(&mut server, owner_cid, "There's nothing in that slot to sell.");
+                            handlers::send_refusal(
+                                &mut server,
+                                owner_cid,
+                                "There's nothing in that slot to sell.",
+                            );
                             continue;
                         };
                         (
@@ -7487,7 +8069,11 @@ pub async fn run(
                             owner = intent.owner,
                             "SellItem rejected — equip slot sells not supported"
                         );
-                        handlers::send_refusal(&mut server, owner_cid, "Take it off before selling it.");
+                        handlers::send_refusal(
+                            &mut server,
+                            owner_cid,
+                            "Take it off before selling it.",
+                        );
                         continue;
                     }
                 };
@@ -7514,14 +8100,21 @@ pub async fn run(
                 let total_credit = unit_price.saturating_mul(qty as i64);
                 // Refuse to sell a non-empty bag.
                 if let protocol::world::SlotRef::BaseSlot { idx } = intent.slot {
-                    if conn.inventory.bags.get(&idx).map_or(false, |arr| {
-                        arr.iter().any(|s| s.is_some())
-                    }) {
+                    if conn
+                        .inventory
+                        .bags
+                        .get(&idx)
+                        .map_or(false, |arr| arr.iter().any(|s| s.is_some()))
+                    {
                         tracing::info!(
                             owner = intent.owner,
                             "SellItem rejected — bag has contents"
                         );
-                        handlers::send_refusal(&mut server, owner_cid, "Empty the bag before selling it.");
+                        handlers::send_refusal(
+                            &mut server,
+                            owner_cid,
+                            "Empty the bag before selling it.",
+                        );
                         continue;
                     }
                 }
@@ -7586,14 +8179,20 @@ pub async fn run(
         //          (bank) to the actor; failures fan a private BankRejected.
         for intent in bank_deposit_intents.drain(..) {
             let cid = intent.owner as ClientId;
-            let Some(conn) = connections.get_mut(&cid) else { continue };
+            let Some(conn) = connections.get_mut(&cid) else {
+                continue;
+            };
             // Proximity gate (dead-intents audit, 2026-08-24): banking requires
             // the banker. This is the arm that voided the death penalty — a
             // modified client could BankStoreItem its whole inventory from a
             // dungeon one second before dying, leaving the corpse empty.
             if super::npcs::any_within_range("banker", conn.pos).is_none() {
                 tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
-                handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
+                handlers::send_bank_rejected(
+                    &mut server,
+                    cid,
+                    "There is no banker near you.".to_string(),
+                );
                 continue;
             }
             if intent.coins.has_negative() || intent.coins == protocol::world::Coins::ZERO {
@@ -7609,7 +8208,9 @@ pub async fn run(
             let mut wallet_after = conn.coins;
             if !wallet_after.pay_value_of(intent.coins) {
                 handlers::send_bank_rejected(
-                    &mut server, cid, "You don't have that much coin to deposit.".to_string(),
+                    &mut server,
+                    cid,
+                    "You don't have that much coin to deposit.".to_string(),
                 );
                 continue;
             }
@@ -7629,11 +8230,17 @@ pub async fn run(
         }
         for intent in bank_withdraw_intents.drain(..) {
             let cid = intent.owner as ClientId;
-            let Some(conn) = connections.get_mut(&cid) else { continue };
+            let Some(conn) = connections.get_mut(&cid) else {
+                continue;
+            };
             // Same banker proximity gate as the deposit loop above.
             if super::npcs::any_within_range("banker", conn.pos).is_none() {
                 tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
-                handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
+                handlers::send_bank_rejected(
+                    &mut server,
+                    cid,
+                    "There is no banker near you.".to_string(),
+                );
                 continue;
             }
             if intent.coins.has_negative() || intent.coins == protocol::world::Coins::ZERO {
@@ -7645,7 +8252,9 @@ pub async fn run(
             let mut bank_after = conn.bank_coins;
             if !bank_after.pay_value_of(intent.coins) {
                 handlers::send_bank_rejected(
-                    &mut server, cid, "Your bank doesn't hold that much coin.".to_string(),
+                    &mut server,
+                    cid,
+                    "Your bank doesn't hold that much coin.".to_string(),
                 );
                 continue;
             }
@@ -7665,14 +8274,23 @@ pub async fn run(
         }
         for intent in bank_exchange_intents.drain(..) {
             let cid = intent.owner as ClientId;
-            let Some(conn) = connections.get_mut(&cid) else { continue };
+            let Some(conn) = connections.get_mut(&cid) else {
+                continue;
+            };
             // Same banker proximity gate as the deposit loop above.
             if super::npcs::any_within_range("banker", conn.pos).is_none() {
                 tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
-                handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
+                handlers::send_bank_rejected(
+                    &mut server,
+                    cid,
+                    "There is no banker near you.".to_string(),
+                );
                 continue;
             }
-            match conn.coins.exchange(intent.from_tier, intent.to_tier, intent.qty) {
+            match conn
+                .coins
+                .exchange(intent.from_tier, intent.to_tier, intent.qty)
+            {
                 Ok(()) => {
                     conn.coins_dirty = true;
                     let wallet = conn.coins;
@@ -7701,21 +8319,36 @@ pub async fn run(
         //           a full BankItemSnapshot (the tiny vault).
         for intent in bank_store_item_intents.drain(..) {
             let cid = intent.owner as ClientId;
-            let Some(conn) = connections.get_mut(&cid) else { continue };
+            let Some(conn) = connections.get_mut(&cid) else {
+                continue;
+            };
             // Same banker proximity gate as the deposit loop above.
             if super::npcs::any_within_range("banker", conn.pos).is_none() {
                 tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
-                handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
+                handlers::send_bank_rejected(
+                    &mut server,
+                    cid,
+                    "There is no banker near you.".to_string(),
+                );
                 continue;
             }
-            let Some((path, avail)) =
-                conn.inventory.peek_at(&intent.src_location, intent.src_slot)
+            let Some((path, avail)) = conn
+                .inventory
+                .peek_at(&intent.src_location, intent.src_slot)
             else {
-                handlers::send_bank_rejected(&mut server, cid, "Nothing to deposit there.".to_string());
+                handlers::send_bank_rejected(
+                    &mut server,
+                    cid,
+                    "Nothing to deposit there.".to_string(),
+                );
                 continue;
             };
             if items::bag_num_slots(&path).is_some() {
-                handlers::send_bank_rejected(&mut server, cid, "Bags can't go in the bank vault.".to_string());
+                handlers::send_bank_rejected(
+                    &mut server,
+                    cid,
+                    "Bags can't go in the bank vault.".to_string(),
+                );
                 continue;
             }
             let room = if intent.shared {
@@ -7725,7 +8358,11 @@ pub async fn run(
             };
             let take = avail.min(room);
             if take == 0 {
-                handlers::send_bank_rejected(&mut server, cid, "Your bank vault is full.".to_string());
+                handlers::send_bank_rejected(
+                    &mut server,
+                    cid,
+                    "Your bank vault is full.".to_string(),
+                );
                 continue;
             }
             // Remove from inventory FIRST and let the actual removed count drive
@@ -7734,13 +8371,21 @@ pub async fn run(
             // inventory). destroy_at can't fail here today — peek_at vetted the
             // slot and bags are rejected above — but bailing on Err keeps a
             // future change from turning this into a dup.
-            let removed = match conn.inventory.destroy_at(&intent.src_location, intent.src_slot, take) {
-                Ok((_, removed)) => removed,
-                Err(_) => {
-                    handlers::send_bank_rejected(&mut server, cid, "Couldn't move that item.".to_string());
-                    continue;
-                }
-            };
+            let removed =
+                match conn
+                    .inventory
+                    .destroy_at(&intent.src_location, intent.src_slot, take)
+                {
+                    Ok((_, removed)) => removed,
+                    Err(_) => {
+                        handlers::send_bank_rejected(
+                            &mut server,
+                            cid,
+                            "Couldn't move that item.".to_string(),
+                        );
+                        continue;
+                    }
+                };
             if removed == 0 {
                 continue;
             }
@@ -7752,13 +8397,20 @@ pub async fn run(
                 conn.bank_items.deposit(&path, removed);
                 conn.bank_items_dirty = true;
             }
-            let post = conn.inventory.peek_at(&intent.src_location, intent.src_slot);
+            let post = conn
+                .inventory
+                .peek_at(&intent.src_location, intent.src_slot);
             let (dpath, dcount) = match post {
                 Some((p, c)) => (Some(p), c),
                 None => (None, 0),
             };
             handlers::send_inventory_delta(
-                &mut server, cid, intent.src_location.clone(), intent.src_slot, dpath, dcount,
+                &mut server,
+                cid,
+                intent.src_location.clone(),
+                intent.src_slot,
+                dpath,
+                dcount,
             );
             let entries = if intent.shared {
                 conn.account_bank_items.to_snapshot_entries()
@@ -7770,11 +8422,17 @@ pub async fn run(
         }
         for intent in bank_withdraw_item_intents.drain(..) {
             let cid = intent.owner as ClientId;
-            let Some(conn) = connections.get_mut(&cid) else { continue };
+            let Some(conn) = connections.get_mut(&cid) else {
+                continue;
+            };
             // Same banker proximity gate as the deposit loop above.
             if super::npcs::any_within_range("banker", conn.pos).is_none() {
                 tracing::info!(owner = intent.owner, pos = ?conn.pos, "bank op rejected — no banker within range");
-                handlers::send_bank_rejected(&mut server, cid, "There is no banker near you.".to_string());
+                handlers::send_bank_rejected(
+                    &mut server,
+                    cid,
+                    "There is no banker near you.".to_string(),
+                );
                 continue;
             }
             let slot = intent.vault_slot as usize;
@@ -7784,7 +8442,11 @@ pub async fn run(
                 conn.bank_items.peek(slot).cloned()
             };
             let Some(entry) = present else {
-                handlers::send_bank_rejected(&mut server, cid, "Nothing to withdraw there.".to_string());
+                handlers::send_bank_rejected(
+                    &mut server,
+                    cid,
+                    "Nothing to withdraw there.".to_string(),
+                );
                 continue;
             };
             let path = entry.item_path;
@@ -7910,9 +8572,7 @@ pub async fn run(
                 .filter(|(_, e)| {
                     // Skip pets under an active command.
                     e.command_at
-                        .map(|t| {
-                            now.duration_since(t).as_secs_f32() > PET_COMMAND_STICKY_SECS
-                        })
+                        .map(|t| now.duration_since(t).as_secs_f32() > PET_COMMAND_STICKY_SECS)
                         .unwrap_or(true)
                 })
                 .map(|(pet_id, pet)| {
@@ -7944,7 +8604,11 @@ pub async fn run(
                         let alive = enemy_target_snapshots
                             .iter()
                             .any(|(id, _, alive)| *id == attacked && *alive);
-                        if alive { Some(attacked) } else { None }
+                        if alive {
+                            Some(attacked)
+                        } else {
+                            None
+                        }
                     });
                     (*pet_id, inherited)
                 })
@@ -7969,8 +8633,12 @@ pub async fn run(
             // stances *intentionally* suppress inheritance).
             const PET_BACK_HOME_DISTANCE: f32 = 4.0;
             for pet in enemies.values_mut() {
-                if !pet.is_pet() { continue; }
-                let Some(t) = pet.command_at else { continue; };
+                if !pet.is_pet() {
+                    continue;
+                }
+                let Some(t) = pet.command_at else {
+                    continue;
+                };
                 if now.duration_since(t).as_secs_f32() > PET_COMMAND_STICKY_SECS {
                     pet.command_at = None;
                     continue;
@@ -7981,12 +8649,16 @@ pub async fn run(
                 if pet.stance != entity::PetStance::Follow {
                     continue;
                 }
-                let Some(owner_id) = pet.owner else { continue; };
+                let Some(owner_id) = pet.owner else {
+                    continue;
+                };
                 let Some(owner_pos) = connections
                     .get(&(owner_id as ClientId))
                     .filter(|c| c.in_world)
                     .map(|c| c.pos)
-                else { continue; };
+                else {
+                    continue;
+                };
                 if pet.pos.distance_to(owner_pos) <= PET_BACK_HOME_DISTANCE {
                     pet.command_at = None;
                 }
@@ -8059,7 +8731,8 @@ pub async fn run(
                     continue;
                 }
                 let old_enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
-                let events = entity.tick_ai(&targets_for_enemy_ai, &enemy_target_snapshots, dt, now);
+                let events =
+                    entity.tick_ai(&targets_for_enemy_ai, &enemy_target_snapshots, dt, now);
                 if let Some(new_target) = events.target_changed {
                     target_changes.push((entity.id, new_target));
                 }
@@ -8088,16 +8761,18 @@ pub async fn run(
             for (id, old_cell, new_cell) in enemy_cell_changes {
                 let (gained, lost) = aoi.update(id, old_cell, new_cell);
                 if let Some(entity) = enemies.get(&id) {
-                    fan_entity_cell_crossing(&mut server, &aoi, &connections, entity, &gained, &lost);
+                    fan_entity_cell_crossing(
+                        &mut server,
+                        &aoi,
+                        &connections,
+                        entity,
+                        &gained,
+                        &lost,
+                    );
                 }
             }
             for (id, target) in target_changes {
-                handlers::fan_out_entity_target(
-                    &mut server,
-                    &in_world_recipients_now,
-                    id,
-                    target,
-                );
+                handlers::fan_out_entity_target(&mut server, &in_world_recipients_now, id, target);
             }
             // DoT ticks (spell batch step 5): everyone sees the hit and the
             // bar; the caster alone gets the named "<spell> for N" line (the
@@ -8214,8 +8889,8 @@ pub async fn run(
                         let max_hp = pet.max_hp;
                         let died = new_hp <= 0.0;
                         pet_shield = buffs::damage_shield_total(&pet.active_buffs);
-                        pet_shield_name =
-                            buffs::first_damage_shield_name(&pet.active_buffs).map(|s| s.to_string());
+                        pet_shield_name = buffs::first_damage_shield_name(&pet.active_buffs)
+                            .map(|s| s.to_string());
                         if died {
                             pet.transition(EnemyState::Dead, now);
                         }
@@ -8225,10 +8900,7 @@ pub async fn run(
                         // target via the owner-inheritance pre-pass
                         // (or by being commanded); Sit ignores
                         // incoming damage on purpose.
-                        if !died
-                            && pet.stance == entity::PetStance::Guard
-                            && pet.target.is_none()
-                        {
+                        if !died && pet.stance == entity::PetStance::Guard && pet.target.is_none() {
                             pet.target = Some(attacker);
                             pet.command_at = Some(now);
                         }
@@ -8354,9 +9026,7 @@ pub async fn run(
                     && (hit.target < protocol::world::LOOT_BAG_ID_BASE
                         || hit.target >= protocol::world::PET_ID_BASE)
                 {
-                    let owner_id_opt = enemies
-                        .get(&attacker)
-                        .and_then(|p| p.owner);
+                    let owner_id_opt = enemies.get(&attacker).and_then(|p| p.owner);
                     let amount = hit.amount.max(0);
                     if let Some(target_entity) = enemies.get_mut(&hit.target) {
                         if !target_entity.is_alive() {
@@ -8367,26 +9037,23 @@ pub async fn run(
                         // damager logic naturally routes to them
                         // (pets don't level themselves).
                         if let Some(owner) = owner_id_opt {
-                            *target_entity
-                                .aggro
-                                .entry(owner)
-                                .or_insert(0.0) += amount as f32;
+                            *target_entity.aggro.entry(owner).or_insert(0.0) += amount as f32;
                         }
                         // Track 12 Piece A2 — threat accrues under
                         // the pet's own id so the enemy can pull
                         // onto a hard-hitting pet via the AI re-eval
                         // even when the owner has been damaging it
                         // longer.
-                        *target_entity
-                            .threat
-                            .entry(attacker)
-                            .or_insert(0.0) += amount as f32;
+                        *target_entity.threat.entry(attacker).or_insert(0.0) += amount as f32;
                         let new_hp = target_entity.hp;
                         let max_hp = target_entity.max_hp;
                         let died = new_hp <= 0.0;
                         // EQ quadratic per-kill award from the mob's level (see
                         // progression::kill_xp); pet kills credit the owner below.
-                        let mob_xp = super::progression::kill_xp(target_entity.mob.level as i32, super::progression::ZEM_NORMAL);
+                        let mob_xp = super::progression::kill_xp(
+                            target_entity.mob.level as i32,
+                            super::progression::ZEM_NORMAL,
+                        );
                         let mob_level = target_entity.mob.level;
                         let mob_name_dead = if died {
                             target_entity.transition(EnemyState::Dead, now);
@@ -8401,19 +9068,15 @@ pub async fn run(
                         // warder-template kill can schedule the
                         // owner's respawn after the borrow drops. None
                         // for NPC enemies; Some for pets.
-                        let dead_pet_owner_opt: Option<EntityId> = if died {
-                            target_entity.owner
-                        } else {
-                            None
-                        };
+                        let dead_pet_owner_opt: Option<EntityId> =
+                            if died { target_entity.owner } else { None };
                         let death_pos = target_entity.pos;
                         let credit_id_opt = if died {
                             target_entity
                                 .aggro
                                 .iter()
                                 .max_by(|a, b| {
-                                    a.1.partial_cmp(b.1)
-                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                    a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)
                                 })
                                 .map(|(&id, _)| id)
                         } else {
@@ -8455,7 +9118,9 @@ pub async fn run(
                                     if let Some(owner_id) = dead_pet_owner_opt {
                                         const WARDER_RETREAT_SECS: f32 = 15.0;
                                         let due = now
-                                            + std::time::Duration::from_secs_f32(WARDER_RETREAT_SECS);
+                                            + std::time::Duration::from_secs_f32(
+                                                WARDER_RETREAT_SECS,
+                                            );
                                         let owner_cid = owner_id as ClientId;
                                         if let Some(conn) = connections.get_mut(&owner_cid) {
                                             conn.warder_respawn_at = Some(due);
@@ -8489,11 +9154,10 @@ pub async fn run(
                                 }
                             }
                             // An owned victim drops nothing (see kill_enemy).
-                            if let Some(mob_name) = mob_name_dead.as_ref().filter(|_| !victim_owned) {
-                                let loot_items =
-                                    loot::roll_for_mob(mob_name).unwrap_or_default();
-                                let loot_coins =
-                                    loot::roll_coin_for_mob(mob_name, mob_level);
+                            if let Some(mob_name) = mob_name_dead.as_ref().filter(|_| !victim_owned)
+                            {
+                                let loot_items = loot::roll_for_mob(mob_name).unwrap_or_default();
+                                let loot_coins = loot::roll_coin_for_mob(mob_name, mob_level);
                                 if !loot_items.is_empty()
                                     || loot_coins != protocol::world::Coins::ZERO
                                 {
@@ -8558,7 +9222,8 @@ pub async fn run(
                         if target_conn.in_world && target_conn.hp > 0.0 {
                             let armor = target_conn.equipped_armor.max(0) as f32;
                             let reduction = armor / (armor + 100.0);
-                            let mut reduced = ((hit.amount as f32 * (1.0 - reduction)) as i32).max(1);
+                            let mut reduced =
+                                ((hit.amount as f32 * (1.0 - reduction)) as i32).max(1);
                             // Track 6 sub-task 4c — consume absorb
                             // pool before applying damage. Returns
                             // the residual + whether the pool hit 0
@@ -8577,19 +9242,22 @@ pub async fn run(
                             // reflects damage back at the attacker.
                             // Read amount before mutating HP so a
                             // killing blow still triggers thorns.
-                            shield_to_attacker = buffs::damage_shield_total(&target_conn.active_buffs);
-                            shield_name_pve = buffs::first_damage_shield_name(&target_conn.active_buffs).map(|s| s.to_string());
+                            shield_to_attacker =
+                                buffs::damage_shield_total(&target_conn.active_buffs);
+                            shield_name_pve =
+                                buffs::first_damage_shield_name(&target_conn.active_buffs)
+                                    .map(|s| s.to_string());
                             target_conn.hp = (target_conn.hp - reduced as f32).max(0.0);
                             regen::mark_dirty(target_conn);
                             target_conn.note_damage_taken(now); // camp breaks on damage
-                            // Track 15.2 follow-up — feed the pet
-                            // inheritance pre-pass so a FOLLOW-stance
-                            // pet auto-engages whatever's hitting its
-                            // owner (matches player behaviour: pet
-                            // helps when you're being attacked, not
-                            // only when you swing). Uses the same
-                            // last_attacked_enemy/at fields the
-                            // owner-attacks path already populates.
+                                                                // Track 15.2 follow-up — feed the pet
+                                                                // inheritance pre-pass so a FOLLOW-stance
+                                                                // pet auto-engages whatever's hitting its
+                                                                // owner (matches player behaviour: pet
+                                                                // helps when you're being attacked, not
+                                                                // only when you swing). Uses the same
+                                                                // last_attacked_enemy/at fields the
+                                                                // owner-attacks path already populates.
                             target_conn.last_attacked_enemy = Some(attacker);
                             target_conn.last_attacked_at = Some(now);
                             // Track 18.1 — armor skill advance: each
@@ -8614,11 +9282,9 @@ pub async fn run(
                                 }
                             }
                             for at in &armor_types {
-                                if let Some(new_score) = skills::try_advance(
-                                    target_conn,
-                                    skills::Skill::Armor,
-                                    at,
-                                ) {
+                                if let Some(new_score) =
+                                    skills::try_advance(target_conn, skills::Skill::Armor, at)
+                                {
                                     handlers::send_skill_progress_update(
                                         &mut server,
                                         target_cid,
@@ -8628,11 +9294,9 @@ pub async fn run(
                                     );
                                 }
                             }
-                            if let Some(new_score) = skills::try_advance(
-                                target_conn,
-                                skills::Skill::Weapon,
-                                "dodge",
-                            ) {
+                            if let Some(new_score) =
+                                skills::try_advance(target_conn, skills::Skill::Weapon, "dodge")
+                            {
                                 handlers::send_skill_progress_update(
                                     &mut server,
                                     target_cid,
@@ -8649,14 +9313,24 @@ pub async fn run(
                             let interrupt_outcome = roll_cast_interrupt(target_conn, now, reduced);
                             let (target_mp, target_max_mp) = (target_conn.mp, target_conn.max_mp);
                             match &interrupt_outcome {
-                                InterruptOutcome::Interrupted { spell_name, mana_charged } => {
+                                InterruptOutcome::Interrupted {
+                                    spell_name,
+                                    mana_charged,
+                                } => {
                                     handlers::fan_out_cast_fail(
                                         &mut server,
                                         &in_world_recipients_now,
                                         hit.target,
                                         "interrupted (hit during cast)".to_string(),
                                     );
-                                    tell_interrupt_charge(&mut server, target_cid, hit.target, target_mp, target_max_mp, *mana_charged);
+                                    tell_interrupt_charge(
+                                        &mut server,
+                                        target_cid,
+                                        hit.target,
+                                        target_mp,
+                                        target_max_mp,
+                                        *mana_charged,
+                                    );
                                     tracing::info!(
                                         caster = hit.target,
                                         spell = %spell_name,
@@ -8708,11 +9382,7 @@ pub async fn run(
                         }
                     }
                     if let Some(tc) = connections.get(&target_cid) {
-                        fan_out_server_buff_snapshot(
-                            &mut server,
-                            &in_world_recipients_now,
-                            tc,
-                        );
+                        fan_out_server_buff_snapshot(&mut server, &in_world_recipients_now, tc);
                     }
                 }
                 // Apply damage shield to attacker (the enemy entity).
@@ -8738,7 +9408,9 @@ pub async fn run(
                                 att_entity.hp,
                                 att_entity.max_hp,
                             );
-                            if let (Some(defender), Some(name)) = (damaged_player, shield_name_pve.as_ref()) {
+                            if let (Some(defender), Some(name)) =
+                                (damaged_player, shield_name_pve.as_ref())
+                            {
                                 handlers::fan_out_damage_shield_trigger(
                                     &mut server,
                                     &in_world_recipients_now,
@@ -8849,8 +9521,9 @@ pub async fn run(
             // transient DB failure below ate an accepted resurrection outright —
             // the old comment conceded as much ("the offer was already consumed
             // above"). Consume it only once the outcome is decided.
-            let Some((offered_corpse, xp_percent)) =
-                connections.get(&responder_cid).and_then(|c| c.pending_res_offer)
+            let Some((offered_corpse, xp_percent)) = connections
+                .get(&responder_cid)
+                .and_then(|c| c.pending_res_offer)
             else {
                 continue; // nothing pending; nothing to lose
             };
@@ -8882,11 +9555,14 @@ pub async fn run(
                         c.pending_res_offer = None;
                     }
                     tracing::info!(
-                        char_id = responder, corpse_id,
+                        char_id = responder,
+                        corpse_id,
                         "resurrection failed — corpse missing, not owned, or already resurrected"
                     );
                     handlers::send_refusal(
-                        &mut server, responder_cid, "That corpse can't be resurrected.",
+                        &mut server,
+                        responder_cid,
+                        "That corpse can't be resurrected.",
                     );
                     continue;
                 }
@@ -8924,7 +9600,13 @@ pub async fn run(
                     super::progression::award_xp(&mut server, conn, refund);
                 }
             }
-            tracing::info!(char_id = responder, corpse_id, xp_percent, refund, "resurrection accepted");
+            tracing::info!(
+                char_id = responder,
+                corpse_id,
+                xp_percent,
+                refund,
+                "resurrection accepted"
+            );
         }
 
         // 4k-quest. PD_W0023/24 — server-authoritative quest turn-ins. The
@@ -8943,12 +9625,24 @@ pub async fn run(
                 // {:?} escapes control chars — the id is attacker-controlled and
                 // a raw newline could forge log lines in the triage artifact.
                 tracing::info!(char_id = responder, quest_id = ?quest_id, "quest turn-in rejected — unknown quest id");
-                handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Unknown quest.", false);
+                handlers::send_quest_rejected(
+                    &mut server,
+                    responder_cid,
+                    &quest_id,
+                    "Unknown quest.",
+                    false,
+                );
                 continue;
             };
             let Some(reward) = super::quests::xp_reward_for(&quest_id) else {
                 tracing::warn!(char_id = responder, quest_id = %quest_id, "quest turn-in rejected — bad reward tier in quests.toml");
-                handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Quest data error.", false);
+                handlers::send_quest_rejected(
+                    &mut server,
+                    responder_cid,
+                    &quest_id,
+                    "Quest data error.",
+                    false,
+                );
                 continue;
             };
             let Some(conn_ro) = connections.get(&responder_cid) else {
@@ -8961,7 +9655,9 @@ pub async fn run(
             // real rewards + XP without ever walking back.
             if let Some(npc_id) = quest.turn_in_npc.as_deref() {
                 if !super::npcs::id_within_range(npc_id, conn_ro.pos) {
-                    let npc_name = super::npcs::lookup(npc_id).map(|n| n.name.as_str()).unwrap_or(npc_id);
+                    let npc_name = super::npcs::lookup(npc_id)
+                        .map(|n| n.name.as_str())
+                        .unwrap_or(npc_id);
                     tracing::info!(char_id = responder, quest_id = %quest_id, npc = npc_id, "quest turn-in rejected — too far from the turn-in NPC");
                     handlers::send_quest_rejected(
                         &mut server,
@@ -8979,12 +9675,24 @@ pub async fn run(
             // actually have.
             if conn_ro.level < quest.level_req {
                 tracing::info!(char_id = responder, quest_id = %quest_id, level = conn_ro.level, level_req = quest.level_req, "quest turn-in rejected — below level_req");
-                handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "You are too low level for this quest.", false);
+                handlers::send_quest_rejected(
+                    &mut server,
+                    responder_cid,
+                    &quest_id,
+                    "You are too low level for this quest.",
+                    false,
+                );
                 continue;
             }
             if conn_ro.completed_quests.contains(&quest_id) {
                 tracing::info!(char_id = responder, quest_id = %quest_id, "quest turn-in rejected — already completed");
-                handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "You have already completed this quest.", false);
+                handlers::send_quest_rejected(
+                    &mut server,
+                    responder_cid,
+                    &quest_id,
+                    "You have already completed this quest.",
+                    false,
+                );
                 continue;
             }
             // PD_W0024 — the objective check. The quest must actually be in
@@ -8993,29 +9701,55 @@ pub async fn run(
             // CompleteQuest with no kills behind it pays nothing.
             let Some(progress) = conn_ro.active_quests.get(&quest_id) else {
                 tracing::info!(char_id = responder, quest_id = %quest_id, "quest turn-in rejected — not in journal");
-                handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "That quest is not in your journal.", false);
+                handlers::send_quest_rejected(
+                    &mut server,
+                    responder_cid,
+                    &quest_id,
+                    "That quest is not in your journal.",
+                    false,
+                );
                 continue;
             };
             if !super::quests::objectives_met(quest, progress) {
                 tracing::info!(char_id = responder, quest_id = %quest_id, progress = ?progress, "quest turn-in rejected — objectives incomplete");
-                handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Quest objectives are not complete.", false);
+                handlers::send_quest_rejected(
+                    &mut server,
+                    responder_cid,
+                    &quest_id,
+                    "Quest objectives are not complete.",
+                    false,
+                );
                 continue;
             }
             // PD_W0024 slice B — item rewards. Pre-check capacity BEFORE the
             // once-ever completion record: a full bag rejects the turn-in (keep
             // the quest, make room, retry) rather than burning the completion
             // with no item. rollback=false so the quest stays in the journal.
-            let rewards: Vec<(String, u32)> =
-                quest.item_rewards.iter().map(|p| (p.clone(), 1u32)).collect();
+            let rewards: Vec<(String, u32)> = quest
+                .item_rewards
+                .iter()
+                .map(|p| (p.clone(), 1u32))
+                .collect();
             if !rewards.is_empty() && !conn_ro.inventory.can_accept(&rewards) {
                 tracing::info!(char_id = responder, quest_id = %quest_id, "quest turn-in rejected — inventory full");
-                handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Your inventory is full — make room and try again.", false);
+                handlers::send_quest_rejected(
+                    &mut server,
+                    responder_cid,
+                    &quest_id,
+                    "Your inventory is full — make room and try again.",
+                    false,
+                );
                 continue;
             }
-            if let Err(e) = db::record_quest_completion(&pool, responder as i64, &quest_id).await
-            {
+            if let Err(e) = db::record_quest_completion(&pool, responder as i64, &quest_id).await {
                 tracing::error!(char_id = responder, quest_id = %quest_id, error = %e, "record_quest_completion failed — reward not granted");
-                handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Server error — try again.", false);
+                handlers::send_quest_rejected(
+                    &mut server,
+                    responder_cid,
+                    &quest_id,
+                    "Server error — try again.",
+                    false,
+                );
                 continue;
             }
             // The active row is now redundant (completed_quests is the
@@ -9051,9 +9785,21 @@ pub async fn run(
                                     Some((p, c)) => (Some(p), c),
                                     None => (None, 0),
                                 };
-                                handlers::send_inventory_delta(&mut server, responder_cid, loc.clone(), *slot, dpath, dcount);
+                                handlers::send_inventory_delta(
+                                    &mut server,
+                                    responder_cid,
+                                    loc.clone(),
+                                    *slot,
+                                    dpath,
+                                    dcount,
+                                );
                             }
-                            handlers::send_loot_granted(&mut server, responder_cid, path.clone(), count.saturating_sub(leftover));
+                            handlers::send_loot_granted(
+                                &mut server,
+                                responder_cid,
+                                path.clone(),
+                                count.saturating_sub(leftover),
+                            );
                         }
                         Err(e) => {
                             tracing::error!(char_id = responder, quest_id = %quest_id, %path, error = e, "quest reward grant failed after completion recorded");
@@ -9093,7 +9839,13 @@ pub async fn run(
                     // the client undoes its optimistic journal add.
                     let Some(quest) = super::quests::lookup(&quest_id) else {
                         tracing::info!(char_id = responder, quest_id = ?quest_id, "quest accept rejected — unknown quest id");
-                        handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Unknown quest.", true);
+                        handlers::send_quest_rejected(
+                            &mut server,
+                            responder_cid,
+                            &quest_id,
+                            "Unknown quest.",
+                            true,
+                        );
                         continue;
                     };
                     let Some(conn) = connections.get_mut(&responder_cid) else {
@@ -9101,12 +9853,24 @@ pub async fn run(
                     };
                     if conn.level < quest.level_req {
                         tracing::info!(char_id = responder, quest_id = %quest_id, level = conn.level, level_req = quest.level_req, "quest accept rejected — below level_req");
-                        handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "You are too low level for this quest.", true);
+                        handlers::send_quest_rejected(
+                            &mut server,
+                            responder_cid,
+                            &quest_id,
+                            "You are too low level for this quest.",
+                            true,
+                        );
                         continue;
                     }
                     if conn.completed_quests.contains(&quest_id) {
                         tracing::info!(char_id = responder, quest_id = %quest_id, "quest accept rejected — already completed");
-                        handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "You have already completed this quest.", true);
+                        handlers::send_quest_rejected(
+                            &mut server,
+                            responder_cid,
+                            &quest_id,
+                            "You have already completed this quest.",
+                            true,
+                        );
                         continue;
                     }
                     if conn.active_quests.contains_key(&quest_id) {
@@ -9118,10 +9882,17 @@ pub async fn run(
                     }
                     if conn.active_quests.len() >= super::quests::MAX_ACTIVE {
                         tracing::info!(char_id = responder, quest_id = %quest_id, "quest accept rejected — journal full");
-                        handlers::send_quest_rejected(&mut server, responder_cid, &quest_id, "Your quest journal is full.", true);
+                        handlers::send_quest_rejected(
+                            &mut server,
+                            responder_cid,
+                            &quest_id,
+                            "Your quest journal is full.",
+                            true,
+                        );
                         continue;
                     }
-                    conn.active_quests.insert(quest_id.clone(), vec![0i32; quest.objectives.len()]);
+                    conn.active_quests
+                        .insert(quest_id.clone(), vec![0i32; quest.objectives.len()]);
                     conn.quests_dirty.insert(quest_id.clone());
                     tracing::info!(char_id = responder, quest_id = %quest_id, "quest accepted");
                 }
@@ -9275,7 +10046,12 @@ pub async fn run(
                                 if conn.inventory.restore_worn(&path, count, slot) {
                                     conn.inventory_dirty = true;
                                     reequipped += 1;
-                                    inv_deltas.push(("equip".to_string(), slot as u32, path.clone(), count));
+                                    inv_deltas.push((
+                                        "equip".to_string(),
+                                        slot as u32,
+                                        path.clone(),
+                                        count,
+                                    ));
                                     granted_lines.push((path, count));
                                     continue;
                                 }
@@ -9302,9 +10078,15 @@ pub async fn run(
                         }
                         if leftover_count > 0 {
                             left_on_corpse += 1;
-                            corpses.get_mut(&corpse_id).unwrap().items.push(
-                                loot::LootItemStack { item_path: path, count: leftover_count, equip_slot: worn },
-                            );
+                            corpses
+                                .get_mut(&corpse_id)
+                                .unwrap()
+                                .items
+                                .push(loot::LootItemStack {
+                                    item_path: path,
+                                    count: leftover_count,
+                                    equip_slot: worn,
+                                });
                         }
                     }
                     // Gear went back on: the gear bonuses and max resources change
@@ -9312,8 +10094,8 @@ pub async fn run(
                     let mut resources_changed = false;
                     if reequipped > 0 {
                         if let Some(conn) = connections.get_mut(&looter_cid) {
-                            resources_changed =
-                                inventory::recompute_equipped_stats(conn).any_resource_max_changed();
+                            resources_changed = inventory::recompute_equipped_stats(conn)
+                                .any_resource_max_changed();
                         }
                         tracing::info!(
                             corpse_id,
@@ -9393,7 +10175,11 @@ pub async fn run(
                         }
                         if resources_changed {
                             if let Some(conn) = connections.get(&looter_cid) {
-                                handlers::fan_out_resources(&mut server, &in_world_recipients_now, conn);
+                                handlers::fan_out_resources(
+                                    &mut server,
+                                    &in_world_recipients_now,
+                                    conn,
+                                );
                             }
                         }
                         // Say why anything is still on the body, instead of
@@ -9415,10 +10201,18 @@ pub async fn run(
                             let visible = aoi.entities_visible_from(cell);
                             for &recipient in &in_world_recipients_now {
                                 if visible.contains(&recipient) {
-                                    handlers::send_entity_despawn(&mut server, recipient, corpse_id);
+                                    handlers::send_entity_despawn(
+                                        &mut server,
+                                        recipient,
+                                        corpse_id,
+                                    );
                                 }
                             }
-                            tracing::info!(corpse_id, char_id = intent.looter, "corpse looted empty — despawned");
+                            tracing::info!(
+                                corpse_id,
+                                char_id = intent.looter,
+                                "corpse looted empty — despawned"
+                            );
                         } else if let Some(corpse) = corpses.get(&corpse_id) {
                             handlers::send_corpse_contents(&mut server, looter_cid, corpse);
                         }
@@ -9716,11 +10510,7 @@ pub async fn run(
                         .copied()
                         .filter(|id| bag_visible.contains(id))
                         .collect();
-                    handlers::fan_out_loot_bag_spawn(
-                        &mut server,
-                        &bag_recipients,
-                        bag,
-                    );
+                    handlers::fan_out_loot_bag_spawn(&mut server, &bag_recipients, bag);
                 }
             }
         }
@@ -9768,16 +10558,12 @@ pub async fn run(
                     if let Some(owner_cid) = bag.owner_killer {
                         if bag.assigned_looter.is_none() {
                             let bag_pos = bag.pos;
-                            bag.assigned_looter =
-                                group_manager.next_loot_turn(owner_cid, |cand| {
-                                    connections
-                                        .get(&cand)
-                                        .map(|c| {
-                                            c.pos.distance_to(bag_pos)
-                                                <= GROUP_SHARE_RANGE
-                                        })
-                                        .unwrap_or(false)
-                                });
+                            bag.assigned_looter = group_manager.next_loot_turn(owner_cid, |cand| {
+                                connections
+                                    .get(&cand)
+                                    .map(|c| c.pos.distance_to(bag_pos) <= GROUP_SHARE_RANGE)
+                                    .unwrap_or(false)
+                            });
                         }
                         if let Some(turn) = bag.assigned_looter {
                             if looter_cid != turn {
@@ -9912,7 +10698,11 @@ pub async fn run(
                 if let Err(e) = db::delete_corpse(&pool, id as i64).await {
                     tracing::error!(corpse_id = id, error = %e, "delete_corpse on decay failed");
                 }
-                tracing::info!(corpse_id = id, char_id = corpse.owner_char, "corpse decayed — gear lost");
+                tracing::info!(
+                    corpse_id = id,
+                    char_id = corpse.owner_char,
+                    "corpse decayed — gear lost"
+                );
             }
         }
 
@@ -9939,9 +10729,7 @@ pub async fn run(
             .filter(|(_, c)| c.ready && c.linkdead_since.is_none())
         {
             let dir = match conn.last_move_received {
-                Some(t) if now.duration_since(t) < STALE_MOVE_THRESHOLD => {
-                    conn.latest_direction
-                }
+                Some(t) if now.duration_since(t) < STALE_MOVE_THRESHOLD => conn.latest_direction,
                 _ => Vec3f::ZERO,
             };
             // Track 6: any non-zero move auto-stands the connection. The
@@ -10134,7 +10922,12 @@ pub async fn run(
                     // Ticks are counted off the elapsed time (`tick_acc`
                     // holds the count), so the last one lands on the frame
                     // the buff expires, whichever accumulator crosses first.
-                    buffs::BuffEffect::Dot { dps, caster, dmg_type, duration } => {
+                    buffs::BuffEffect::Dot {
+                        dps,
+                        caster,
+                        dmg_type,
+                        duration,
+                    } => {
                         if dps > 0.0 && conn.hp > 0.0 && !conn.death_processed {
                             let total = (duration / super::DOT_TICK_SECS).floor();
                             let elapsed = (duration - buff.remaining.max(0.0)).max(0.0);
@@ -10231,14 +11024,24 @@ pub async fn run(
                     // Other effect kinds were already accounted for
                     // by the tick body.
                     if let buffs::BuffEffect::StatBuff {
-                        strength, agility, intelligence, wisdom, constitution,
-                        max_hp_delta, max_mp_delta,
+                        strength,
+                        agility,
+                        intelligence,
+                        wisdom,
+                        constitution,
+                        max_hp_delta,
+                        max_mp_delta,
                     } = conn.active_buffs[i].effect
                     {
                         buffs::undo_stat_deltas(
                             conn,
-                            strength, agility, intelligence, wisdom, constitution,
-                            max_hp_delta, max_mp_delta,
+                            strength,
+                            agility,
+                            intelligence,
+                            wisdom,
+                            constitution,
+                            max_hp_delta,
+                            max_mp_delta,
                         );
                         regen::mark_dirty(conn);
                     }
@@ -10261,7 +11064,15 @@ pub async fn run(
                 .map(|(id, _)| *id)
                 .collect();
             for (bearer, caster, name, amount, dmg_type, hp_after, max_hp) in pvp_dot_ticks {
-                handlers::fan_out_hit(&mut server, &recipients, caster, bearer, amount, false, dmg_type);
+                handlers::fan_out_hit(
+                    &mut server,
+                    &recipients,
+                    caster,
+                    bearer,
+                    amount,
+                    false,
+                    dmg_type,
+                );
                 handlers::fan_out_health_update(&mut server, &recipients, bearer, hp_after, max_hp);
                 let caster_cid = caster as ClientId;
                 if connections.get(&caster_cid).is_some_and(|c| c.in_world) {
@@ -10318,7 +11129,11 @@ pub async fn run(
                 if let Some(pet) = enemies.get(&pet_id) {
                     if hp_changed {
                         handlers::fan_out_health_update(
-                            &mut server, &recipients, pet_id, pet.hp, pet.max_hp,
+                            &mut server,
+                            &recipients,
+                            pet_id,
+                            pet.hp,
+                            pet.max_hp,
                         );
                     }
                     if set_changed {
@@ -10351,15 +11166,17 @@ pub async fn run(
             let Some(start) = conn.camp_since else {
                 continue;
             };
-            let cancelled =
-                !conn.is_sitting || conn.last_damaged_at.is_some_and(|t| t >= start);
+            let cancelled = !conn.is_sitting || conn.last_damaged_at.is_some_and(|t| t >= start);
             if cancelled {
                 conn.camp_since = None;
                 handlers::send_camp_update(&mut server, *camp_cid, 0, false);
             } else if now.duration_since(start) >= CAMP_SECS {
                 // Window elapsed; stop tracking. The client logs itself out.
                 conn.camp_since = None;
-                tracing::info!(char_id = conn.char_id, "camp window elapsed — client logs out");
+                tracing::info!(
+                    char_id = conn.char_id,
+                    "camp window elapsed — client logs out"
+                );
             }
         }
 
@@ -10398,7 +11215,12 @@ pub async fn run(
         // someone else finishes.
         if !newly_dead.is_empty() {
             for mob_id in wipe_hate(&mut enemies, &newly_dead) {
-                handlers::fan_out_entity_target(&mut server, &in_world_recipients_now, mob_id, None);
+                handlers::fan_out_entity_target(
+                    &mut server,
+                    &in_world_recipients_now,
+                    mob_id,
+                    None,
+                );
             }
             for bearer in clear_player_dots_from(&mut connections, &newly_dead) {
                 if let Some(conn) = connections.get(&bearer) {
@@ -10509,7 +11331,12 @@ pub async fn run(
             // can loot it (peers got only the render-only CorpseSpawn above).
             handlers::send_corpse_contents(&mut server, client_id, &corpse);
             corpses.insert(corpse_id, corpse);
-            tracing::info!(char_id = cid, corpse_id, item_stacks = items.len(), "corpse created");
+            tracing::info!(
+                char_id = cid,
+                corpse_id,
+                item_stacks = items.len(),
+                "corpse created"
+            );
         }
 
         // 5b. Track 6 regen tick — HP/MP/Stamina recovery, then fan
@@ -10538,11 +11365,15 @@ pub async fn run(
                 // Eat before speaking: a character that runs out WITH bread in
                 // the bags eats this tick and is never told it is out of food.
                 let mut fed_now = [false, false];
-                for (i, need) in [hunger::Need::Food, hunger::Need::Drink].into_iter().enumerate() {
+                for (i, need) in [hunger::Need::Food, hunger::Need::Drink]
+                    .into_iter()
+                    .enumerate()
+                {
                     if !hunger::is_famished(conn, need) {
                         continue;
                     }
-                    let Some((loc, slot, item)) = hunger::first_in_slot_order(&conn.inventory, need)
+                    let Some((loc, slot, item)) =
+                        hunger::first_in_slot_order(&conn.inventory, need)
                     else {
                         continue;
                     };
@@ -10554,10 +11385,21 @@ pub async fn run(
                         Some((p, c)) => (Some(p), c),
                         None => (None, 0),
                     };
-                    handlers::send_inventory_delta(&mut server, *client_id, loc.clone(), slot, path, count);
+                    handlers::send_inventory_delta(
+                        &mut server,
+                        *client_id,
+                        loc.clone(),
+                        slot,
+                        path,
+                        count,
+                    );
                     let added = hunger::feed(conn, need, hunger::fullness_of(item));
                     fed_now[i] = true;
-                    let verb = if need == hunger::Need::Food { "eat" } else { "drink" };
+                    let verb = if need == hunger::Need::Food {
+                        "eat"
+                    } else {
+                        "drink"
+                    };
                     handlers::send_system_line(
                         &mut server,
                         *client_id,
@@ -10842,7 +11684,6 @@ pub async fn run(
 
         // 8. Push outbound packets to the network.
         transport.send_packets(&mut server);
-
     }
 }
 
@@ -10910,8 +11751,11 @@ fn cast_target_refusal(
     let in_reach = |pos: Vec3f| pos.distance_to(caster_pos) <= reach;
     let unreachable = || Some(TARGET_UNREACHABLE.to_string());
     let no_effect = || Some(NO_EFFECT_YET.to_string());
-    let player_in_reach =
-        |cid: ClientId| connections.get(&cid).filter(|c| c.in_world && in_reach(c.pos));
+    let player_in_reach = |cid: ClientId| {
+        connections
+            .get(&cid)
+            .filter(|c| c.in_world && in_reach(c.pos))
+    };
     let entity_in_reach =
         |id: EntityId| enemies.get(&id).filter(|e| e.is_alive() && in_reach(e.pos));
     let attackable = |other: &PerConnection| {
@@ -10947,8 +11791,8 @@ fn cast_target_refusal(
             // and never the caster's own.
             if let Some(owner_id) = e.owner {
                 let owner_cid = owner_id as ClientId;
-                let allowed = owner_cid != caster_cid
-                    && connections.get(&owner_cid).is_some_and(attackable);
+                let allowed =
+                    owner_cid != caster_cid && connections.get(&owner_cid).is_some_and(attackable);
                 if !allowed {
                     return Some("You cannot attack that pet.".to_string());
                 }
@@ -11042,8 +11886,7 @@ fn cast_target_refusal(
         }
         "PET_SUMMON" => {
             let known = !spell.pet_type.is_empty()
-                && pet_templates::scaled(&spell.pet_type, caster.level.max(1) as u32, 0)
-                    .is_some();
+                && pet_templates::scaled(&spell.pet_type, caster.level.max(1) as u32, 0).is_some();
             if known {
                 None
             } else {
@@ -11071,7 +11914,9 @@ fn cast_target_refusal(
                 return Some("That target is no longer here.".to_string());
             }
             if super::safe_areas::containing(t.pos).is_none() {
-                return Some("You can only bind another in a safe place, such as the town.".to_string());
+                return Some(
+                    "You can only bind another in a safe place, such as the town.".to_string(),
+                );
             }
             None
         }
@@ -11110,7 +11955,10 @@ fn cast_target_refusal(
 /// for a flagged player's bar too, or a caster could DoT someone and log
 /// out with no counterplay. Returns the bearers whose buff set changed, for
 /// the caller to re-fan.
-fn clear_player_dots_from(connections: &mut HashMap<ClientId, PerConnection>, casters: &[EntityId]) -> Vec<ClientId> {
+fn clear_player_dots_from(
+    connections: &mut HashMap<ClientId, PerConnection>,
+    casters: &[EntityId],
+) -> Vec<ClientId> {
     let mut changed = Vec::new();
     for (cid, conn) in connections.iter_mut() {
         let before = conn.active_buffs.len();
@@ -11171,7 +12019,10 @@ fn tell_interrupt_charge(
     handlers::send_system_line(
         server,
         caster_cid,
-        &format!("Your concentration breaks: {} mana lost.", mana_charged.round() as i32),
+        &format!(
+            "Your concentration breaks: {} mana lost.",
+            mana_charged.round() as i32
+        ),
     );
 }
 
@@ -11374,11 +12225,23 @@ mod tests {
         // Never swung -> always accepted.
         assert!(!swing_too_fast(None, base, 0.65));
         // 0.5s after last, min 0.65 -> too fast (rejected).
-        assert!(swing_too_fast(Some(base - Duration::from_millis(500)), base, 0.65));
+        assert!(swing_too_fast(
+            Some(base - Duration::from_millis(500)),
+            base,
+            0.65
+        ));
         // Exactly at the interval -> allowed (not "less than").
-        assert!(!swing_too_fast(Some(base - Duration::from_millis(650)), base, 0.65));
+        assert!(!swing_too_fast(
+            Some(base - Duration::from_millis(650)),
+            base,
+            0.65
+        ));
         // Well after -> allowed.
-        assert!(!swing_too_fast(Some(base - Duration::from_secs(2)), base, 0.65));
+        assert!(!swing_too_fast(
+            Some(base - Duration::from_secs(2)),
+            base,
+            0.65
+        ));
     }
 
     // The connect token's user_data layout is a contract between

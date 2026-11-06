@@ -40,17 +40,17 @@ pub mod semver {
             let minor = parts.next()?.parse().ok()?;
             // Ignore pre-release / build metadata.
             let patch_field = parts.next().unwrap_or("0");
-            let patch_str = patch_field
-                .split(['-', '+'])
-                .next()
-                .unwrap_or("0");
+            let patch_str = patch_field.split(['-', '+']).next().unwrap_or("0");
             let patch = patch_str.parse().ok()?;
-            Some(Self { major, minor, patch })
+            Some(Self {
+                major,
+                minor,
+                patch,
+            })
         }
 
         pub fn at_least(&self, other: &Self) -> bool {
-            (self.major, self.minor, self.patch)
-                >= (other.major, other.minor, other.patch)
+            (self.major, self.minor, self.patch) >= (other.major, other.minor, other.patch)
         }
     }
 
@@ -63,16 +63,14 @@ pub mod semver {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let auth_bind = env::var("PROJECTDAWN_AUTH_BIND")
-            .unwrap_or_else(|_| "0.0.0.0:8765".into());
-        let world_bind = env::var("PROJECTDAWN_WORLD_BIND")
-            .unwrap_or_else(|_| "0.0.0.0:7777".into());
-        let world_endpoint = env::var("PROJECTDAWN_WORLD_ENDPOINT")
-            .unwrap_or_else(|_| "127.0.0.1:7777".into());
+        let auth_bind = env::var("PROJECTDAWN_AUTH_BIND").unwrap_or_else(|_| "0.0.0.0:8765".into());
+        let world_bind =
+            env::var("PROJECTDAWN_WORLD_BIND").unwrap_or_else(|_| "0.0.0.0:7777".into());
+        let world_endpoint =
+            env::var("PROJECTDAWN_WORLD_ENDPOINT").unwrap_or_else(|_| "127.0.0.1:7777".into());
         let database_url = env::var("PROJECTDAWN_DATABASE_URL")
             .unwrap_or_else(|_| "sqlite://world.db?mode=rwc".into());
-        let min_str = env::var("PROJECTDAWN_MIN_CLIENT_VERSION")
-            .unwrap_or_else(|_| "0.1.0".into());
+        let min_str = env::var("PROJECTDAWN_MIN_CLIENT_VERSION").unwrap_or_else(|_| "0.1.0".into());
         let min_client_version = semver::Version::parse(&min_str)
             .ok_or_else(|| anyhow::anyhow!("invalid PROJECTDAWN_MIN_CLIENT_VERSION: {min_str}"))?;
         let netcode_private_key = load_netcode_key()?;
@@ -100,9 +98,8 @@ fn load_netcode_key() -> Result<[u8; 32]> {
              POSIX:      PROJECTDAWN_NETCODE_KEY=$(openssl rand -hex 32)"
         )
     })?;
-    let bytes = hex::decode(raw.trim()).map_err(|e| {
-        anyhow::anyhow!("PROJECTDAWN_NETCODE_KEY is not valid hex: {e}")
-    })?;
+    let bytes = hex::decode(raw.trim())
+        .map_err(|e| anyhow::anyhow!("PROJECTDAWN_NETCODE_KEY is not valid hex: {e}"))?;
     let arr: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
         anyhow::anyhow!(
             "PROJECTDAWN_NETCODE_KEY must decode to exactly 32 bytes (got {})",

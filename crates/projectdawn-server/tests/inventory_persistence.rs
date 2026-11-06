@@ -47,9 +47,7 @@ async fn save_and_load_roundtrip() {
         .await
         .expect("save");
 
-    let loaded = db::load_inventory(&pool, char_id)
-        .await
-        .expect("load");
+    let loaded = db::load_inventory(&pool, char_id).await.expect("load");
     assert_eq!(loaded.len(), 2);
     let cloth = loaded
         .iter()
@@ -161,7 +159,10 @@ async fn cascade_delete_on_character_removes_inventory() {
         .unwrap();
 
     let loaded = db::load_inventory(&pool, char_id).await.unwrap();
-    assert!(loaded.is_empty(), "inventory rows must cascade with the character");
+    assert!(
+        loaded.is_empty(),
+        "inventory rows must cascade with the character"
+    );
 }
 
 /// Coins persist across "restart": save_coins → load_character returns the
@@ -184,8 +185,15 @@ async fn coins_save_and_load_roundtrip() {
         silver: 5,
         copper: 4000,
     };
-    db::save_coins(&pool, char_id, wallet).await.expect("save coins");
+    db::save_coins(&pool, char_id, wallet)
+        .await
+        .expect("save coins");
 
-    let spawn = db::load_character(&pool, char_id).await.expect("load character");
-    assert_eq!(spawn.coins, wallet, "wallet must round-trip exactly, per-tier");
+    let spawn = db::load_character(&pool, char_id)
+        .await
+        .expect("load character");
+    assert_eq!(
+        spawn.coins, wallet,
+        "wallet must round-trip exactly, per-tier"
+    );
 }

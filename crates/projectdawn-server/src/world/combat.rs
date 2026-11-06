@@ -69,11 +69,7 @@ pub struct Swing {
 /// empty string or unknown path falls back to bare-handed damage.
 /// `is_offhand` applies the 0.80× damage multiplier matching
 /// `Combat.calc_offhand_damage`.
-pub fn calc_swing(
-    attacker: &PerConnection,
-    weapon_path: &str,
-    is_offhand: bool,
-) -> Swing {
+pub fn calc_swing(attacker: &PerConnection, weapon_path: &str, is_offhand: bool) -> Swing {
     let mut rng = rand::thread_rng();
 
     let weapon = items::lookup(weapon_path);
@@ -91,7 +87,11 @@ pub fn calc_swing(
     let base_roll: i32 = match weapon {
         Some(w) if w.damage_max > 0 => {
             let span = (w.damage_max - w.damage_min).max(0);
-            let roll = if span == 0 { 0 } else { rng.gen_range(0..=span) };
+            let roll = if span == 0 {
+                0
+            } else {
+                rng.gen_range(0..=span)
+            };
             w.damage_min + roll
         }
         _ => rng.gen_range(1..=4),
@@ -177,9 +177,11 @@ mod tests {
         // Base roll 1-4, STR/5 = 4 bonus, no crit cap on 0% chance.
         // amount = (1..=4) + 4 = 5..=8 worst case, up to 2x on the
         // 0% crit chance (never crits at DEX 10). So strict 5..=8.
-        assert!(swing.amount >= 5 && swing.amount <= 8,
-                "bare-handed should land 5-8 at STR 20 DEX 10, got {}",
-                swing.amount);
+        assert!(
+            swing.amount >= 5 && swing.amount <= 8,
+            "bare-handed should land 5-8 at STR 20 DEX 10, got {}",
+            swing.amount
+        );
         assert!(!swing.crit, "DEX 10 should never crit");
     }
 
@@ -189,10 +191,16 @@ mod tests {
         // damage_min=7, damage_max=15, STR bonus = 50/5 = 10.
         // Range: (7+10) ..= (15+10) = 17..=25 (no crit at DEX 10).
         for _ in 0..50 {
-            let swing = calc_swing(&attacker, "res://data/loot/items/iron_short_sword.tres", false);
-            assert!(swing.amount >= 17 && swing.amount <= 25,
-                    "iron short sword should land 17-25, got {}",
-                    swing.amount);
+            let swing = calc_swing(
+                &attacker,
+                "res://data/loot/items/iron_short_sword.tres",
+                false,
+            );
+            assert!(
+                swing.amount >= 17 && swing.amount <= 25,
+                "iron short sword should land 17-25, got {}",
+                swing.amount
+            );
             assert!(!swing.crit);
         }
     }
@@ -202,10 +210,16 @@ mod tests {
         let attacker = make_attacker(50, 10);
         // Main = 17..=25, offhand = floor(main * 0.8) = 13..=20.
         for _ in 0..50 {
-            let swing = calc_swing(&attacker, "res://data/loot/items/iron_short_sword.tres", true);
-            assert!(swing.amount >= 13 && swing.amount <= 20,
-                    "offhand should land 13-20, got {}",
-                    swing.amount);
+            let swing = calc_swing(
+                &attacker,
+                "res://data/loot/items/iron_short_sword.tres",
+                true,
+            );
+            assert!(
+                swing.amount >= 13 && swing.amount <= 20,
+                "offhand should land 13-20, got {}",
+                swing.amount
+            );
         }
     }
 

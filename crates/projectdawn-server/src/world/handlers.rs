@@ -679,10 +679,7 @@ pub fn handle_message(
             // client can never send one, so drop it before it touches any
             // state (same shape as DevSpawnMob's payload guard). Deliberately
             // silent: only a forged client can reach this arm.
-            if !direction.x.is_finite()
-                || !direction.y.is_finite()
-                || !direction.z.is_finite()
-            {
+            if !direction.x.is_finite() || !direction.y.is_finite() || !direction.z.is_finite() {
                 return Outcome::Continue;
             }
             // Drop out-of-order Move packets (unreliable channel can reorder).
@@ -703,7 +700,11 @@ pub fn handle_message(
             } else {
                 // Y is zeroed — server does not simulate gravity or jumping.
                 // Only XZ is authoritative; vertical position stays at spawn height.
-                let v = Vec3f { x: direction.x, y: 0.0, z: direction.z };
+                let v = Vec3f {
+                    x: direction.x,
+                    y: 0.0,
+                    z: direction.z,
+                };
                 v.clamp_length(1.0)
             };
             // Store the latest intent for the tick loop to integrate exactly
@@ -717,7 +718,10 @@ pub fn handle_message(
             Outcome::Continue
         }
 
-        ClientWorldMsg::CastStartBroadcast { spell_name, duration } => {
+        ClientWorldMsg::CastStartBroadcast {
+            spell_name,
+            duration,
+        } => {
             if !conn.ready {
                 return Outcome::Continue;
             }
@@ -739,7 +743,12 @@ pub fn handle_message(
                             "CastStart refused — inside the global cooldown"
                         );
                         let caster = conn.char_id as u64;
-                        fan_out_cast_fail(server, &[client_id], caster, "You cannot cast again yet.".to_string());
+                        fan_out_cast_fail(
+                            server,
+                            &[client_id],
+                            caster,
+                            "You cannot cast again yet.".to_string(),
+                        );
                         fan_out_mana_update(server, &[client_id], caster, conn.mp, conn.max_mp);
                         return Outcome::Continue;
                     }
@@ -754,7 +763,10 @@ pub fn handle_message(
             // Casting stands you, as a swing does (spell batch step 0): the
             // seated regen rate does not run under a cast bar.
             conn.is_sitting = false;
-            Outcome::CastStartFanOut { spell_name, duration }
+            Outcome::CastStartFanOut {
+                spell_name,
+                duration,
+            }
         }
 
         ClientWorldMsg::CastCompleteBroadcast { spell_name } => {
@@ -869,7 +881,10 @@ pub fn handle_message(
             }
         }
 
-        ClientWorldMsg::AcceptQuest { quest_id, giver_id: _ } => {
+        ClientWorldMsg::AcceptQuest {
+            quest_id,
+            giver_id: _,
+        } => {
             // PD_W0024 — validated in the tick loop (needs the quest table +
             // the connection's active/completed sets + the DB pool to persist
             // the zeroed progress row). giver_id is scaffold-era: NPCs aren't
@@ -917,11 +932,7 @@ pub fn handle_message(
                 return Outcome::Continue;
             }
             conn.pvp_override_on = on;
-            tracing::info!(
-                char_id = conn.char_id,
-                on,
-                "dev PvP override toggled"
-            );
+            tracing::info!(char_id = conn.char_id, on, "dev PvP override toggled");
             Outcome::Continue
         }
 
@@ -943,7 +954,14 @@ pub fn handle_message(
             }
         }
 
-        ClientWorldMsg::DevSpawnMob { name, level, hp, dmg, speed, aggro } => {
+        ClientWorldMsg::DevSpawnMob {
+            name,
+            level,
+            hp,
+            dmg,
+            speed,
+            aggro,
+        } => {
             // Same dev gate as HealSelf/DamageSelf: silently ignored unless the
             // server runs with PD_DEV_CMDS=1. Spawns a REAL world mob ~3m in
             // front of the requester (Godot forward = -Z rotated by yaw), so
@@ -1092,7 +1110,12 @@ pub fn handle_message(
             Outcome::Continue
         }
 
-        ClientWorldMsg::GiveCoins { platinum, gold, silver, copper } => {
+        ClientWorldMsg::GiveCoins {
+            platinum,
+            gold,
+            silver,
+            copper,
+        } => {
             if !conn.in_world
                 || !dev_cmd_allowed(
                     server,
@@ -1116,7 +1139,10 @@ pub fn handle_message(
             send_coins_update(server, client_id, conn.coins);
             tracing::info!(
                 char_id = conn.char_id,
-                platinum, gold, silver, copper,
+                platinum,
+                gold,
+                silver,
+                copper,
                 total_copper = conn.coins.total_copper(),
                 "dev coin grant"
             );
@@ -1154,18 +1180,16 @@ pub fn handle_message(
                     char_id = conn.char_id,
                     "BindAtCurrentLocation refused — cannot bind while dead"
                 );
-                send_refusal(
-                    server,
-                    client_id,
-                    "You can't bind your soul while dead.",
-                );
+                send_refusal(server, client_id, "You can't bind your soul while dead.");
                 return Outcome::Continue;
             }
             let pos = conn.pos.into_tuple();
             conn.bind = Some(crate::db::BindPoint { pos });
             tracing::info!(
                 char_id = conn.char_id,
-                x = pos.0, y = pos.1, z = pos.2,
+                x = pos.0,
+                y = pos.1,
+                z = pos.2,
                 "bind point set"
             );
             // Confirm the success too. There was no bind confirmation message at
@@ -1340,7 +1364,9 @@ pub fn handle_message(
             if !conn.in_world {
                 return Outcome::Continue;
             }
-            Outcome::GroupLeaveIntent { member: conn.char_id as u64 }
+            Outcome::GroupLeaveIntent {
+                member: conn.char_id as u64,
+            }
         }
 
         ClientWorldMsg::GroupKick { name } => {
@@ -1373,7 +1399,10 @@ pub fn handle_message(
             }
         }
 
-        ClientWorldMsg::CastSpell { spell_name, target_id } => {
+        ClientWorldMsg::CastSpell {
+            spell_name,
+            target_id,
+        } => {
             if !conn.in_world {
                 return Outcome::Continue;
             }
@@ -1402,7 +1431,9 @@ pub fn handle_message(
                 let caster = conn.char_id as u64;
                 fan_out_cast_fail(server, &[client_id], caster, reason.to_string());
                 fan_out_mana_update(server, &[client_id], caster, conn.mp, conn.max_mp);
-                return Outcome::CastFailFanOut { reason: reason.to_string() };
+                return Outcome::CastFailFanOut {
+                    reason: reason.to_string(),
+                };
             }
             // Track 10 — snapshot the cast cache state *now*, before
             // any CastCompleteBroadcast in the same batch wipes it.
@@ -1630,17 +1661,27 @@ pub fn handle_message(
             if !conn.in_world {
                 return Outcome::Continue;
             }
-            Outcome::BankDepositIntent { owner: conn.char_id as u64, coins }
+            Outcome::BankDepositIntent {
+                owner: conn.char_id as u64,
+                coins,
+            }
         }
 
         ClientWorldMsg::BankWithdrawCoins { coins } => {
             if !conn.in_world {
                 return Outcome::Continue;
             }
-            Outcome::BankWithdrawIntent { owner: conn.char_id as u64, coins }
+            Outcome::BankWithdrawIntent {
+                owner: conn.char_id as u64,
+                coins,
+            }
         }
 
-        ClientWorldMsg::BankExchange { from_tier, to_tier, qty } => {
+        ClientWorldMsg::BankExchange {
+            from_tier,
+            to_tier,
+            qty,
+        } => {
             if !conn.in_world {
                 return Outcome::Continue;
             }
@@ -1652,7 +1693,11 @@ pub fn handle_message(
             }
         }
 
-        ClientWorldMsg::BankStoreItem { src_location, src_slot, shared } => {
+        ClientWorldMsg::BankStoreItem {
+            src_location,
+            src_slot,
+            shared,
+        } => {
             if !conn.in_world {
                 return Outcome::Continue;
             }
@@ -1737,7 +1782,11 @@ pub fn handle_message(
             Outcome::InspectIntent { target_char_id }
         }
 
-        ClientWorldMsg::Chat { channel, text, target_name } => {
+        ClientWorldMsg::Chat {
+            channel,
+            text,
+            target_name,
+        } => {
             if !conn.in_world {
                 return Outcome::Continue;
             }
@@ -1767,8 +1816,16 @@ pub fn handle_message(
 pub fn build_position_msg(conn: &PerConnection) -> Option<Vec<u8>> {
     let msg = ServerWorldMsg::Position {
         id: conn.char_id as u64,
-        pos: Vec3 { x: conn.pos.x, y: conn.pos.y, z: conn.pos.z },
-        vel: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
+        pos: Vec3 {
+            x: conn.pos.x,
+            y: conn.pos.y,
+            z: conn.pos.z,
+        },
+        vel: Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
         yaw: conn.yaw,
         sequence: conn.last_move_seq,
     };
@@ -1785,18 +1842,18 @@ fn send_position(server: &mut RenetServer, client_id: ClientId, conn: &PerConnec
 /// "new client → existing peers" and "existing peers → new client" sides of
 /// the connection handshake fan-out, plus any future per-recipient AOI
 /// transitions.
-pub fn send_entity_spawn(
-    server: &mut RenetServer,
-    recipient_id: ClientId,
-    conn: &PerConnection,
-) {
+pub fn send_entity_spawn(server: &mut RenetServer, recipient_id: ClientId, conn: &PerConnection) {
     let msg = ServerWorldMsg::EntitySpawn {
         id: conn.char_id as u64,
         name: conn.name.clone(),
         race: conn.race.clone(),
         class: conn.class.clone(),
         level: conn.level.max(0) as u32,
-        pos: Vec3 { x: conn.pos.x, y: conn.pos.y, z: conn.pos.z },
+        pos: Vec3 {
+            x: conn.pos.x,
+            y: conn.pos.y,
+            z: conn.pos.z,
+        },
         yaw: conn.yaw,
     };
     if let Some(bytes) = encode(&msg) {
@@ -1807,11 +1864,7 @@ pub fn send_entity_spawn(
 /// Send an EntityDespawn for `entity_id` to a single recipient. Reliable
 /// system channel so the despawn is guaranteed to arrive even if the
 /// preceding Position broadcasts are dropped on the unreliable channel.
-pub fn send_entity_despawn(
-    server: &mut RenetServer,
-    recipient_id: ClientId,
-    entity_id: u64,
-) {
+pub fn send_entity_despawn(server: &mut RenetServer, recipient_id: ClientId, entity_id: u64) {
     let msg = ServerWorldMsg::EntityDespawn { id: entity_id };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
@@ -1907,7 +1960,11 @@ pub fn send_xp_gained(
     current: i32,
     to_next: i32,
 ) {
-    let msg = ServerWorldMsg::XpGained { amount, current, to_next };
+    let msg = ServerWorldMsg::XpGained {
+        amount,
+        current,
+        to_next,
+    };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
     }
@@ -1955,7 +2012,9 @@ pub fn send_quest_progress(
 /// the client flips its journal entry to COMPLETED off this (never
 /// optimistically — the server may have rejected instead).
 pub fn send_quest_completed(server: &mut RenetServer, recipient_id: ClientId, quest_id: &str) {
-    let msg = ServerWorldMsg::QuestCompleted { quest_id: quest_id.to_string() };
+    let msg = ServerWorldMsg::QuestCompleted {
+        quest_id: quest_id.to_string(),
+    };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
     }
@@ -1995,7 +2054,11 @@ pub fn send_level_up(
     xp: i32,
     xp_to_next: i32,
 ) {
-    let msg = ServerWorldMsg::LevelUp { new_level, xp, xp_to_next };
+    let msg = ServerWorldMsg::LevelUp {
+        new_level,
+        xp,
+        xp_to_next,
+    };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient_id, CHANNEL_SYSTEM, bytes);
     }
@@ -2005,17 +2068,17 @@ pub fn send_level_up(
 /// initial spawn fan-out on enemy death and (sub-task 4B) re-snapshots
 /// when items are removed. Bag despawn rides the generic
 /// `EntityDespawn` since the id partition lets the client route by id.
-pub fn fan_out_loot_bag_spawn(
-    server: &mut RenetServer,
-    recipients: &[ClientId],
-    bag: &LootBag,
-) {
+pub fn fan_out_loot_bag_spawn(server: &mut RenetServer, recipients: &[ClientId], bag: &LootBag) {
     if recipients.is_empty() {
         return;
     }
     let msg = ServerWorldMsg::LootBagSpawn {
         bag_id: bag.id,
-        pos: Vec3 { x: bag.pos.x, y: bag.pos.y, z: bag.pos.z },
+        pos: Vec3 {
+            x: bag.pos.x,
+            y: bag.pos.y,
+            z: bag.pos.z,
+        },
         items: bag.snapshot(),
         coins: bag.coins,
         creature_name: bag.creature_name.clone(),
@@ -2044,7 +2107,11 @@ pub fn fan_out_corpse_spawn(
         corpse_id: corpse.id,
         owner_id: corpse.owner_char as u64,
         owner_name: corpse.owner_name.clone(),
-        pos: Vec3 { x: corpse.pos.x, y: corpse.pos.y, z: corpse.pos.z },
+        pos: Vec3 {
+            x: corpse.pos.x,
+            y: corpse.pos.y,
+            z: corpse.pos.z,
+        },
     };
     let Some(bytes) = encode(&msg) else {
         return;
@@ -2088,7 +2155,11 @@ pub fn send_resurrect_offer(
     caster_name: String,
     xp_percent: u32,
 ) {
-    let msg = ServerWorldMsg::ResurrectOffer { corpse_id, caster_name, xp_percent };
+    let msg = ServerWorldMsg::ResurrectOffer {
+        corpse_id,
+        caster_name,
+        xp_percent,
+    };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient, CHANNEL_SYSTEM, bytes);
     }
@@ -2097,7 +2168,13 @@ pub fn send_resurrect_offer(
 /// Snap one client's local player to `pos` — corpse / resurrection Slice 3 summons
 /// the living player to their corpse on accept. Server-authoritative reposition.
 pub fn send_teleport(server: &mut RenetServer, recipient: ClientId, pos: super::connection::Vec3f) {
-    let msg = ServerWorldMsg::Teleport { pos: Vec3 { x: pos.x, y: pos.y, z: pos.z } };
+    let msg = ServerWorldMsg::Teleport {
+        pos: Vec3 {
+            x: pos.x,
+            y: pos.y,
+            z: pos.z,
+        },
+    };
     if let Some(bytes) = encode(&msg) {
         server.send_message(recipient, CHANNEL_SYSTEM, bytes);
     }
@@ -2151,8 +2228,16 @@ pub fn fan_out_mana_update(
 pub fn build_enemy_position_msg(entity: &Entity) -> Option<Vec<u8>> {
     let msg = ServerWorldMsg::Position {
         id: entity.id,
-        pos: Vec3 { x: entity.pos.x, y: entity.pos.y, z: entity.pos.z },
-        vel: Vec3 { x: 0.0, y: 0.0, z: 0.0 },
+        pos: Vec3 {
+            x: entity.pos.x,
+            y: entity.pos.y,
+            z: entity.pos.z,
+        },
+        vel: Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
         yaw: entity.yaw,
         sequence: entity.seq,
     };
@@ -2255,11 +2340,7 @@ pub fn send_inspect_result(
 /// cloned per recipient. Used for live spawns (new mob appears → broadcast
 /// to all in_world clients) and late-joiner seed (new client enters world
 /// → server sends every living enemy).
-pub fn fan_out_enemy_spawn(
-    server: &mut RenetServer,
-    recipients: &[ClientId],
-    entity: &Entity,
-) {
+pub fn fan_out_enemy_spawn(server: &mut RenetServer, recipients: &[ClientId], entity: &Entity) {
     if recipients.is_empty() {
         return;
     }
@@ -2269,7 +2350,11 @@ pub fn fan_out_enemy_spawn(
         level: entity.mob.level,
         max_hp: entity.max_hp,
         hp: entity.hp,
-        pos: Vec3 { x: entity.pos.x, y: entity.pos.y, z: entity.pos.z },
+        pos: Vec3 {
+            x: entity.pos.x,
+            y: entity.pos.y,
+            z: entity.pos.z,
+        },
         yaw: entity.yaw,
     };
     let Some(bytes) = encode(&msg) else {
@@ -2320,11 +2405,7 @@ pub fn send_inventory_delta(
 /// pattern as `fan_out_enemy_spawn`; the variant carries the owner's
 /// char_id so the client can route the pet under the right player.
 /// Caller is responsible for `entity.owner.is_some()`.
-pub fn fan_out_pet_spawn(
-    server: &mut RenetServer,
-    recipients: &[ClientId],
-    entity: &Entity,
-) {
+pub fn fan_out_pet_spawn(server: &mut RenetServer, recipients: &[ClientId], entity: &Entity) {
     if recipients.is_empty() {
         return;
     }
@@ -2339,7 +2420,11 @@ pub fn fan_out_pet_spawn(
         level: entity.mob.level,
         max_hp: entity.max_hp,
         hp: entity.hp,
-        pos: Vec3 { x: entity.pos.x, y: entity.pos.y, z: entity.pos.z },
+        pos: Vec3 {
+            x: entity.pos.x,
+            y: entity.pos.y,
+            z: entity.pos.z,
+        },
         yaw: entity.yaw,
     };
     let Some(bytes) = encode(&msg) else {
@@ -2355,11 +2440,7 @@ pub fn fan_out_pet_spawn(
 /// id partition is the point: the partitions stack (player < enemy < bag <
 /// pet) and a partition test in the wrong order once swallowed pets into a
 /// bag arm, so a player walking into view of an existing pet never saw it.
-pub fn fan_out_entity_spawn(
-    server: &mut RenetServer,
-    recipients: &[ClientId],
-    entity: &Entity,
-) {
+pub fn fan_out_entity_spawn(server: &mut RenetServer, recipients: &[ClientId], entity: &Entity) {
     if entity.is_pet() {
         fan_out_pet_spawn(server, recipients, entity);
     } else {
@@ -2408,10 +2489,7 @@ pub fn fan_out_cast_complete(
     if recipients.is_empty() {
         return;
     }
-    let msg = ServerWorldMsg::CastComplete {
-        caster,
-        spell_name,
-    };
+    let msg = ServerWorldMsg::CastComplete { caster, spell_name };
     let Some(bytes) = encode(&msg) else { return };
     for recipient in recipients {
         server.send_message(*recipient, CHANNEL_SYSTEM, bytes.clone());
@@ -2519,12 +2597,7 @@ pub fn fan_out_damage_shield_trigger(
     }
 }
 
-pub fn fan_out_miss(
-    server: &mut RenetServer,
-    recipients: &[ClientId],
-    attacker: u64,
-    target: u64,
-) {
+pub fn fan_out_miss(server: &mut RenetServer, recipients: &[ClientId], attacker: u64, target: u64) {
     if recipients.is_empty() {
         return;
     }
@@ -2551,11 +2624,7 @@ pub fn fan_out_evade(
     }
 }
 
-pub fn fan_out_entity_died(
-    server: &mut RenetServer,
-    recipients: &[ClientId],
-    entity_id: u64,
-) {
+pub fn fan_out_entity_died(server: &mut RenetServer, recipients: &[ClientId], entity_id: u64) {
     if recipients.is_empty() {
         return;
     }
@@ -2694,11 +2763,7 @@ pub fn send_skill_progress_snapshot(
 /// ServerWorldMsg variants. Track 6 made these server-authoritative —
 /// the values come straight from `conn.hp` / `conn.mp` / `conn.stamina`
 /// (the DB-loaded snapshot at spawn, mutated by regen + combat).
-pub fn fan_out_resources(
-    server: &mut RenetServer,
-    recipients: &[ClientId],
-    conn: &PerConnection,
-) {
+pub fn fan_out_resources(server: &mut RenetServer, recipients: &[ClientId], conn: &PerConnection) {
     if recipients.is_empty() {
         return;
     }
@@ -2760,7 +2825,10 @@ pub fn send_camp_update(
     remaining_secs: u32,
     active: bool,
 ) {
-    let msg = ServerWorldMsg::CampUpdate { remaining_secs, active };
+    let msg = ServerWorldMsg::CampUpdate {
+        remaining_secs,
+        active,
+    };
     if let Some(bytes) = encode(&msg) {
         server.send_message(client_id, CHANNEL_SYSTEM, bytes);
     }

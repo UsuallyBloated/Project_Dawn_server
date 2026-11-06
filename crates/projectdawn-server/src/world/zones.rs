@@ -141,7 +141,13 @@ mod tests {
             .iter()
             .filter_map(|c| c.mob.named_id.as_deref())
             .collect();
-        for id in ["sable", "rotfang", "ancient_crawler", "greth", "the_undying"] {
+        for id in [
+            "sable",
+            "rotfang",
+            "ancient_crawler",
+            "greth",
+            "the_undying",
+        ] {
             assert_eq!(
                 placed.iter().filter(|p| **p == id).count(),
                 1,

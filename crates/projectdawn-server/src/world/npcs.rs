@@ -36,7 +36,11 @@ pub struct Npc {
 
 impl Npc {
     pub fn position(&self) -> Vec3f {
-        Vec3f { x: self.pos[0], y: self.pos[1], z: self.pos[2] }
+        Vec3f {
+            x: self.pos[0],
+            y: self.pos[1],
+            z: self.pos[2],
+        }
     }
 
     pub fn has_kind(&self, kind: &str) -> bool {
@@ -98,9 +102,14 @@ mod tests {
     #[test]
     fn the_four_town_npcs_exist_with_their_roles() {
         assert!(lookup("brom").expect("brom").has_kind("vendor"));
-        assert!(lookup("brom").expect("brom").has_kind("quest"), "Brom also gives quests");
+        assert!(
+            lookup("brom").expect("brom").has_kind("quest"),
+            "Brom also gives quests"
+        );
         assert!(lookup("aldric").expect("aldric").has_kind("quest"));
-        assert!(lookup("sister_maelis").expect("maelis").has_kind("soul_binder"));
+        assert!(lookup("sister_maelis")
+            .expect("maelis")
+            .has_kind("soul_binder"));
         assert!(lookup("thalia").expect("thalia").has_kind("banker"));
     }
 
@@ -111,7 +120,14 @@ mod tests {
     #[test]
     fn starter_spawn_reaches_every_town_npc() {
         let spawn = Vec3f::ZERO;
-        for id in ["brom", "aldric", "sister_maelis", "thalia", "elara", "hadrik"] {
+        for id in [
+            "brom",
+            "aldric",
+            "sister_maelis",
+            "thalia",
+            "elara",
+            "hadrik",
+        ] {
             let n = lookup(id).unwrap();
             assert!(
                 n.position().distance_to(spawn) <= NPC_SERVICE_RANGE,
@@ -122,11 +138,22 @@ mod tests {
 
     #[test]
     fn range_gate_accepts_near_and_refuses_far() {
-        let at_banker = Vec3f { x: 11.0, y: 0.0, z: 5.0 };
+        let at_banker = Vec3f {
+            x: 11.0,
+            y: 0.0,
+            z: 5.0,
+        };
         assert!(any_within_range("banker", at_banker).is_some());
 
-        let dungeon = Vec3f { x: 200.0, y: -10.0, z: 200.0 };
-        assert!(any_within_range("banker", dungeon).is_none(), "the exploit case");
+        let dungeon = Vec3f {
+            x: 200.0,
+            y: -10.0,
+            z: 200.0,
+        };
+        assert!(
+            any_within_range("banker", dungeon).is_none(),
+            "the exploit case"
+        );
         assert!(any_within_range("vendor", dungeon).is_none());
         assert!(!id_within_range("aldric", dungeon));
     }

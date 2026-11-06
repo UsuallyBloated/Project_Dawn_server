@@ -86,28 +86,96 @@ mod tests {
     #[test]
     fn an_interrupt_charges_mana_in_proportion_to_the_bar() {
         // A 40 mana, 4 s spell.
-        assert_eq!(interrupt_charge(40.0, 4.0, Some(2_000), 7, 100.0), 20.0, "half way, half the mana");
-        assert_eq!(interrupt_charge(40.0, 4.0, Some(1_000), 7, 100.0), 10.0, "a quarter in");
-        assert_eq!(interrupt_charge(40.0, 4.0, Some(9_000), 7, 100.0), 40.0, "past the end: the whole cost, never more");
-        assert_eq!(interrupt_charge(40.0, 4.0, Some(2_000), 0, 100.0), 0.0, "a zero-damage hit charges nothing");
-        assert_eq!(interrupt_charge(40.0, 4.0, Some(2_000), -3, 100.0), 0.0, "an absorbed hit charges nothing");
-        assert_eq!(interrupt_charge(40.0, 4.0, None, 7, 100.0), 0.0, "no bar on file");
-        assert_eq!(interrupt_charge(40.0, 0.0, Some(2_000), 7, 100.0), 0.0, "an instant cast has no bar");
-        assert_eq!(interrupt_charge(40.0, 4.0, Some(2_000), 7, 12.5), 12.5, "capped at the mana held");
-        assert_eq!(interrupt_charge(40.0, 4.0, Some(2_000), 7, 0.0), 0.0, "an empty bar stays at zero");
+        assert_eq!(
+            interrupt_charge(40.0, 4.0, Some(2_000), 7, 100.0),
+            20.0,
+            "half way, half the mana"
+        );
+        assert_eq!(
+            interrupt_charge(40.0, 4.0, Some(1_000), 7, 100.0),
+            10.0,
+            "a quarter in"
+        );
+        assert_eq!(
+            interrupt_charge(40.0, 4.0, Some(9_000), 7, 100.0),
+            40.0,
+            "past the end: the whole cost, never more"
+        );
+        assert_eq!(
+            interrupt_charge(40.0, 4.0, Some(2_000), 0, 100.0),
+            0.0,
+            "a zero-damage hit charges nothing"
+        );
+        assert_eq!(
+            interrupt_charge(40.0, 4.0, Some(2_000), -3, 100.0),
+            0.0,
+            "an absorbed hit charges nothing"
+        );
+        assert_eq!(
+            interrupt_charge(40.0, 4.0, None, 7, 100.0),
+            0.0,
+            "no bar on file"
+        );
+        assert_eq!(
+            interrupt_charge(40.0, 0.0, Some(2_000), 7, 100.0),
+            0.0,
+            "an instant cast has no bar"
+        );
+        assert_eq!(
+            interrupt_charge(40.0, 4.0, Some(2_000), 7, 12.5),
+            12.5,
+            "capped at the mana held"
+        );
+        assert_eq!(
+            interrupt_charge(40.0, 4.0, Some(2_000), 7, 0.0),
+            0.0,
+            "an empty bar stays at zero"
+        );
     }
 
     #[test]
     fn a_cast_is_ready_only_inside_its_window() {
         let required = 2_000;
-        assert_eq!(cast_timing(None, required), CastTiming::NotReady, "no bar on file");
-        assert_eq!(cast_timing(Some(0), required), CastTiming::NotReady, "sent with the start");
-        assert_eq!(cast_timing(Some(1_899), required), CastTiming::NotReady, "just early");
-        assert_eq!(cast_timing(Some(1_900), required), CastTiming::Ready, "inside the jitter allowance");
-        assert_eq!(cast_timing(Some(2_000), required), CastTiming::Ready, "on time");
-        assert_eq!(cast_timing(Some(4_000), required), CastTiming::Ready, "the last honoured millisecond");
-        assert_eq!(cast_timing(Some(4_001), required), CastTiming::Held, "held past the bar");
-        assert_eq!(cast_timing(Some(60_000), required), CastTiming::Held, "held a minute");
+        assert_eq!(
+            cast_timing(None, required),
+            CastTiming::NotReady,
+            "no bar on file"
+        );
+        assert_eq!(
+            cast_timing(Some(0), required),
+            CastTiming::NotReady,
+            "sent with the start"
+        );
+        assert_eq!(
+            cast_timing(Some(1_899), required),
+            CastTiming::NotReady,
+            "just early"
+        );
+        assert_eq!(
+            cast_timing(Some(1_900), required),
+            CastTiming::Ready,
+            "inside the jitter allowance"
+        );
+        assert_eq!(
+            cast_timing(Some(2_000), required),
+            CastTiming::Ready,
+            "on time"
+        );
+        assert_eq!(
+            cast_timing(Some(4_000), required),
+            CastTiming::Ready,
+            "the last honoured millisecond"
+        );
+        assert_eq!(
+            cast_timing(Some(4_001), required),
+            CastTiming::Held,
+            "held past the bar"
+        );
+        assert_eq!(
+            cast_timing(Some(60_000), required),
+            CastTiming::Held,
+            "held a minute"
+        );
     }
 
     #[test]
@@ -116,9 +184,18 @@ mod tests {
         let before = began - Duration::from_millis(500);
         let after = began + Duration::from_millis(500);
         assert!(!beaten_by_interrupt(None, Some(began)), "never interrupted");
-        assert!(!beaten_by_interrupt(Some(after), None), "an instant cast has no bar to beat");
-        assert!(!beaten_by_interrupt(Some(before), Some(began)), "an older cast's interrupt");
-        assert!(beaten_by_interrupt(Some(began), Some(began)), "the same instant counts");
+        assert!(
+            !beaten_by_interrupt(Some(after), None),
+            "an instant cast has no bar to beat"
+        );
+        assert!(
+            !beaten_by_interrupt(Some(before), Some(began)),
+            "an older cast's interrupt"
+        );
+        assert!(
+            beaten_by_interrupt(Some(began), Some(began)),
+            "the same instant counts"
+        );
         assert!(beaten_by_interrupt(Some(after), Some(began)), "hit mid-bar");
     }
 }

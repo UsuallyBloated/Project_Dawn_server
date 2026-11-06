@@ -40,9 +40,8 @@ const RACE: &str = "Human";
 const CLIENT_VERSION: &str = "0.1.0";
 const PASSWORD_LEN: usize = 16;
 
-type Ws = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -58,18 +57,24 @@ async fn main() -> anyhow::Result<()> {
     let password = random_password();
     let (mut ws, _) = tokio_tungstenite::connect_async(&url).await?;
 
-    match rpc(&mut ws, ClientAuthMsg::Register {
-        username: username.clone(),
-        password: password.clone(),
-        email: None,
-        invite: None,
-    })
+    match rpc(
+        &mut ws,
+        ClientAuthMsg::Register {
+            username: username.clone(),
+            password: password.clone(),
+            email: None,
+            invite: None,
+        },
+    )
     .await?
     {
         ServerAuthMsg::RegisterOk { account_id } => {
             println!("Registered account '{username}' (id {account_id}).");
         }
-        ServerAuthMsg::Error { code: ErrorCode::NameTaken, .. } => {
+        ServerAuthMsg::Error {
+            code: ErrorCode::NameTaken,
+            ..
+        } => {
             anyhow::bail!(
                 "an account named '{username}' already exists; its password is not known \
                  here, so pick another account name"
@@ -78,11 +83,14 @@ async fn main() -> anyhow::Result<()> {
         other => anyhow::bail!("register: unexpected reply {other:?}"),
     }
 
-    let session = match rpc(&mut ws, ClientAuthMsg::Login {
-        username: username.clone(),
-        password: password.clone(),
-        client_version: CLIENT_VERSION.into(),
-    })
+    let session = match rpc(
+        &mut ws,
+        ClientAuthMsg::Login {
+            username: username.clone(),
+            password: password.clone(),
+            client_version: CLIENT_VERSION.into(),
+        },
+    )
     .await?
     {
         ServerAuthMsg::LoginOk { session_token, .. } => session_token,
@@ -93,19 +101,25 @@ async fn main() -> anyhow::Result<()> {
     for (class, level, candidates) in WANTED {
         let mut landed = None;
         for name in *candidates {
-            match rpc(&mut ws, ClientAuthMsg::CharCreate {
-                session_token: session.clone(),
-                name: (*name).into(),
-                race: RACE.into(),
-                class: (*class).into(),
-            })
+            match rpc(
+                &mut ws,
+                ClientAuthMsg::CharCreate {
+                    session_token: session.clone(),
+                    name: (*name).into(),
+                    race: RACE.into(),
+                    class: (*class).into(),
+                },
+            )
             .await?
             {
                 ServerAuthMsg::CharCreated { char_id } => {
                     landed = Some(((*name).to_string(), char_id));
                     break;
                 }
-                ServerAuthMsg::Error { code: ErrorCode::NameTaken, .. } => {
+                ServerAuthMsg::Error {
+                    code: ErrorCode::NameTaken,
+                    ..
+                } => {
                     println!("  '{name}' is taken, trying the next name");
                 }
                 other => anyhow::bail!("create {name} ({class}): unexpected reply {other:?}"),
@@ -117,14 +131,22 @@ async fn main() -> anyhow::Result<()> {
         println!("  created {name} ({RACE} {class}, id {char_id}), wanted at level {level}");
         made.push((name, class, *level, char_id));
     }
-    let _ = rpc(&mut ws, ClientAuthMsg::Logout { session_token: session }).await;
+    let _ = rpc(
+        &mut ws,
+        ClientAuthMsg::Logout {
+            session_token: session,
+        },
+    )
+    .await;
     // A proper close handshake, or the server logs the dropped socket as a
     // protocol error (it did, on the first run).
     let _ = ws.close(None).await;
 
     println!();
     println!("Log in with  account: {username}   password: {password}");
-    println!("(The password is shown this once and stored nowhere. reset_password can replace it.)");
+    println!(
+        "(The password is shown this once and stored nowhere. reset_password can replace it.)"
+    );
     println!();
     println!("Characters (all level 1 until the host command below runs):");
     for (name, class, level, _) in &made {
@@ -154,7 +176,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn rpc(ws: &mut Ws, msg: ClientAuthMsg) -> anyhow::Result<ServerAuthMsg> {
-    ws.send(Message::Text(serde_json::to_string(&msg)?.into())).await?;
+    ws.send(Message::Text(serde_json::to_string(&msg)?.into()))
+        .await?;
     loop {
         let frame = ws
             .next()

@@ -78,7 +78,13 @@ pub fn award_xp(server: &mut RenetServer, conn: &mut PerConnection, amount: i32)
     let leveled = conn.level != old_level;
     if leveled {
         apply_intrinsic_delta(conn, old_level, conn.level);
-        handlers::send_level_up(server, owner_cid, conn.level as u32, conn.xp, conn.xp_to_next);
+        handlers::send_level_up(
+            server,
+            owner_cid,
+            conn.level as u32,
+            conn.xp,
+            conn.xp_to_next,
+        );
         tracing::info!(
             char_id = conn.char_id,
             from = old_level,
@@ -135,10 +141,10 @@ pub fn kill_player(server: &mut RenetServer, conn: &mut PerConnection) {
     conn.cast_set_at = None;
     conn.active_buffs.clear();
     conn.camp_since = None; // a corpse can't make camp
-    // Flag a corpse for the tick's corpse-creation pass. Set on EVERY death path
-    // (this is called from the server-detected death sweep AND the client-first
-    // DeathBroadcast handler), so fall damage / Trigger Death / a dying linkdead
-    // body all leave a corpse, not just server-simulated combat kills.
+                            // Flag a corpse for the tick's corpse-creation pass. Set on EVERY death path
+                            // (this is called from the server-detected death sweep AND the client-first
+                            // DeathBroadcast handler), so fall damage / Trigger Death / a dying linkdead
+                            // body all leave a corpse, not just server-simulated combat kills.
     conn.corpse_pending = true;
     super::regen::mark_dirty(conn);
 }
@@ -292,7 +298,10 @@ mod tests {
         for lvl in 1..=99 {
             let band = char_data::xp_to_next_for(lvl);
             assert!(band > 0, "band({lvl}) = {band} went non-positive");
-            assert!(band < 100_000_000, "band({lvl}) = {band} unexpectedly large");
+            assert!(
+                band < 100_000_000,
+                "band({lvl}) = {band} unexpectedly large"
+            );
         }
         // Above the cap the band is pinned to the cap band, never the raw cubic
         // for that level (which would overflow i32).

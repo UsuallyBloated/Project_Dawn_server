@@ -47,9 +47,7 @@ use crate::Config;
 use anyhow::Context;
 use protocol::world::WORLD_PROTOCOL_ID;
 use renet::{ChannelConfig, ConnectionConfig, RenetServer, SendType};
-use renet_netcode::{
-    ConnectToken, NetcodeServerTransport, ServerAuthentication, ServerConfig,
-};
+use renet_netcode::{ConnectToken, NetcodeServerTransport, ServerAuthentication, ServerConfig};
 use sqlx::SqlitePool;
 use std::{
     collections::HashMap,

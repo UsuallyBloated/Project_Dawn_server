@@ -237,12 +237,7 @@ impl NetClient {
     /// Counts < 0 shouldn't happen (server validates) but the i64
     /// width on the FFI boundary is conservative.
     #[signal]
-    fn inventory_delta(
-        location: GString,
-        slot: i64,
-        item_path: GString,
-        count: i64,
-    );
+    fn inventory_delta(location: GString, slot: i64, item_path: GString, count: i64);
 
     /// Track 5 sub-task 4 — server-owned loot bag landed in the AOI.
     /// `items` is parallel arrays of (path, count) so the FFI stays
@@ -431,23 +426,14 @@ impl NetClient {
     /// (Thorns / Spellshield). Clients use this for combat-log
     /// attribution and floating-number rendering on the attacker.
     #[signal]
-    fn damage_shield_trigger(
-        defender: i64,
-        attacker: i64,
-        amount: i32,
-        shield_name: GString,
-    );
+    fn damage_shield_trigger(defender: i64, attacker: i64, amount: i32, shield_name: GString);
 
     /// Track 4 sub-task 3 buff snapshot. `names` and `durations` are
     /// parallel arrays — entry i is one buff. Empty arrays mean "no
     /// active buffs". Receiver should replace any previously-tracked
     /// buff list for `target` with these values.
     #[signal]
-    fn buff_snapshot(
-        target: i64,
-        names: PackedStringArray,
-        durations: PackedFloat32Array,
-    );
+    fn buff_snapshot(target: i64, names: PackedStringArray, durations: PackedFloat32Array);
 
     /// Track 18.1 — single-skill advance event. `kind` is 0 = weapon,
     /// 1 = armor, 2 = casting. GDScript subscribers update the
@@ -509,11 +495,7 @@ impl NetClient {
     /// listen for `transport_connected` (success) or `transport_disconnected`
     /// (failure) rather than treating `true` as "connected now".
     #[func]
-    fn connect_to_server(
-        &mut self,
-        token_bytes: PackedByteArray,
-        world_endpoint: GString,
-    ) -> bool {
+    fn connect_to_server(&mut self, token_bytes: PackedByteArray, world_endpoint: GString) -> bool {
         let _ = world_endpoint;
         let bytes_vec: Vec<u8> = token_bytes.to_vec();
         let token = match ConnectToken::read(&mut Cursor::new(&bytes_vec[..])) {
@@ -596,10 +578,7 @@ impl NetClient {
     /// over its recent window; 0.0 with no client.
     #[func]
     fn packet_loss(&self) -> f64 {
-        self.client
-            .as_ref()
-            .map(|c| c.packet_loss())
-            .unwrap_or(0.0)
+        self.client.as_ref().map(|c| c.packet_loss()).unwrap_or(0.0)
     }
 
     /// Pump renet for one frame. Call from `_process(delta)` in GDScript.
@@ -696,7 +675,11 @@ impl NetClient {
             return false;
         };
         let target = target_name.to_string();
-        let target_opt = if target.is_empty() { None } else { Some(target) };
+        let target_opt = if target.is_empty() {
+            None
+        } else {
+            Some(target)
+        };
         let msg = ClientWorldMsg::Chat {
             channel: ch,
             text: text.to_string(),
@@ -750,7 +733,9 @@ impl NetClient {
     fn send_complete_quest(&mut self, quest_id: GString) -> bool {
         self.send_app(
             CHANNEL_SYSTEM,
-            &ClientWorldMsg::CompleteQuest { quest_id: quest_id.to_string() },
+            &ClientWorldMsg::CompleteQuest {
+                quest_id: quest_id.to_string(),
+            },
         )
     }
 
@@ -762,7 +747,10 @@ impl NetClient {
     fn send_accept_quest(&mut self, quest_id: GString) -> bool {
         self.send_app(
             CHANNEL_SYSTEM,
-            &ClientWorldMsg::AcceptQuest { quest_id: quest_id.to_string(), giver_id: 0 },
+            &ClientWorldMsg::AcceptQuest {
+                quest_id: quest_id.to_string(),
+                giver_id: 0,
+            },
         )
     }
 
@@ -772,7 +760,9 @@ impl NetClient {
     fn send_abandon_quest(&mut self, quest_id: GString) -> bool {
         self.send_app(
             CHANNEL_SYSTEM,
-            &ClientWorldMsg::AbandonQuest { quest_id: quest_id.to_string() },
+            &ClientWorldMsg::AbandonQuest {
+                quest_id: quest_id.to_string(),
+            },
         )
     }
 
@@ -826,7 +816,9 @@ impl NetClient {
     /// damage in tick step 4h.
     #[func]
     fn send_equip_update(&mut self, armor: i64) -> bool {
-        let msg = ClientWorldMsg::EquipUpdate { armor: armor as i32 };
+        let msg = ClientWorldMsg::EquipUpdate {
+            armor: armor as i32,
+        };
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
@@ -861,7 +853,9 @@ impl NetClient {
     /// `Net` autoload's `broadcast_pass_leadership`.
     #[func]
     fn send_pass_leadership(&mut self, new_leader: i64) -> bool {
-        let msg = ClientWorldMsg::PassLeadership { new_leader: new_leader as u64 };
+        let msg = ClientWorldMsg::PassLeadership {
+            new_leader: new_leader as u64,
+        };
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
@@ -870,7 +864,9 @@ impl NetClient {
     /// CastSpell port. Mirror of send_heal_self.
     #[func]
     fn send_damage_self(&mut self, amount: i64) -> bool {
-        let msg = ClientWorldMsg::DamageSelf { amount: amount as i32 };
+        let msg = ClientWorldMsg::DamageSelf {
+            amount: amount as i32,
+        };
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
@@ -880,7 +876,9 @@ impl NetClient {
     /// spell table lives server-side.
     #[func]
     fn send_heal_self(&mut self, amount: i64) -> bool {
-        let msg = ClientWorldMsg::HealSelf { amount: amount as i32 };
+        let msg = ClientWorldMsg::HealSelf {
+            amount: amount as i32,
+        };
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
@@ -889,7 +887,12 @@ impl NetClient {
     /// the authoritative wallet comes back via `coins_update`.
     #[func]
     fn send_give_coins(&mut self, platinum: i64, gold: i64, silver: i64, copper: i64) -> bool {
-        let msg = ClientWorldMsg::GiveCoins { platinum, gold, silver, copper };
+        let msg = ClientWorldMsg::GiveCoins {
+            platinum,
+            gold,
+            silver,
+            copper,
+        };
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
@@ -899,7 +902,12 @@ impl NetClient {
     #[func]
     fn send_bank_deposit(&mut self, platinum: i64, gold: i64, silver: i64, copper: i64) -> bool {
         let msg = ClientWorldMsg::BankDepositCoins {
-            coins: Coins { platinum, gold, silver, copper },
+            coins: Coins {
+                platinum,
+                gold,
+                silver,
+                copper,
+            },
         };
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
@@ -909,7 +917,12 @@ impl NetClient {
     #[func]
     fn send_bank_withdraw(&mut self, platinum: i64, gold: i64, silver: i64, copper: i64) -> bool {
         let msg = ClientWorldMsg::BankWithdrawCoins {
-            coins: Coins { platinum, gold, silver, copper },
+            coins: Coins {
+                platinum,
+                gold,
+                silver,
+                copper,
+            },
         };
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
@@ -985,13 +998,7 @@ impl NetClient {
     /// discriminant of protocol::world::DamageType (clamped to the
     /// known range; out-of-range falls back to Physical).
     #[func]
-    fn send_hit_broadcast(
-        &mut self,
-        target: i64,
-        amount: i64,
-        crit: bool,
-        dmg_type: i64,
-    ) -> bool {
+    fn send_hit_broadcast(&mut self, target: i64, amount: i64, crit: bool, dmg_type: i64) -> bool {
         let msg = ClientWorldMsg::HitBroadcast {
             target: target as u64,
             amount: amount as i32,
@@ -1053,7 +1060,11 @@ impl NetClient {
     /// (or negative) encodes "no target" (None on the wire).
     #[func]
     fn send_set_target(&mut self, target_id: i64) -> bool {
-        let opt = if target_id <= 0 { None } else { Some(target_id as u64) };
+        let opt = if target_id <= 0 {
+            None
+        } else {
+            Some(target_id as u64)
+        };
         let msg = ClientWorldMsg::SetTarget { target_id: opt };
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
@@ -1065,7 +1076,9 @@ impl NetClient {
     /// invite map.
     #[func]
     fn send_group_invite(&mut self, name: GString) -> bool {
-        let msg = ClientWorldMsg::GroupInvite { name: name.to_string() };
+        let msg = ClientWorldMsg::GroupInvite {
+            name: name.to_string(),
+        };
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
@@ -1082,7 +1095,9 @@ impl NetClient {
 
     #[func]
     fn send_group_kick(&mut self, name: GString) -> bool {
-        let msg = ClientWorldMsg::GroupKick { name: name.to_string() };
+        let msg = ClientWorldMsg::GroupKick {
+            name: name.to_string(),
+        };
         self.send_app(CHANNEL_SYSTEM, &msg)
     }
 
@@ -1240,7 +1255,10 @@ impl NetClient {
                 Ok(v) => v,
                 Err(_) => return false,
             };
-            protocol::world::SlotRef::BagSlot { base, slot: slot_u8 }
+            protocol::world::SlotRef::BagSlot {
+                base,
+                slot: slot_u8,
+            }
         } else {
             return false;
         };
@@ -1253,12 +1271,7 @@ impl NetClient {
     /// `protocol::world::EquipSlot` (weapon=0, offhand=1, head=2,
     /// chest=3, legs=4, feet=5, hands=6, ring=7, neck=8).
     #[func]
-    fn send_equip_item(
-        &mut self,
-        src_location: GString,
-        src_slot: i64,
-        equip_slot: i64,
-    ) -> bool {
+    fn send_equip_item(&mut self, src_location: GString, src_slot: i64, equip_slot: i64) -> bool {
         let msg = ClientWorldMsg::EquipItem {
             src_location: src_location.to_string(),
             src_slot: src_slot.max(0) as u32,
@@ -1270,12 +1283,7 @@ impl NetClient {
     /// Track 13.3 — unequip paperdoll slot `equip_slot` into
     /// (dst_location, dst_slot). Swap on dst-occupied.
     #[func]
-    fn send_unequip_item(
-        &mut self,
-        equip_slot: i64,
-        dst_location: GString,
-        dst_slot: i64,
-    ) -> bool {
+    fn send_unequip_item(&mut self, equip_slot: i64, dst_location: GString, dst_slot: i64) -> bool {
         let msg = ClientWorldMsg::UnequipItem {
             equip_slot: equip_slot.clamp(0, u8::MAX as i64) as u8,
             dst_location: dst_location.to_string(),
@@ -1314,7 +1322,10 @@ impl NetClient {
                 Ok(v) => v,
                 Err(_) => return false,
             };
-            protocol::world::SlotRef::BagSlot { base, slot: slot_u8 }
+            protocol::world::SlotRef::BagSlot {
+                base,
+                slot: slot_u8,
+            }
         } else {
             return false;
         };
@@ -1347,7 +1358,11 @@ impl NetClient {
     /// so the GDScript caller doesn't need to know about nullables.
     #[func]
     fn send_pet_command(&mut self, command: i64, target_id: i64) -> bool {
-        let target = if target_id > 0 { Some(target_id as u64) } else { None };
+        let target = if target_id > 0 {
+            Some(target_id as u64)
+        } else {
+            None
+        };
         let msg = ClientWorldMsg::PetCommand {
             command: command as u8,
             target_id: target,
@@ -1669,8 +1684,7 @@ impl NetClient {
 
     fn tick_renet(&mut self, dt: Duration) -> Pending {
         let mut p = Pending::default();
-        let (Some(client), Some(transport)) =
-            (self.client.as_mut(), self.transport.as_mut())
+        let (Some(client), Some(transport)) = (self.client.as_mut(), self.transport.as_mut())
         else {
             return p;
         };
@@ -1683,10 +1697,7 @@ impl NetClient {
         let now_connected = client.is_connected();
         if now_connected && !self.was_connected {
             p.transport_connected = true;
-        } else if !now_connected
-            && self.was_connected
-            && p.transport_disconnected.is_none()
-        {
+        } else if !now_connected && self.was_connected && p.transport_disconnected.is_none() {
             // Server-initiated drop or timeout: lift renet's reason if any.
             let r = client
                 .disconnect_reason()
@@ -1717,8 +1728,7 @@ impl NetClient {
 
     fn fire(&mut self, p: Pending) {
         if p.transport_connected {
-            self.base_mut()
-                .emit_signal("transport_connected", &[]);
+            self.base_mut().emit_signal("transport_connected", &[]);
         }
         if let Some(reason) = p.transport_disconnected {
             // Drop renet state so the caller can re-`connect_to_server` cleanly.
@@ -1810,31 +1820,19 @@ impl NetClient {
                 Incoming::HealthUpdate { id, hp, max_hp } => {
                     self.base_mut().emit_signal(
                         "health_update",
-                        &[
-                            id.to_variant(),
-                            hp.to_variant(),
-                            max_hp.to_variant(),
-                        ],
+                        &[id.to_variant(), hp.to_variant(), max_hp.to_variant()],
                     );
                 }
                 Incoming::ManaUpdate { id, mp, max_mp } => {
                     self.base_mut().emit_signal(
                         "mana_update",
-                        &[
-                            id.to_variant(),
-                            mp.to_variant(),
-                            max_mp.to_variant(),
-                        ],
+                        &[id.to_variant(), mp.to_variant(), max_mp.to_variant()],
                     );
                 }
                 Incoming::StaminaUpdate { id, stamina, max } => {
                     self.base_mut().emit_signal(
                         "stamina_update",
-                        &[
-                            id.to_variant(),
-                            stamina.to_variant(),
-                            max.to_variant(),
-                        ],
+                        &[id.to_variant(), stamina.to_variant(), max.to_variant()],
                     );
                 }
                 Incoming::CastStart {
@@ -1851,10 +1849,7 @@ impl NetClient {
                         ],
                     );
                 }
-                Incoming::CastComplete {
-                    caster,
-                    spell_name,
-                } => {
+                Incoming::CastComplete { caster, spell_name } => {
                     self.base_mut().emit_signal(
                         "cast_complete",
                         &[
@@ -1911,16 +1906,12 @@ impl NetClient {
                     );
                 }
                 Incoming::Miss { attacker, target } => {
-                    self.base_mut().emit_signal(
-                        "miss",
-                        &[attacker.to_variant(), target.to_variant()],
-                    );
+                    self.base_mut()
+                        .emit_signal("miss", &[attacker.to_variant(), target.to_variant()]);
                 }
                 Incoming::Evade { attacker, target } => {
-                    self.base_mut().emit_signal(
-                        "evade",
-                        &[attacker.to_variant(), target.to_variant()],
-                    );
+                    self.base_mut()
+                        .emit_signal("evade", &[attacker.to_variant(), target.to_variant()]);
                 }
                 Incoming::EntityDied { id } => {
                     self.base_mut()
@@ -2031,10 +2022,8 @@ impl NetClient {
                     // signal docs). Mint a non-collision sentinel because
                     // GDScript Variant doesn't carry an Option type.
                     let target_id = target.unwrap_or(0);
-                    self.base_mut().emit_signal(
-                        "entity_target",
-                        &[id.to_variant(), target_id.to_variant()],
-                    );
+                    self.base_mut()
+                        .emit_signal("entity_target", &[id.to_variant(), target_id.to_variant()]);
                 }
                 Incoming::LootBagSpawn {
                     bag_id,
@@ -2067,7 +2056,12 @@ impl NetClient {
                         ],
                     );
                 }
-                Incoming::CorpseSpawn { corpse_id, owner_id, owner_name, pos } => {
+                Incoming::CorpseSpawn {
+                    corpse_id,
+                    owner_id,
+                    owner_name,
+                    pos,
+                } => {
                     self.base_mut().emit_signal(
                         "corpse_spawn",
                         &[
@@ -2105,7 +2099,11 @@ impl NetClient {
                         ],
                     );
                 }
-                Incoming::ResurrectOffer { corpse_id, caster_name, xp_percent } => {
+                Incoming::ResurrectOffer {
+                    corpse_id,
+                    caster_name,
+                    xp_percent,
+                } => {
                     self.base_mut().emit_signal(
                         "resurrect_offer",
                         &[
@@ -2141,12 +2139,14 @@ impl NetClient {
                     );
                 }
                 Incoming::GroupNotice { text } => {
-                    self.base_mut().emit_signal(
-                        "group_notice",
-                        &[GString::from(text.as_str()).to_variant()],
-                    );
+                    self.base_mut()
+                        .emit_signal("group_notice", &[GString::from(text.as_str()).to_variant()]);
                 }
-                Incoming::XpGained { amount, current, to_next } => {
+                Incoming::XpGained {
+                    amount,
+                    current,
+                    to_next,
+                } => {
                     self.base_mut().emit_signal(
                         "xp_gained",
                         &[
@@ -2191,7 +2191,11 @@ impl NetClient {
                         ],
                     );
                 }
-                Incoming::QuestProgress { quest_id, objective_index, count } => {
+                Incoming::QuestProgress {
+                    quest_id,
+                    objective_index,
+                    count,
+                } => {
                     self.base_mut().emit_signal(
                         "quest_progress",
                         &[
@@ -2201,7 +2205,11 @@ impl NetClient {
                         ],
                     );
                 }
-                Incoming::QuestRejected { quest_id, reason, rollback } => {
+                Incoming::QuestRejected {
+                    quest_id,
+                    reason,
+                    rollback,
+                } => {
                     self.base_mut().emit_signal(
                         "quest_rejected",
                         &[
@@ -2217,7 +2225,11 @@ impl NetClient {
                         &[GString::from(quest_id.as_str()).to_variant()],
                     );
                 }
-                Incoming::LevelUp { new_level, xp, xp_to_next } => {
+                Incoming::LevelUp {
+                    new_level,
+                    xp,
+                    xp_to_next,
+                } => {
                     self.base_mut().emit_signal(
                         "level_up",
                         &[
@@ -2227,7 +2239,12 @@ impl NetClient {
                         ],
                     );
                 }
-                Incoming::CoinsUpdate { platinum, gold, silver, copper } => {
+                Incoming::CoinsUpdate {
+                    platinum,
+                    gold,
+                    silver,
+                    copper,
+                } => {
                     self.base_mut().emit_signal(
                         "coins_update",
                         &[
@@ -2238,7 +2255,12 @@ impl NetClient {
                         ],
                     );
                 }
-                Incoming::BankSnapshot { platinum, gold, silver, copper } => {
+                Incoming::BankSnapshot {
+                    platinum,
+                    gold,
+                    silver,
+                    copper,
+                } => {
                     self.base_mut().emit_signal(
                         "bank_snapshot",
                         &[
@@ -2311,7 +2333,12 @@ impl NetClient {
                         ],
                     );
                 }
-                Incoming::DamageShieldTrigger { defender, attacker, amount, shield_name } => {
+                Incoming::DamageShieldTrigger {
+                    defender,
+                    attacker,
+                    amount,
+                    shield_name,
+                } => {
                     self.base_mut().emit_signal(
                         "damage_shield_trigger",
                         &[
@@ -2322,7 +2349,11 @@ impl NetClient {
                         ],
                     );
                 }
-                Incoming::SkillProgressUpdate { kind, key, new_score } => {
+                Incoming::SkillProgressUpdate {
+                    kind,
+                    key,
+                    new_score,
+                } => {
                     self.base_mut().emit_signal(
                         "skill_progress_update",
                         &[
@@ -2332,18 +2363,23 @@ impl NetClient {
                         ],
                     );
                 }
-                Incoming::SkillProgressSnapshot { weapon, armor, casting } => {
-                    let split = |entries: &[(String, u32)]| -> (PackedStringArray, PackedInt32Array) {
-                        let mut keys = PackedStringArray::new();
-                        let mut scores = PackedInt32Array::new();
-                        keys.resize(entries.len());
-                        scores.resize(entries.len());
-                        for (i, (k, s)) in entries.iter().enumerate() {
-                            keys[i] = GString::from(k.as_str());
-                            scores[i] = *s as i32;
-                        }
-                        (keys, scores)
-                    };
+                Incoming::SkillProgressSnapshot {
+                    weapon,
+                    armor,
+                    casting,
+                } => {
+                    let split =
+                        |entries: &[(String, u32)]| -> (PackedStringArray, PackedInt32Array) {
+                            let mut keys = PackedStringArray::new();
+                            let mut scores = PackedInt32Array::new();
+                            keys.resize(entries.len());
+                            scores.resize(entries.len());
+                            for (i, (k, s)) in entries.iter().enumerate() {
+                                keys[i] = GString::from(k.as_str());
+                                scores[i] = *s as i32;
+                            }
+                            (keys, scores)
+                        };
                     let (wk, ws) = split(&weapon);
                     let (ak, asc) = split(&armor);
                     let (ck, cs) = split(&casting);
@@ -2359,7 +2395,12 @@ impl NetClient {
                         ],
                     );
                 }
-                Incoming::ChatMessage { speaker, channel, text, lang } => {
+                Incoming::ChatMessage {
+                    speaker,
+                    channel,
+                    text,
+                    lang,
+                } => {
                     self.base_mut().emit_signal(
                         "chat_message",
                         &[
@@ -2370,7 +2411,11 @@ impl NetClient {
                         ],
                     );
                 }
-                Incoming::InspectResult { target_char_id, target_name, slots } => {
+                Incoming::InspectResult {
+                    target_char_id,
+                    target_name,
+                    slots,
+                } => {
                     let mut keys = PackedInt32Array::new();
                     let mut paths = PackedStringArray::new();
                     keys.resize(slots.len());
@@ -2389,7 +2434,10 @@ impl NetClient {
                         ],
                     );
                 }
-                Incoming::CampUpdate { remaining_secs, active } => {
+                Incoming::CampUpdate {
+                    remaining_secs,
+                    active,
+                } => {
                     self.base_mut().emit_signal(
                         "camp_update",
                         &[remaining_secs.to_variant(), active.to_variant()],
@@ -2484,10 +2532,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             spell_name,
             duration,
         },
-        ServerWorldMsg::CastComplete {
-            caster,
-            spell_name,
-        } => Incoming::CastComplete {
+        ServerWorldMsg::CastComplete { caster, spell_name } => Incoming::CastComplete {
             caster: caster as i64,
             spell_name,
         },
@@ -2576,9 +2621,7 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             pos,
             yaw,
         },
-        ServerWorldMsg::InventorySnapshot { entries } => {
-            Incoming::InventorySnapshot { entries }
-        }
+        ServerWorldMsg::InventorySnapshot { entries } => Incoming::InventorySnapshot { entries },
         ServerWorldMsg::InventoryDelta {
             location,
             slot,
@@ -2590,7 +2633,13 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             item_path,
             count,
         },
-        ServerWorldMsg::LootBagSpawn { bag_id, pos, items, coins, creature_name } => Incoming::LootBagSpawn {
+        ServerWorldMsg::LootBagSpawn {
+            bag_id,
+            pos,
+            items,
+            coins,
+            creature_name,
+        } => Incoming::LootBagSpawn {
             bag_id: bag_id as i64,
             pos,
             items,
@@ -2600,15 +2649,22 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             coin_copper: coins.copper,
             creature_name,
         },
-        ServerWorldMsg::CorpseSpawn { corpse_id, owner_id, owner_name, pos } => {
-            Incoming::CorpseSpawn {
-                corpse_id: corpse_id as i64,
-                owner_id: owner_id as i64,
-                owner_name,
-                pos,
-            }
-        }
-        ServerWorldMsg::CorpseContents { corpse_id, items, coins } => Incoming::CorpseContents {
+        ServerWorldMsg::CorpseSpawn {
+            corpse_id,
+            owner_id,
+            owner_name,
+            pos,
+        } => Incoming::CorpseSpawn {
+            corpse_id: corpse_id as i64,
+            owner_id: owner_id as i64,
+            owner_name,
+            pos,
+        },
+        ServerWorldMsg::CorpseContents {
+            corpse_id,
+            items,
+            coins,
+        } => Incoming::CorpseContents {
             corpse_id: corpse_id as i64,
             items,
             coin_platinum: coins.platinum,
@@ -2616,20 +2672,27 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             coin_silver: coins.silver,
             coin_copper: coins.copper,
         },
-        ServerWorldMsg::ResurrectOffer { corpse_id, caster_name, xp_percent } => Incoming::ResurrectOffer {
+        ServerWorldMsg::ResurrectOffer {
+            corpse_id,
+            caster_name,
+            xp_percent,
+        } => Incoming::ResurrectOffer {
             corpse_id: corpse_id as i64,
             caster_name,
             xp_percent: xp_percent as i64,
         },
         ServerWorldMsg::Teleport { pos } => Incoming::Teleport { pos },
         ServerWorldMsg::TimeOfDay { hour } => Incoming::TimeOfDay { hour },
-        ServerWorldMsg::LootGranted { item_path, count } => Incoming::LootGranted {
-            item_path,
-            count,
-        },
+        ServerWorldMsg::LootGranted { item_path, count } => {
+            Incoming::LootGranted { item_path, count }
+        }
         ServerWorldMsg::LootRejected { reason } => Incoming::LootRejected { reason },
         ServerWorldMsg::GroupNotice { text } => Incoming::GroupNotice { text },
-        ServerWorldMsg::XpGained { amount, current, to_next } => Incoming::XpGained {
+        ServerWorldMsg::XpGained {
+            amount,
+            current,
+            to_next,
+        } => Incoming::XpGained {
             amount,
             current,
             to_next,
@@ -2638,16 +2701,30 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
         ServerWorldMsg::QuestSnapshot { active, completed } => {
             Incoming::QuestSnapshot { active, completed }
         }
-        ServerWorldMsg::QuestProgress { quest_id, objective_index, count } => {
-            Incoming::QuestProgress { quest_id, objective_index, count }
-        }
-        ServerWorldMsg::QuestRejected { quest_id, reason, rollback } => {
-            Incoming::QuestRejected { quest_id, reason, rollback }
-        }
-        ServerWorldMsg::QuestCompleted { quest_id } => {
-            Incoming::QuestCompleted { quest_id }
-        }
-        ServerWorldMsg::LevelUp { new_level, xp, xp_to_next } => Incoming::LevelUp {
+        ServerWorldMsg::QuestProgress {
+            quest_id,
+            objective_index,
+            count,
+        } => Incoming::QuestProgress {
+            quest_id,
+            objective_index,
+            count,
+        },
+        ServerWorldMsg::QuestRejected {
+            quest_id,
+            reason,
+            rollback,
+        } => Incoming::QuestRejected {
+            quest_id,
+            reason,
+            rollback,
+        },
+        ServerWorldMsg::QuestCompleted { quest_id } => Incoming::QuestCompleted { quest_id },
+        ServerWorldMsg::LevelUp {
+            new_level,
+            xp,
+            xp_to_next,
+        } => Incoming::LevelUp {
             new_level,
             xp,
             xp_to_next,
@@ -2672,7 +2749,12 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
             from_id: from_id as i64,
             from_name,
         },
-        ServerWorldMsg::GroupRoster { group_id, leader_id, members, loot_mode } => {
+        ServerWorldMsg::GroupRoster {
+            group_id,
+            leader_id,
+            members,
+            loot_mode,
+        } => {
             let mut member_ids = Vec::with_capacity(members.len());
             let mut member_names = Vec::with_capacity(members.len());
             for (id, name) in members {
@@ -2687,36 +2769,59 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
                 loot_mode,
             }
         }
-        ServerWorldMsg::DamageShieldTrigger { defender, attacker, amount, shield_name } => {
-            Incoming::DamageShieldTrigger {
-                defender: defender as i64,
-                attacker: attacker as i64,
-                amount,
-                shield_name,
-            }
-        }
-        ServerWorldMsg::SkillProgressUpdate { kind, key, new_score } => {
-            Incoming::SkillProgressUpdate {
-                kind: kind as u8,
-                key,
-                new_score,
-            }
-        }
-        ServerWorldMsg::SkillProgressSnapshot { weapon, armor, casting } => {
-            Incoming::SkillProgressSnapshot { weapon, armor, casting }
-        }
-        ServerWorldMsg::ChatMessage { speaker, channel: ch, text, lang } => {
-            Incoming::ChatMessage {
-                speaker,
-                channel: chat_channel_to_int(ch),
-                text,
-                lang,
-            }
-        }
-        ServerWorldMsg::InspectResult { target_char_id, target_name, slots } => {
-            Incoming::InspectResult { target_char_id, target_name, slots }
-        }
-        ServerWorldMsg::CampUpdate { remaining_secs, active } => Incoming::CampUpdate {
+        ServerWorldMsg::DamageShieldTrigger {
+            defender,
+            attacker,
+            amount,
+            shield_name,
+        } => Incoming::DamageShieldTrigger {
+            defender: defender as i64,
+            attacker: attacker as i64,
+            amount,
+            shield_name,
+        },
+        ServerWorldMsg::SkillProgressUpdate {
+            kind,
+            key,
+            new_score,
+        } => Incoming::SkillProgressUpdate {
+            kind: kind as u8,
+            key,
+            new_score,
+        },
+        ServerWorldMsg::SkillProgressSnapshot {
+            weapon,
+            armor,
+            casting,
+        } => Incoming::SkillProgressSnapshot {
+            weapon,
+            armor,
+            casting,
+        },
+        ServerWorldMsg::ChatMessage {
+            speaker,
+            channel: ch,
+            text,
+            lang,
+        } => Incoming::ChatMessage {
+            speaker,
+            channel: chat_channel_to_int(ch),
+            text,
+            lang,
+        },
+        ServerWorldMsg::InspectResult {
+            target_char_id,
+            target_name,
+            slots,
+        } => Incoming::InspectResult {
+            target_char_id,
+            target_name,
+            slots,
+        },
+        ServerWorldMsg::CampUpdate {
+            remaining_secs,
+            active,
+        } => Incoming::CampUpdate {
             remaining_secs: remaining_secs as i64,
             active,
         },

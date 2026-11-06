@@ -59,7 +59,9 @@ fn parse_args(args: &[String]) -> Action {
             if args.len() != 2 {
                 usage();
             }
-            Action::Unban { username: args[1].clone() }
+            Action::Unban {
+                username: args[1].clone(),
+            }
         }
         Some(other) => {
             eprintln!("unknown subcommand '{other}'");
@@ -166,7 +168,10 @@ async fn list(pool: &sqlx::SqlitePool) -> Result<()> {
         println!("No accounts.");
         return Ok(());
     }
-    let banned = rows.iter().filter(|r| r.get::<bool, _>("is_banned")).count();
+    let banned = rows
+        .iter()
+        .filter(|r| r.get::<bool, _>("is_banned"))
+        .count();
     println!("Accounts ({} total, {banned} banned):", rows.len());
     for r in rows {
         let id: i64 = r.get("id");

@@ -63,9 +63,8 @@ fn tight_policy() -> AuthPolicy {
     }
 }
 
-type Ws = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// The next frame, or `None` once the server has closed the connection
 /// (a Close frame, an EOF, or a reset all count as closed).
@@ -85,7 +84,9 @@ async fn next_or_closed(ws: &mut Ws) -> Option<Message> {
 #[tokio::test]
 async fn an_oversize_message_closes_the_connection() {
     let (url, _db, _tmp) = start_server_with(tight_policy()).await;
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
     // Well-formed JSON so only the SIZE can be the reason it is refused.
     let big = serde_json::json!({
         "type": "Register",
@@ -98,10 +99,16 @@ async fn an_oversize_message_closes_the_connection() {
         "the server must close rather than answer an oversize message"
     );
     // And the server is fine afterwards.
-    let (mut ws2, _) = tokio_tungstenite::connect_async(&url).await.expect("reconnect");
-    let resp = rpc(&mut ws2, serde_json::json!({
-        "type": "Register", "username": "fine", "password": "hunter2!",
-    })).await;
+    let (mut ws2, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("reconnect");
+    let resp = rpc(
+        &mut ws2,
+        serde_json::json!({
+            "type": "Register", "username": "fine", "password": "hunter2!",
+        }),
+    )
+    .await;
     assert_eq!(resp["type"], "RegisterOk", "{resp}");
 }
 
@@ -111,13 +118,21 @@ async fn an_oversize_message_closes_the_connection() {
 async fn a_client_that_never_finishes_the_handshake_is_dropped() {
     let (url, _db, _tmp) = start_server_with(tight_policy()).await;
     let addr = url.trim_start_matches("ws://").to_string();
-    let mut raw = tokio::net::TcpStream::connect(&addr).await.expect("tcp connect");
+    let mut raw = tokio::net::TcpStream::connect(&addr)
+        .await
+        .expect("tcp connect");
     // Send nothing. The server must hang up on its own.
     let mut buf = [0u8; 64];
-    let read = tokio::time::timeout(Duration::from_secs(3), tokio::io::AsyncReadExt::read(&mut raw, &mut buf))
-        .await
-        .expect("the server closed the half-open connection within 3 s");
-    assert!(matches!(read, Ok(0) | Err(_)), "EOF or reset, not data: {read:?}");
+    let read = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::io::AsyncReadExt::read(&mut raw, &mut buf),
+    )
+    .await
+    .expect("the server closed the half-open connection within 3 s");
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "EOF or reset, not data: {read:?}"
+    );
 }
 
 /// A connection that stops talking is closed at the idle timeout; the
@@ -126,8 +141,13 @@ async fn a_client_that_never_finishes_the_handshake_is_dropped() {
 #[tokio::test]
 async fn an_idle_connection_is_closed() {
     let (url, _db, _tmp) = start_server_with(tight_policy()).await;
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
-    assert!(next_or_closed(&mut ws).await.is_none(), "closed after the idle timeout");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
+    assert!(
+        next_or_closed(&mut ws).await.is_none(),
+        "closed after the idle timeout"
+    );
 }
 
 /// One address may hold only so many connections at once; the next is
@@ -140,11 +160,20 @@ async fn connections_per_address_are_capped() {
     })
     .await;
     let (mut a, _) = tokio_tungstenite::connect_async(&url).await.expect("first");
-    let (mut b, _) = tokio_tungstenite::connect_async(&url).await.expect("second");
+    let (mut b, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("second");
     let (mut c, _) = tokio_tungstenite::connect_async(&url).await.expect("third");
-    assert!(next_or_closed(&mut c).await.is_none(), "the third connection is refused");
+    assert!(
+        next_or_closed(&mut c).await.is_none(),
+        "the third connection is refused"
+    );
     // The first two still work.
-    let resp = rpc(&mut a, serde_json::json!({"type": "CharList", "session_token": "00"})).await;
+    let resp = rpc(
+        &mut a,
+        serde_json::json!({"type": "CharList", "session_token": "00"}),
+    )
+    .await;
     assert_eq!(resp["type"], "Error");
     // Closing one frees a slot for a new one (the slot drops when the server's
     // task ends, so poll rather than guess the moment).
@@ -152,7 +181,9 @@ async fn connections_per_address_are_capped() {
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     let mut admitted = false;
     while std::time::Instant::now() < deadline && !admitted {
-        let (mut d, _) = tokio_tungstenite::connect_async(&url).await.expect("fourth");
+        let (mut d, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("fourth");
         // A refused connection closes without answering; an admitted one answers.
         let _ = d
             .send(Message::Text(
@@ -179,7 +210,10 @@ async fn the_forwarded_address_is_what_the_limiter_keys_on() {
         let mut req = url.into_client_request().expect("request");
         req.headers_mut()
             .insert("x-forwarded-for", forwarded.parse().expect("header"));
-        tokio_tungstenite::connect_async(req).await.expect("connect").0
+        tokio_tungstenite::connect_async(req)
+            .await
+            .expect("connect")
+            .0
     }
     let bad_login = serde_json::json!({
         "type": "Login", "username": "nobody", "password": "wrong", "client_version": "0.1.0",
@@ -198,7 +232,10 @@ async fn the_forwarded_address_is_what_the_limiter_keys_on() {
     // A different forwarded address, same loopback peer: its own budget.
     let mut b = connect_as(&url, "198.51.100.10").await;
     let resp = rpc(&mut b, bad_login).await;
-    assert_eq!(resp["code"], "auth_failed", "a fresh address is not throttled: {resp}");
+    assert_eq!(
+        resp["code"], "auth_failed",
+        "a fresh address is not throttled: {resp}"
+    );
 }
 
 /// With `require_invite` on, Register needs a code the operator minted, and
@@ -211,38 +248,65 @@ async fn registration_needs_a_valid_unused_invite_when_required() {
     })
     .await;
     let pool = db::open(&db_url).await.expect("open");
-    let codes = db::create_invites(&pool, 1, Some("test")).await.expect("mint");
+    let codes = db::create_invites(&pool, 1, Some("test"))
+        .await
+        .expect("mint");
     let code = codes[0].clone();
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
 
-    let resp = rpc(&mut ws, serde_json::json!({
-        "type": "Register", "username": "guest", "password": "hunter2!",
-    })).await;
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "Register", "username": "guest", "password": "hunter2!",
+        }),
+    )
+    .await;
     assert_eq!(resp["code"], "invite_invalid", "no code: {resp}");
     assert!(resp["msg"].as_str().unwrap().contains("required"));
 
-    let resp = rpc(&mut ws, serde_json::json!({
-        "type": "Register", "username": "guest", "password": "hunter2!",
-        "invite": "ffffffffffffffffffffffffffffffff",
-    })).await;
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "Register", "username": "guest", "password": "hunter2!",
+            "invite": "ffffffffffffffffffffffffffffffff",
+        }),
+    )
+    .await;
     assert_eq!(resp["code"], "invite_invalid", "unknown code: {resp}");
 
-    let resp = rpc(&mut ws, serde_json::json!({
-        "type": "Register", "username": "guest", "password": "hunter2!",
-        "invite": code,
-    })).await;
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "Register", "username": "guest", "password": "hunter2!",
+            "invite": code,
+        }),
+    )
+    .await;
     assert_eq!(resp["type"], "RegisterOk", "the minted code works: {resp}");
 
-    let resp = rpc(&mut ws, serde_json::json!({
-        "type": "Register", "username": "guest2", "password": "hunter2!",
-        "invite": code,
-    })).await;
-    assert_eq!(resp["code"], "invite_invalid", "a spent code is refused: {resp}");
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "Register", "username": "guest2", "password": "hunter2!",
+            "invite": code,
+        }),
+    )
+    .await;
+    assert_eq!(
+        resp["code"], "invite_invalid",
+        "a spent code is refused: {resp}"
+    );
 
     // The account works like any other.
-    let resp = rpc(&mut ws, serde_json::json!({
-        "type": "Login", "username": "guest", "password": "hunter2!", "client_version": "0.1.0",
-    })).await;
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "Login", "username": "guest", "password": "hunter2!", "client_version": "0.1.0",
+        }),
+    )
+    .await;
     assert_eq!(resp["type"], "LoginOk", "{resp}");
 }
 
@@ -347,7 +411,9 @@ async fn full_auth_flow() {
 #[tokio::test]
 async fn rejects_old_client_version() {
     let (url, _tmp) = start_server().await;
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
 
     rpc(
         &mut ws,
@@ -376,7 +442,9 @@ async fn rejects_old_client_version() {
 #[tokio::test]
 async fn rejects_duplicate_username() {
     let (url, _tmp) = start_server().await;
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
 
     rpc(
         &mut ws,
@@ -407,10 +475,16 @@ async fn rejects_duplicate_username() {
 #[tokio::test]
 async fn character_creation_accepts_only_the_creation_lists() {
     let (url, _tmp) = start_server().await;
-    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("connect");
-    let resp = rpc(&mut ws, serde_json::json!({
-        "type": "Register", "username": "picker", "password": "hunter2!",
-    })).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "Register", "username": "picker", "password": "hunter2!",
+        }),
+    )
+    .await;
     assert_eq!(resp["type"], "RegisterOk", "{resp}");
     let resp = rpc(&mut ws, serde_json::json!({
         "type": "Login", "username": "picker", "password": "hunter2!", "client_version": "0.1.0",
@@ -419,11 +493,17 @@ async fn character_creation_accepts_only_the_creation_lists() {
     let resp = rpc(&mut ws, serde_json::json!({
         "type": "CharCreate", "session_token": session, "name": "Revvy", "race": "Revenant", "class": "Warrior",
     })).await;
-    assert_eq!(resp["code"], "invalid_input", "a transformation is not a birth race: {resp}");
+    assert_eq!(
+        resp["code"], "invalid_input",
+        "a transformation is not a birth race: {resp}"
+    );
     let resp = rpc(&mut ws, serde_json::json!({
         "type": "CharCreate", "session_token": session, "name": "Wardy", "race": "Human", "class": "Warlock",
     })).await;
-    assert_eq!(resp["code"], "invalid_input", "a planned class is not playable yet: {resp}");
+    assert_eq!(
+        resp["code"], "invalid_input",
+        "a planned class is not playable yet: {resp}"
+    );
     let resp = rpc(&mut ws, serde_json::json!({
         "type": "CharCreate", "session_token": session, "name": "Halfy", "race": "Halfling", "class": "Rogue",
     })).await;

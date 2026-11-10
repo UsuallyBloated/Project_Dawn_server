@@ -628,6 +628,126 @@ async fn charm_converts_enemy_to_pet() {
     }
 }
 
+/// A charmed pet that dies inside the last ENEMY_DESPAWN_LINGER_SECS of its
+/// charm is a body when the charm runs out, and stays one: the corpse sweep
+/// despawns it and frees its slot, and nothing is handed back. On the previous
+/// code the expiry sweep rebuilt the dead pet as a mob at 0 HP, the stray sweep
+/// killed that mob the next tick and dropped its loot for a fight nobody fought
+/// (Sable the Dark, 2026-11-09: a loot faucet). A Bard 14 charms a 10 HP dummy
+/// with Siren's Song (30 s) and, 26 s in, sends it at a mob that kills it in
+/// one hit; fails on the previous code at the EnemySpawn that replaces the pet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_charmed_pet_that_dies_as_its_charm_runs_out_is_not_handed_back() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale_token) =
+        provision_client(&h.auth_url, "sirendead", "Sirenne", "Human", "Bard").await;
+    // Siren's Song is Bard level 14.
+    set_char_level(&h.db_url, a_char_id, 14).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "sirendead", true)
+        .await
+        .expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // 10 HP; aggro 1 m, so it never notices the bard before the charm; speed 3,
+    // so it reaches the killer at once when sent.
+    a.send_dev_spawn("Charm Dummy", 1, 10.0, 1, 3.0, 1.0);
+    let enemy_id: u64 = match a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
+        })
+        .await
+        .expect("the dummy spawns")
+    {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    a.send_cast_start("Siren's Song", 1.5);
+    a.pump_for(Duration::from_millis(1700)).await;
+    a.send_cast_spell("Siren's Song", Some(enemy_id));
+    let pet_id: u64 = match a
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
+        .await
+        .expect("the charm lands")
+    {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    let charmed_at = Instant::now();
+
+    // Wait out most of the charm (heartbeating past the 10 s idle timeout),
+    // then put a killer beside the pet: 60 damage against 10 HP, aggro 1 m so
+    // only the pet's own swing provokes it. The pet dies about 27 s in: inside
+    // the charm, and inside the body's 5 s linger of the expiry at 30 s.
+    while Instant::now() < charmed_at + Duration::from_secs(26) {
+        a.send_heartbeat();
+        a.pump_for(Duration::from_secs(2)).await;
+    }
+    a.send_dev_spawn("Pet Killer", 10, 500.0, 60, 1.0, 1.0);
+    let killer_id: u64 = match a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Pet Killer")
+        })
+        .await
+        .expect("the killer spawns")
+    {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    a.send_pet_command(protocol::world::pet_command::ATTACK, Some(killer_id));
+    let died = a
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(4),
+            |m| matches!(m, ServerWorldMsg::EntityDied { id } if *id == pet_id),
+        )
+        .await;
+    assert!(died.is_some(), "the setup kills the pet");
+    let into_charm = charmed_at.elapsed().as_secs_f32();
+    assert!(
+        (25.5..29.5).contains(&into_charm),
+        "the setup must kill the pet inside the charm's last five seconds (it died {into_charm:.1} s in)"
+    );
+
+    // Through the expiry and the body's linger, keep every message.
+    let seen: std::cell::RefCell<Vec<ServerWorldMsg>> = std::cell::RefCell::new(Vec::new());
+    let until = charmed_at + Duration::from_secs(37);
+    while Instant::now() < until {
+        a.send_heartbeat();
+        let _ = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+                seen.borrow_mut().push(m.clone());
+                false
+            })
+            .await;
+    }
+    let seen = seen.into_inner();
+    let handed_back = seen
+        .iter()
+        .any(|m| matches!(m, ServerWorldMsg::EnemySpawn { replaces: Some(r), .. } if *r == pet_id));
+    assert!(
+        !handed_back,
+        "a dead pet is not handed back as a mob when its charm runs out"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|m| matches!(m, ServerWorldMsg::LootBagSpawn { .. })),
+        "and nothing is dropped for it"
+    );
+    assert!(
+        seen.iter()
+            .any(|m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == pet_id)),
+        "the body is despawned by the corpse sweep"
+    );
+}
+
 /// A charm that ends hands the mob back (user call 2026-10-06, EQ's rule): the
 /// pet is despawned, the same mob respawns in its place with the HP it had,
 /// and it comes straight for the one who charmed it. Siren's Song is the

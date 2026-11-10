@@ -130,9 +130,15 @@ pub(super) fn despawn_owned_pets(
 ) {
     // Track 11 — owner's pet dies with them. Future work: hand off pets on
     // zone change rather than instant despawn.
+    // A charmed mob that died before its charmer left is a body, not a mob to
+    // hand back: the corpse sweep despawns it and frees its camp slot within
+    // ENEMY_DESPAWN_LINGER_SECS. Handed back, its 0 HP made a stray kill with
+    // the mob's loot (the expiry sweep's bug of 2026-11-09, the same shape).
+    // A summoned pet's body is despawned here as before (no slot to free).
     let owned_pets: Vec<EntityId> = enemies
         .iter()
         .filter(|(_, e)| e.owner == Some(owner_entity))
+        .filter(|(_, e)| e.charm_expires_at.is_none() || e.is_alive())
         .map(|(id, _)| *id)
         .collect();
     // The leaver's transport is going or gone, so they are not an audience.

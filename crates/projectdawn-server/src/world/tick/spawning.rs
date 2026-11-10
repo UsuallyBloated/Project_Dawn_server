@@ -261,7 +261,14 @@ pub(super) fn run_spawning(
             // test was true on the very next tick: every charm ended
             // 50 ms after it landed (seen in play 2026-10-06, twice).
             // Same bug the warder retreat timer had.
-            if now >= exp {
+            //
+            // A pet that DIED inside the last ENEMY_DESPAWN_LINGER_SECS of its
+            // charm is still here as a body, and is the corpse sweep's: it
+            // despawns it and frees its camp slot. Handing it back as a mob
+            // copied its 0 HP into the new enemy, the stray sweep killed that
+            // the next tick, and the bag held the mob's loot for a fight
+            // nobody fought (Sable the Dark, 2026-11-09: a loot faucet).
+            if now >= exp && e.is_alive() {
                 Some(*id)
             } else {
                 None

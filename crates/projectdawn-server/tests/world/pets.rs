@@ -430,6 +430,102 @@ async fn pet_command_attack_locks_onto_target() {
     }
 }
 
+/// The owner is on a mob's hate list from the moment their pet engages it
+/// (user call 2026-11-09, `PET_OWNER_HATE_TOKEN`): a mob whose only attacker
+/// was the pet turns on the owner when the pet dies, instead of walking home
+/// with the owner never at risk. A Necromancer 6 sends its skeleton at a mob
+/// with 1 m aggro (it notices nobody on its own) that kills the skeleton in
+/// one hit; the mob then targets the owner and comes for them. Fails on the
+/// previous code at the EntityTarget: the owner was never on the list, so the
+/// mob leashed home.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mob_that_fought_only_a_pet_turns_on_the_owner_when_the_pet_dies() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale_token) =
+        provision_client(&h.auth_url, "pethate", "Vexanne", "Human", "Necromancer").await;
+    // Summon Skeleton requires level 6.
+    set_char_level(&h.db_url, a_char_id, 6).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "pethate", true)
+        .await
+        .expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Summon first, in peace (a cast under fire rolls the interrupt).
+    a.send_cast_start("Summon Skeleton", 3.0);
+    a.pump_for(Duration::from_millis(3100)).await;
+    a.send_cast_spell("Summon Skeleton", None);
+    let pet_id: u64 = match a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+                || matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64)
+        })
+        .await
+        .expect("the skeleton spawns (or a CastFail says why not)")
+    {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        ServerWorldMsg::CastFail { reason, .. } => {
+            panic!("Summon Skeleton failed with CastFail: {reason:?}")
+        }
+        _ => unreachable!(),
+    };
+
+    // 60 damage against a level 3-to-5 skeleton: one hit kills it. Aggro
+    // 1 m, so only the pet's own swing provokes it; the leash floor (35 m)
+    // keeps the owner, 3 m away, within reach afterwards.
+    a.send_dev_spawn("Pet Hater", 10, 500.0, 60, 1.0, 1.0);
+    let mob_id: u64 = match a
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Pet Hater"),
+        )
+        .await
+        .expect("the mob spawns")
+    {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    // The owner never swings: only the pet engages.
+    a.send_pet_command(protocol::world::pet_command::ATTACK, Some(mob_id));
+    let engaged = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(10), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
+                if *attacker == pet_id && *target == mob_id)
+        })
+        .await;
+    assert!(engaged.is_some(), "the skeleton engages the mob");
+    let pet_died = a
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(10),
+            |m| matches!(m, ServerWorldMsg::EntityDied { id } if *id == pet_id),
+        )
+        .await;
+    assert!(pet_died.is_some(), "the mob kills the skeleton");
+
+    // Its only attacker gone, the mob turns on the owner and comes for them.
+    let turned = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(t) }
+                if *id == mob_id && *t == a_char_id as u64)
+        })
+        .await;
+    assert!(
+        turned.is_some(),
+        "the mob targets the pet's owner, who was on its hate list from the pet's first swing"
+    );
+    let hit = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(10), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
+                if *attacker == mob_id && *target == a_char_id as u64)
+        })
+        .await;
+    assert!(hit.is_some(), "and hits them within seconds");
+}
+
 /// Track 12 Piece A2: the pet pulls aggro through the threat re-evaluation.
 /// A mob targets the player, the pet is sent on it, and once the pet's
 /// threat clears 1.3x the player's the mob switches to the pet, fanning an

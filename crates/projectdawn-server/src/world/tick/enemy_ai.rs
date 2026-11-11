@@ -592,6 +592,25 @@ pub(super) fn run_enemy_ai(
                     // even when the owner has been damaging it
                     // longer.
                     *target_entity.threat.entry(attacker).or_insert(0.0) += amount as f32;
+                    // The owner is on the mob's hate list from the moment
+                    // their pet engages it (user call 2026-11-09), at a
+                    // token that never grows: enough that a mob whose only
+                    // attacker was the pet turns on the owner when the pet
+                    // dies (`next_hater_or_home`) instead of walking home,
+                    // never enough to outrank anyone who fought it. Threat
+                    // only: the damage ledger (`aggro`) decides credit and
+                    // already names the owner for the pet's hits. A hidden
+                    // or feigning owner stays off the list, as their own
+                    // hate was wiped; world mobs only (a pet's own threat
+                    // map steers nothing).
+                    if let Some(owner) = owner_id_opt {
+                        if target_entity.owner.is_none() && !hidden_players.contains(&owner) {
+                            target_entity
+                                .threat
+                                .entry(owner)
+                                .or_insert(crate::world::PET_OWNER_HATE_TOKEN);
+                        }
+                    }
                     let new_hp = target_entity.hp;
                     let max_hp = target_entity.max_hp;
                     let died = new_hp <= 0.0;

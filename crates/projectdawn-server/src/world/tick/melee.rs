@@ -1119,6 +1119,18 @@ pub(super) fn apply_attacks(
                             entity.hp = (entity.hp - proc_dmg as f32).max(0.0);
                             *entity.aggro.entry(intent.attacker).or_insert(0.0) += proc_dmg as f32;
                             *entity.threat.entry(intent.attacker).or_insert(0.0) += proc_dmg as f32;
+                            // The journal's only witness of a proc (the
+                            // "<proc> for N" line is the client's): a melee
+                            // session with a proc weapon used to show nothing
+                            // either way (2026-11-09).
+                            tracing::info!(
+                                char_id = intent.attacker,
+                                target = intent.target_id,
+                                proc = %w.proc_name,
+                                amount = proc_dmg,
+                                crit = proc_crit,
+                                "weapon proc"
+                            );
                             // Private to the attacker — the proc's named
                             // number/flash/log is their flavor; the mob's HP
                             // drop is already fanned to everyone via the

@@ -343,6 +343,13 @@ pub const ATTACK_RANGE_TOLERANCE: f32 = 1.5;
 /// Mobs with an aggro radius of 0 (dev-spawned dummies) are left passive.
 pub const MIN_LEASH_RANGE: f32 = 35.0;
 
+/// The hate a pet's owner holds on a mob from the moment the pet engages it
+/// (user call 2026-11-09): one point, inserted once and never added to, so a
+/// mob whose only attacker was the pet turns on the owner when the pet dies
+/// instead of walking home, while anyone who fought it outranks the owner.
+/// A miss adds the same point for the swinger. Threat only, never credit.
+pub const PET_OWNER_HATE_TOKEN: f32 = 1.0;
+
 /// How long a mob or pet may be held at ground it cannot climb before it
 /// gives up (the first hills, decision 6, EQ's rule): a chasing mob forgets
 /// everyone and walks home, where it heals to full; a mob walking home warps

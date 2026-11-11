@@ -430,6 +430,102 @@ async fn pet_command_attack_locks_onto_target() {
     }
 }
 
+/// The owner is on a mob's hate list from the moment their pet engages it
+/// (user call 2026-11-09, `PET_OWNER_HATE_TOKEN`): a mob whose only attacker
+/// was the pet turns on the owner when the pet dies, instead of walking home
+/// with the owner never at risk. A Necromancer 6 sends its skeleton at a mob
+/// with 1 m aggro (it notices nobody on its own) that kills the skeleton in
+/// one hit; the mob then targets the owner and comes for them. Fails on the
+/// previous code at the EntityTarget: the owner was never on the list, so the
+/// mob leashed home.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mob_that_fought_only_a_pet_turns_on_the_owner_when_the_pet_dies() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale_token) =
+        provision_client(&h.auth_url, "pethate", "Vexanne", "Human", "Necromancer").await;
+    // Summon Skeleton requires level 6.
+    set_char_level(&h.db_url, a_char_id, 6).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "pethate", true)
+        .await
+        .expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // Summon first, in peace (a cast under fire rolls the interrupt).
+    a.send_cast_start("Summon Skeleton", 3.0);
+    a.pump_for(Duration::from_millis(3100)).await;
+    a.send_cast_spell("Summon Skeleton", None);
+    let pet_id: u64 = match a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64)
+                || matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == a_char_id as u64)
+        })
+        .await
+        .expect("the skeleton spawns (or a CastFail says why not)")
+    {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        ServerWorldMsg::CastFail { reason, .. } => {
+            panic!("Summon Skeleton failed with CastFail: {reason:?}")
+        }
+        _ => unreachable!(),
+    };
+
+    // 60 damage against a level 3-to-5 skeleton: one hit kills it. Aggro
+    // 1 m, so only the pet's own swing provokes it; the leash floor (35 m)
+    // keeps the owner, 3 m away, within reach afterwards.
+    a.send_dev_spawn("Pet Hater", 10, 500.0, 60, 1.0, 1.0);
+    let mob_id: u64 = match a
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Pet Hater"),
+        )
+        .await
+        .expect("the mob spawns")
+    {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    // The owner never swings: only the pet engages.
+    a.send_pet_command(protocol::world::pet_command::ATTACK, Some(mob_id));
+    let engaged = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(10), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
+                if *attacker == pet_id && *target == mob_id)
+        })
+        .await;
+    assert!(engaged.is_some(), "the skeleton engages the mob");
+    let pet_died = a
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(10),
+            |m| matches!(m, ServerWorldMsg::EntityDied { id } if *id == pet_id),
+        )
+        .await;
+    assert!(pet_died.is_some(), "the mob kills the skeleton");
+
+    // Its only attacker gone, the mob turns on the owner and comes for them.
+    let turned = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(5), |m| {
+            matches!(m, ServerWorldMsg::EntityTarget { id, target: Some(t) }
+                if *id == mob_id && *t == a_char_id as u64)
+        })
+        .await;
+    assert!(
+        turned.is_some(),
+        "the mob targets the pet's owner, who was on its hate list from the pet's first swing"
+    );
+    let hit = a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(10), |m| {
+            matches!(m, ServerWorldMsg::Hit { attacker, target, .. }
+                if *attacker == mob_id && *target == a_char_id as u64)
+        })
+        .await;
+    assert!(hit.is_some(), "and hits them within seconds");
+}
+
 /// Track 12 Piece A2: the pet pulls aggro through the threat re-evaluation.
 /// A mob targets the player, the pet is sent on it, and once the pet's
 /// threat clears 1.3x the player's the mob switches to the pet, fanning an
@@ -626,6 +722,126 @@ async fn charm_converts_enemy_to_pet() {
             "a fresh charm must not release on the next tick"
         );
     }
+}
+
+/// A charmed pet that dies inside the last ENEMY_DESPAWN_LINGER_SECS of its
+/// charm is a body when the charm runs out, and stays one: the corpse sweep
+/// despawns it and frees its slot, and nothing is handed back. On the previous
+/// code the expiry sweep rebuilt the dead pet as a mob at 0 HP, the stray sweep
+/// killed that mob the next tick and dropped its loot for a fight nobody fought
+/// (Sable the Dark, 2026-11-09: a loot faucet). A Bard 14 charms a 10 HP dummy
+/// with Siren's Song (30 s) and, 26 s in, sends it at a mob that kills it in
+/// one hit; fails on the previous code at the EnemySpawn that replaces the pet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_charmed_pet_that_dies_as_its_charm_runs_out_is_not_handed_back() {
+    let h = start_both().await;
+    let (a_session, a_char_id, _stale_token) =
+        provision_client(&h.auth_url, "sirendead", "Sirenne", "Human", "Bard").await;
+    // Siren's Song is Bard level 14.
+    set_char_level(&h.db_url, a_char_id, 14).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "sirendead", true)
+        .await
+        .expect("set is_gm");
+    let a_token = request_world_token(&h.auth_url, &a_session, a_char_id).await;
+    let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
+
+    // 10 HP; aggro 1 m, so it never notices the bard before the charm; speed 3,
+    // so it reaches the killer at once when sent.
+    a.send_dev_spawn("Charm Dummy", 1, 10.0, 1, 3.0, 1.0);
+    let enemy_id: u64 = match a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Charm Dummy")
+        })
+        .await
+        .expect("the dummy spawns")
+    {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+
+    a.send_cast_start("Siren's Song", 1.5);
+    a.pump_for(Duration::from_millis(1700)).await;
+    a.send_cast_spell("Siren's Song", Some(enemy_id));
+    let pet_id: u64 = match a
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_char_id as u64),
+        )
+        .await
+        .expect("the charm lands")
+    {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    let charmed_at = Instant::now();
+
+    // Wait out most of the charm (heartbeating past the 10 s idle timeout),
+    // then put a killer beside the pet: 60 damage against 10 HP, aggro 1 m so
+    // only the pet's own swing provokes it. The pet dies about 27 s in: inside
+    // the charm, and inside the body's 5 s linger of the expiry at 30 s.
+    while Instant::now() < charmed_at + Duration::from_secs(26) {
+        a.send_heartbeat();
+        a.pump_for(Duration::from_secs(2)).await;
+    }
+    a.send_dev_spawn("Pet Killer", 10, 500.0, 60, 1.0, 1.0);
+    let killer_id: u64 = match a
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::EnemySpawn { mob_name, .. } if mob_name == "Pet Killer")
+        })
+        .await
+        .expect("the killer spawns")
+    {
+        ServerWorldMsg::EnemySpawn { id, .. } => id,
+        _ => unreachable!(),
+    };
+    a.send_pet_command(protocol::world::pet_command::ATTACK, Some(killer_id));
+    let died = a
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(4),
+            |m| matches!(m, ServerWorldMsg::EntityDied { id } if *id == pet_id),
+        )
+        .await;
+    assert!(died.is_some(), "the setup kills the pet");
+    let into_charm = charmed_at.elapsed().as_secs_f32();
+    assert!(
+        (25.5..29.5).contains(&into_charm),
+        "the setup must kill the pet inside the charm's last five seconds (it died {into_charm:.1} s in)"
+    );
+
+    // Through the expiry and the body's linger, keep every message.
+    let seen: std::cell::RefCell<Vec<ServerWorldMsg>> = std::cell::RefCell::new(Vec::new());
+    let until = charmed_at + Duration::from_secs(37);
+    while Instant::now() < until {
+        a.send_heartbeat();
+        let _ = a
+            .wait_for(CHANNEL_SYSTEM, Duration::from_secs(2), |m| {
+                seen.borrow_mut().push(m.clone());
+                false
+            })
+            .await;
+    }
+    let seen = seen.into_inner();
+    let handed_back = seen
+        .iter()
+        .any(|m| matches!(m, ServerWorldMsg::EnemySpawn { replaces: Some(r), .. } if *r == pet_id));
+    assert!(
+        !handed_back,
+        "a dead pet is not handed back as a mob when its charm runs out"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|m| matches!(m, ServerWorldMsg::LootBagSpawn { .. })),
+        "and nothing is dropped for it"
+    );
+    assert!(
+        seen.iter()
+            .any(|m| matches!(m, ServerWorldMsg::EntityDespawn { id } if *id == pet_id)),
+        "the body is despawned by the corpse sweep"
+    );
 }
 
 /// A charm that ends hands the mob back (user call 2026-10-06, EQ's rule): the

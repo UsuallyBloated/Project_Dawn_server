@@ -515,3 +515,78 @@ async fn character_creation_accepts_only_the_creation_lists() {
     })).await;
     assert_eq!(resp["type"], "CharCreated", "a real pair creates: {resp}");
 }
+
+/// L8: an account holds at most `db::MAX_CHARACTERS_PER_ACCOUNT` live
+/// characters. The next CharCreate is refused with a line the launcher
+/// shows, nothing is written for it, and a delete makes room again.
+#[tokio::test]
+async fn an_account_holds_at_most_the_character_cap() {
+    let (url, _tmp) = start_server().await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect");
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "Register", "username": "crowded", "password": "hunter2!",
+        }),
+    )
+    .await;
+    assert_eq!(resp["type"], "RegisterOk", "{resp}");
+    let resp = rpc(&mut ws, serde_json::json!({
+        "type": "Login", "username": "crowded", "password": "hunter2!", "client_version": "0.1.0",
+    })).await;
+    let session = resp["session_token"].as_str().expect("session").to_string();
+
+    let cap = db::MAX_CHARACTERS_PER_ACCOUNT;
+    let mut first_id = None;
+    for i in 0..cap {
+        let name = format!(
+            "Crowd{}",
+            char::from(b'a' + u8::try_from(i).expect("small"))
+        );
+        let resp = rpc(&mut ws, serde_json::json!({
+            "type": "CharCreate", "session_token": session, "name": name, "race": "Human", "class": "Warrior",
+        })).await;
+        assert_eq!(resp["type"], "CharCreated", "character {i}: {resp}");
+        first_id.get_or_insert(resp["char_id"].as_i64().expect("id"));
+    }
+    let resp = rpc(&mut ws, serde_json::json!({
+        "type": "CharCreate", "session_token": session, "name": "Crowdz", "race": "Human", "class": "Warrior",
+    })).await;
+    assert_eq!(
+        resp["type"], "Error",
+        "the one past the cap is refused: {resp}"
+    );
+    assert_eq!(resp["code"], "invalid_input", "{resp}");
+    assert!(
+        resp["msg"].as_str().unwrap_or("").contains("Delete one"),
+        "the line names the way out: {resp}"
+    );
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({ "type": "CharList", "session_token": session }),
+    )
+    .await;
+    assert_eq!(
+        resp["characters"].as_array().map(Vec::len),
+        Some(usize::try_from(cap).expect("positive")),
+        "{resp}"
+    );
+
+    let resp = rpc(
+        &mut ws,
+        serde_json::json!({
+            "type": "CharDelete", "session_token": session, "char_id": first_id.expect("one made"),
+        }),
+    )
+    .await;
+    assert_eq!(resp["type"], "CharDeleted", "{resp}");
+    let resp = rpc(&mut ws, serde_json::json!({
+        "type": "CharCreate", "session_token": session, "name": "Crowdz", "race": "Human", "class": "Warrior",
+    })).await;
+    assert_eq!(
+        resp["type"], "CharCreated",
+        "room again after a delete: {resp}"
+    );
+}

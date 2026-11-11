@@ -471,6 +471,7 @@ async fn accept_loop(
     // Precompute the auth-timing equalizer hash now so no live request pays the
     // one-time init (see db::verify_login's enumeration defense).
     db::warm_login_timing_defense();
+    tokio::spawn(session_purge_loop(pool.clone()));
 
     let shared = Arc::new(Shared {
         limiter: LoginRateLimiter::new(),
@@ -493,6 +494,24 @@ async fn accept_loop(
                 tracing::warn!(peer = %peer, error = %e, "connection ended with error");
             }
         });
+    }
+}
+
+/// Delete expired session rows at boot and every `db::SESSION_PURGE_INTERVAL`.
+/// An expired row is refused at every redemption already; this keeps the
+/// table from holding one row per login for ever. A failed purge is logged
+/// and retried at the next interval; nothing waits on it.
+async fn session_purge_loop(pool: SqlitePool) {
+    let mut every = tokio::time::interval(db::SESSION_PURGE_INTERVAL);
+    loop {
+        every.tick().await;
+        match db::purge_expired_sessions(&pool).await {
+            Ok(0) => tracing::debug!("session purge: nothing expired"),
+            Ok(removed) => tracing::info!(removed, "expired sessions purged"),
+            Err(e) => {
+                tracing::warn!(error = %e, "session purge failed; retried at the next interval")
+            }
+        }
     }
 }
 

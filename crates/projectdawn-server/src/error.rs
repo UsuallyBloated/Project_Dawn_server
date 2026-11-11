@@ -28,6 +28,11 @@ pub enum AuthError {
     /// user-facing line (no prefix), like `RateLimited`.
     #[error("{0}")]
     InviteInvalid(String),
+    /// A character past `db::MAX_CHARACTERS_PER_ACCOUNT` on one account. The
+    /// whole user-facing line, like `RateLimited`; it maps to `InvalidInput` on
+    /// the wire so the launcher needs no change.
+    #[error("{0}")]
+    CharacterCapReached(String),
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -46,6 +51,7 @@ impl AuthError {
             Self::InvalidInput(_) => ErrorCode::InvalidInput,
             Self::NotFound => ErrorCode::NotFound,
             Self::InviteInvalid(_) => ErrorCode::InviteInvalid,
+            Self::CharacterCapReached(_) => ErrorCode::InvalidInput,
             Self::Internal(_) => ErrorCode::Internal,
         }
     }

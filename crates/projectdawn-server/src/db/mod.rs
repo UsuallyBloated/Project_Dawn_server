@@ -13,9 +13,21 @@ use chrono::{DateTime, Duration, Utc};
 use protocol::auth::CharacterSummary;
 use protocol::world::Coins;
 use rand::RngCore;
+use sha2::{Digest, Sha256};
 use sqlx::{sqlite::SqlitePoolOptions, FromRow, Row, SqlitePool};
 
 pub const SESSION_TTL: Duration = Duration::minutes(30);
+
+/// How often the auth service deletes expired session rows
+/// (`purge_expired_sessions`). An expired row is already unredeemable
+/// (`touch_session` refuses it); the purge keeps the table from growing by
+/// one row per login for ever.
+pub const SESSION_PURGE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// The most live (not soft-deleted) characters one account may hold; the
+/// next `CharCreate` is refused until one is deleted. EQ's classic count per
+/// server. A knob.
+pub const MAX_CHARACTERS_PER_ACCOUNT: i64 = 8;
 
 pub async fn open(database_url: &str) -> anyhow::Result<SqlitePool> {
     let pool = SqlitePoolOptions::new()
@@ -397,7 +409,7 @@ pub async fn issue_session(pool: &SqlitePool, account_id: i64) -> AuthResult<Str
         "INSERT INTO sessions (token, account_id, issued_at, expires_at, last_seen)
          VALUES (?1, ?2, ?3, ?4, ?3)",
     )
-    .bind(&bytes[..])
+    .bind(&session_key(&bytes)[..])
     .bind(account_id)
     .bind(now)
     .bind(expires)
@@ -408,7 +420,7 @@ pub async fn issue_session(pool: &SqlitePool, account_id: i64) -> AuthResult<Str
 }
 
 pub async fn touch_session(pool: &SqlitePool, token_hex: &str) -> AuthResult<i64> {
-    let bytes = decode_token(token_hex)?;
+    let key = session_key(&decode_token(token_hex)?);
     let now = Utc::now();
 
     let row = sqlx::query(
@@ -416,7 +428,7 @@ pub async fn touch_session(pool: &SqlitePool, token_hex: &str) -> AuthResult<i64
          FROM sessions s JOIN accounts a ON a.id = s.account_id
          WHERE s.token = ?1",
     )
-    .bind(&bytes[..])
+    .bind(&key[..])
     .fetch_optional(pool)
     .await?;
 
@@ -439,7 +451,7 @@ pub async fn touch_session(pool: &SqlitePool, token_hex: &str) -> AuthResult<i64
 
     sqlx::query("UPDATE sessions SET last_seen = ?1 WHERE token = ?2")
         .bind(now)
-        .bind(&bytes[..])
+        .bind(&key[..])
         .execute(pool)
         .await?;
 
@@ -447,18 +459,38 @@ pub async fn touch_session(pool: &SqlitePool, token_hex: &str) -> AuthResult<i64
 }
 
 pub async fn revoke_session(pool: &SqlitePool, token_hex: &str) -> AuthResult<()> {
-    let bytes = decode_token(token_hex)?;
+    let key = session_key(&decode_token(token_hex)?);
     sqlx::query("DELETE FROM sessions WHERE token = ?1")
-        .bind(&bytes[..])
+        .bind(&key[..])
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Delete every session past its `expires_at` and say how many went. The auth
+/// service runs it at boot and every `SESSION_PURGE_INTERVAL`.
+pub async fn purge_expired_sessions(pool: &SqlitePool) -> DbResult<u64> {
+    let res = sqlx::query("DELETE FROM sessions WHERE expires_at < ?1")
+        .bind(Utc::now())
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected())
 }
 
 fn decode_token(token_hex: &str) -> AuthResult<[u8; 32]> {
     let v = hex::decode(token_hex).map_err(|_| AuthError::SessionExpired)?;
     let arr: [u8; 32] = v.try_into().map_err(|_| AuthError::SessionExpired)?;
     Ok(arr)
+}
+
+/// The key a session is stored under: the SHA-256 of the token the client
+/// holds, never the token itself. A copy of the database (a backup, the
+/// off-host copy, anyone who can read the file) therefore carries no
+/// redeemable session, because redeeming one needs the preimage, which exists
+/// only in the launcher that logged in. The token is 32 CSPRNG bytes, so the
+/// hash needs no salt. Migration 0019 cleared the rows stored raw before this.
+fn session_key(token: &[u8; 32]) -> [u8; 32] {
+    Sha256::digest(token).into()
 }
 
 // ─── Characters ──────────────────────────────────────────────────────────
@@ -610,6 +642,23 @@ pub async fn create_character(
         }
         Err(e) => return Err(AuthError::from(e)),
     };
+    // The cap (`MAX_CHARACTERS_PER_ACCOUNT`) is counted AFTER the insert,
+    // inside the transaction: the insert took the write lock, so the count
+    // sees every committed character plus this one, and two creates racing on
+    // one account cannot both read seven and both land. Over the cap, the
+    // transaction is rolled back: no row, no kit, no ledger line.
+    let live: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM characters WHERE account_id = ?1 AND deleted_at IS NULL",
+    )
+    .bind(account_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if live > MAX_CHARACTERS_PER_ACCOUNT {
+        tx.rollback().await?;
+        return Err(AuthError::CharacterCapReached(format!(
+            "This account already has {MAX_CHARACTERS_PER_ACCOUNT} characters. Delete one to make another."
+        )));
+    }
     let now = crate::world::ledger::unix_now_secs();
     let mut rows = Vec::with_capacity(kit.len());
     for (slot, item_path) in kit {
@@ -2418,6 +2467,136 @@ mod test_support {
             Some((s.x, s.y, s.z)),
             "a fresh character is bound where it spawns"
         );
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    //! A session is stored as its hash (a copy of the database redeems
+    //! nothing), expired rows are purged, and an account holds at most
+    //! `MAX_CHARACTERS_PER_ACCOUNT` characters.
+    use super::test_support::fresh_pool;
+    use super::*;
+
+    #[tokio::test]
+    async fn a_session_is_stored_as_its_hash_and_redeemed_only_by_the_token() {
+        let (pool, _tmp) = fresh_pool().await;
+        let account = create_account(&pool, "hashed", "password123", None)
+            .await
+            .expect("account");
+        let token_hex = issue_session(&pool, account).await.expect("session");
+        let token = hex::decode(&token_hex).expect("hex");
+
+        let stored: Vec<u8> = sqlx::query_scalar("SELECT token FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .expect("one row");
+        assert_ne!(stored, token, "the token itself is never at rest");
+        assert_eq!(
+            stored,
+            Sha256::digest(&token).to_vec(),
+            "the row is keyed by the token's SHA-256"
+        );
+
+        // The client, holding the token, redeems it.
+        assert_eq!(
+            touch_session(&pool, &token_hex).await.expect("redeem"),
+            account
+        );
+        // Someone holding the database (the stored bytes) does not.
+        assert!(
+            matches!(
+                touch_session(&pool, &hex::encode(&stored)).await,
+                Err(AuthError::SessionExpired)
+            ),
+            "the stored hash is not a session"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_sessions_are_purged_and_live_ones_kept() {
+        let (pool, _tmp) = fresh_pool().await;
+        let stale = create_account(&pool, "stale", "password123", None)
+            .await
+            .expect("stale account");
+        let fresh = create_account(&pool, "fresh", "password123", None)
+            .await
+            .expect("fresh account");
+        let stale_token = issue_session(&pool, stale).await.expect("stale session");
+        let fresh_token = issue_session(&pool, fresh).await.expect("fresh session");
+        sqlx::query("UPDATE sessions SET expires_at = ?1 WHERE account_id = ?2")
+            .bind(Utc::now() - Duration::minutes(1))
+            .bind(stale)
+            .execute(&pool)
+            .await
+            .expect("age one session");
+
+        assert_eq!(purge_expired_sessions(&pool).await.expect("purge"), 1);
+        assert!(matches!(
+            touch_session(&pool, &stale_token).await,
+            Err(AuthError::SessionExpired)
+        ));
+        assert_eq!(
+            touch_session(&pool, &fresh_token)
+                .await
+                .expect("still live"),
+            fresh
+        );
+        assert_eq!(purge_expired_sessions(&pool).await.expect("again"), 0);
+    }
+
+    #[tokio::test]
+    async fn an_account_holds_at_most_the_cap_until_one_is_deleted() {
+        let (pool, _tmp) = fresh_pool().await;
+        let account = create_account(&pool, "crowded", "password123", None)
+            .await
+            .expect("account");
+        let mut ids = Vec::new();
+        for i in 0..MAX_CHARACTERS_PER_ACCOUNT {
+            let name = format!("Alt{}", char::from(b'a' + u8::try_from(i).expect("small")));
+            ids.push(
+                create_character(&pool, account, &name, "Human", "Warrior")
+                    .await
+                    .unwrap_or_else(|e| panic!("character {name}: {e}")),
+            );
+        }
+        let refused = create_character(&pool, account, "Altz", "Human", "Warrior").await;
+        assert!(
+            matches!(refused, Err(AuthError::CharacterCapReached(_))),
+            "the one past the cap is refused: {refused:?}"
+        );
+        // Refused means nothing was written: no row, and no kit for a row.
+        let live = list_characters(&pool, account).await.expect("list");
+        assert_eq!(
+            i64::try_from(live.len()).expect("len"),
+            MAX_CHARACTERS_PER_ACCOUNT
+        );
+        let kit_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM character_items ci JOIN characters c ON c.id = ci.char_id
+             WHERE c.account_id = ?1",
+        )
+        .bind(account)
+        .fetch_one(&pool)
+        .await
+        .expect("kit rows");
+        let kit_len = i64::try_from(
+            crate::world::starter_kit::starter_kit("Warrior")
+                .expect("a Warrior has a kit")
+                .len(),
+        )
+        .expect("len");
+        assert_eq!(
+            kit_rows,
+            MAX_CHARACTERS_PER_ACCOUNT * kit_len,
+            "no kit row from the refused character"
+        );
+
+        delete_character(&pool, account, ids[0])
+            .await
+            .expect("delete one");
+        create_character(&pool, account, "Altz", "Human", "Warrior")
+            .await
+            .expect("room again");
     }
 }
 

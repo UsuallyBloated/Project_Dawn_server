@@ -616,7 +616,7 @@ async fn the_ledger_records_a_sale_a_purchase_a_drop_and_a_pickup_and_balances()
     a.pump_for(Duration::from_millis(300)).await;
     b.pump_for(Duration::from_millis(300)).await;
 
-    let a_rows = ledger_rows(&h.db_url, a_char).await;
+    let a_rows = ledger_rows_at_least(&h.db_url, a_char, 3).await;
     let actions: Vec<&str> = a_rows.iter().map(|r| r.0.as_str()).collect();
     assert_eq!(
         actions,
@@ -643,7 +643,7 @@ async fn the_ledger_records_a_sale_a_purchase_a_drop_and_a_pickup_and_balances()
         (Some(BREAD), 1, -1, 0),
         "{drop:?}"
     );
-    let b_rows = ledger_rows(&h.db_url, b_char).await;
+    let b_rows = ledger_rows_at_least(&h.db_url, b_char, 1).await;
     assert_eq!(
         b_rows,
         vec![("pickup".to_string(), Some(BREAD.to_string()), 1, 1, 0)],
@@ -768,7 +768,7 @@ async fn the_ledger_records_the_bank_and_balances() {
     a.send_disconnect();
     a.pump_for(Duration::from_millis(300)).await;
 
-    let rows = ledger_rows(&h.db_url, char_id).await;
+    let rows = ledger_rows_at_least(&h.db_url, char_id, 5).await;
     assert_eq!(
         rows,
         vec![
@@ -862,7 +862,7 @@ async fn a_death_and_the_corpse_loot_keep_the_books_balanced() {
     let ServerWorldMsg::CorpseContents { corpse_id, .. } = contents else {
         unreachable!()
     };
-    let rows = ledger_rows(&h.db_url, char_id).await;
+    let rows = ledger_rows_at_least(&h.db_url, char_id, 3).await;
     assert_eq!(
         rows,
         vec![
@@ -891,7 +891,7 @@ async fn a_death_and_the_corpse_loot_keep_the_books_balanced() {
     .await
     .expect("the cap goes back on");
     a.pump_for(Duration::from_millis(200)).await;
-    let rows = ledger_rows(&h.db_url, char_id).await;
+    let rows = ledger_rows_at_least(&h.db_url, char_id, 6).await;
     assert_eq!(
         rows[3..].to_vec(),
         vec![

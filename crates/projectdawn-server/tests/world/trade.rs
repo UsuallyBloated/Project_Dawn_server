@@ -686,7 +686,7 @@ async fn a_trade_writes_both_sides_of_the_ledger_and_balances() {
     .expect("the trade commits");
     a.pump_for(Duration::from_millis(200)).await;
 
-    let mut a_rows = ledger_rows(&h.db_url, a_char_id).await;
+    let mut a_rows = ledger_rows_at_least(&h.db_url, a_char_id, 4).await;
     // The two GM grants land in one tick, the coin grant at intake and the
     // give at the apply phase, so their order between themselves is not a
     // rule; the trade's rows follow both.
@@ -702,7 +702,7 @@ async fn a_trade_writes_both_sides_of_the_ledger_and_balances() {
         ],
         "the giver's rows, the queued GM grants and the trade, all with the commit"
     );
-    let b_rows = ledger_rows(&h.db_url, b_char_id).await;
+    let b_rows = ledger_rows_at_least(&h.db_url, b_char_id, 2).await;
     assert_eq!(
         b_rows,
         vec![

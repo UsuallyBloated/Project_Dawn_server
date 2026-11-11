@@ -943,7 +943,7 @@ async fn the_bank_and_the_merchant_take_what_you_hold() {
     a.send_disconnect();
     a.pump_for(Duration::from_millis(300)).await;
 
-    let rows = ledger_rows(&h.db_url, char_id).await;
+    let rows = ledger_rows_at_least(&h.db_url, char_id, 3).await;
     assert_eq!(
         rows,
         vec![

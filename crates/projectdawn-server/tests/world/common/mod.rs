@@ -2224,6 +2224,27 @@ pub async fn ledger_rows(
     .expect("ledger rows")
 }
 
+/// `ledger_rows` once the character has at least `at_least` of them, polled
+/// every 50 ms for up to five seconds, then whatever is there. The rows land
+/// with a database write the test is never told about (the logout flush, an
+/// immediate save, the corpse or trade transaction), and a fixed sleep after
+/// the move read the table too early under the whole suite's load (the bank
+/// test, 2026-11-10). The caller's assertion still names every row.
+pub async fn ledger_rows_at_least(
+    db_url: &str,
+    char_id: i64,
+    at_least: usize,
+) -> Vec<(String, Option<String>, i64, i64, i64)> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let rows = ledger_rows(db_url, char_id).await;
+        if rows.len() >= at_least || Instant::now() >= deadline {
+            return rows;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 pub async fn ledger_mismatches(db_url: &str) -> Vec<projectdawn_server::db::LedgerMismatch> {
     let pool = projectdawn_server::db::open(db_url)
         .await

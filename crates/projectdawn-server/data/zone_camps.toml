@@ -231,11 +231,11 @@ radius = 5.0
 respawn = 90.0
 
 [[camp]]
-desc = "Wraith Gate — ancient wraiths patrolling the far eastern edge"
+desc = "Wraith Gate — ancient wraiths patrolling the plateau behind the arch on the cliff"
 mob = { name = "Ancient Wraith", level = 16, hp = 328.0, dmg = 40, xp = 205, speed = 4.2, aggro = 22.0, faction = "restless_dead", alignment = "undead" }
 spawns = [
-    [1724.0, 0.0, -2.0],
-    [1716.0, 0.0, -78.0],
+    [1574.0, 0.0, -2.0],
+    [1566.0, 0.0, -78.0],
 ]
 radius = 5.0
 respawn = 90.0

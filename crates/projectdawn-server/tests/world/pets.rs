@@ -203,6 +203,7 @@ async fn pet_attacks_owners_target() {
     // Summon Skeleton requires level 6; provisioned characters start at 1.
     set_char_level(&h.db_url, a_char_id, 6).await;
 
+    seed_position(&h.db_url, a_char_id, CAMP_PULL_START.x, CAMP_PULL_START.z).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     // Summon FIRST, in peace, before walking into aggro range â€” the same
@@ -255,11 +256,7 @@ async fn pet_attacks_owners_target() {
         &mut a,
         &mut seq,
         a_char_id,
-        Vec3 {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-        },
+        CAMP_PULL_START,
         BONEPILE_SPAWN,
         2.0,
     )
@@ -324,6 +321,7 @@ async fn pet_command_attack_locks_onto_target() {
     // Summon Skeleton requires level 6; provisioned characters start at 1.
     set_char_level(&h.db_url, a_char_id, 6).await;
 
+    seed_position(&h.db_url, a_char_id, CAMP_PULL_START.x, CAMP_PULL_START.z).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     // Summon FIRST, in peace, before walking into aggro range.
@@ -383,11 +381,7 @@ async fn pet_command_attack_locks_onto_target() {
         &mut a,
         &mut seq,
         a_char_id,
-        Vec3 {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-        },
+        CAMP_PULL_START,
         BONEPILE_SPAWN,
         2.0,
     )
@@ -1274,14 +1268,18 @@ async fn charm_converts_a_camp_mob_that_is_fighting_someone_else() {
     let (b_session, b_char_id, b_token) =
         provision_client(&h.auth_url, "camptank", "Camptank", "Human", "Warrior").await;
 
+    // Both enter at the camp-pull start, 21 m from the Bonepile's isolated spawn.
+    for id in [a_char_id, b_char_id] {
+        seed_position(&h.db_url, id, CAMP_PULL_START.x, CAMP_PULL_START.z).await;
+    }
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
     pump_both_for(&mut a, &mut b, Duration::from_millis(300)).await;
 
-    // B walks 18 m toward the Bonepile's isolated [-16, -14] spawn (21 m from
-    // the starter spawn, aggro 8) and stops: inside its aggro circle, and the
-    // fight then happens under 20 m from A, who stays at spawn, outside that
-    // circle and inside charm range (25 m).
+    // B walks 18 m toward the Bonepile's isolated spawn (`BONEPILE_SPAWN`,
+    // 21 m from where both entered, aggro 8) and stops: inside its aggro
+    // circle, and the fight then happens under 20 m from A, who stays where
+    // it entered, outside that circle and inside charm range (25 m).
     let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
     let dir = Vec3 {
         x: -16.0 / len,

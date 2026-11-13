@@ -698,22 +698,28 @@ mod tests {
     #[test]
     fn the_compiled_terrain_parses_and_its_hash_matches() {
         let t = compiled();
-        assert_eq!(t.grid_size(), 40);
+        assert_eq!(t.grid_size(), 400);
         assert_eq!(t.cell_size(), 10.0);
-        // The first hills (the client's data/terrain_features.toml): the town
-        // flat at the floor, the Wraith Gate plateau's top, the rim at the
-        // plate's edge (its outer vertices, which nothing else reaches).
+        // The 4 km plate (the client's data/terrain_features.toml): the town
+        // flat at the floor, the Wraith Gate plateau's top, the Greywood
+        // ridge's wall, and the rim at the plate's edge, which is at least
+        // its 160 m everywhere (peaks and foothills only add to it).
         assert_eq!(t.ground(0.0, 0.0), t.floor_y());
         assert_eq!(t.mesh_height(12.5, 5.0), Some(0.0));
-        assert_eq!(t.mesh_height(170.0, 0.0), Some(18.0));
+        assert_eq!(t.mesh_height(1700.0, 0.0), Some(60.0));
+        assert!(t.ground(-700.0, 900.0) >= 62.0, "the ridge's crest");
+        assert_eq!(t.ground(0.0, 900.0), 0.0, "the pass's floor");
         for (x, z) in [
-            (-200.0, 0.0),
-            (200.0, 0.0),
-            (0.0, -200.0),
-            (0.0, 200.0),
-            (200.0, 200.0),
+            (-2000.0, 0.0),
+            (2000.0, 0.0),
+            (0.0, -2000.0),
+            (0.0, 2000.0),
+            (2000.0, 2000.0),
         ] {
-            assert_eq!(t.mesh_height(x, z), Some(40.0), "({x}, {z})");
+            let h = t
+                .mesh_height(x, z)
+                .expect("the plate's edge is on the mesh");
+            assert!(h >= 160.0, "({x}, {z}): {h}");
         }
     }
 

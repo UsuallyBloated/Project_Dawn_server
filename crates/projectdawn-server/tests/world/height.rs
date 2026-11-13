@@ -804,22 +804,29 @@ async fn a_mob_at_a_face_gives_up_and_walks_home() {
     );
 }
 
-/// The same on the zone's own compiled hills, the perch the review found: the Greywood
-/// ridge's crest (walkable from its ends) above the Broken Crypt's bowl. A Cleric at the
-/// crest's north edge, (25, 89.8), 17.8 m up, Smites a dummy a GM spawns in the bowl at
-/// about (25, 108), 26 m away; the dummy walks to the foot of the ridge's north face
-/// (z = 100) and no further, gives up and walks home. The Cleric's second Smite, while
-/// the dummy is held, is refused: it is evading. Every other integration test runs
-/// on a flat plate; this one holds the shipped ground.
+/// The same on the zone's own compiled ground (the 4 km plate), on a perch a player can
+/// walk to: the west edge of the ramp up the north side of the Wraith Gate plateau. At
+/// z = 408 the ramp is 31 m up and its side is a wall down to the plain (24 m over one
+/// cell, 67 degrees). A Cleric at the ramp's edge, (1450.1, 408), Smites a dummy a GM
+/// spawns on the plain at (1435, 410), 28 m away; the dummy walks to the foot of the
+/// wall (x = 1440) and no further, gives up and walks home. The Cleric's second Smite,
+/// while the dummy is held, is refused: it is evading. The dummy starts north of the
+/// Cleric's row on purpose: the wall grows to the south (the ramp climbs that way), and
+/// from a foot south of the Cleric the wall's taller part hides the dummy, so sight
+/// would refuse the Smite before the evade rule could. (The Greywood ridge and the
+/// plateau's own cliff are no perch: both are more than a spell's reach high.) Every
+/// other integration test runs on a flat plate; this one holds the shipped ground.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_mob_below_the_greywood_ridge_gives_up_on_a_player_on_its_crest() {
+async fn a_mob_below_the_plateau_ramp_gives_up_on_a_player_on_its_edge() {
     let compiled = projectdawn_server::world::terrain::compiled().clone();
+    let foot_y = compiled.ground(1438.0, 408.0);
     let h = start_with_terrain(compiled).await;
-    let run = nuke_from_a_lip(&h, "crest", (25.0, 108.0), (25.0, 89.8), 17.0, None).await;
+    // A dev spawn lands 3 m south of the GM (yaw 0): the watcher at z = 413.
+    let run = nuke_from_a_lip(&h, "ramp", (1435.0, 413.0), (1450.1, 408.0), 30.0, None).await;
     let highest = assert_gave_up_and_went_home(&run);
-    // The perch itself: the crest sees the bowl, so the second Smite reaches the
-    // evade rule (on the plateau the lip cannot see the face's foot, and sight
-    // refuses it first).
+    // The perch itself: the ramp's edge sees the wall's foot, so the second Smite
+    // reaches the evade rule (on the plateau's own cliff the lip cannot see the
+    // foot, and sight refuses it first).
     assert!(
         run.cleric_msgs.iter().any(|m| matches!(m, ServerWorldMsg::CastFail { reason, .. } if reason == "Your target is evading.")),
         "the Smite at the held dummy is refused: it is evading (refusals: {:?})",
@@ -831,17 +838,17 @@ async fn a_mob_below_the_greywood_ridge_gives_up_on_a_player_on_its_crest() {
             })
             .collect::<Vec<_>>()
     );
-    let southmost = run
+    let eastmost = run
         .positions
         .iter()
-        .map(|(_, p)| p.z)
-        .fold(f32::INFINITY, f32::min);
+        .map(|(_, p)| p.x)
+        .fold(f32::NEG_INFINITY, f32::max);
     assert!(
-        southmost > 99.5 && highest < 1.5,
-        "the dummy never climbed the ridge (south to z = {southmost:.2}, up to y = {highest:.2})"
+        eastmost < 1440.5 && highest < foot_y + 1.5,
+        "the dummy never climbed the wall (east to x = {eastmost:.2}, up to y = {highest:.2}, the plain is at {foot_y:.2})"
     );
     assert!(
-        southmost < 101.5,
-        "the dummy reached the foot of the ridge: z = {southmost:.2}"
+        eastmost > 1438.5,
+        "the dummy reached the foot of the wall: x = {eastmost:.2}"
     );
 }

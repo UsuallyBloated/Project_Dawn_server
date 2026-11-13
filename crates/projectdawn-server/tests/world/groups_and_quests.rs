@@ -58,8 +58,9 @@ async fn an_xp_share_stops_past_200_m() {
 }
 
 /// Ledger item 4 (user call D2): a caster may bind a GROUP MEMBER only while
-/// that member stands in a safe area. B, grouped and 20 m out, is refused;
-/// C, grouped and in the town square, is bound where they stand.
+/// that member stands in a safe area. B, grouped and 75 m out (the town's
+/// safe area is the 60 m round the origin), is refused; C, grouped and inside
+/// it, is bound where they stand.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_group_member_is_bound_only_in_a_safe_area() {
     let h = start_both().await;
@@ -69,12 +70,13 @@ async fn a_group_member_is_bound_only_in_a_safe_area() {
         provision_client(&h.auth_url, "farbound", "Farwell", "Human", "Warrior").await;
     let (c_session, c_char_id, c_token) =
         provision_client(&h.auth_url, "nearbound", "Nearby", "Human", "Warrior").await;
-    // A stands at -4 (inside the square, away from the spawn and from C), so
-    // a bind written from the CASTER's position would read as -4 and one left
-    // at birth as 0: the DB check below tells all three apart.
-    set_char_pos(&h.db_url, a_char_id, -4.0, 0.0).await;
-    set_char_pos(&h.db_url, b_char_id, 20.0, 0.0).await;
-    set_char_pos(&h.db_url, c_char_id, 3.0, 0.0).await;
+    // A stands at 52 (inside the safe area, 23 m from B and 12 m from C, so
+    // both are in a friendly spell's reach), so a bind written from the
+    // CASTER's position would read as 52 and one left at birth as 0: the DB
+    // check below tells all three apart.
+    set_char_pos(&h.db_url, a_char_id, 52.0, 0.0).await;
+    set_char_pos(&h.db_url, b_char_id, 75.0, 0.0).await;
+    set_char_pos(&h.db_url, c_char_id, 40.0, 0.0).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
     let mut c = WorldClient::start(c_token, &c_session, c_char_id).await;
@@ -122,7 +124,7 @@ async fn a_group_member_is_bound_only_in_a_safe_area() {
         .await;
     assert!(
         bound.is_some(),
-        "a group member in the town square is bound where they stand"
+        "a group member in the safe area is bound where they stand"
     );
 
     // The bind written is C's OWN position, persisted; B's was never touched.
@@ -135,8 +137,8 @@ async fn a_group_member_is_bound_only_in_a_safe_area() {
         .expect("C is bound")
         .pos;
     assert!(
-        (c_bind.0 - 3.0).abs() < 0.5 && c_bind.2.abs() < 0.5,
-        "C is bound where C stood (3, 0), not at the caster (-4, 0) or the spawn: got {c_bind:?}"
+        (c_bind.0 - 40.0).abs() < 0.5 && c_bind.2.abs() < 0.5,
+        "C is bound where C stood (40, 0), not at the caster (52, 0) or the spawn: got {c_bind:?}"
     );
     let b_bind = db::load_character(&pool, b_char_id)
         .await

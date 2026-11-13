@@ -4,12 +4,13 @@
 #
 # The unit test in world/safe_areas.rs refuses any circle that a camp spawn's
 # aggro radius (plus the 3 m spawn jitter) can reach into, so nobody is ever
-# bound or evacuated into a mob's reach. Town NPCs sit on the z = 5 row out to
-# x = 14; the rat warren east of them is why the circle is the square around
-# the starter spawn and not the whole row.
+# bound or evacuated into a mob's reach. On the 4 km plate (2026-11-13) the
+# nearest camp is 180 m from the origin and the town's walls stand 90 m out,
+# so the circle covers the square, the NPC row and the streets round them;
+# `world/terrain_content.rs` holds every point of it to flat ground.
 
 [[area]]
 name = "Town square"
 center = [0.0, 0.0, 0.0]
-radius = 10.0
+radius = 60.0
 arrival = [0.0, 0.0, 0.0]

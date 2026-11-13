@@ -24,6 +24,7 @@ async fn enemy_aggros_chases_and_attacks_player() {
     let (a_session, a_char_id, a_token) =
         provision_client(&h.auth_url, "zeta", "Zett", "Human", "Warrior").await;
 
+    seed_position(&h.db_url, a_char_id, CAMP_PULL_START.x, CAMP_PULL_START.z).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     // Unit vector toward camp 0's [20, 0, 5] spawn.
@@ -47,11 +48,7 @@ async fn enemy_aggros_chases_and_attacks_player() {
         &mut a,
         &mut seq,
         a_char_id,
-        Vec3 {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-        },
+        CAMP_PULL_START,
         BONEPILE_SPAWN,
         2.0,
     )
@@ -137,6 +134,7 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
         provision_client(&h.auth_url, "eta", "Etta", "Human", "Warrior").await;
 
     master_weapon_skill(&h.db_url, a_char_id, "hand_to_hand").await;
+    seed_position(&h.db_url, a_char_id, CAMP_PULL_START.x, CAMP_PULL_START.z).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     // Walk toward the Bonepile's isolated [-16, -14] spawn (one level 1
@@ -158,11 +156,7 @@ async fn player_attack_kills_enemy_and_corpse_despawns() {
         &mut a,
         &mut seq,
         a_char_id,
-        Vec3 {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-        },
+        CAMP_PULL_START,
         BONEPILE_SPAWN,
         2.0,
     )

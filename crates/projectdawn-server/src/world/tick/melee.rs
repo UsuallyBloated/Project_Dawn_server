@@ -13,6 +13,68 @@ fn is_ranged_weapon(weapon_path: &str) -> bool {
     items::lookup(weapon_path).is_some_and(|w| w.is_ranged)
 }
 
+/// The line a bow with an empty quiver answers with, on a swing or a skill.
+pub(super) const NO_AMMUNITION: &str = "You have no ammunition.";
+
+/// A bow shot takes one arrow from the ammo slot (user, 2026-11-13; EQ's rule),
+/// hit or miss, out of reach or not: the arrow flies. With the slot empty there
+/// is no shot: the attacker is told and the swing is dropped (the honest client
+/// refuses first and sends nothing; a forged one gains nothing, since the swing
+/// never resolves). Returns whether the shot goes on; a melee swing spends
+/// nothing and always goes on. The arrow leaving the holdings is a server-made
+/// movement of an item, so it is a ledger row and a delta on the slot.
+fn spend_arrow(
+    server: &mut RenetServer,
+    connections: &mut HashMap<ClientId, PerConnection>,
+    attacker_cid: ClientId,
+    weapon_path: &str,
+    target: u64,
+) -> bool {
+    if !is_ranged_weapon(weapon_path) {
+        return true;
+    }
+    let Some(att) = connections.get_mut(&attacker_cid) else {
+        return false;
+    };
+    match att.inventory.take_one_from_equip(inventory::AMMO_SLOT) {
+        Ok(path) => {
+            att.inventory_dirty = true;
+            att.ledger(ledger::item_event(
+                ItemAction::Shoot,
+                &path,
+                1,
+                -1,
+                Some(format!("target {target}")),
+            ));
+            let after = att
+                .inventory
+                .equipment
+                .get(&inventory::AMMO_SLOT)
+                .map(|e| (e.item_path.clone(), e.count));
+            let left = after.as_ref().map_or(0, |(_, n)| *n);
+            tracing::debug!(char_id = att.char_id, item = %path, target, left, "arrow spent");
+            handlers::send_slot_delta(
+                server,
+                attacker_cid,
+                "equip".to_string(),
+                u32::from(inventory::AMMO_SLOT),
+                after,
+            );
+            true
+        }
+        Err(_) => {
+            tracing::info!(
+                char_id = att.char_id,
+                weapon = %weapon_path,
+                target,
+                "Attack dropped — no ammunition"
+            );
+            handlers::send_system_line(server, attacker_cid, NO_AMMUNITION);
+            false
+        }
+    }
+}
+
 /// How far a swing or a shot reaches: a ranged weapon's own range (it carries
 /// its headroom), else the target's melee envelope with the tolerance. The one
 /// place the reach rule lives for skills, PvP swings and swings at mobs.
@@ -174,6 +236,13 @@ pub(super) fn apply_active_skills(
                 };
                 if let Err(line) = check {
                     handlers::send_skill_fail(&mut *server, user_cid, &skill.name, line);
+                    continue;
+                }
+                // A bow skill needs an arrow in the ammo slot (2026-11-13):
+                // refused here, before the stamina and the cooldown, as every
+                // other pre-flight is; the swing it becomes spends the arrow.
+                if ranged && user.inventory.equip_count(inventory::AMMO_SLOT) == 0 {
+                    handlers::send_skill_fail(&mut *server, user_cid, &skill.name, NO_AMMUNITION);
                     continue;
                 }
             }
@@ -555,6 +624,16 @@ pub(super) fn apply_attacks(
                         target = intent.target_id,
                         "PvP not authorized"
                     );
+                    continue;
+                }
+                // A bow shot costs its arrow here, whatever the roll says.
+                if !spend_arrow(
+                    &mut *server,
+                    &mut *connections,
+                    attacker_cid,
+                    &server_weapon_path,
+                    intent.target_id,
+                ) {
                     continue;
                 }
                 if !target_in_range_alive {
@@ -958,6 +1037,16 @@ pub(super) fn apply_attacks(
                     intent.attacker,
                     intent.target_id,
                 );
+                continue;
+            }
+            // A bow shot costs its arrow here, in reach or not, hit or miss.
+            if !spend_arrow(
+                &mut *server,
+                &mut *connections,
+                attacker_cid,
+                &server_weapon_path,
+                intent.target_id,
+            ) {
                 continue;
             }
             let dist = entity.pos.distance_to(attacker_pos);

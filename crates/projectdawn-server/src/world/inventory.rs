@@ -263,9 +263,15 @@ pub const BASE_SLOT_COUNT: usize = 8;
 
 /// Track 13.3 — paperdoll slot count. Matches the client's
 /// `Equipment.SLOTS` array length (weapon, offhand, head, chest,
-/// legs, feet, hands, ring, neck) and the
+/// legs, feet, hands, ring, neck, ammo) and the
 /// `protocol::world::EquipSlot` enum order.
-pub const EQUIP_SLOT_COUNT: u8 = 9;
+pub const EQUIP_SLOT_COUNT: u8 = 10;
+
+/// The ammo slot (user, 2026-11-13; EQ's shape): `EquipSlot::Ammo`, the last
+/// paperdoll slot. Only an ammo-typed item goes in it
+/// (`items::is_equippable_in_slot`), and every bow shot takes one from it
+/// (`take_one_from_equip`); with none, no shot.
+pub const AMMO_SLOT: u8 = 9;
 
 /// Banker slice 2 — fixed item-vault sizes. The per-character bank holds 10
 /// slots; the 2-slot vault is shared across all of an account's characters
@@ -794,6 +800,32 @@ impl PlayerInventory {
             out.push((entry.item_path.clone(), entry.count, None));
         }
         out
+    }
+
+    /// How many units the paperdoll slot `slot` holds (0 when empty): the
+    /// arrows in the quiver, for the shot that needs one.
+    pub fn equip_count(&self, slot: u8) -> u32 {
+        self.equipment.get(&slot).map_or(0, |e| e.count)
+    }
+
+    /// Take ONE unit from paperdoll slot `slot` (a shot's arrow), emptying the
+    /// slot when that was the last. Returns the item's path. The caller fans
+    /// the slot's delta (`equipment.get(&slot)` afterwards) and queues the
+    /// ledger row, as `decrement_at` callers do for the bags.
+    pub fn take_one_from_equip(&mut self, slot: u8) -> Result<String, MoveError> {
+        if slot >= EQUIP_SLOT_COUNT {
+            return Err(MoveError::EquipSlotOutOfRange);
+        }
+        let entry = self
+            .equipment
+            .get_mut(&slot)
+            .ok_or(MoveError::EquipSlotEmpty)?;
+        let path = entry.item_path.clone();
+        entry.count = entry.count.saturating_sub(1);
+        if entry.count == 0 {
+            self.equipment.remove(&slot);
+        }
+        Ok(path)
     }
 
     /// Corpse auto-re-equip: put `count` of `path` back on equipment `slot`,
@@ -2014,6 +2046,54 @@ impl PlayerInventory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The ammo slot (2026-11-13): a shot takes one arrow, the last empties the
+    // slot, an empty slot has none to give, and the corpse puts arrows back
+    // where they were worn (the slot is one of the ten the strip covers).
+    #[test]
+    fn the_quiver_gives_one_arrow_a_shot_until_empty() {
+        const ARROWS: &str = "res://data/loot/items/arrow_bundle.tres";
+        let mut inv = PlayerInventory::new();
+        assert_eq!(inv.equip_count(AMMO_SLOT), 0);
+        assert_eq!(
+            inv.take_one_from_equip(AMMO_SLOT),
+            Err(MoveError::EquipSlotEmpty)
+        );
+        inv.base[0] = Some(InventoryEntry {
+            item_path: ARROWS.to_string(),
+            count: 2,
+        });
+        assert!(
+            inv.equip_from_location("base", 0, 0).is_err(),
+            "arrows are not a weapon"
+        );
+        inv.equip_from_location("base", 0, AMMO_SLOT)
+            .expect("arrows go into the ammo slot");
+        assert_eq!(inv.equip_count(AMMO_SLOT), 2);
+        assert_eq!(inv.take_one_from_equip(AMMO_SLOT), Ok(ARROWS.to_string()));
+        assert_eq!(inv.equip_count(AMMO_SLOT), 1);
+        assert_eq!(inv.take_one_from_equip(AMMO_SLOT), Ok(ARROWS.to_string()));
+        assert_eq!(inv.equip_count(AMMO_SLOT), 0);
+        assert!(
+            !inv.equipment.contains_key(&AMMO_SLOT),
+            "the last arrow empties the slot"
+        );
+        assert_eq!(
+            inv.take_one_from_equip(AMMO_SLOT),
+            Err(MoveError::EquipSlotEmpty)
+        );
+        assert_eq!(
+            inv.take_one_from_equip(EQUIP_SLOT_COUNT),
+            Err(MoveError::EquipSlotOutOfRange)
+        );
+        // Off the corpse, back into the quiver, five of them.
+        assert!(inv.restore_worn(ARROWS, 5, AMMO_SLOT));
+        assert_eq!(inv.equip_count(AMMO_SLOT), 5);
+        assert!(
+            !inv.restore_worn("res://data/loot/items/iron_short_sword.tres", 1, AMMO_SLOT),
+            "a sword never lands in the quiver"
+        );
+    }
 
     // ── Banker slice 2: ItemVault ──
     const VAULT_ITEM: &str = "res://data/loot/items/minor_healing_potion.tres"; // stack_size 10

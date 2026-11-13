@@ -1116,3 +1116,181 @@ async fn holy_shield_absorbs_the_next_swings() {
         }
     }
 }
+
+/// The ammo slot (user, 2026-11-13; EQ's shape, PD_W0030): arrows go into the
+/// paperdoll's ammo slot and nowhere else, nothing else goes there, a melee
+/// swing spends none, every bow shot takes one (hit or miss), the last arrow
+/// empties the slot, an empty quiver fires nothing and says so, and every
+/// arrow spent is a ledger row. Fails on the previous server at the first
+/// equip: slot 9 was out of its range.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bow_shot_takes_an_arrow_and_an_empty_quiver_fires_nothing() {
+    const BOW: &str = "res://data/loot/items/hunters_shortbow.tres";
+    const ARROWS: &str = "res://data/loot/items/arrow_bundle.tres";
+    const AMMO: u32 = 9;
+    const CANNOT: &str = "You can't equip that there.";
+    const NO_AMMO: &str = "You have no ammunition.";
+    // The bow's 3.0 s delay paces the main hand; the kit sword before it is
+    // faster, and the server reads the weapon worn at each swing.
+    const BOW_PACE: Duration = Duration::from_millis(3_300);
+
+    async fn ammo_delta(c: &mut WorldClient, window: Duration) -> Option<(Option<String>, u32)> {
+        match c
+            .wait_for(CHANNEL_SYSTEM, window, |m| {
+                matches!(m, ServerWorldMsg::InventoryDelta { location, slot, .. }
+                    if location == "equip" && *slot == AMMO)
+            })
+            .await
+        {
+            Some(ServerWorldMsg::InventoryDelta {
+                item_path, count, ..
+            }) => Some((item_path, count)),
+            _ => None,
+        }
+    }
+
+    /// One main-hand swing and everything the server says inside 1.5 s:
+    /// whether a Hit or Miss answered it, the quiver's delta if one came, and
+    /// whether the no-ammunition line did. The arrow's delta goes out before
+    /// the roll's answer, so both are read from one collection.
+    async fn shot(
+        c: &mut WorldClient,
+        attacker: i64,
+        target: u64,
+    ) -> (bool, Option<(Option<String>, u32)>, bool) {
+        c.send_attack(target, "", false, DamageType::Physical);
+        let got = c.collect_for(Duration::from_millis(1_500)).await;
+        let answered = got.iter().any(|m| {
+            matches!(m,
+                ServerWorldMsg::Hit { attacker: a, target: t, .. }
+                | ServerWorldMsg::Miss { attacker: a, target: t }
+                if *a == attacker as u64 && *t == target)
+        });
+        let delta = got.iter().find_map(|m| match m {
+            ServerWorldMsg::InventoryDelta {
+                location,
+                slot,
+                item_path,
+                count,
+            } if location == "equip" && *slot == AMMO => Some((item_path.clone(), *count)),
+            _ => None,
+        });
+        let told = got
+            .iter()
+            .any(|m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == NO_AMMO));
+        (answered, delta, told)
+    }
+
+    let h = start_both().await;
+    let (session, char_id, _stale) =
+        provision_client(&h.auth_url, "archer", "Archa", "Human", "Ranger").await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "archer", true)
+        .await
+        .expect("set is_gm");
+    set_char_level(&h.db_url, char_id, 15).await;
+    master_weapon_skill(&h.db_url, char_id, "archery").await;
+    // The kit's Trainee's Sword is worn in the main hand from birth.
+    give_char_item(&h.db_url, char_id, "base", 0, BOW, 1).await;
+    give_char_item(&h.db_url, char_id, "base", 1, ARROWS, 2).await;
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut c = WorldClient::start(token, &session, char_id).await;
+    c.pump_for(Duration::from_millis(300)).await;
+
+    // Arrows into the main hand: refused; the bow into the quiver: refused.
+    c.send_equip_item("base", 1, 0);
+    let line = c
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == CANNOT),
+        )
+        .await;
+    assert!(line.is_some(), "arrows are refused for the main hand");
+    c.send_equip_item("base", 0, AMMO as u8);
+    let line = c
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::ChatMessage { text, .. } if text == CANNOT),
+        )
+        .await;
+    assert!(line.is_some(), "a bow is refused for the ammo slot");
+    assert!(
+        ammo_delta(&mut c, Duration::from_millis(400))
+            .await
+            .is_none(),
+        "nothing reached the quiver"
+    );
+    // Arrows into the quiver: worn, two of them.
+    c.send_equip_item("base", 1, AMMO as u8);
+    assert_eq!(
+        ammo_delta(&mut c, Duration::from_secs(3)).await,
+        Some((Some(ARROWS.to_string()), 2)),
+        "two arrows go into the ammo slot"
+    );
+
+    // A dummy within sword's reach.
+    let (dummy, dummy_pos) = spawn_dummy(&mut c, "Quiver Dummy", 0, 0.0).await;
+    let mut seq: u32 = 1;
+    walk_until_within(
+        &mut c,
+        &mut seq,
+        char_id,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        dummy_pos,
+        1.0,
+    )
+    .await;
+    // The sword swings and spends nothing.
+    let (answered, delta, told) = shot(&mut c, char_id, dummy).await;
+    assert!(answered, "the sword swings");
+    assert_eq!(delta, None, "a melee swing takes no arrow");
+    assert!(!told, "a sword needs no arrow");
+
+    // The bow goes on (the sword swaps into base 0; the off hand is empty).
+    c.send_equip_item("base", 0, 0);
+    assert_eq!(
+        next_equip_delta(&mut c, 0, Duration::from_secs(3)).await,
+        Some(Some(BOW.to_string())),
+        "the bow goes into the main hand"
+    );
+    c.pump_alive_for(BOW_PACE).await;
+    // Shot one: answered, one arrow left.
+    let (answered, delta, told) = shot(&mut c, char_id, dummy).await;
+    assert!(answered, "the first shot is answered");
+    assert_eq!(
+        delta,
+        Some((Some(ARROWS.to_string()), 1)),
+        "the first shot takes an arrow"
+    );
+    assert!(!told);
+    c.pump_alive_for(BOW_PACE).await;
+    // Shot two: answered, the quiver empties.
+    let (answered, delta, told) = shot(&mut c, char_id, dummy).await;
+    assert!(answered, "the second shot is answered");
+    assert_eq!(delta, Some((None, 0)), "the last arrow empties the slot");
+    assert!(!told);
+    c.pump_alive_for(BOW_PACE).await;
+    // Shot three: no arrow, no shot, the line.
+    let (answered, delta, told) = shot(&mut c, char_id, dummy).await;
+    assert!(told, "an empty quiver says so");
+    assert!(!answered, "an empty quiver fires nothing");
+    assert_eq!(delta, None, "and nothing moves");
+
+    // The two arrows are in the books, one row each, delta -1.
+    c.send_disconnect();
+    c.pump_for(Duration::from_millis(500)).await;
+    let rows = ledger_rows_at_least(&h.db_url, char_id, 5).await;
+    let shots: Vec<_> = rows.iter().filter(|r| r.0 == "shoot").collect();
+    assert_eq!(shots.len(), 2, "two shoot rows (rows: {rows:?})");
+    for r in &shots {
+        assert_eq!(r.1.as_deref(), Some(ARROWS), "the row names the arrows");
+        assert_eq!(r.2, 1, "one arrow a row");
+        assert_eq!(r.3, -1, "an arrow spent leaves the holdings");
+    }
+}

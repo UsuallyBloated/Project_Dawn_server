@@ -160,7 +160,13 @@ use serde::{Deserialize, Serialize};
 /// name what the player holds (sell-from-cursor); `BankStoreItem` already
 /// took `"cursor"` as a location string. The first hills (2026-11-04) append
 /// the dev-gated `DevFling` after `DevSetFaction`.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3239; // "PD_W0029"
+///
+/// PD_W0030: the ammo slot (user, 2026-11-13: an equip slot on the paperdoll,
+/// EQ's shape, one arrow per shot). `EquipSlot` gains `Ammo`, appended last
+/// (the slot index 9 rides the existing `EquipItem` / `UnequipItem` bytes and
+/// the `"equip"` location; only the enum's domain grew). The DLL and the
+/// server move together.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3330; // "PD_W0030"
 
 pub type EntityId = u64;
 
@@ -509,6 +515,9 @@ pub enum EquipSlot {
     Hands,
     Ring,
     Neck,
+    /// PD_W0030: the quiver. Only an ammo-typed item goes here; a bow shot
+    /// takes one from it (`world/tick/melee.rs`). Appended last.
+    Ammo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

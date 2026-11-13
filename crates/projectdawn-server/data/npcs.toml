@@ -104,6 +104,7 @@ stock = [
     "Skinning Knife",
     "Sewing Needle",
     "Pickaxe",
+    "Arrow Bundle",
 ]
 
 [[npc]]
@@ -128,6 +129,7 @@ stock = [
     "Iron Dagger",
     "Copper Short Sword",
     "Iron Short Sword",
+    "Hunter's Shortbow",
     "Copper Chain Vest",
     "Iron Chain Vest",
     "Iron Chain Coif",

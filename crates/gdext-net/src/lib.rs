@@ -544,7 +544,7 @@ impl NetClient {
 
     /// Reply to a `send_inspect_player` request. `slot_keys` are
     /// `EquipSlot` discriminants (Weapon=0, Offhand=1, Head=2, Chest=3,
-    /// Legs=4, Feet=5, Hands=6, Ring=7, Neck=8); `item_paths` are the
+    /// Legs=4, Feet=5, Hands=6, Ring=7, Neck=8, Ammo=9); `item_paths` are the
     /// matching `.tres` resource paths. Empty arrays mean the target
     /// wasn't found or wasn't in-world.
     #[signal]

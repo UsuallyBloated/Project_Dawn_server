@@ -430,6 +430,17 @@ async fn a_bow_needs_sight_of_its_target() {
     set_char_level(&h.db_url, a_char_id, 10).await;
     master_weapon_skill(&h.db_url, a_char_id, "archery").await;
     give_char_item(&h.db_url, a_char_id, "equip", 0, BOW, 1).await;
+    // A quiver of arrows (the ammo slot, 2026-11-13): a shot takes one, and
+    // the shots through the ridge cost theirs as any miss does.
+    give_char_item(
+        &h.db_url,
+        a_char_id,
+        "equip",
+        9,
+        "res://data/loot/items/arrow_bundle.tres",
+        20,
+    )
+    .await;
     seed_position(&h.db_url, a_char_id, -50.0, Z).await;
     let token = request_world_token(&h.auth_url, &session, a_char_id).await;
     let mut a = WorldClient::start(token, &session, a_char_id).await;

@@ -702,13 +702,14 @@ mod tests {
         assert_eq!(t.cell_size(), 10.0);
         // The 4 km plate (the client's data/terrain_features.toml): the town
         // flat at the floor, the Wraith Gate plateau's top, the Greywood
-        // ridge's wall, and the rim at the plate's edge, which is at least
-        // its 160 m everywhere (peaks and foothills only add to it).
+        // ridge's wall, the pass through it (its floor at the level of the
+        // ground at its mouths), and the mountains at the plate's edge, well
+        // over 160 m everywhere.
         assert_eq!(t.ground(0.0, 0.0), t.floor_y());
         assert_eq!(t.mesh_height(12.5, 5.0), Some(0.0));
         assert_eq!(t.mesh_height(1700.0, 0.0), Some(60.0));
         assert!(t.ground(-700.0, 900.0) >= 62.0, "the ridge's crest");
-        assert_eq!(t.ground(0.0, 900.0), 0.0, "the pass's floor");
+        assert_eq!(t.ground(0.0, 900.0), 6.0, "the pass's floor");
         for (x, z) in [
             (-2000.0, 0.0),
             (2000.0, 0.0),

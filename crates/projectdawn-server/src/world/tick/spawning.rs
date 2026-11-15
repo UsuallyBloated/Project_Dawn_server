@@ -152,7 +152,8 @@ pub(super) fn run_spawning(
     // hate. Mobs never see a flier again until it lands (`enemy_ai`), and a
     // flier cannot fight, so nothing is paid from where no mob can answer.
     if !fly_takeoffs.is_empty() {
-        let fliers: Vec<EntityId> = fly_takeoffs.drain(..).map(|c| c as EntityId).collect();
+        let flier_cids: Vec<ClientId> = std::mem::take(fly_takeoffs);
+        let fliers: Vec<EntityId> = flier_cids.iter().map(|c| *c as EntityId).collect();
         for mob_id in wipe_hate(&mut *enemies, &fliers) {
             handlers::fan_out_entity_target(&mut *server, in_world_recipients_now, mob_id, None);
         }
@@ -160,6 +161,20 @@ pub(super) fn run_spawning(
             if let Some(conn) = connections.get(&bearer) {
                 handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, conn);
             }
+        }
+        // A flier fights through nothing: their pets drop their targets (and
+        // the pet command arm refuses a `/pet attack` from the air), and a
+        // Bard's song stops, or Aria of Dismay would keep slowing a mob from a
+        // body it cannot answer. Review findings, 2026-11-15.
+        for pet in enemies
+            .values_mut()
+            .filter(|e| e.owner.is_some_and(|o| fliers.contains(&o)) && e.target.is_some())
+        {
+            pet.target = None;
+            handlers::fan_out_entity_target(&mut *server, in_world_recipients_now, pet.id, None);
+        }
+        for cid in flier_cids {
+            stop_song(&mut *server, &mut *connections, cid);
         }
     }
 

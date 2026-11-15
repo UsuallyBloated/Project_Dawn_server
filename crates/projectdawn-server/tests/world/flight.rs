@@ -434,3 +434,160 @@ async fn a_fling_or_a_death_ends_flight() {
         "the respawn is on foot: {respawned:?}"
     );
 }
+
+/// A flier fights through nothing, a pet included (the review's finding): the skeleton
+/// that was fighting for a Necromancer GM drops its target at takeoff and does not swing
+/// again, a `/pet attack` from the air is refused with the flying line, and once the GM
+/// lands the pet can be sent again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fliers_pet_stands_down_and_cannot_be_sent() {
+    let h = start_both().await;
+    let (session, char_id, _stale) =
+        provision_client(&h.auth_url, "flypet", "Flypeta", "Human", "Necromancer").await;
+    memorize_whole_class(&h.db_url, char_id, "Necromancer").await;
+    set_char_level(&h.db_url, char_id, 6).await;
+    let pool = db::open(&h.db_url).await.expect("open pool");
+    db::set_account_gm(&pool, "flypet", true)
+        .await
+        .expect("set is_gm");
+    let token = request_world_token(&h.auth_url, &session, char_id).await;
+    let mut c = WorldClient::start(token, &session, char_id).await;
+    c.pump_for(Duration::from_millis(300)).await;
+
+    c.send_cast_start("Summon Skeleton", 3.0);
+    c.pump_for(Duration::from_millis(3100)).await;
+    c.send_cast_spell("Summon Skeleton", None);
+    let pet_id: u64 = match c
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == char_id as u64)
+                || matches!(m, ServerWorldMsg::CastFail { caster, .. } if *caster == char_id as u64)
+        })
+        .await
+        .expect("the skeleton spawns (or a CastFail says why not)")
+    {
+        ServerWorldMsg::PetSpawn { id, .. } => id,
+        ServerWorldMsg::CastFail { reason, .. } => {
+            panic!("Summon Skeleton failed with CastFail: {reason:?}")
+        }
+        _ => unreachable!(),
+    };
+    // A sponge: it never swings or notices anyone, so only the pet's hits move.
+    let (mob_id, _) = spawn_dummy(&mut c, "Air Target", 0, 0.0).await;
+    let pet_hits = |msgs: &[ServerWorldMsg]| {
+        msgs.iter()
+            .filter(|m| matches!(m, ServerWorldMsg::Hit { attacker, target, .. } if *attacker == pet_id && *target == mob_id))
+            .count()
+    };
+
+    c.send_pet_command(protocol::world::pet_command::ATTACK, Some(mob_id));
+    let msgs = c.collect_for(Duration::from_secs(6)).await;
+    assert!(
+        pet_hits(&msgs) >= 1,
+        "on foot the skeleton fights for the GM: {msgs:?}"
+    );
+
+    let mut seen = gm_line(&mut c, "fly 10").await;
+    seen.extend(c.collect_for(Duration::from_millis(600)).await);
+    assert!(says(&seen, "You take to the air"), "{seen:?}");
+    assert!(
+        seen.iter().any(
+            |m| matches!(m, ServerWorldMsg::EntityTarget { id, target: None } if *id == pet_id)
+        ),
+        "the skeleton drops its target at takeoff: {seen:?}"
+    );
+    let msgs = c.collect_for(Duration::from_secs(3)).await;
+    assert_eq!(pet_hits(&msgs), 0, "and swings no more: {msgs:?}");
+
+    c.send_pet_command(protocol::world::pet_command::ATTACK, Some(mob_id));
+    let msgs = c.collect_for(Duration::from_secs(3)).await;
+    assert!(
+        says(&msgs, FLYING_REFUSAL),
+        "a /pet attack from the air is refused: {msgs:?}"
+    );
+    assert_eq!(pet_hits(&msgs), 0, "and the pet stays down: {msgs:?}");
+
+    let msgs = gm_line(&mut c, "fly off").await;
+    assert!(says(&msgs, "You stop flying."), "{msgs:?}");
+    c.pump_for(Duration::from_millis(500)).await;
+    c.send_pet_command(protocol::world::pet_command::ATTACK, Some(mob_id));
+    let msgs = c.collect_for(Duration::from_secs(6)).await;
+    assert!(
+        pet_hits(&msgs) >= 1,
+        "landed, the GM can send the pet again: {msgs:?}"
+    );
+}
+
+/// A GM in flight earns nothing from the air (the review's finding): grouped with a
+/// partner who kills a mob on the ground, the flier takes no XP share while the partner
+/// is paid.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_flier_in_a_group_takes_no_xp_share() {
+    let h = start_both().await;
+    let (mut a, mut b, dummy, b_char_id) =
+        grouped_pair_with_dummy(&h, "flyshare", "flymate", 0.0).await;
+    // The dev spawn stands 3 m in front of A (at the origin, yaw 0 facing -z,
+    // so at z = -3); B walks into melee reach of it on the server's word.
+    let mut bseq: u32 = 1;
+    walk_until_within(
+        &mut b,
+        &mut bseq,
+        b_char_id,
+        ZERO,
+        Vec3 {
+            x: 0.0,
+            y: 0.0,
+            z: -3.0,
+        },
+        1.5,
+    )
+    .await;
+
+    let a_char_id = a._char_id;
+    let mut seen = gm_line(&mut a, "fly 10").await;
+    seen.extend(a.collect_for(Duration::from_millis(400)).await);
+    assert!(says(&seen, "You take to the air"), "{seen:?}");
+    let mut aseq: u32 = 1;
+    steer(&mut a, &mut aseq, UP, 20).await;
+    let up = own_position_now(&mut a, a_char_id).await;
+    assert!(up.y > 5.0, "A is in the air: {up:?}");
+
+    // B kills the 5 HP dummy with its fists; A pumps meanwhile.
+    let mut a_msgs: Vec<ServerWorldMsg> = Vec::new();
+    let mut b_msgs: Vec<ServerWorldMsg> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let mut died = false;
+    while Instant::now() < deadline {
+        if !died {
+            b.send_attack(dummy, "", false, DamageType::Physical);
+        }
+        b_msgs.extend(b.collect_for(Duration::from_millis(300)).await);
+        a_msgs.extend(a.collect_for(Duration::from_millis(100)).await);
+        if b_msgs
+            .iter()
+            .any(|m| matches!(m, ServerWorldMsg::EntityDied { id } if *id == dummy))
+        {
+            died = true;
+            // (The join seeds an XpGained of 0; the kill's share is more.)
+            if b_msgs
+                .iter()
+                .any(|m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0))
+            {
+                break;
+            }
+        }
+    }
+    assert!(died, "B kills the dummy: {b_msgs:?}");
+    assert!(
+        b_msgs
+            .iter()
+            .any(|m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)),
+        "the partner on the ground is paid: {b_msgs:?}"
+    );
+    a_msgs.extend(a.collect_for(Duration::from_secs(1)).await);
+    assert!(
+        !a_msgs
+            .iter()
+            .any(|m| matches!(m, ServerWorldMsg::XpGained { amount, .. } if *amount > 0)),
+        "the flier takes no share: {a_msgs:?}"
+    );
+}

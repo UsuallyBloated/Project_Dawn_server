@@ -113,9 +113,13 @@ pub(super) fn award_kill(
     // member the mob dropped in this same tick (death sweep runs at end
     // of tick).
     let alive = |c: &PerConnection| !c.death_processed && c.hp > 0.0;
-    // XP share: alive + in range (creditor exempt from the range half only).
+    // XP share: alive, on foot (a GM in flight earns nothing from the air,
+    // docs/design/handoff_gm_flight.md) and in range (the creditor is exempt
+    // from the range half only).
     let xp_eligible = |cid: ClientId, c: &PerConnection| -> bool {
-        alive(c) && (cid == credit_cid || c.pos.distance_to(victim_pos) <= GROUP_SHARE_RANGE)
+        alive(c)
+            && !c.is_flying()
+            && (cid == credit_cid || c.pos.distance_to(victim_pos) <= GROUP_SHARE_RANGE)
     };
     // The candidate set: the group, or the solo creditor. Liveness check on
     // the solo killer too — they may have disconnected (or died to a last

@@ -631,7 +631,7 @@ fn route_outcome(
                 if conn.hp > 0.0 && !conn.death_processed {
                     // A GM flinging from flight stops flying: the fling's fall
                     // is the real test of a fall and costs what it costs.
-                    conn.flight = None;
+                    conn.end_flight();
                     conn.pos.y += height;
                     let from_y = if conn.vertical.airborne {
                         conn.vertical.from_y.max(conn.pos.y)
@@ -652,26 +652,29 @@ fn route_outcome(
             // GM flight (docs/design/handoff_gm_flight.md). The handler
             // already checked the gate, the speed and that the GM is alive.
             if let Some(conn) = connections.get_mut(&requester) {
-                match speed {
-                    Some(speed) if conn.is_flying() => {
-                        if let Some(f) = conn.flight.as_mut() {
-                            f.speed = speed;
-                        }
+                match (speed, conn.flight.as_mut()) {
+                    (Some(speed), Some(flight)) => {
+                        flight.speed = speed;
                         handlers::send_system_line(
                             &mut *server,
                             requester,
                             &format!("You fly at {speed:.0} m/s."),
                         );
                     }
-                    Some(speed) => {
+                    (Some(speed), None) => {
                         // Takeoff catches a fall already in progress (a GM
-                        // power, invariant D1). The mobs forget the flier in
-                        // the spawning step, where the enemies map is.
+                        // power, invariant D1). The mobs forget the flier, the
+                        // flier's pets stand down and their song stops in the
+                        // spawning step, where the enemies map is; the fight
+                        // is over for them here as for a port, so the pet
+                        // pre-pass cannot hand their pet the old target back.
                         conn.vertical = crate::world::fall::Vertical::default();
                         conn.flight = Some(crate::world::connection::Flight {
                             speed,
                             ground_y: terrain.ground(conn.pos.x, conn.pos.z),
                         });
+                        conn.last_attacked_enemy = None;
+                        conn.last_attacked_at = None;
                         fly_takeoffs.push(requester);
                         tracing::info!(
                             char_id = conn.char_id,
@@ -687,10 +690,10 @@ fn route_outcome(
                             &format!("You take to the air ({speed:.0} m/s). /fly off to land."),
                         );
                     }
-                    None => {
+                    (None, _) => {
                         // Let go where the body is: it falls as any body
                         // does and lands for nothing (the user's call 4).
-                        conn.flight = None;
+                        conn.end_flight();
                         conn.vertical = crate::world::fall::harmless_drop(conn.pos.y);
                         tracing::info!(
                             char_id = conn.char_id,

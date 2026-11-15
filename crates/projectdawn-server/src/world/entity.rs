@@ -1199,13 +1199,18 @@ impl Entity {
                     // disconnect, so this is short-lived).
                     return;
                 };
-                let dist = self.pos.distance_to(owner_pos);
+                // The follow distance is on the ground (XZ): a pet standing
+                // under an owner above it (a GM in flight; an owner on a
+                // ledge it has warped to) has arrived, where a 3D distance
+                // never shrank below the height and the stuck clock warped it
+                // to where it already stood every MOB_STUCK_SECS.
+                let dist = self.pos.xz_distance_to(owner_pos);
                 if dist > PET_FOLLOW_DISTANCE && !self.is_rooted() {
                     let snare = self.snare_factor();
                     let step = self.move_speed() * (1.0 - snare) * dt;
                     self.face_toward(owner_pos);
                     let moved = self.step_on(terrain, self.pos.step_toward(owner_pos, step));
-                    let dist = self.pos.distance_to(owner_pos);
+                    let dist = self.pos.xz_distance_to(owner_pos);
                     if self.stuck_too_long(moved, Some(owner_id), dist, now) {
                         // An owner it cannot reach (on a ledge): EQ's pets warp
                         // to their owner. Only to where the owner already is.

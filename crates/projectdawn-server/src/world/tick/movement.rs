@@ -129,7 +129,7 @@ pub(super) fn run_movement(
             // already on the ground below it. Death ends a GM's flight; the
             // client ends its own on the death screen.
             conn.vertical = fall::Vertical::default();
-            conn.flight = None;
+            conn.end_flight();
             conn.pos = terrain.ground_vec(before);
         } else if let Some(flight) = conn.flight.as_mut() {
             // GM flight (docs/design/handoff_gm_flight.md): three dimensions

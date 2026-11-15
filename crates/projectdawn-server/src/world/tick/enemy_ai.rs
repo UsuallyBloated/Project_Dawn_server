@@ -56,10 +56,12 @@ pub(super) fn run_enemy_ai(
         // enemy's POV; the new enemy→pet hit dispatch below
         // applies damage to pets.
         // Players a Hide holds (active skills): an idle mob's proximity
-        // scan passes over them; a provoked mob still finds them.
+        // scan passes over them; a provoked mob still finds them. A GM in
+        // flight counts as hidden here too, so their pet's hits put no owner
+        // token on a mob's hate list for a body it could never reach.
         let hidden_players: Vec<EntityId> = connections
             .values()
-            .filter(|c| c.in_world && buffs::is_hidden(&c.active_buffs))
+            .filter(|c| c.in_world && (buffs::is_hidden(&c.active_buffs) || c.is_flying()))
             .map(|c| c.char_id as u64)
             .collect();
         let mut targets_for_enemy_ai: Vec<(EntityId, Vec3f)> = player_snapshots.clone();

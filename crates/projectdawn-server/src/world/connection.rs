@@ -1094,7 +1094,22 @@ impl PerConnection {
     pub fn teleport_to(&mut self, pos: Vec3f) {
         self.pos = pos;
         self.vertical = super::fall::Vertical::default();
+        self.end_flight();
+    }
+
+    /// The one way a flight ends on the server (`teleport_to`, a death, the
+    /// fling, `fly off`): the flight state goes, and the direction the flier
+    /// last sent is cut back to a walk (no vertical, at most a full run), or
+    /// the on-foot step would integrate a boosted, climbing direction for the
+    /// stale-move window after the flight ended. A review finding, 2026-11-15.
+    pub fn end_flight(&mut self) {
         self.flight = None;
+        self.latest_direction = Vec3f {
+            x: self.latest_direction.x,
+            y: 0.0,
+            z: self.latest_direction.z,
+        }
+        .clamp_length(1.0);
     }
 
     /// Track 6: resources / xp / level dirty since last

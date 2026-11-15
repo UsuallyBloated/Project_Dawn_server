@@ -697,6 +697,15 @@ pub fn handle_message(
                 send_skill_fail(server, client_id, skill_name, FLYING_REFUSAL);
                 return Outcome::Continue;
             }
+            // Nor through a pet: a `/pet attack` from the air is refused (the
+            // other pet commands stand; the takeoff already stood the pet
+            // down). Review finding, 2026-11-15.
+            ClientWorldMsg::PetCommand { command, .. }
+                if *command == protocol::world::pet_command::ATTACK =>
+            {
+                send_refusal(server, client_id, FLYING_REFUSAL);
+                return Outcome::Continue;
+            }
             _ => {}
         }
     }

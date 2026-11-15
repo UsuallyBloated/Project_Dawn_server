@@ -207,7 +207,7 @@ mod tests {
         let at_banker = Vec3f {
             x: 11.0,
             y: 0.0,
-            z: 5.0,
+            z: -5.0,
         };
         assert!(any_within_range("banker", at_banker).is_some());
 
@@ -253,7 +253,7 @@ mod tests {
         let at_brom = Vec3f {
             x: 8.0,
             y: 0.0,
-            z: 5.0,
+            z: -5.0,
         };
         assert_eq!(
             vendor_stocking_within_range("Bread Loaf", at_brom, |_| true).map(|n| n.id.as_str()),

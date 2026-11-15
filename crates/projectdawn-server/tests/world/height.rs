@@ -36,7 +36,7 @@ fn test_ground() -> Terrain {
     // world does not use. The features begin 20 m west of the last NPC.
     for x in [-2.0, 0.0, 5.0, 8.0, 11.0, 14.0] {
         assert_eq!(
-            t.ground(x, 5.0),
+            t.ground(x, -5.0),
             0.0,
             "the town must stay flat under a test ground"
         );
@@ -545,7 +545,7 @@ fn plateau_ground() -> Terrain {
         Terrain::from_heights(30, 5.0, [-90.0, 0.0, 100.0], 0.0, heights).expect("a valid plateau");
     for x in [-2.0, 0.0, 5.0, 8.0, 11.0, 14.0] {
         assert_eq!(
-            t.ground(x, 5.0),
+            t.ground(x, -5.0),
             0.0,
             "the town must stay flat under a test ground"
         );

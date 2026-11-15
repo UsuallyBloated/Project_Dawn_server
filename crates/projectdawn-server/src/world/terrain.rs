@@ -708,8 +708,8 @@ mod tests {
         assert_eq!(t.ground(0.0, 0.0), t.floor_y());
         assert_eq!(t.mesh_height(12.5, 5.0), Some(0.0));
         assert_eq!(t.mesh_height(1700.0, 0.0), Some(60.0));
-        assert!(t.ground(-700.0, 900.0) >= 62.0, "the ridge's crest");
-        assert_eq!(t.ground(0.0, 900.0), 6.0, "the pass's floor");
+        assert!(t.ground(-700.0, -900.0) >= 62.0, "the ridge's crest");
+        assert_eq!(t.ground(0.0, -900.0), 6.0, "the pass's floor");
         for (x, z) in [
             (-2000.0, 0.0),
             (2000.0, 0.0),
@@ -833,7 +833,7 @@ mod tests {
         assert!(face.slope_ok(on_face, at(4.75, 0.0)));
         let mut p = face.ground_vec(at(-2.0, -9.0));
         for i in 0..200 {
-            // Zigzag: north-east, then south-east.
+            // Zigzag: +x and +z, then +x and -z.
             let dz = if (i / 20) % 2 == 0 { d } else { -d };
             p = face.player_step(p, d, dz).pos;
             assert!(p.y < 0.01, "step {i}: the walker is {p:?}, up the face");

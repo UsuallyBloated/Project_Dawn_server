@@ -336,13 +336,13 @@ fn a_gap_in_the_mountains_is_a_way_out() {
     let gs = t.grid_size();
     let cell = t.cell_size();
     let half = gs as f32 * cell * 0.5;
-    let floor = t.ground(1880.0, -900.0);
+    let floor = t.ground(1880.0, 900.0);
     let mut heights = Vec::with_capacity((gs + 1) * (gs + 1));
     for iz in 0..=gs {
         for ix in 0..=gs {
             let (x, z) = (-half + ix as f32 * cell, -half + iz as f32 * cell);
             let h = t.mesh_height(x, z).expect("a grid vertex is on the mesh");
-            let in_corridor = x >= 1880.0 && (-930.0..=-870.0).contains(&z);
+            let in_corridor = x >= 1880.0 && (870.0..=930.0).contains(&z);
             heights.push(if in_corridor { floor } else { h });
         }
     }

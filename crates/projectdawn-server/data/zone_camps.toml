@@ -25,8 +25,8 @@
 # further from the town, so the first camps are a minute's run from the gate
 # and the Wraith Gate about six. No spawn was added: 54, as before.
 #
-# Coordinates are world-space (Vector3 in Godot: y is up, and the y written
-# here is a placeholder the ground overrides). Spawn-point offsets at runtime
+# Coordinates are world-space (Vector3 in Godot: y is up, north is -z and east
+# +x, and the y written here is a placeholder the ground overrides). Spawn-point offsets at runtime
 # apply a random XZ jitter within `radius`. The town is the 150 m of flat
 # ground round the origin; the nearest spawn is 180 m from it.
 
@@ -35,37 +35,37 @@ default_respawn = 35.0
 
 # ── Ring 1 · 200-350 m · lvl 1-2 ──────────────────────────────────────
 # The integration harness aims its camp-pull tests at the Bonepile's
-# [-216, 54] spawn (`tests/world/common`, CAMP_PULL_SPAWN): the one spawn whose
+# [-216, -54] spawn (`tests/world/common`, CAMP_PULL_SPAWN): the one spawn whose
 # aggro circle overlaps no other, 78 m from the rest of its camp, so exactly
 # one slow level 1 skeleton pulls. Move it and that constant together.
 [[camp]]
 desc = "Bonepile — decrepit skeletons lurking west of the safe area"
 mob = { name = "Decrepit Skeleton", level = 1, hp = 16.0, dmg = 3, xp = 10, speed = 1.8, aggro = 8.0, faction = "restless_dead", alignment = "undead" }
 spawns = [
-    [-222.0, 0.0, 132.0],
-    [-240.0, 0.0, 138.0],
-    [-216.0, 0.0, 54.0],
-    [-204.0, 0.0, 156.0],
+    [-222.0, 0.0, -132.0],
+    [-240.0, 0.0, -138.0],
+    [-216.0, 0.0, -54.0],
+    [-204.0, 0.0, -156.0],
 ]
 
 [[camp]]
 desc = "Wolf Run — the pack that hunts south of the eastern road (wolf_threat)"
 mob = { name = "Grey Wolf", level = 1, hp = 16.0, dmg = 3, xp = 10, speed = 4.0, aggro = 12.0, faction = "wildlife", alignment = "neutral" }
 spawns = [
-    [274.0, 0.0, -190.0],
-    [292.0, 0.0, -202.0],
-    [268.0, 0.0, -214.0],
-    [286.0, 0.0, -196.0],
+    [274.0, 0.0, 190.0],
+    [292.0, 0.0, 202.0],
+    [268.0, 0.0, 214.0],
+    [286.0, 0.0, 196.0],
 ]
 
 [[camp]]
 desc = "Rat Warrens — plague rats out the back of Brom's cellar (rat_infestation)"
 mob = { name = "Plague Rat", level = 2, hp = 26.0, dmg = 5, xp = 18, speed = 4.2, aggro = 14.0, faction = "wildlife", alignment = "neutral" }
 spawns = [
-    [140.0, 0.0, 116.0],
-    [154.0, 0.0, 116.0],
-    [146.0, 0.0, 128.0],
-    [160.0, 0.0, 119.0],
+    [140.0, 0.0, -116.0],
+    [154.0, 0.0, -116.0],
+    [146.0, 0.0, -128.0],
+    [160.0, 0.0, -119.0],
 ]
 
 # ── Ring 2 · 450-700 m · lvl 3-4 ───────────────────────────────────────
@@ -73,44 +73,44 @@ spawns = [
 desc = "Shallow Graves — rotting skeletons clawing out of the earth"
 mob = { name = "Rotting Skeleton", level = 3, hp = 38.0, dmg = 7, xp = 28, speed = 2.2, aggro = 10.0, faction = "restless_dead", alignment = "undead" }
 spawns = [
-    [398.0, 0.0, 324.0],
-    [422.0, 0.0, 306.0],
-    [380.0, 0.0, 360.0],
+    [398.0, 0.0, -324.0],
+    [422.0, 0.0, -306.0],
+    [380.0, 0.0, -360.0],
 ]
 
 [[camp]]
 desc = "Gnoll Raider Camp — war parties in the rocky flats east of town (gnoll_raiders)"
 mob = { name = "Gnoll Raider", level = 3, hp = 36.0, dmg = 7, xp = 28, speed = 3.0, aggro = 14.0, faction = "gnoll_raiders", alignment = "bad" }
 spawns = [
-    [548.0, 0.0, 68.0],
-    [566.0, 0.0, 50.0],
-    [554.0, 0.0, 86.0],
-    [572.0, 0.0, 74.0],
+    [548.0, 0.0, -68.0],
+    [566.0, 0.0, -50.0],
+    [554.0, 0.0, -86.0],
+    [572.0, 0.0, -74.0],
 ]
 
 [[camp]]
 desc = "Boar Thicket — wild boars rooting in the southwest scrub"
 mob = { name = "Wild Boar", level = 4, hp = 56.0, dmg = 9, xp = 38, speed = 3.4, aggro = 10.0, faction = "wildlife", alignment = "neutral" }
 spawns = [
-    [-422.0, 0.0, -334.0],
-    [-398.0, 0.0, -370.0],
-    [-440.0, 0.0, -316.0],
+    [-422.0, 0.0, 334.0],
+    [-398.0, 0.0, 370.0],
+    [-440.0, 0.0, 316.0],
 ]
 
 [[camp]]
 desc = "Bat Hollow — cave bats at the Greywood edge, north of town"
 mob = { name = "Cave Bat", level = 4, hp = 48.0, dmg = 8, xp = 38, speed = 4.5, aggro = 12.0, faction = "wildlife", alignment = "neutral" }
 spawns = [
-    [-126.0, 0.0, 530.0],
-    [-156.0, 0.0, 542.0],
-    [-108.0, 0.0, 548.0],
+    [-126.0, 0.0, -530.0],
+    [-156.0, 0.0, -542.0],
+    [-108.0, 0.0, -548.0],
 ]
 
 [[camp]]
 desc = "Sable's roost — the dark shape the bats scatter from"
 mob = { name = "Cave Bat", level = 4, hp = 48.0, dmg = 8, xp = 38, speed = 4.5, aggro = 12.0, named_id = "sable", faction = "wildlife", alignment = "neutral" }
 spawns = [
-    [-180.0, 0.0, 640.0],
+    [-180.0, 0.0, -640.0],
 ]
 respawn = 300.0
 
@@ -119,24 +119,24 @@ respawn = 300.0
 desc = "Bandit Outpost — road cutthroats with actual combat training"
 mob = { name = "Bandit Scout", level = 5, hp = 64.0, dmg = 10, xp = 50, speed = 3.2, aggro = 14.0, faction = "bandits", alignment = "bad" }
 spawns = [
-    [-598.0, 0.0, 618.0],
-    [-622.0, 0.0, 642.0],
-    [-580.0, 0.0, 660.0],
+    [-598.0, 0.0, -618.0],
+    [-622.0, 0.0, -642.0],
+    [-580.0, 0.0, -660.0],
 ]
 
 [[camp]]
 desc = "Rotfang's Den — dire wolves prowling the old rocks south of the mill"
 mob = { name = "Dire Wolf", level = 5, hp = 64.0, dmg = 10, xp = 50, speed = 4.2, aggro = 14.0, faction = "wildlife", alignment = "neutral" }
 spawns = [
-    [75.0, 0.0, -794.0],
-    [45.0, 0.0, -806.0],
+    [75.0, 0.0, 794.0],
+    [45.0, 0.0, 806.0],
 ]
 
 [[camp]]
 desc = "Rotfang the Feared — the killer of three hunters (rotfang_hunt)"
 mob = { name = "Dire Wolf", level = 5, hp = 64.0, dmg = 10, xp = 50, speed = 4.2, aggro = 14.0, named_id = "rotfang", faction = "wildlife", alignment = "neutral" }
 spawns = [
-    [48.0, 0.0, -836.0],
+    [48.0, 0.0, 836.0],
 ]
 respawn = 300.0
 
@@ -144,9 +144,9 @@ respawn = 300.0
 desc = "Festering Mound — bloated plagued zombies that shamble fast when aggroed"
 mob = { name = "Plagued Zombie", level = 6, hp = 80.0, dmg = 12, xp = 62, speed = 2.6, aggro = 14.0, faction = "restless_dead", alignment = "undead" }
 spawns = [
-    [631.0, 0.0, -610.0],
-    [667.0, 0.0, -598.0],
-    [622.0, 0.0, -652.0],
+    [631.0, 0.0, 610.0],
+    [667.0, 0.0, 598.0],
+    [622.0, 0.0, 652.0],
 ]
 
 # ── Ring 4 · 1.1-1.25 km · lvl 7-9 ─────────────────────────────────────
@@ -154,9 +154,9 @@ spawns = [
 desc = "Spider Copse — giant spiders webbed through the eastern trees"
 mob = { name = "Giant Spider", level = 7, hp = 104.0, dmg = 15, xp = 72, speed = 3.2, aggro = 14.0, faction = "wildlife", alignment = "neutral" }
 spawns = [
-    [1108.0, 0.0, 86.0],
-    [1132.0, 0.0, 62.0],
-    [1120.0, 0.0, 32.0],
+    [1108.0, 0.0, -86.0],
+    [1132.0, 0.0, -62.0],
+    [1120.0, 0.0, -32.0],
 ]
 radius = 4.0
 respawn = 40.0
@@ -165,7 +165,7 @@ respawn = 40.0
 desc = "The Crawler's burrow — something old under the webs"
 mob = { name = "Giant Spider", level = 7, hp = 104.0, dmg = 15, xp = 72, speed = 3.2, aggro = 14.0, named_id = "ancient_crawler", faction = "wildlife", alignment = "neutral" }
 spawns = [
-    [1210.0, 0.0, -10.0],
+    [1210.0, 0.0, 10.0],
 ]
 respawn = 300.0
 
@@ -173,9 +173,9 @@ respawn = 300.0
 desc = "The Broken Crypt — skeleton champions, armoured and relentless"
 mob = { name = "Skeleton Champion", level = 9, hp = 160.0, dmg = 20, xp = 92, speed = 2.5, aggro = 12.0, faction = "restless_dead", alignment = "undead" }
 spawns = [
-    [46.0, 0.0, 1250.0],
-    [-8.0, 0.0, 1268.0],
-    [22.0, 0.0, 1232.0],
+    [46.0, 0.0, -1250.0],
+    [-8.0, 0.0, -1268.0],
+    [22.0, 0.0, -1232.0],
 ]
 radius = 4.0
 respawn = 50.0
@@ -185,9 +185,9 @@ respawn = 50.0
 desc = "Gnoll War Camp — gnoll brutes standing guard over a ruined encampment"
 mob = { name = "Gnoll Brute", level = 10, hp = 215.0, dmg = 22, xp = 102, speed = 3.0, aggro = 16.0, faction = "gnoll_raiders", alignment = "bad" }
 spawns = [
-    [20.0, 0.0, -1500.0],
-    [62.0, 0.0, -1488.0],
-    [-22.0, 0.0, -1512.0],
+    [20.0, 0.0, 1500.0],
+    [62.0, 0.0, 1488.0],
+    [-22.0, 0.0, 1512.0],
 ]
 radius = 4.0
 respawn = 50.0
@@ -196,7 +196,7 @@ respawn = 50.0
 desc = "Greth's tent — the war camp's chief"
 mob = { name = "Gnoll Brute", level = 10, hp = 215.0, dmg = 22, xp = 102, speed = 3.0, aggro = 16.0, named_id = "greth", faction = "gnoll_raiders", alignment = "bad" }
 spawns = [
-    [40.0, 0.0, -1620.0],
+    [40.0, 0.0, 1620.0],
 ]
 respawn = 600.0
 
@@ -204,9 +204,9 @@ respawn = 600.0
 desc = "The Sunken Barrow — barrow zombies below the western hills"
 mob = { name = "Barrow Zombie", level = 12, hp = 265.0, dmg = 26, xp = 125, speed = 2.2, aggro = 14.0, faction = "restless_dead", alignment = "undead" }
 spawns = [
-    [-1478.0, 0.0, -60.0],
-    [-1496.0, 0.0, -30.0],
-    [-1466.0, 0.0, -90.0],
+    [-1478.0, 0.0, 60.0],
+    [-1496.0, 0.0, 30.0],
+    [-1466.0, 0.0, 90.0],
 ]
 radius = 4.0
 respawn = 60.0
@@ -215,7 +215,7 @@ respawn = 60.0
 desc = "The Undying — what the barrow was dug to hold"
 mob = { name = "Barrow Zombie", level = 12, hp = 265.0, dmg = 26, xp = 125, speed = 2.2, aggro = 14.0, named_id = "the_undying", faction = "restless_dead", alignment = "undead" }
 spawns = [
-    [-1560.0, 0.0, -60.0],
+    [-1560.0, 0.0, 60.0],
 ]
 respawn = 600.0
 
@@ -224,8 +224,8 @@ respawn = 600.0
 desc = "Ossuary — bone colossi, rare and long-respawning"
 mob = { name = "Bone Colossus", level = 14, hp = 365.0, dmg = 35, xp = 165, speed = 1.8, aggro = 15.0, faction = "restless_dead", alignment = "undead" }
 spawns = [
-    [-1731.0, 0.0, 123.0],
-    [-1749.0, 0.0, 57.0],
+    [-1731.0, 0.0, -123.0],
+    [-1749.0, 0.0, -57.0],
 ]
 radius = 5.0
 respawn = 90.0
@@ -234,8 +234,8 @@ respawn = 90.0
 desc = "Wraith Gate — ancient wraiths patrolling the plateau behind the arch on the cliff"
 mob = { name = "Ancient Wraith", level = 16, hp = 328.0, dmg = 40, xp = 205, speed = 4.2, aggro = 22.0, faction = "restless_dead", alignment = "undead" }
 spawns = [
-    [1574.0, 0.0, -2.0],
-    [1566.0, 0.0, -78.0],
+    [1574.0, 0.0, 2.0],
+    [1566.0, 0.0, 78.0],
 ]
 radius = 5.0
 respawn = 90.0

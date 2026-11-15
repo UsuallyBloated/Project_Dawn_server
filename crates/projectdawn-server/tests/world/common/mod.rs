@@ -1241,13 +1241,13 @@ pub async fn walk_dir(c: &mut WorldClient, seq: &mut u32, dir: Vec3, metres: f32
     c.pump_for(Duration::from_millis(600)).await;
 }
 
-/// The Bonepile's isolated [-216, 0, 54] spawn (`data/zone_camps.toml`): the
+/// The Bonepile's isolated [-216, 0, -54] spawn (`data/zone_camps.toml`): the
 /// one ring 1 spawn whose aggro circle overlaps no other, so exactly one slow
 /// level 1 Decrepit Skeleton pulls (the camp-walking tests' target).
 pub const BONEPILE_SPAWN: Vec3 = Vec3 {
     x: -216.0,
     y: 0.0,
-    z: 54.0,
+    z: -54.0,
 };
 
 /// Where a camp-walking test's character enters the world (`seed_position`
@@ -1257,7 +1257,7 @@ pub const BONEPILE_SPAWN: Vec3 = Vec3 {
 pub const CAMP_PULL_START: Vec3 = Vec3 {
     x: -200.0,
     y: 0.0,
-    z: 68.0,
+    z: -68.0,
 };
 
 /// Walk toward `target` on the server's own word: each tick a Move aims at

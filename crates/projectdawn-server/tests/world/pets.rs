@@ -1280,11 +1280,15 @@ async fn charm_converts_a_camp_mob_that_is_fighting_someone_else() {
     // 21 m from where both entered, aggro 8) and stops: inside its aggro
     // circle, and the fight then happens under 20 m from A, who stays where
     // it entered, outside that circle and inside charm range (25 m).
-    let len: f32 = (16.0_f32 * 16.0 + 14.0_f32 * 14.0).sqrt();
+    let (dx, dz) = (
+        BONEPILE_SPAWN.x - CAMP_PULL_START.x,
+        BONEPILE_SPAWN.z - CAMP_PULL_START.z,
+    );
+    let len = (dx * dx + dz * dz).sqrt();
     let dir = Vec3 {
-        x: -16.0 / len,
+        x: dx / len,
         y: 0.0,
-        z: -14.0 / len,
+        z: dz / len,
     };
     let mut seq: u32 = 1;
     let moves = (18.0 / (world::RUN_SPEED * 0.05)).ceil() as u32;

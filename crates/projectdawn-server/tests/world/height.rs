@@ -817,9 +817,9 @@ async fn a_mob_at_a_face_gives_up_and_walks_home() {
 
 /// The same on the zone's own compiled ground (the 4 km plate), on a perch a player can
 /// walk to: the west edge of the ramp up the north side of the Wraith Gate plateau. At
-/// z = 408 the ramp is 31 m up and its side is a wall down to the plain (24 m over one
-/// cell, 67 degrees). A Cleric at the ramp's edge, (1450.1, 408), Smites a dummy a GM
-/// spawns on the plain at (1435, 410), 28 m away; the dummy walks to the foot of the
+/// z = -408 the ramp is 31 m up and its side is a wall down to the plain (24 m over one
+/// cell, 67 degrees). A Cleric at the ramp's edge, (1450.1, -408), Smites a dummy a GM
+/// spawns on the plain at (1435, -410), 28 m away; the dummy walks to the foot of the
 /// wall (x = 1440) and no further, gives up and walks home. The Cleric's second Smite,
 /// while the dummy is held, is refused: it is evading. The dummy starts north of the
 /// Cleric's row on purpose: the wall grows to the south (the ramp climbs that way), and
@@ -830,10 +830,10 @@ async fn a_mob_at_a_face_gives_up_and_walks_home() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_mob_below_the_plateau_ramp_gives_up_on_a_player_on_its_edge() {
     let compiled = projectdawn_server::world::terrain::compiled().clone();
-    let foot_y = compiled.ground(1438.0, 408.0);
+    let foot_y = compiled.ground(1438.0, -408.0);
     let h = start_with_terrain(compiled).await;
-    // A dev spawn lands 3 m south of the GM (yaw 0): the watcher at z = 413.
-    let run = nuke_from_a_lip(&h, "ramp", (1435.0, 413.0), (1450.1, 408.0), 30.0, None).await;
+    // A dev spawn lands 3 m in front of the GM (yaw 0 faces -z, north): the watcher at z = -407.
+    let run = nuke_from_a_lip(&h, "ramp", (1435.0, -407.0), (1450.1, -408.0), 30.0, None).await;
     let highest = assert_gave_up_and_went_home(&run);
     // The perch itself: the ramp's edge sees the wall's foot, so the second Smite
     // reaches the evade rule (on the plateau's own cliff the lip cannot see the

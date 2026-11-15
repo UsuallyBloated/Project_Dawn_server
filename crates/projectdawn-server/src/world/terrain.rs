@@ -301,6 +301,22 @@ impl Terrain {
         self.ground_local(snap(lx), snap(lz))
     }
 
+    /// The nearest point to (x, z) on the plate (the mesh's extent): where a
+    /// GM's flight is held, free to cross the mountains to the plate's edge
+    /// and never past it. A coordinate that is not finite comes back as the
+    /// plate's middle.
+    pub fn clamp_to_plate(&self, x: f32, z: f32) -> (f32, f32) {
+        let half = self.half();
+        let hold = |v: f32, mid: f32| {
+            if v.is_finite() {
+                v.clamp(mid - half, mid + half)
+            } else {
+                mid
+            }
+        };
+        (hold(x, self.origin.x), hold(z, self.origin.z))
+    }
+
     /// The same XZ, standing on the ground.
     pub fn ground_vec(&self, pos: Vec3f) -> Vec3f {
         Vec3f {

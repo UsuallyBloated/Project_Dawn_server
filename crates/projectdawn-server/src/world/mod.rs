@@ -146,6 +146,21 @@ pub const STARTER_SPAWN: connection::Vec3f = connection::Vec3f::ZERO;
 /// to carry the client's own speed against a 7.5 m/s ceiling, so a modified
 /// client ran 1.5x and an honest one under Spirit of Wolf got the buff twice.
 pub const RUN_SPEED: f32 = 5.0;
+/// GM flight (docs/design/handoff_gm_flight.md): the speed `/fly` with no
+/// number gives, m/s. Each of these five is a lockstep pair with `player.gd`
+/// (`tools/check_constant_lockstep.gd`).
+pub const DEFAULT_FLY_SPEED: f32 = 25.0;
+/// The slowest and fastest speed `fly <m/s>` accepts; anything else (or a
+/// number that is not finite) is dropped before the audit row.
+pub const MIN_FLY_SPEED: f32 = 1.0;
+pub const MAX_FLY_SPEED: f32 = 100.0;
+/// How much longer than 1 a flier's Move direction may be: the client sends
+/// its boost (Ctrl, Minecraft's sprint) as a direction this long, so the top
+/// speed is `MAX_FLY_SPEED * FLY_BOOST`.
+pub const FLY_BOOST: f32 = 2.0;
+/// The highest a flier may go, as a world height (the zone's highest
+/// mountains stand about 440 m).
+pub const FLY_CEILING: f32 = 1000.0;
 /// The least time between two relayed jumps from one player. An honest
 /// client cannot jump again until it lands (0.7 s at its 7 m/s and 20 m/s²),
 /// so this never clips a real jump, and it caps what a forged stream of

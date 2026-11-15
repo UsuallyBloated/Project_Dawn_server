@@ -14,6 +14,7 @@ mod admin;
 mod death;
 mod durability;
 mod falls;
+mod flight;
 mod groups_and_quests;
 mod height;
 mod hunger;

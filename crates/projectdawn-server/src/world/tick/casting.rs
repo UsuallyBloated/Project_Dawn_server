@@ -1874,7 +1874,7 @@ pub(super) fn apply_casts(
                                     continue;
                                 }
                             }
-                            c.pos = dest;
+                            c.teleport_to(dest);
                             // The fight is over for the mover: without this
                             // the pet pre-pass (step 4i) re-inherits the
                             // owner's last target for up to 10 s and the

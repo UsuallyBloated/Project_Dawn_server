@@ -41,9 +41,12 @@ pub(super) fn run_enemy_ai(
         // Dropping the dead from the list makes an enemy lose its target the
         // moment you die, so it leashes home instead of beating your body
         // (playtest 2026-08-12).
+        // A GM in flight is left out as well: no mob notices, chases or
+        // swings at one (docs/design/handoff_gm_flight.md), as no mob could
+        // reach one.
         let player_snapshots: Vec<(EntityId, Vec3f)> = connections
             .values()
-            .filter(|c| c.in_world && c.hp > 0.0)
+            .filter(|c| c.in_world && c.hp > 0.0 && !c.is_flying())
             .map(|c| (c.char_id as u64, c.pos))
             .collect();
         // Track 11.4 — enemies aggro on pets too. Build a combined

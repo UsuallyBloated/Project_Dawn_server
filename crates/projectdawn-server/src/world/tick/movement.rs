@@ -11,7 +11,7 @@ use crate::world::fall;
 /// stands them and breaks a `/camp`. The HP bar follows on the resource fan,
 /// and a death goes through the death sweep like any other, the corpse where
 /// the body landed. A drop inside the safe height costs nothing and says
-/// nothing.
+/// nothing, and so does a harmless one (a GM's `/fly off` in the air).
 pub(super) fn land(
     server: &mut RenetServer,
     client_id: ClientId,
@@ -19,6 +19,9 @@ pub(super) fn land(
     landing: fall::Landing,
     now: Instant,
 ) {
+    if landing.harmless {
+        return;
+    }
     let damage = fall::damage(landing.drop, conn.max_hp);
     if damage <= 0.0 {
         return;
@@ -94,7 +97,8 @@ pub(super) fn run_movement(
         // player; the server mirrors it so a Sit intent dropped on
         // the wire doesn't leave the server thinking the player is
         // seated while they're running around.
-        if dir.x != 0.0 || dir.z != 0.0 {
+        // (Only a GM in flight ever carries a vertical; it stands them too.)
+        if dir.x != 0.0 || dir.y != 0.0 || dir.z != 0.0 {
             conn.is_sitting = false;
             // Moving ends a feign death (standing up) and a hide (active
             // skills): the mobs that forgot or never noticed the player
@@ -106,8 +110,9 @@ pub(super) fn run_movement(
         // The server decides the speed (RUN_SPEED's note): its own speed
         // buff (Spirit of Wolf, Selos' Melody), snare (floored at 10% so
         // the player can still inch along) and encumbrance. The weight
-        // is only worked out for a player who is actually moving.
-        let speed = if dir.x != 0.0 || dir.z != 0.0 {
+        // is only worked out for a player who is actually moving, on foot (a
+        // flier's speed is its own, below).
+        let speed = if !conn.is_flying() && (dir.x != 0.0 || dir.z != 0.0) {
             let speed_buff = buffs::speed_mult(&conn.active_buffs);
             let snare = buffs::snare_amount(&conn.active_buffs);
             let snare_mult = (1.0 - snare).max(0.1);
@@ -121,9 +126,27 @@ pub(super) fn run_movement(
         if conn.hp <= 0.0 || conn.death_processed {
             // The dead lie on the ground where they are (the death lock holds
             // their Moves); a body killed in the air stops falling, its corpse
-            // already on the ground below it.
+            // already on the ground below it. Death ends a GM's flight; the
+            // client ends its own on the death screen.
             conn.vertical = fall::Vertical::default();
+            conn.flight = None;
             conn.pos = terrain.ground_vec(before);
+        } else if let Some(flight) = conn.flight.as_mut() {
+            // GM flight (docs/design/handoff_gm_flight.md): three dimensions
+            // at the flier's own speed (the boost is the direction's length),
+            // untouched by speed buffs, snare or encumbrance (Minecraft's
+            // Speed effect does not touch flight either). No slope rule and
+            // no fall: the body is held above the server's own ground, on the
+            // plate and under the ceiling, the same clamps the client's body
+            // applies to itself. Nothing is counted as a slope refusal.
+            let reach = flight.speed * dt;
+            let (x, z) = terrain.clamp_to_plate(before.x + dir.x * reach, before.z + dir.z * reach);
+            let ground = terrain.ground(x, z);
+            let ceiling = crate::world::FLY_CEILING.max(ground);
+            let y = (before.y + dir.y * reach).clamp(ground, ceiling);
+            flight.ground_y = ground;
+            conn.vertical = fall::Vertical::default();
+            conn.pos = Vec3f { x, y, z };
         } else if conn.vertical.airborne {
             // In the air the body keeps its heading at its ground speed: no
             // slope under it to shrink the step or to refuse it. Ground it

@@ -403,6 +403,9 @@ pub(super) struct Intents {
     // The Test Panel's "Despawn All Enemies": the GM and their position,
     // applied with the dev spawns.
     pub(super) dev_despawn_intents: Vec<(ClientId, Vec3f)>,
+    // GM flight: the GMs who took to the air this tick (the flight itself is
+    // set in the drain). Every mob forgets them where the enemies map is.
+    pub(super) fly_takeoffs: Vec<ClientId>,
     // Spell bar writes (a memorize, a forget, the one-time seed), applied
     // after dispatch where the pool is.
     pub(super) spell_gem_saves: Vec<(i64, Vec<(i32, String)>, bool)>,

@@ -23,6 +23,7 @@ pub(super) fn run_spawning(
         newly_in_world,
         dev_spawn_intents,
         dev_despawn_intents,
+        fly_takeoffs,
         ..
     } = q;
     // 4g. Enemy spawner phase. Tick the respawn timers; for any spawn
@@ -144,6 +145,22 @@ pub(super) fn run_spawning(
             requester,
             &format!("Despawned {} enemies.", doomed.len()),
         );
+    }
+
+    // GM flight takeoffs (the flight was set in the drain): every mob forgets
+    // the flier, as for a port, and what they left ticking ends with their
+    // hate. Mobs never see a flier again until it lands (`enemy_ai`), and a
+    // flier cannot fight, so nothing is paid from where no mob can answer.
+    if !fly_takeoffs.is_empty() {
+        let fliers: Vec<EntityId> = fly_takeoffs.drain(..).map(|c| c as EntityId).collect();
+        for mob_id in wipe_hate(&mut *enemies, &fliers) {
+            handlers::fan_out_entity_target(&mut *server, in_world_recipients_now, mob_id, None);
+        }
+        for bearer in clear_player_dots_from(&mut *connections, &fliers) {
+            if let Some(conn) = connections.get(&bearer) {
+                handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, conn);
+            }
+        }
     }
 
     // 4g2. Track 12 Piece B — auto-summon a warder for each

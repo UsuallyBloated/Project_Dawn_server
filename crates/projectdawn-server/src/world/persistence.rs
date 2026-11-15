@@ -67,8 +67,15 @@ pub async fn persist_dirty_stores(pool: &SqlitePool, conn: &mut PerConnection) -
 pub async fn flush_connection(pool: &SqlitePool, conn: &mut PerConnection, when: &str) -> bool {
     if conn.is_dirty_for_persist() {
         let zone = conn.zone.as_deref();
-        match db::checkpoint_position(pool, conn.char_id, zone, conn.pos.into_tuple(), conn.yaw)
-            .await
+        // A flier is saved on the ground under them (`saved_pos`).
+        match db::checkpoint_position(
+            pool,
+            conn.char_id,
+            zone,
+            conn.saved_pos().into_tuple(),
+            conn.yaw,
+        )
+        .await
         {
             Ok(()) => conn.mark_persisted(),
             Err(e) => {

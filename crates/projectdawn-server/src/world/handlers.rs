@@ -414,6 +414,14 @@ pub enum Outcome {
         requester: ClientId,
         height: f32,
     },
+    /// GM flight (`GmCommand` `fly <m/s>` / `fly off`), dev-gated and audited
+    /// in the handler: `Some(speed)` takes to the air or changes speed,
+    /// `None` lets go. The tick loop applies it, since the takeoff wipes the
+    /// flier from every mob's hate (docs/design/handoff_gm_flight.md).
+    FlyIntent {
+        requester: ClientId,
+        speed: Option<f32>,
+    },
     /// A `Consider` of a mob (factions, 2026-10-23): answered in the tick
     /// loop, which holds the enemies map.
     ConsiderIntent {
@@ -503,6 +511,28 @@ pub const CAST_CANCELLED_RELAY: &str = "cancelled";
 /// `fall::LETHAL_DROP`, so a lethal fall can be tested, and bounded, so no
 /// height a client sends puts a body wherever it likes.
 pub const MAX_FLING_HEIGHT: f32 = 100.0;
+
+/// The refusal a GM in flight gets for a cast or a skill: a flier does not
+/// fight (docs/design/handoff_gm_flight.md, the user's call 5). The client
+/// refuses first with the same words, so only a modified client meets this.
+pub const FLYING_REFUSAL: &str = "You cannot do that while flying.";
+
+/// The speed a `GmCommand` `fly` argument asks for: `Some(None)` to land,
+/// `Some(Some(speed))` to fly, `None` for anything else (a speed that is not
+/// a finite number inside [`MIN_FLY_SPEED`, `MAX_FLY_SPEED`], rule A3). An
+/// empty argument is the default speed.
+fn parse_fly_arg(arg: &str) -> Option<Option<f32>> {
+    if arg.eq_ignore_ascii_case("off") {
+        return Some(None);
+    }
+    if arg.is_empty() {
+        return Some(Some(super::DEFAULT_FLY_SPEED));
+    }
+    let speed: f32 = arg.parse().ok()?;
+    let in_range =
+        speed.is_finite() && (super::MIN_FLY_SPEED..=super::MAX_FLY_SPEED).contains(&speed);
+    in_range.then_some(Some(speed))
+}
 
 /// Cut `text` to at most `max_chars` characters. Counting characters, never
 /// slicing by byte: `&text[..n]` panics when `n` falls inside a multibyte
@@ -647,6 +677,29 @@ pub fn handle_message(
             return Outcome::Continue;
         }
     }
+    // ── The flying gate (GM flight, docs/design/handoff_gm_flight.md) ─────
+    // A flier does not fight: no mob can reach one, so nothing a flier deals
+    // could be answered, and kill credit, loot and XP from the air would land
+    // in the GM's ledger and stats. A cast or a skill is told privately (the
+    // client drops what it began); a swing is dropped silently, as under a
+    // mez or a stun, since it arrives at the swing rate. The honest client
+    // refuses all three first.
+    if conn.is_flying() {
+        let caster = conn.char_id as u64;
+        match &msg {
+            ClientWorldMsg::Attack { .. } => return Outcome::Continue,
+            ClientWorldMsg::CastStartBroadcast { .. } | ClientWorldMsg::CastSpell { .. } => {
+                fan_out_cast_fail(server, &[client_id], caster, FLYING_REFUSAL.to_string());
+                fan_out_mana_update(server, &[client_id], caster, conn.mp, conn.max_mp);
+                return Outcome::Continue;
+            }
+            ClientWorldMsg::UseSkill { skill_name, .. } => {
+                send_skill_fail(server, client_id, skill_name, FLYING_REFUSAL);
+                return Outcome::Continue;
+            }
+            _ => {}
+        }
+    }
     match msg {
         ClientWorldMsg::Connect {
             session_token: _,
@@ -761,11 +814,22 @@ pub fn handle_message(
                 || super::buffs::is_stunned(&conn.active_buffs)
             {
                 Vec3f::ZERO
+            } else if conn.is_flying() {
+                // GM flight: the vertical is the flier's too (climb and
+                // descend), and the boost is a direction up to FLY_BOOST long.
+                // The movement step clamps where it goes.
+                Vec3f {
+                    x: direction.x,
+                    y: direction.y,
+                    z: direction.z,
+                }
+                .clamp_length(super::FLY_BOOST)
             } else {
                 // Only the XZ direction is the client's. Nothing vertical is ever
                 // read from it: the ground decides height (the height model,
                 // `terrain::player_step` pins every player each tick), and there
-                // is no gravity or jumping to simulate.
+                // is no gravity or jumping to simulate. (A GM in flight is the
+                // one exception, above.)
                 let v = Vec3f {
                     x: direction.x,
                     y: 0.0,
@@ -1692,8 +1756,7 @@ pub fn handle_message(
             // Mutating pos makes `is_dirty_for_persist()` true on its own, so the
             // next checkpoint writes the bind location rather than leaving the DB
             // pointing at the death site. The respawn lands standing (fall.rs).
-            conn.vertical = super::fall::Vertical::default();
-            conn.pos = dest;
+            conn.teleport_to(dest);
             Outcome::RespawnTeleport { pos: dest }
         }
 
@@ -2387,6 +2450,39 @@ pub fn handle_message(
                     owner: conn.char_id as u64,
                     item_name,
                     qty,
+                };
+            }
+            // `fly [m/s]` / `fly off`: GM flight
+            // (docs/design/handoff_gm_flight.md). Everything is checked before
+            // the audit row, so a row means the command ran: the speed (A3),
+            // that the GM is alive (GmCommand is on the dead-state whitelist,
+            // so this branch refuses the dead itself), and that a `fly off`
+            // has a flight to end. One row per toggle, never per Move.
+            let fly_arg = if trimmed == "fly" {
+                Some("")
+            } else {
+                trimmed.strip_prefix("fly ").map(str::trim)
+            };
+            if let Some(arg) = fly_arg {
+                let Some(speed) = parse_fly_arg(arg) else {
+                    return Outcome::Continue;
+                };
+                if conn.hp <= 0.0 || conn.death_processed {
+                    return Outcome::Continue;
+                }
+                if speed.is_none() && !conn.is_flying() {
+                    return Outcome::Continue;
+                }
+                let audit_args = match speed {
+                    Some(s) => format!("speed={s:.1}"),
+                    None => "off".to_string(),
+                };
+                if !dev_cmd_allowed(server, conn, client_id, now, "fly", audit_args) {
+                    return Outcome::Continue;
+                }
+                return Outcome::FlyIntent {
+                    requester: client_id,
+                    speed,
                 };
             }
             // Unknown gm sub-command — log and drop.

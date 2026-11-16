@@ -717,15 +717,37 @@ mod tests {
         assert_eq!(t.grid_size(), 400);
         assert_eq!(t.cell_size(), 10.0);
         // The 4 km plate (the client's data/terrain_features.toml): the town
-        // flat at the floor, the Wraith Gate plateau's top, the Greywood
+        // flat at the floor, the Wraith Gate plateau's cliff, the Greywood
         // ridge's wall, the pass through it (its floor at the level of the
         // ground at its mouths), and the mountains at the plate's edge, well
-        // over 160 m everywhere.
+        // over 160 m everywhere. The rolling ground rides over the plateau
+        // and the pass (2026-11-16), so they are held by their shapes, not
+        // by fixed heights.
         assert_eq!(t.ground(0.0, 0.0), t.floor_y());
         assert_eq!(t.mesh_height(12.5, 5.0), Some(0.0));
-        assert_eq!(t.mesh_height(1700.0, 0.0), Some(60.0));
-        assert!(t.ground(-700.0, -900.0) >= 62.0, "the ridge's crest");
-        assert_eq!(t.ground(0.0, -900.0), 6.0, "the pass's floor");
+        // The cliff: the plateau's west lip stands 50 m or more over the
+        // ground one cell past its foot (42 m of fall takes all of max HP).
+        let lip = t.ground(1455.0, 0.0);
+        let foot = t.ground(1435.0, 0.0);
+        assert!(
+            lip - foot >= 50.0,
+            "the Wraith Gate cliff: lip {lip}, foot {foot}"
+        );
+        let crest = t.ground(-700.0, -900.0);
+        assert!(crest >= 62.0, "the ridge's crest: {crest}");
+        // The pass: its floor within a few metres of the ground at both
+        // mouths (no step into it), and far below the ridge beside it.
+        let floor = t.ground(0.0, -900.0);
+        for mouth in [t.ground(0.0, -770.0), t.ground(0.0, -1030.0)] {
+            assert!(
+                (floor - mouth).abs() <= 8.0,
+                "the pass: floor {floor}, a mouth {mouth}"
+            );
+        }
+        assert!(
+            t.ground(60.0, -900.0) - floor >= 40.0,
+            "the pass's walls above its floor {floor}"
+        );
         for (x, z) in [
             (-2000.0, 0.0),
             (2000.0, 0.0),

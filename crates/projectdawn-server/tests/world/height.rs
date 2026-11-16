@@ -830,10 +830,13 @@ async fn a_mob_at_a_face_gives_up_and_walks_home() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_mob_below_the_plateau_ramp_gives_up_on_a_player_on_its_edge() {
     let compiled = projectdawn_server::world::terrain::compiled().clone();
-    let foot_y = compiled.ground(1438.0, -408.0);
+    let foot_y = compiled.ground(1438.0, -422.0);
     let h = start_with_terrain(compiled).await;
-    // A dev spawn lands 3 m in front of the GM (yaw 0 faces -z, north): the watcher at z = -407.
-    let run = nuke_from_a_lip(&h, "ramp", (1435.0, -407.0), (1450.1, -408.0), 30.0, None).await;
+    // A dev spawn lands 3 m in front of the GM (yaw 0 faces -z, north): the watcher at
+    // z = -421, the dummy at -424. The perch is low enough on the ramp that the dummy
+    // is inside Smite's 30 m (the rolling ground of 2026-11-16 lifted the wall to
+    // about 23 m here, about 30 m at the perch's old z = -408, out of reach).
+    let run = nuke_from_a_lip(&h, "ramp", (1435.0, -421.0), (1450.1, -422.0), 30.0, None).await;
     let highest = assert_gave_up_and_went_home(&run);
     // The perch itself: the ramp's edge sees the wall's foot, so the second Smite
     // reaches the evade rule (on the plateau's own cliff the lip cannot see the

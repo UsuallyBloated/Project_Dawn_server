@@ -735,14 +735,19 @@ mod tests {
         );
         let crest = t.ground(-700.0, -900.0);
         assert!(crest >= 62.0, "the ridge's crest: {crest}");
-        // The pass: its floor within a few metres of the ground at both
-        // mouths (no step into it), and far below the ridge beside it.
+        // The pass: walked straight through, from 130 m before it to 130 m
+        // after, the ground never steps up or down more than 30 degrees (no
+        // bank at a mouth: the rolling ground rides over the cut), and its
+        // floor is far below the ridge beside it.
         let floor = t.ground(0.0, -900.0);
-        for mouth in [t.ground(0.0, -770.0), t.ground(0.0, -1030.0)] {
+        let mut z = -640.0_f32;
+        while z > -1160.0 {
+            let rise = (t.ground(0.0, z - 2.0) - t.ground(0.0, z)).abs();
             assert!(
-                (floor - mouth).abs() <= 8.0,
-                "the pass: floor {floor}, a mouth {mouth}"
+                rise <= 2.0 * 30.0_f32.to_radians().tan(),
+                "the pass steps {rise:.2} m over 2 m at z = {z}"
             );
+            z -= 2.0;
         }
         assert!(
             t.ground(60.0, -900.0) - floor >= 40.0,

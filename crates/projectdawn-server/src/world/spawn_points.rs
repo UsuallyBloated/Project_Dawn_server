@@ -155,11 +155,11 @@ impl Spawner {
             // height model's decision 4).
             let x = point.camp.pos[0] + jitter_x;
             let z = point.camp.pos[2] + jitter_z;
-            let spawn_pos = Vec3f {
-                x,
-                y: terrain.ground(x, z),
-                z,
-            };
+            // Clear of the camp's own scenery (a tent, a rock, a wall): a
+            // camp is drawn where the camp is, so a spawn can fall on its set
+            // piece; the mob stands at the nearest free point, and that is
+            // its home.
+            let spawn_pos = terrain.obstacles().place(terrain, Vec3f { x, y: 0.0, z });
             let entity = Entity::from_spawn(idx, spawn_pos, point.camp.mob.clone(), now);
             point.due_at = None;
             out.push(entity);
@@ -326,6 +326,43 @@ mod tests {
         for p in &sp.points {
             assert!(p.due_at.is_none(), "live points must clear due_at");
         }
+    }
+
+    /// A camp's spawn that falls on scenery (the camp's own tent or wall)
+    /// stands its mob at the nearest free point, and that is the mob's home.
+    /// Here a solid covers the whole of the first camp's spawn square.
+    #[test]
+    fn a_spawn_under_scenery_stands_beside_it() {
+        use crate::world::obstacles::{Obstacles, Prism, BODY_RADIUS, P2};
+        let camp = &crate::world::zones::load_camps()[0];
+        let (x, z, r) = (camp.pos[0], camp.pos[2], camp.radius + 1.0);
+        let obstacles =
+            Obstacles::from_prisms(&[Prism::rect(x - r, z - r, x + r, z + r, 0.0, 5.0)]).unwrap();
+        let ground = super::super::terrain::compiled()
+            .clone()
+            .with_obstacles(Arc::new(obstacles));
+        let now = Instant::now();
+        let none = HashMap::new();
+        let mut sp = Spawner::new(now);
+        let spawned = sp.tick(now, &ground, &nobody(&none));
+        let first = spawned
+            .iter()
+            .find(|e| e.spawn_point_idx == 0)
+            .expect("the first camp spawned");
+        assert!(
+            ground.obstacles().is_free(P2::of(first.pos), BODY_RADIUS),
+            "spawned inside the solid at {:?}",
+            first.pos
+        );
+        assert!(
+            first.pos.xz_distance_to(first.spawn_pos) < 1e-4,
+            "and its home is where it stands"
+        );
+        assert!(
+            (first.pos.x - x).abs().max((first.pos.z - z).abs()) < r + 1.0,
+            "beside the solid, not across the zone: {:?}",
+            first.pos
+        );
     }
 
     #[test]

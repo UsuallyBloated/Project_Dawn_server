@@ -33,6 +33,9 @@ pub struct RoamMap {
     /// One flag a triangle: index `(cell z * gs + cell x) * 2`, plus 1 for the
     /// upper one.
     roamable: Vec<bool>,
+    /// What stands on the ground (`obstacles.rs`): a wanderer appears only
+    /// where a body can be put (`spot_ok`).
+    obstacles: std::sync::Arc<crate::world::obstacles::Obstacles>,
 }
 
 impl RoamMap {
@@ -49,6 +52,7 @@ impl RoamMap {
             min_x,
             min_z,
             roamable: vec![false; gs * gs * 2],
+            obstacles: terrain.obstacles_handle(),
         };
         let floor: Vec<bool> = (0..gs * gs * 2)
             .map(|tri| {
@@ -130,6 +134,17 @@ impl RoamMap {
     /// Whether a wanderer may stand at this point.
     pub fn roamable(&self, x: f32, z: f32) -> bool {
         self.triangle_at(x, z).is_some_and(|tri| self.roamable[tri])
+    }
+
+    /// Whether a wanderer may appear at this point: roamable ground, clear of
+    /// every tree, rock and wall, and not a gap closed all round
+    /// (`Obstacles::stands`).
+    pub fn spot_ok(&self, x: f32, z: f32) -> bool {
+        self.roamable(x, z)
+            && self.obstacles.stands(
+                crate::world::obstacles::P2::new(x, z),
+                crate::world::obstacles::BODY_RADIUS,
+            )
     }
 
     /// The roamable share of the whole grid, for the boot line.

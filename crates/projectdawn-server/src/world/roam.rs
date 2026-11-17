@@ -241,10 +241,11 @@ pub fn clear_of_bodies(x: f32, z: f32, bodies: &[Vec3f]) -> bool {
     })
 }
 
-/// A spot a wanderer may stand on: on the roam map and inside its region
-/// (which is never inside the town clearance).
+/// A spot a wanderer may appear on: on the roam map, clear of what stands on
+/// the ground, and inside its region (which is never inside the town
+/// clearance).
 fn standable(map: &RoamMap, region: &Region, x: f32, z: f32) -> bool {
-    region.contains(x, z) && map.roamable(x, z)
+    region.contains(x, z) && map.spot_ok(x, z)
 }
 
 /// A random spot in `region` for a wanderer to appear at: on the roam map,

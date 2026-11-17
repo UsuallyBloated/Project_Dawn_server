@@ -10,6 +10,7 @@
 //! launcher-mode client will be a render-only consumer (sub-task 2).
 
 use super::buffs::{ActiveBuff, BuffEffect};
+use super::obstacles::{BODY_RADIUS, P2};
 use super::roam::{self, Roam};
 use super::roam_map::RoamMap;
 use super::{connection::Vec3f, zones::MobTemplate};
@@ -272,8 +273,14 @@ pub struct Entity {
     pub active_buffs: Vec<ActiveBuff>,
 
     /// Since when, and toward what, this entity has been held by the slope
-    /// rule (`StuckClock`); `None` while it is getting somewhere.
+    /// rule or by what stands on the ground (`StuckClock`); `None` while it
+    /// is getting somewhere.
     pub stuck: Option<StuckClock>,
+
+    /// Which side this entity last went round something that held its step
+    /// (`step_on`): 1 or -1, 0 while its steps go as aimed. It keeps to the
+    /// side, so it follows a wall to its end and does not dither at it.
+    pub detour: i8,
 
     /// A wanderer's region and where it is in its walk (`roam.rs`,
     /// `tick_roam`); `None` for a camp mob, a dev spawn and a summoned pet.
@@ -390,6 +397,7 @@ impl Entity {
             base_stats: PrimaryStats::default(),
             active_buffs: Vec::new(),
             stuck: None,
+            detour: 0,
             roam: None,
         };
         // Single choke point for both spawn paths (camp spawner and dev
@@ -455,6 +463,7 @@ impl Entity {
             base_stats: base,
             active_buffs: Vec::new(),
             stuck: None,
+            detour: 0,
             roam: None,
         }
     }
@@ -701,15 +710,65 @@ impl Entity {
         self.stuck = None;
     }
 
-    /// One step toward `to`, standing on the ground, refused up a face the
-    /// slope rule forbids (the player's own rule, `Terrain::slope_ok`, which
-    /// also refuses a diagonal onto a face). Returns whether it moved.
+    /// One step toward `to`, standing on the ground: turned aside by what
+    /// stands on it exactly as a player's step is (`Obstacles::resolve`, the
+    /// same body radius, so a mob fits wherever a player does), and refused
+    /// up a face the slope rule forbids (the player's own rule,
+    /// `Terrain::slope_ok`, which also refuses a diagonal onto a face).
+    ///
+    /// A step that is held (it gets less than `DETOUR_BELOW` of the way: a
+    /// wall square in front) is tried again turned 45 and then 90 degrees to
+    /// one side, then the other, keeping to the side it last went: the mob
+    /// walks along the wall to its end and comes round.
+    ///
+    /// Returns whether the step was taken as aimed. A refusal, a slide and a
+    /// detour all return false: the stuck clock starts on any of them and
+    /// ends when the mob is a metre nearer its goal, and the evade rule
+    /// reads them as "not on a clear run at its target".
     fn step_on(&mut self, terrain: &crate::world::terrain::Terrain, to: Vec3f) -> bool {
+        // Sine and cosine of the two turns tried.
+        const TURNS: [(f32, f32); 2] = [
+            (
+                std::f32::consts::FRAC_1_SQRT_2,
+                std::f32::consts::FRAC_1_SQRT_2,
+            ),
+            (1.0, 0.0),
+        ];
+        let obstacles = terrain.obstacles();
+        let from = P2::of(self.pos);
+        let aim = P2::of(to);
+        let want = from.dist_to(aim);
+        let direct = obstacles.resolve(from, aim, BODY_RADIUS);
+        let mut end = P2::new(direct.x, direct.z);
+        if !direct.deflected {
+            self.detour = 0;
+        } else if want > 0.0 && from.dist_to(end) < want * crate::world::DETOUR_BELOW {
+            let first: f32 = if self.detour < 0 { -1.0 } else { 1.0 };
+            let (dx, dz) = (aim.x - from.x, aim.z - from.z);
+            'sides: for side in [first, -first] {
+                for (sin, cos) in TURNS {
+                    let s = sin * side;
+                    let turned = P2::new(from.x + dx * cos - dz * s, from.z + dx * s + dz * cos);
+                    let r = obstacles.resolve(from, turned, BODY_RADIUS);
+                    let got = P2::new(r.x, r.z);
+                    if from.dist_to(got) >= want * crate::world::DETOUR_BELOW {
+                        end = got;
+                        self.detour = side as i8;
+                        break 'sides;
+                    }
+                }
+            }
+        }
+        let to = Vec3f {
+            x: end.x,
+            y: to.y,
+            z: end.z,
+        };
         if !terrain.slope_ok(self.pos, to) {
             return false;
         }
         self.pos = terrain.ground_vec(to);
-        true
+        !direct.deflected
     }
 
     /// The stuck clock after a step toward `goal`, now `dist` away, was tried
@@ -1603,15 +1662,30 @@ impl Entity {
     }
 
     /// One roam step to `to`, taken only onto the roam map (and never against
-    /// the slope rule, which the map's floors satisfy anyway). Returns
-    /// whether it moved. A refusal here is not a player's and never counts on
-    /// the `slope_refusals` health line.
+    /// the slope rule, which the map's floors satisfy anyway), and turned
+    /// aside by what stands on the ground as any step is: an ambling animal
+    /// slides round a trunk. Returns whether it moved; a step held to less
+    /// than `DETOUR_BELOW` of its way (a wall, a rock square in front) does
+    /// not, which ends the leg. A refusal here is not a player's and never
+    /// counts on the `slope_refusals` health line.
     fn roam_step(
         &mut self,
         map: &RoamMap,
         terrain: &crate::world::terrain::Terrain,
         to: Vec3f,
     ) -> bool {
+        let from = P2::of(self.pos);
+        let r = terrain.obstacles().resolve(from, P2::of(to), BODY_RADIUS);
+        let got = P2::new(r.x, r.z);
+        if r.deflected && from.dist_to(got) < from.dist_to(P2::of(to)) * crate::world::DETOUR_BELOW
+        {
+            return false;
+        }
+        let to = Vec3f {
+            x: got.x,
+            y: to.y,
+            z: got.z,
+        };
         if !map.roamable(to.x, to.z) || !terrain.slope_ok(self.pos, to) {
             return false;
         }
@@ -2418,6 +2492,143 @@ mod tests {
             }
         }
         panic!("never reached the face: {:?}", e.pos);
+    }
+
+    /// A flat plate, 80 m across, with `prisms` standing on it.
+    fn ground_with(prisms: &[crate::world::obstacles::Prism]) -> crate::world::terrain::Terrain {
+        crate::world::terrain::Terrain::flat(8, 10.0, 0.0).with_obstacles(std::sync::Arc::new(
+            crate::world::obstacles::Obstacles::from_prisms(prisms).unwrap(),
+        ))
+    }
+
+    fn on_plate(x: f32, z: f32) -> Vec3f {
+        Vec3f { x, y: 0.0, z }
+    }
+
+    /// A mob set chasing `player` from `from`.
+    fn chaser(from: Vec3f, player: EntityId, start: Instant) -> Entity {
+        let mut e = Entity::from_spawn(0, from, template(), start);
+        e.threat.insert(player, 10.0);
+        e.target = Some(player);
+        e.transition(EnemyState::Chase, start);
+        e
+    }
+
+    /// A house stands square between a mob and its target. The mob is held
+    /// at the wall, walks along it to its end, comes round and attacks; at
+    /// no tick is it inside the house. Before obstacles it walked through
+    /// the house; with obstacles and no way round, it would push into the
+    /// wall until it gave up.
+    #[test]
+    fn a_mob_walks_round_a_house_to_its_target() {
+        use crate::world::obstacles::Prism;
+        let t = ground_with(&[Prism::rect(-5.0, -5.0, 5.0, 5.0, 0.0, 4.0)]);
+        let start = Instant::now();
+        let player: EntityId = 1;
+        let mut e = chaser(on_plate(-12.0, 0.0), player, start);
+        let targets = vec![(player, on_plate(12.0, 0.0))];
+        let mut now = start;
+        let mut arrived = None;
+        for tick in 0..400 {
+            now += Duration::from_millis(50);
+            let _ = e.tick_ai(&targets, &[], &[], 0.05, now, &t);
+            assert!(
+                t.obstacles().is_free(P2::of(e.pos), BODY_RADIUS),
+                "inside the house at {:?}",
+                e.pos
+            );
+            if matches!(e.state, EnemyState::Attack) {
+                arrived = Some(tick);
+                break;
+            }
+        }
+        assert!(
+            arrived.is_some(),
+            "never came round: {:?} at {:?}",
+            e.state,
+            e.pos
+        );
+        assert_eq!(e.target, Some(player));
+    }
+
+    /// A trunk on the way costs a mob a step aside and nothing else: it
+    /// slides round, arrives, and is never evading on the way (a fight in a
+    /// wood must not turn mobs immune at every tree).
+    #[test]
+    fn a_mob_slides_round_a_trunk_and_never_evades() {
+        use crate::world::obstacles::Prism;
+        let t = ground_with(&[Prism::round(0.0, 0.2, 0.3, 6, 0.0, 8.0)]);
+        let start = Instant::now();
+        let player: EntityId = 1;
+        let mut e = chaser(on_plate(-8.0, 0.0), player, start);
+        let targets = vec![(player, on_plate(8.0, 0.0))];
+        let mut now = start;
+        let mut arrived = false;
+        for _ in 0..200 {
+            now += Duration::from_millis(50);
+            let _ = e.tick_ai(&targets, &[], &[], 0.05, now, &t);
+            assert!(
+                t.obstacles().is_free(P2::of(e.pos), BODY_RADIUS),
+                "inside the trunk at {:?}",
+                e.pos
+            );
+            assert!(!e.is_evading(now), "evading at a tree, at {:?}", e.pos);
+            if matches!(e.state, EnemyState::Attack) {
+                arrived = true;
+                break;
+            }
+        }
+        assert!(arrived, "never arrived: {:?} at {:?}", e.state, e.pos);
+    }
+
+    /// A mob in a dead end (three walls, its target beyond the closed one)
+    /// has no way round: it is evading once the grace has passed, so nobody
+    /// kills it through the wall, and gives up after `MOB_STUCK_SECS`.
+    #[test]
+    fn a_mob_in_a_dead_end_evades_and_gives_up() {
+        use crate::world::obstacles::Prism;
+        let t = ground_with(&[
+            Prism::rect(4.0, -6.0, 5.0, 6.0, 0.0, 4.0),
+            Prism::rect(-10.0, -6.0, 5.0, -5.0, 0.0, 4.0),
+            Prism::rect(-10.0, 5.0, 5.0, 6.0, 0.0, 4.0),
+        ]);
+        let start = Instant::now();
+        let player: EntityId = 1;
+        let mut e = chaser(on_plate(-8.0, 0.0), player, start);
+        let targets = vec![(player, on_plate(12.0, 0.0))];
+        let mut now = start;
+        // To the closed end: the clock starts at the first step not taken as aimed.
+        while e.stuck.is_none() {
+            now += Duration::from_millis(50);
+            let _ = e.tick_ai(&targets, &[], &[], 0.05, now, &t);
+            assert!(
+                now.duration_since(start).as_secs_f32() < 10.0,
+                "never reached the wall"
+            );
+        }
+        let held_at = now;
+        let mut evaded = false;
+        while now.duration_since(held_at).as_secs_f32() < crate::world::MOB_STUCK_SECS - 0.5 {
+            now += Duration::from_millis(50);
+            let _ = e.tick_ai(&targets, &[], &[], 0.05, now, &t);
+            assert!(e.pos.x < 4.0, "through the wall at {:?}", e.pos);
+            if now.duration_since(held_at).as_secs_f32() > crate::world::EVADE_GRACE_SECS + 0.2 {
+                assert!(e.is_evading(now), "not evading while held, at {:?}", e.pos);
+                evaded = true;
+            }
+        }
+        assert!(evaded);
+        assert!(matches!(e.state, EnemyState::Chase), "still trying");
+        for _ in 0..20 {
+            now += Duration::from_millis(50);
+            let _ = e.tick_ai(&targets, &[], &[], 0.05, now, &t);
+        }
+        assert!(
+            matches!(e.state, EnemyState::Leash | EnemyState::Idle),
+            "gave up: {:?}",
+            e.state
+        );
+        assert_eq!(e.target, None);
     }
 
     #[test]

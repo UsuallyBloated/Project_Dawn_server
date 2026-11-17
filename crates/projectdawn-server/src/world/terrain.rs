@@ -150,6 +150,11 @@ impl Terrain {
         &self.obstacles
     }
 
+    /// The same, to keep (the roam map holds its own handle).
+    pub fn obstacles_handle(&self) -> Arc<Obstacles> {
+        self.obstacles.clone()
+    }
+
     /// A flat terrain at the floor: what today's world is.
     pub fn flat(grid_size: usize, cell_size: f32, floor_y: f32) -> Self {
         Self::from_heights(

@@ -255,3 +255,34 @@ async fn a_spell_through_a_house_is_refused_and_lands_round_the_corner() {
         "with nothing between them the Smite lands"
     );
 }
+
+/// A pet summoned by an owner standing against a house appears on the owner's
+/// side of the wall. It is stood 1.5 m east of its owner; before the model
+/// that was a point inside the house.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pet_summoned_at_a_wall_appears_on_its_owners_side() {
+    let h = start_with_obstacles(yard()).await;
+    let obstacles = yard();
+    // Half a metre off the house's west face.
+    let (mut a, a_id) = gm_at(&h, "wallsummoner", "Necromancer", 6, HOUSE.0 - 0.5, Z).await;
+
+    a.send_cast_start("Summon Skeleton", 3.0);
+    a.pump_for(Duration::from_millis(3_200)).await;
+    a.send_cast_spell("Summon Skeleton", None);
+    let spawn = a
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(5),
+            |m| matches!(m, ServerWorldMsg::PetSpawn { owner, .. } if *owner == a_id as u64),
+        )
+        .await
+        .expect("the skeleton is summoned");
+    let ServerWorldMsg::PetSpawn { pos, .. } = spawn else {
+        unreachable!()
+    };
+    assert!(
+        obstacles.is_free(P2::new(pos.x, pos.z), BODY_RADIUS),
+        "the pet appeared inside the house: {pos:?}"
+    );
+    assert!(pos.x < HOUSE.0, "on its owner's side of the wall: {pos:?}");
+}

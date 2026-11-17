@@ -26,12 +26,19 @@ pub(super) fn summon_scaled_pet(
 ) -> Option<(EntityId, u32)> {
     let template = pet_templates::scaled(pet_type, owner_level, variance)?;
     let pet_level = template.level;
-    // Spawn at the owner's pos + 1.5 m east so the pet doesn't clip the
-    // player capsule, standing on the ground there (the height model).
+    // Spawn 1.5 m east of the owner so the pet doesn't clip the player
+    // capsule, standing on the ground there (the height model). The 1.5 m is
+    // walked from the owner, not jumped to: with a wall at the owner's
+    // shoulder the pet appears on the owner's side of it, never beyond.
+    let beside = terrain.obstacles().resolve(
+        crate::world::obstacles::P2::of(owner_pos),
+        crate::world::obstacles::P2::new(owner_pos.x + 1.5, owner_pos.z),
+        crate::world::obstacles::BODY_RADIUS,
+    );
     let spawn_pos = terrain.ground_vec(Vec3f {
-        x: owner_pos.x + 1.5,
+        x: beside.x,
         y: owner_pos.y,
-        z: owner_pos.z,
+        z: beside.z,
     });
     let pet_id = summon_pet_for_owner(
         server,

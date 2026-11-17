@@ -122,10 +122,11 @@ pub(super) fn run_spawning(
             .map(|(id, _)| *id)
             .collect();
         for (pos, mob) in dev_spawn_intents.drain(..) {
-            // On the ground in front of the GM, like a camp spawn.
+            // On the ground in front of the GM, clear of what stands there,
+            // like a camp spawn.
             let entity = crate::world::entity::Entity::from_spawn(
                 usize::MAX,
-                terrain.ground_vec(pos),
+                terrain.obstacles().place(terrain, pos),
                 mob,
                 now,
             );

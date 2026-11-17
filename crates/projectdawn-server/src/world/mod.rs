@@ -236,6 +236,13 @@ pub const MOB_STUCK_SECS: f32 = 8.0;
 /// never give up. A knob.
 pub const STUCK_PROGRESS_M: f32 = 1.0;
 
+/// A mob's or a pet's step that gets less than this share of the way it
+/// aimed (a wall square in front of it) is tried again turned to one side,
+/// then the other (`Entity::step_on`): it walks along the wall to its end
+/// instead of pushing into it. There is no pathfinder; this is what lets a
+/// mob round a house. A knob.
+pub const DETOUR_BELOW: f32 = 0.5;
+
 /// How long a chasing mob may be held below a face before it evades
 /// (`Entity::is_evading`, WoW's rule, the user's call of 2026-11-05): from then
 /// until it gives up, and on its walk home, it takes no damage. A short grace,

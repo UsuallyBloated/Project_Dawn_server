@@ -39,6 +39,8 @@ mod loot;
 mod named;
 mod npcs;
 pub mod obstacles;
+#[cfg(test)]
+mod obstacles_content;
 mod persistence;
 mod pet_templates;
 mod progression;
@@ -50,8 +52,6 @@ mod safe_areas;
 mod songs;
 // `pub` so the persistence layer (`crate::db::load_character`) can read MAX_LEVEL
 // to clamp a stored level into the cap on load.
-#[cfg(test)]
-mod obstacles_content;
 pub mod skills;
 mod spawn_points;
 mod spell_gems;
@@ -237,11 +237,27 @@ pub const MOB_STUCK_SECS: f32 = 8.0;
 pub const STUCK_PROGRESS_M: f32 = 1.0;
 
 /// A mob's or a pet's step that gets less than this share of the way it
-/// aimed (a wall square in front of it) is tried again turned to one side,
-/// then the other (`Entity::step_on`): it walks along the wall to its end
-/// instead of pushing into it. There is no pathfinder; this is what lets a
-/// mob round a house. A knob.
+/// aimed (a wall square in front of it) is held: it sets off along the wall
+/// instead of pushing into it (`Entity::step_on`). There is no pathfinder;
+/// this is what lets a mob round a house. A knob.
 pub const DETOUR_BELOW: f32 = 0.5;
+
+/// A mob walking along a wall turns for its goal again once this much of the
+/// straight line to the goal is clear of everything a body would touch
+/// (`Entity::step_on`). Long enough to be past the wall's end and not turn
+/// back into it; short enough that a tree further on does not keep it on
+/// the wall. A knob.
+pub const DETOUR_LOOKAHEAD: f32 = 3.0;
+
+/// How far along a wall a held mob looks for its end, each way, to choose
+/// the shorter way round (`scout_way_round`). About as far as it could walk
+/// before `MOB_STUCK_SECS` ends the attempt anyway. A knob.
+pub const DETOUR_SCOUT_M: f32 = 24.0;
+
+/// A held mob that has had this long of steps all taken as aimed is no longer
+/// held (`StuckClock`): it bumped something, went round, and is running
+/// freely, whether or not it has gained on its target. A knob.
+pub const STUCK_CLEAN_SECS: f32 = 1.0;
 
 /// How long a chasing mob may be held below a face before it evades
 /// (`Entity::is_evading`, WoW's rule, the user's call of 2026-11-05): from then

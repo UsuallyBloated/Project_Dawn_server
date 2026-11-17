@@ -19,7 +19,6 @@ pub(super) fn apply_casts(
         group_manager,
         corpses,
         terrain,
-        obstacles,
         ..
     } = world;
     let Intents {
@@ -1761,7 +1760,7 @@ pub(super) fn apply_casts(
                     // Every arrival stands on the ground, clear of whatever
                     // stands on it, whatever the bind or the arrival point
                     // was saved with.
-                    let dest = obstacles.place(terrain, dest);
+                    let dest = terrain.obstacles().place(terrain, dest);
                     let mut movers: Vec<ClientId> = vec![caster_cid];
                     if spell.port_group {
                         if let Some(g) = group_manager.group_of(caster_cid) {
@@ -1869,11 +1868,21 @@ pub(super) fn apply_casts(
                                     continue;
                                 };
                                 let old_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
-                                pet.pos = Vec3f {
-                                    x: dest.x + 1.5,
+                                // 1.5 m east of where its owner arrives, as at
+                                // a summon, and walked there from the owner in
+                                // the same way: with a wall at the arrival
+                                // point's shoulder the pet lands on its
+                                // owner's side, never in the wall or beyond.
+                                let beside = terrain.obstacles().resolve(
+                                    crate::world::obstacles::P2::of(dest),
+                                    crate::world::obstacles::P2::new(dest.x + 1.5, dest.z),
+                                    crate::world::obstacles::BODY_RADIUS,
+                                );
+                                pet.pos = terrain.ground_vec(Vec3f {
+                                    x: beside.x,
                                     y: dest.y,
-                                    z: dest.z,
-                                };
+                                    z: beside.z,
+                                });
                                 // last_bcast_pos is left where it was, so the
                                 // move fans on the next tick instead of
                                 // waiting for the keepalive.

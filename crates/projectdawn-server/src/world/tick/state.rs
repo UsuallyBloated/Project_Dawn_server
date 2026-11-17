@@ -123,10 +123,9 @@ pub(super) struct WorldState {
     pub(super) corpses: HashMap<EntityId, crate::world::corpses::Corpse>,
     /// The ground (world/terrain.rs): what every body stands on and every
     /// sight line is checked against.
+    /// What stands on it rides with it (`Terrain::obstacles`,
+    /// world/obstacles.rs): what stops a body and blocks a line of sight.
     pub(super) terrain: std::sync::Arc<crate::world::terrain::Terrain>,
-    /// What stands on the ground (world/obstacles.rs): what stops a body and
-    /// blocks a line of sight.
-    pub(super) obstacles: std::sync::Arc<crate::world::obstacles::Obstacles>,
     /// Where a wandering animal may stand (world/roam_map.rs): the floors
     /// reachable from the town without crossing a face.
     pub(super) roam_map: std::sync::Arc<crate::world::roam_map::RoamMap>,

@@ -60,10 +60,10 @@ pub(super) fn run_movement(
         loot_bags,
         corpses,
         terrain,
-        obstacles,
         tick_health,
         ..
     } = world;
+    let obstacles = terrain.obstacles();
     // 5. Integrate movement intent exactly once per tick. The Move
     //    handler stores the latest direction on the connection; we
     //    advance position here so the rate is bound to wall-clock

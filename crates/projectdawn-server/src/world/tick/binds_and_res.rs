@@ -26,7 +26,6 @@ pub(super) async fn apply_res_accepts(world: &mut WorldState, q: &mut Intents, n
         connections,
         corpses,
         terrain,
-        obstacles,
         ..
     } = world;
     let Intents {
@@ -144,7 +143,7 @@ pub(super) async fn apply_res_accepts(world: &mut WorldState, q: &mut Intents, n
             // Beside the corpse, on the ground, standing (fall.rs), clear of
             // whatever stands there (a corpse lies where a body stood, so
             // this only matters if the scenery changed since).
-            let corpse_pos = obstacles.place(terrain, corpse_pos);
+            let corpse_pos = terrain.obstacles().place(terrain, corpse_pos);
             conn.teleport_to(corpse_pos);
             handlers::send_teleport(&mut *server, responder_cid, corpse_pos);
             if refund > 0 {

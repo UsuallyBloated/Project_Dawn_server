@@ -10,7 +10,6 @@ pub(super) fn drain_messages(world: &mut WorldState, q: &mut Intents, now: Insta
         server,
         connections,
         terrain,
-        obstacles,
         ..
     } = world;
     // 3. Drain incoming application messages on each channel for each client.
@@ -43,15 +42,7 @@ pub(super) fn drain_messages(world: &mut WorldState, q: &mut Intents, now: Insta
             continue;
         };
         for outcome in outcomes {
-            route_outcome(
-                &mut *server,
-                connections,
-                q,
-                client_id,
-                outcome,
-                terrain,
-                obstacles,
-            );
+            route_outcome(&mut *server, connections, q, client_id, outcome, terrain);
         }
     }
 }
@@ -138,7 +129,6 @@ fn route_outcome(
     client_id: ClientId,
     outcome: Outcome,
     terrain: &crate::world::terrain::Terrain,
-    obstacles: &crate::world::obstacles::Obstacles,
 ) {
     let Intents {
         to_disconnect,
@@ -619,7 +609,7 @@ fn route_outcome(
             // a bind whose ground was since lowered would read to the
             // movement step as a walk-off, and the respawn would fall. And
             // clear of whatever stands there now (world/obstacles.rs).
-            let dest = obstacles.place(terrain, pos);
+            let dest = terrain.obstacles().place(terrain, pos);
             if let Some(conn) = connections.get_mut(&client_id) {
                 conn.teleport_to(dest);
             }

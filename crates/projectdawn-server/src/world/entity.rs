@@ -277,10 +277,11 @@ pub struct Entity {
     /// is getting somewhere.
     pub stuck: Option<StuckClock>,
 
-    /// Which side this entity last went round something that held its step
-    /// (`step_on`): 1 or -1, 0 while its steps go as aimed. It keeps to the
-    /// side, so it follows a wall to its end and does not dither at it.
-    pub detour: i8,
+    /// The way this entity is walking along something that held its step
+    /// (`step_on`): a unit direction on the ground plane, `None` while its
+    /// steps go as aimed. It keeps on that way until its run at its goal is
+    /// clear, so it follows a wall to its end and does not dither at it.
+    pub detour: Option<(f32, f32)>,
 
     /// A wanderer's region and where it is in its walk (`roam.rs`,
     /// `tick_roam`); `None` for a camp mob, a dev spawn and a summoned pet.
@@ -289,12 +290,15 @@ pub struct Entity {
     pub roam: Option<Roam>,
 }
 
-/// The stuck clock (the first hills): started by a step the slope rule refused
-/// (a face the entity cannot climb), and kept until the entity comes
-/// `STUCK_PROGRESS_M` closer to the same goal than it was then, or the goal
-/// changes. Read against `MOB_STUCK_SECS`. A step taken does not stop it: a mob
-/// sliding along a face's foot after a player walking the lip above moves, and
-/// gets no closer.
+/// The stuck clock (the first hills): started by a step that did not get on
+/// with it (the slope rule refused it at a face, or something on the ground
+/// held it and it is walking round), and kept until the entity comes
+/// `STUCK_PROGRESS_M` closer to the same goal than it was then, the goal
+/// changes, or it has had `STUCK_CLEAN_SECS` of steps all taken as aimed. Read
+/// against `MOB_STUCK_SECS`. One step taken does not stop it: a mob sliding
+/// along a face's foot after a player walking the lip above moves, and gets no
+/// closer. A whole second of them does: a mob that bumped one tree in a chase
+/// and has run freely since is not held, however fast its target runs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StuckClock {
     pub since: Instant,
@@ -302,8 +306,11 @@ pub struct StuckClock {
     pub goal: Option<EntityId>,
     /// Its distance to the goal when the clock started.
     pub start_dist: f32,
-    /// The last step the slope rule refused (`Entity::is_evading`).
+    /// The last step that did not get on with it (`Entity::is_evading`).
     pub last_refused: Instant,
+    /// Since when every step has been taken as aimed; `None` after one that
+    /// was not.
+    pub clean_since: Option<Instant>,
 }
 
 /// Track 13 — five-stat block carried by an Entity. Used by pets so
@@ -397,7 +404,7 @@ impl Entity {
             base_stats: PrimaryStats::default(),
             active_buffs: Vec::new(),
             stuck: None,
-            detour: 0,
+            detour: None,
             roam: None,
         };
         // Single choke point for both spawn paths (camp spawner and dev
@@ -463,7 +470,7 @@ impl Entity {
             base_stats: base,
             active_buffs: Vec::new(),
             stuck: None,
-            detour: 0,
+            detour: None,
             roam: None,
         }
     }
@@ -708,28 +715,38 @@ impl Entity {
         self.state = new_state;
         self.state_entered_at = now;
         self.stuck = None;
+        self.detour = None;
     }
 
-    /// One step toward `to`, standing on the ground: turned aside by what
-    /// stands on it exactly as a player's step is (`Obstacles::resolve`, the
-    /// same body radius, so a mob fits wherever a player does), and refused
-    /// up a face the slope rule forbids (the player's own rule,
-    /// `Terrain::slope_ok`, which also refuses a diagonal onto a face).
+    /// One step of `step` metres toward `goal`, standing on the ground: turned
+    /// aside by what stands on it exactly as a player's step is
+    /// (`Obstacles::resolve`, the same body radius, so a mob fits wherever a
+    /// player does), and refused up a face the slope rule forbids (the
+    /// player's own rule, `Terrain::slope_ok`, which also refuses a diagonal
+    /// onto a face).
     ///
-    /// A step that is held (it gets less than `DETOUR_BELOW` of the way: a
-    /// wall square in front) is tried again turned 45 and then 90 degrees to
-    /// one side, then the other, keeping to the side it last went: the mob
-    /// walks along the wall to its end and comes round.
+    /// There is no pathfinder; this is what gets a mob round a wall. A step
+    /// held to less than `DETOUR_BELOW` of its way (a wall square in front)
+    /// is tried turned 45 and 90 degrees to each side, and the mob sets off
+    /// along the wall the way that works (`detour`). It then keeps on that
+    /// way, bending with the wall, until its run at the goal is clear for
+    /// `DETOUR_LOOKAHEAD` metres, and only then turns for the goal again.
+    /// Turning back the moment a step toward the goal slides is what a
+    /// greedy walker does, and it never rounds a wall whose far side holds
+    /// its target: the slide always leads back to the point nearest the
+    /// target. A wall that ends in a corner sends it the other way.
     ///
     /// Returns whether the step got on with it: taken as aimed, or turned
     /// aside but still most of the way (a glance off a trunk). A step the
-    /// slope rule refused, or one held so short that it needed a way round
-    /// (whether or not one was found), returns false: the stuck clock starts
-    /// on those and ends when the mob is a metre nearer its goal, and the
-    /// evade rule reads them as "not on a clear run at its target". A mob
-    /// sliding past trees in a chase is never held; one following a wall is,
-    /// for as long as it takes.
-    fn step_on(&mut self, terrain: &crate::world::terrain::Terrain, to: Vec3f) -> bool {
+    /// slope rule refused, a held one, and every step along a wall return
+    /// false: the stuck clock starts on those, and the evade rule reads them
+    /// as "not on a clear run at its target".
+    fn step_on(
+        &mut self,
+        terrain: &crate::world::terrain::Terrain,
+        goal: Vec3f,
+        step: f32,
+    ) -> bool {
         // Sine and cosine of the two turns tried.
         const TURNS: [(f32, f32); 2] = [
             (
@@ -739,29 +756,80 @@ impl Entity {
             (1.0, 0.0),
         ];
         let obstacles = terrain.obstacles();
+        let to = self.pos.step_toward(goal, step);
         let from = P2::of(self.pos);
         let aim = P2::of(to);
         let want = from.dist_to(aim);
-        let direct = obstacles.resolve(from, aim, BODY_RADIUS);
-        let mut end = P2::new(direct.x, direct.z);
-        let held =
-            direct.deflected && want > 0.0 && from.dist_to(end) < want * crate::world::DETOUR_BELOW;
-        if !direct.deflected {
-            self.detour = 0;
-        } else if held {
-            let first: f32 = if self.detour < 0 { -1.0 } else { 1.0 };
-            let (dx, dz) = (aim.x - from.x, aim.z - from.z);
-            'sides: for side in [first, -first] {
-                for (sin, cos) in TURNS {
-                    let s = sin * side;
-                    let turned = P2::new(from.x + dx * cos - dz * s, from.z + dx * s + dz * cos);
-                    let r = obstacles.resolve(from, turned, BODY_RADIUS);
-                    let got = P2::new(r.x, r.z);
-                    if from.dist_to(got) >= want * crate::world::DETOUR_BELOW {
-                        end = got;
-                        self.detour = side as i8;
-                        break 'sides;
+        let enough = want * crate::world::DETOUR_BELOW;
+        let walk = |to: P2| {
+            let r = obstacles.resolve(from, to, BODY_RADIUS);
+            (P2::new(r.x, r.z), r.deflected)
+        };
+
+        // Walking along a wall: leave it once the way to the goal is open.
+        if self.detour.is_some() {
+            let left = from.dist_to(P2::of(goal));
+            let look = left.min(crate::world::DETOUR_LOOKAHEAD);
+            let ahead = if left > 0.0 {
+                P2::new(
+                    from.x + (goal.x - from.x) / left * look,
+                    from.z + (goal.z - from.z) / left * look,
+                )
+            } else {
+                from
+            };
+            if obstacles.run_clear(from, ahead, BODY_RADIUS) {
+                self.detour = None;
+            }
+        }
+
+        let mut end = from;
+        let mut on_its_way = false;
+        let mut found = false;
+        if let Some((ax, az)) = self.detour {
+            // On along the wall, bending with it.
+            let (got, _) = walk(P2::new(from.x + ax * want, from.z + az * want));
+            let moved = from.dist_to(got);
+            if want > 0.0 && moved >= enough {
+                self.detour = Some(((got.x - from.x) / moved, (got.z - from.z) / moved));
+                end = got;
+                found = true;
+            } else {
+                // The wall ended in a corner: look for a way afresh.
+                self.detour = None;
+            }
+        }
+        if !found {
+            let (direct, deflected) = walk(aim);
+            if !deflected || want <= 0.0 || from.dist_to(direct) >= enough {
+                // As aimed, or a glance.
+                end = direct;
+                on_its_way = true;
+            } else {
+                // Held. To one side or the other, whichever moves; when both
+                // do, the side whose way round is shorter (`scout_way_round`).
+                end = direct;
+                let (dx, dz) = (aim.x - from.x, aim.z - from.z);
+                let mut best: Option<(P2, f32)> = None;
+                for side in [1.0f32, -1.0] {
+                    for (sin, cos) in TURNS {
+                        let s = sin * side;
+                        let turned =
+                            P2::new(from.x + dx * cos - dz * s, from.z + dx * s + dz * cos);
+                        let (got, _) = walk(turned);
+                        if from.dist_to(got) >= enough {
+                            let cost = scout_way_round(obstacles, from, got, P2::of(goal));
+                            if best.is_none_or(|(_, b)| cost < b - 1e-3) {
+                                best = Some((got, cost));
+                            }
+                            break;
+                        }
                     }
+                }
+                if let Some((got, _)) = best {
+                    let moved = from.dist_to(got);
+                    self.detour = Some(((got.x - from.x) / moved, (got.z - from.z) / moved));
+                    end = got;
                 }
             }
         }
@@ -774,7 +842,7 @@ impl Entity {
             return false;
         }
         self.pos = terrain.ground_vec(to);
-        !held
+        on_its_way
     }
 
     /// The stuck clock after a step toward `goal`, now `dist` away, was tried
@@ -795,15 +863,24 @@ impl Entity {
         }
         if !moved {
             match self.stuck.as_mut() {
-                Some(c) => c.last_refused = now,
+                Some(c) => {
+                    c.last_refused = now;
+                    c.clean_since = None;
+                }
                 None => {
                     self.stuck = Some(StuckClock {
                         since: now,
                         goal,
                         start_dist: dist,
                         last_refused: now,
+                        clean_since: None,
                     })
                 }
+            }
+        } else if let Some(c) = self.stuck.as_mut() {
+            let since = *c.clean_since.get_or_insert(now);
+            if now.duration_since(since).as_secs_f32() >= crate::world::STUCK_CLEAN_SECS {
+                self.stuck = None;
             }
         }
         self.stuck.is_some_and(|c| {
@@ -1262,7 +1339,7 @@ impl Entity {
                     let snare = self.snare_factor();
                     let step = self.move_speed() * (1.0 - snare) * dt;
                     self.face_toward(target_pos);
-                    let moved = self.step_on(terrain, self.pos.step_toward(target_pos, step));
+                    let moved = self.step_on(terrain, target_pos, step);
                     let dist = self.pos.distance_to(target_pos);
                     if self.stuck_too_long(moved, Some(target_id), dist, now) {
                         // A target it cannot reach (above a face): drop it.
@@ -1301,7 +1378,7 @@ impl Entity {
                     let snare = self.snare_factor();
                     let step = self.move_speed() * (1.0 - snare) * dt;
                     self.face_toward(owner_pos);
-                    let moved = self.step_on(terrain, self.pos.step_toward(owner_pos, step));
+                    let moved = self.step_on(terrain, owner_pos, step);
                     let dist = self.pos.xz_distance_to(owner_pos);
                     if self.stuck_too_long(moved, Some(owner_id), dist, now) {
                         // An owner it cannot reach (on a ledge): EQ's pets warp
@@ -1384,7 +1461,7 @@ impl Entity {
         let snare = self.snare_factor();
         let step = self.enraged_speed() * (1.0 - snare) * dt;
         self.face_toward(target_pos);
-        let moved = self.step_on(terrain, self.pos.step_toward(target_pos, step));
+        let moved = self.step_on(terrain, target_pos, step);
         let dist = self.pos.distance_to(target_pos);
         if self.stuck_too_long(moved, Some(target_id), dist, now) {
             // EQ's rule: a mob that cannot reach its target (above a face)
@@ -1475,7 +1552,7 @@ impl Entity {
         }
         let step = self.enraged_speed() * dt;
         self.face_toward(self.spawn_pos);
-        let moved = self.step_on(terrain, self.pos.step_toward(self.spawn_pos, step));
+        let moved = self.step_on(terrain, self.spawn_pos, step);
         let dist = self.pos.distance_to(self.spawn_pos);
         if self.stuck_too_long(moved, None, dist, now) {
             // Home is up a face it came down: EQ's mobs warp home. The home
@@ -1708,6 +1785,57 @@ impl Entity {
         }
         self.yaw = dx.atan2(dz);
     }
+}
+
+/// How far it is to `goal` going along a wall from `from` by way of `first`
+/// (one step along it): the walk along the wall to where the run at the goal
+/// comes clear, plus the straight run from there. What a held mob compares
+/// its two ways round by, so it takes the shorter. It looks
+/// `DETOUR_SCOUT_M` along the wall; a way with no end in that distance, or
+/// one that stops in a corner, costs more than any way that has one, and
+/// between two such ways the one that ends nearer the goal costs less.
+fn scout_way_round(
+    obstacles: &crate::world::obstacles::Obstacles,
+    from: P2,
+    first: P2,
+    goal: P2,
+) -> f32 {
+    const STRIDE: f32 = 1.0;
+    let mut walked = from.dist_to(first);
+    if walked <= 0.0 {
+        return f32::INFINITY;
+    }
+    let mut dir = ((first.x - from.x) / walked, (first.z - from.z) / walked);
+    let mut p = first;
+    while walked < crate::world::DETOUR_SCOUT_M {
+        let left = p.dist_to(goal);
+        let look = left.min(crate::world::DETOUR_LOOKAHEAD);
+        let ahead = if left > 0.0 {
+            P2::new(
+                p.x + (goal.x - p.x) / left * look,
+                p.z + (goal.z - p.z) / left * look,
+            )
+        } else {
+            p
+        };
+        if obstacles.run_clear(p, ahead, BODY_RADIUS) {
+            return walked + left;
+        }
+        let r = obstacles.resolve(
+            p,
+            P2::new(p.x + dir.0 * STRIDE, p.z + dir.1 * STRIDE),
+            BODY_RADIUS,
+        );
+        let got = P2::new(r.x, r.z);
+        let moved = p.dist_to(got);
+        if moved < STRIDE * crate::world::DETOUR_BELOW {
+            break;
+        }
+        dir = ((got.x - p.x) / moved, (got.z - p.z) / moved);
+        walked += moved;
+        p = got;
+    }
+    1_000_000.0 + p.dist_to(goal)
 }
 
 /// The nearest target inside `radius` that can be seen from `origin` across
@@ -2555,6 +2683,88 @@ mod tests {
             e.pos
         );
         assert_eq!(e.target, Some(player));
+    }
+
+    /// A long wall with the target standing a few metres behind its middle,
+    /// the mob arriving at either end of the stretch facing the target. A
+    /// greedy walker never rounds it: every step toward the target slides
+    /// back to the point nearest the target. Walking on along the wall until
+    /// the run at the target is clear does, from both sides.
+    #[test]
+    fn a_mob_rounds_a_long_wall_to_a_target_close_behind_it() {
+        use crate::world::obstacles::Prism;
+        let t = ground_with(&[Prism::rect(0.0, -8.0, 0.4, 8.0, 0.0, 4.0)]);
+        let player: EntityId = 1;
+        let targets = vec![(player, on_plate(4.0, 0.0))];
+        for from_z in [-3.0f32, 3.0, 0.0] {
+            let start = Instant::now();
+            let mut e = chaser(on_plate(-6.0, from_z), player, start);
+            let mut now = start;
+            let mut arrived = false;
+            // The shorter way round is about 22 m at 2.5 m/s.
+            for _ in 0..(14.0 / 0.05) as usize {
+                now += Duration::from_millis(50);
+                let _ = e.tick_ai(&targets, &[], &[], 0.05, now, &t);
+                assert!(
+                    t.obstacles().is_free(P2::of(e.pos), BODY_RADIUS),
+                    "inside the wall at {:?}",
+                    e.pos
+                );
+                assert!(
+                    matches!(e.state, EnemyState::Chase | EnemyState::Attack),
+                    "from z = {from_z} it gave up at {:?}",
+                    e.pos
+                );
+                if matches!(e.state, EnemyState::Attack) {
+                    arrived = true;
+                    break;
+                }
+            }
+            assert!(
+                arrived,
+                "from z = {from_z} it never came round: {:?} at {:?}",
+                e.state, e.pos
+            );
+            // It took the nearer end of the wall.
+            if from_z != 0.0 {
+                assert!(
+                    e.pos.z * from_z >= -1.0,
+                    "from z = {from_z} it went the long way round, to {:?}",
+                    e.pos
+                );
+            }
+        }
+    }
+
+    /// A held mob that has since had a second of steps all taken as aimed is
+    /// no longer held, whether or not it has gained on its target: it bumped
+    /// a tree in a chase and ran on. One step that is not as aimed starts the
+    /// second again.
+    #[test]
+    fn a_clean_second_ends_the_stuck_clock() {
+        let t0 = Instant::now();
+        let at = |s: f32| t0 + Duration::from_secs_f32(s);
+        let goal = Some(7);
+        let mut e = idle_entity();
+        assert!(
+            !e.stuck_too_long(false, goal, 10.0, t0),
+            "held: the clock starts"
+        );
+        assert!(e.stuck.is_some());
+        // Half a second clean, one held step, most of a second clean: still held.
+        for i in 1..=10 {
+            let _ = e.stuck_too_long(true, goal, 10.5, at(i as f32 * 0.05));
+        }
+        let _ = e.stuck_too_long(false, goal, 10.5, at(0.55));
+        for i in 12..=30 {
+            let _ = e.stuck_too_long(true, goal, 11.0, at(i as f32 * 0.05));
+        }
+        assert!(e.stuck.is_some(), "0.95 s clean is not yet a second");
+        // The second completes, the target further off than ever: free.
+        for i in 31..=33 {
+            let _ = e.stuck_too_long(true, goal, 12.0, at(i as f32 * 0.05));
+        }
+        assert!(e.stuck.is_none(), "a clean second ends it");
     }
 
     /// A trunk on the way costs a mob a step aside and nothing else: it

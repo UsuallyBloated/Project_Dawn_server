@@ -209,6 +209,7 @@ pub struct Obstacles {
     flags: Vec<u8>,
     base: Vec<f32>,
     top: Vec<f32>,
+    scale: Vec<f32>,
     /// Where prism i's corners start in `pts`, and how many it has.
     first: Vec<usize>,
     count: Vec<usize>,
@@ -383,6 +384,7 @@ impl Obstacles {
         self.flags.push(p.flags);
         self.base.push(p.base);
         self.top.push(p.top);
+        self.scale.push(p.sight_scale);
         self.first.push(self.pts.len());
         self.count.push(n);
         let (mut lo, mut hi) = (
@@ -464,7 +466,7 @@ impl Obstacles {
             flags: self.flags[i],
             base: self.base[i],
             top: self.top[i],
-            sight_scale: 1.0,
+            sight_scale: self.scale[i],
             corners: self.pts[first..first + n].to_vec(),
         })
     }
@@ -732,16 +734,117 @@ impl Obstacles {
         p
     }
 
-    /// Where a body put at `pos` stands: the nearest point clear of every
-    /// solid, on the ground there. Every placement of a player goes through
-    /// this (a login, a respawn, a port, a resurrection summon).
+    /// Where a body put at `pos` stands: `pos` itself when a body can be put
+    /// there, else the nearest point that is clear of every solid, that a
+    /// body can walk away from, and that is ground a body stands on (a floor,
+    /// not a face: moved out of a rock at a cliff's foot, a body must not be
+    /// stood on the cliff). On the ground there. Every placement goes through
+    /// this (a login, a respawn, a port, a resurrection summon, a spawn, a
+    /// corpse at load). A point that is already good is never moved, whatever
+    /// its ground: that is the terrain's business, as it was.
     pub fn place(&self, terrain: &super::terrain::Terrain, pos: Vec3f) -> Vec3f {
-        let out = self.clear_of(P2::of(pos), BODY_RADIUS);
+        let at = P2::of(pos);
+        let good = |p: P2| {
+            self.stands(p, BODY_RADIUS) && super::fall::is_floor(terrain.gradient(p.x, p.z))
+        };
+        let out = if !at.is_finite() || self.stands(at, BODY_RADIUS) {
+            at
+        } else {
+            let settled = self.settle(at, BODY_RADIUS, CLEAR_PASSES);
+            let mut found = good(settled).then_some(settled);
+            'rings: for ring in 1..=CLEAR_RINGS {
+                if found.is_some() {
+                    break;
+                }
+                let reach = ring as f32 * CLEAR_RING_STEP;
+                for (sx, sz) in CLEAR_SPOKES {
+                    let c = P2::new(at.x + sx * reach, at.z + sz * reach);
+                    if good(c) {
+                        found = Some(c);
+                        break 'rings;
+                    }
+                }
+            }
+            // No floor in reach (it never happens on the zone's ground): the
+            // nearest clear point, as `clear_of` gives it.
+            found.unwrap_or_else(|| self.clear_of(at, BODY_RADIUS))
+        };
         terrain.ground_vec(Vec3f {
             x: out.x,
             y: pos.y,
             z: out.z,
         })
+    }
+
+    /// Whether a body of `radius` can run straight from `a` to `b` touching
+    /// no walk prism: the segment keeps the body's radius from every outline.
+    /// What a mob walking along a wall asks before it turns for its goal
+    /// again (`Entity::step_on`). Not finite: never clear.
+    pub fn run_clear(&self, a: P2, b: P2, radius: f32) -> bool {
+        if !(a.is_finite() && b.is_finite()) {
+            return false;
+        }
+        if self.walk_count == 0 {
+            return true;
+        }
+        let reach = radius - FREE_SLACK;
+        Self::gather(
+            &self.walk_cells,
+            a.x.min(b.x) - radius,
+            a.z.min(b.z) - radius,
+            a.x.max(b.x) + radius,
+            a.z.max(b.z) + radius,
+        )
+        .into_iter()
+        .all(|i| self.segment_gap(i, a, b) >= reach)
+    }
+
+    /// How near the segment `a` to `b` comes to prism `i`'s outline: 0 when
+    /// it crosses it or an end is inside.
+    fn segment_gap(&self, i: u32, a: P2, b: P2) -> f32 {
+        let corners = self.corners(i);
+        let inside = |q: P2| {
+            let mut p = corners[corners.len() - 1];
+            for &c in corners {
+                let e = c.sub(p);
+                if q.sub(p).dot(P2::new(e.z, -e.x)) > 0.0 {
+                    return false;
+                }
+                p = c;
+            }
+            true
+        };
+        if inside(a) || inside(b) {
+            return 0.0;
+        }
+        // Which side of the line p to q the point r is on.
+        let side = |p: P2, q: P2, r: P2| (q.x - p.x) * (r.z - p.z) - (q.z - p.z) * (r.x - p.x);
+        let to_segment = |r: P2, p: P2, q: P2| {
+            let e = q.sub(p);
+            let len2 = e.dot(e);
+            let t = if len2 > 0.0 {
+                (r.sub(p).dot(e) / len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            r.dist_to(P2::new(p.x + e.x * t, p.z + e.z * t))
+        };
+        let mut best = f32::INFINITY;
+        let mut p = corners[corners.len() - 1];
+        for &q in corners {
+            let crosses =
+                side(a, b, p) * side(a, b, q) < 0.0 && side(p, q, a) * side(p, q, b) < 0.0;
+            if crosses {
+                return 0.0;
+            }
+            best = best
+                .min(to_segment(a, p, q))
+                .min(to_segment(b, p, q))
+                .min(to_segment(p, a, b))
+                .min(to_segment(q, a, b));
+            p = q;
+        }
+        best
     }
 
     /// Whether a sight prism stands between `a` and `b` (world points already
@@ -795,21 +898,33 @@ impl Obstacles {
             }
             p = q;
         }
+        let i = i as usize;
+        let (base, top) = (self.base[i], self.top[i]);
+        // A line that begins or ends inside this prism is not blocked by it:
+        // a body under a tree on a slope has its eye inside the crown, and
+        // sees out as it is seen. (No body is ever inside a prism that stands
+        // in its way; this is crowns, roofs and lintels.) Every other prism
+        // on the line still blocks.
+        if (t0 == 0.0 && a.y > base && a.y < top) || (t1 == 1.0 && b.y > base && b.y < top) {
+            return false;
+        }
         let y0 = a.y + (b.y - a.y) * t0;
         let y1 = a.y + (b.y - a.y) * t1;
-        let i = i as usize;
-        y0.max(y1) > self.base[i] && y0.min(y1) < self.top[i]
+        y0.max(y1) > base && y0.min(y1) < top
     }
 }
 
 /// The obstacles this binary was built with. Parsed once; a file that does
 /// not parse or whose hash does not match stops the server at first use,
 /// which the world's start makes the boot line.
-pub fn compiled() -> &'static Obstacles {
-    static OBSTACLES: OnceLock<Obstacles> = OnceLock::new();
+pub fn compiled() -> &'static std::sync::Arc<Obstacles> {
+    static OBSTACLES: OnceLock<std::sync::Arc<Obstacles>> = OnceLock::new();
     OBSTACLES.get_or_init(|| {
-        Obstacles::parse(OBSTACLES_BIN)
-            .unwrap_or_else(|e| panic!("obstacles.bin must be valid; fix the embedded file: {e}"))
+        std::sync::Arc::new(
+            Obstacles::parse(OBSTACLES_BIN).unwrap_or_else(|e| {
+                panic!("obstacles.bin must be valid; fix the embedded file: {e}")
+            }),
+        )
     })
 }
 
@@ -1109,6 +1224,88 @@ mod tests {
         assert!(!o.sight_blocked(at(0.0, 1.2, 0.0), at(4.0, 1.2, 0.0)));
         // A point looking at itself beside it.
         assert!(!o.sight_blocked(at(4.0, 1.2, 0.0), at(4.0, 1.2, 0.0)));
+    }
+
+    /// A body on a slope beside a tree can have its eye inside the tree's
+    /// crown (a sight-only prism). It sees out, and is seen; the crown still
+    /// blocks a line that passes clean through it, and a wall beyond still
+    /// blocks. Before, such a body could see nothing and nothing could see it.
+    #[test]
+    fn a_line_from_inside_a_crown_sees_out_and_other_solids_still_block() {
+        let crown = Prism {
+            flags: FLAG_SIGHT,
+            sight_scale: 1.0,
+            ..Prism::round(0.0, 0.0, 2.0, 8, 1.4, 9.0)
+        };
+        let o =
+            Obstacles::from_prisms(&[crown, Prism::rect(10.0, -5.0, 11.0, 5.0, 0.0, 6.0)]).unwrap();
+        let at = |x: f32, y: f32, z: f32| Vec3f { x, y, z };
+        let inside = at(0.5, 2.0, 0.0);
+        // Out of the crown to open ground, both ways round.
+        assert!(!o.sight_blocked(inside, at(-8.0, 1.2, 0.0)));
+        assert!(!o.sight_blocked(at(-8.0, 1.2, 0.0), inside));
+        // The wall beyond is not its own crown: still blocked.
+        assert!(o.sight_blocked(inside, at(15.0, 1.2, 0.0)));
+        // Clean through the crown from outside to outside: blocked.
+        assert!(o.sight_blocked(at(-8.0, 3.0, 0.0), at(8.0, 3.0, 0.0)));
+        // Under the crown's base the point is not inside it at all.
+        assert!(!o.sight_blocked(at(0.5, 1.2, 0.0), at(-8.0, 1.2, 0.0)));
+    }
+
+    /// The straight run a mob asks about before it leaves a wall: clear when
+    /// the whole segment keeps a body's radius from every solid.
+    #[test]
+    fn a_run_is_clear_only_with_a_bodys_width_to_spare() {
+        let o = yard();
+        // Along the house's west face, a body's radius off it: clear.
+        assert!(o.run_clear(
+            p(5.0 - BODY_RADIUS, -4.0),
+            p(5.0 - BODY_RADIUS, 4.0),
+            BODY_RADIUS
+        ));
+        // Nearer than that, or into it, or across its corner: not.
+        assert!(!o.run_clear(p(4.8, -4.0), p(4.8, 4.0), BODY_RADIUS));
+        assert!(!o.run_clear(p(2.0, 0.0), p(8.0, 0.0), BODY_RADIUS));
+        assert!(!o.run_clear(p(4.0, 6.0), p(6.0, 4.9), BODY_RADIUS));
+        // Past the corner with room: clear.
+        assert!(o.run_clear(p(4.0, 6.0), p(8.0, 5.5), BODY_RADIUS));
+        // Clean through the house, both ends outside: not.
+        assert!(!o.run_clear(p(0.0, 0.0), p(20.0, 0.0), BODY_RADIUS));
+        assert!(!o.run_clear(p(f32::NAN, 0.0), p(1.0, 0.0), BODY_RADIUS));
+        assert!(Obstacles::empty().run_clear(p(0.0, 0.0), p(20.0, 0.0), BODY_RADIUS));
+    }
+
+    /// A body moved out of a solid is stood on a floor: with a cliff face on
+    /// the near side of a rock and level ground on the far side, it goes to
+    /// the level ground, though the face is nearer.
+    #[test]
+    fn a_body_moved_out_of_a_solid_is_stood_on_a_floor() {
+        // West of x = 0 the ground climbs at 70 degrees; east of it, flat.
+        let mut heights = vec![0.0f32; 21 * 21];
+        for iz in 0..21 {
+            for ix in 0..10 {
+                heights[iz * 21 + ix] = (10 - ix) as f32 * 10.0 * 70f32.to_radians().tan();
+            }
+        }
+        let ground =
+            super::super::terrain::Terrain::from_heights(20, 10.0, [0.0; 3], 0.0, heights).unwrap();
+        // A rock whose west edge is at the cliff's foot; the point is nearer
+        // its west edge.
+        let o = Obstacles::from_prisms(&[Prism::rect(0.2, -2.0, 4.2, 2.0, 0.0, 3.0)]).unwrap();
+        let put = o.place(
+            &ground,
+            Vec3f {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+            },
+        );
+        assert!(o.is_free(p(put.x, put.z), BODY_RADIUS));
+        assert!(
+            super::super::fall::is_floor(ground.gradient(put.x, put.z)),
+            "stood on a face at {put:?}"
+        );
+        assert!(put.x > 0.0, "on the level side: {put:?}");
     }
 
     #[test]

@@ -175,13 +175,14 @@ pub async fn run(
         .unwrap_or_else(|| Arc::new(super::terrain::compiled().clone()));
     // What stands on that ground (world/obstacles.rs): the compiled
     // obstacles, or the ones the integration harness hands in. The ground
-    // carries them from here on, so every sight line is checked against both.
+    // carries them from here on (`Terrain::obstacles`), the one handle every
+    // step, placement and sight line reads.
     let obstacles: Arc<super::obstacles::Obstacles> = cfg
         .obstacles
         .clone()
-        .unwrap_or_else(|| Arc::new(super::obstacles::compiled().clone()));
-    let terrain = Arc::new((*terrain).clone().with_obstacles(obstacles.clone()));
+        .unwrap_or_else(|| Arc::clone(super::obstacles::compiled()));
     tracing::info!(obstacles = %obstacles.describe(), "what stands on the ground");
+    let terrain = Arc::new((*terrain).clone().with_obstacles(obstacles));
     // Wandering wildlife (world/roam.rs): the roam map is the ground an
     // animal may stand on, flooded once from the town (the starter spawn)
     // over this server's own terrain. With `Config::roamers` off
@@ -220,10 +221,12 @@ pub async fn run(
             let mut max_id: EntityId = 0;
             for r in rows {
                 let id = r.corpse_id as EntityId;
-                // Re-pinned at load: the ground may have changed since the
-                // corpse was saved, and a corpse in the air or underground
-                // would be out of every reach.
-                let pos = terrain.ground_vec(super::connection::Vec3f::from_tuple(r.pos));
+                // Re-placed at load: the ground and the scenery may have
+                // changed since the corpse was saved, and a corpse in the air,
+                // underground or inside a wall would be out of every reach.
+                let pos = terrain
+                    .obstacles()
+                    .place(&terrain, super::connection::Vec3f::from_tuple(r.pos));
                 let items: Vec<super::loot::LootItemStack> = r
                     .items
                     .into_iter()
@@ -287,7 +290,6 @@ pub async fn run(
         trade_manager,
         corpses,
         terrain,
-        obstacles,
         roam_map,
     };
 

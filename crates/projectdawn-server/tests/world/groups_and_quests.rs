@@ -615,14 +615,21 @@ async fn a_plain_account_cannot_set_faction_and_a_consider_names_no_standing() {
 /// Group-mates see each other's level and class (user, 2026-11-17; PD_W0031).
 /// The roster carries both from the moment the group forms; a member's level
 /// change re-sends it to the group, on the way up (an XP grant) and on the way
-/// down (a death's de-level). On the previous protocol the roster carried ids
-/// and names only and was never re-sent on a level change.
+/// down (a death's de-level), and reaches nobody outside the group: a player
+/// standing beside them, ungrouped, learns neither. On the previous protocol
+/// the roster carried ids and names only and was never re-sent on a level
+/// change.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn group_mates_see_each_others_level_and_class_both_ways() {
     let h = start_both().await;
     let (mut a, mut b, _dummy, b_id) =
         grouped_pair_with_dummy(&h, "lvlsharer", "lvlmate", 5.0).await;
     let a_id = a._char_id as u64;
+    // An ungrouped player standing at the spawn beside them.
+    let (c_session, c_char_id, c_token) =
+        provision_client(&h.auth_url, "lvloutsider", "Outsider", "Human", "Rogue").await;
+    let mut c = WorldClient::start(c_token, &c_session, c_char_id).await;
+    c.pump_for(Duration::from_millis(300)).await;
 
     // The row a roster carries for `id`, as (level, class).
     fn row(m: &ServerWorldMsg, id: u64) -> Option<(u32, String)> {
@@ -672,4 +679,12 @@ async fn group_mates_see_each_others_level_and_class_both_ways() {
         .await
         .expect("the partner's roster shows the death's de-level");
     assert_eq!(row(&down, a_id), Some((5, "Cleric".to_string())));
+
+    // The outsider heard none of it.
+    let leaked = c
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(1), |m| {
+            matches!(m, ServerWorldMsg::GroupRoster { .. })
+        })
+        .await;
+    assert!(leaked.is_none(), "an ungrouped player is sent no roster");
 }

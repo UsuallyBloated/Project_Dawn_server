@@ -2703,16 +2703,16 @@ pub fn group_member_rows(
 /// 2026-08-27: rows build zeroed client-side and resources otherwise fan only
 /// on a change, so an idle full-HP member showed blank bars). The one home for
 /// "the group changed, tell the group": membership changes, a member leaving
-/// the world, and a member's level moving. Returns false when no such group
-/// exists.
+/// the world, and a member's level moving. Sends nothing for a group that no
+/// longer exists.
 pub fn fan_current_roster(
     server: &mut RenetServer,
     connections: &HashMap<ClientId, PerConnection>,
     group_manager: &GroupManager,
     gid: GroupId,
-) -> bool {
+) {
     let Some(g) = group_manager.groups.get(&gid) else {
-        return false;
+        return;
     };
     let recipients: Vec<ClientId> = g.members.clone();
     fan_group_roster(
@@ -2728,7 +2728,15 @@ pub fn fan_current_roster(
             fan_out_resources(server, &recipients, c);
         }
     }
-    true
+}
+
+/// Tell each of `members` that group `gid` is over for them: an empty roster,
+/// which the client reads as "clear the group" (the leaver, a kicked member,
+/// and the last one left when a group dissolves).
+pub fn fan_group_ended(server: &mut RenetServer, members: &[ClientId], gid: GroupId) {
+    for &m in members {
+        fan_group_roster(server, std::slice::from_ref(&m), gid, m, Vec::new(), 0);
+    }
 }
 
 /// Private XP grant to the kill-credit recipient. Mirrors

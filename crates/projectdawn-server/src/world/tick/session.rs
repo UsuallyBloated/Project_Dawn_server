@@ -148,9 +148,7 @@ pub(super) async fn reap_connection(
         if dissolved {
             // Group dissolved. Survivors (0 or 1) get an empty roster so their
             // HUD clears. The leaver's transport is already torn down.
-            for m in &remaining {
-                handlers::fan_group_roster(server, std::slice::from_ref(m), gid, *m, Vec::new(), 0);
-            }
+            handlers::fan_group_ended(server, &remaining, gid);
         } else {
             // The survivors get the new roster and the panel-row seed.
             handlers::fan_current_roster(server, connections, group_manager, gid);

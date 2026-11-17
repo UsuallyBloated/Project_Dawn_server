@@ -101,27 +101,11 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
                 "GroupLeave processed"
             );
             // The leaver always gets an empty roster so their HUD clears.
-            handlers::fan_group_roster(
-                &mut *server,
-                std::slice::from_ref(&cid),
-                gid,
-                cid,
-                Vec::new(),
-                0,
-            );
+            handlers::fan_group_ended(&mut *server, std::slice::from_ref(&cid), gid);
             if dissolved {
                 // Survivors (0 or 1) also need a dissolution notice
                 // so their HUD clears.
-                for m in &remaining {
-                    handlers::fan_group_roster(
-                        &mut *server,
-                        std::slice::from_ref(m),
-                        gid,
-                        *m,
-                        Vec::new(),
-                        0,
-                    );
-                }
+                handlers::fan_group_ended(&mut *server, &remaining, gid);
             } else {
                 handlers::fan_current_roster(&mut *server, connections, group_manager, gid);
             }
@@ -187,26 +171,10 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
                 "GroupKick processed"
             );
             // Notify the kicked member their group ended (from their POV).
-            handlers::fan_group_roster(
-                &mut *server,
-                std::slice::from_ref(&target_cid),
-                gid,
-                target_cid,
-                Vec::new(),
-                0,
-            );
+            handlers::fan_group_ended(&mut *server, std::slice::from_ref(&target_cid), gid);
             if dissolved {
                 // Survivors (0 or 1) also need a dissolution notice.
-                for m in &remaining {
-                    handlers::fan_group_roster(
-                        &mut *server,
-                        std::slice::from_ref(m),
-                        gid,
-                        *m,
-                        Vec::new(),
-                        0,
-                    );
-                }
+                handlers::fan_group_ended(&mut *server, &remaining, gid);
             } else {
                 handlers::fan_current_roster(&mut *server, connections, group_manager, gid);
             }

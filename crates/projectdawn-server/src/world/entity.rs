@@ -232,6 +232,14 @@ pub struct Entity {
     /// despawns the pet (mob "runs away") once this passes.
     /// `None` for normal summoned pets and world-spawned enemies.
     pub charm_expires_at: Option<Instant>,
+    /// The damage ledger (`aggro`) the mob carried when it was charmed, kept
+    /// on the pet and given back by `released_from_charm`. Without it a charm
+    /// wiped the record of who had hurt the mob while keeping its wounds, so
+    /// charming a nearly dead mob and letting it go took the kill from
+    /// whoever did the work (and since a new charm releases the old one at
+    /// once, that took two casts). Empty for everything but a charmed pet.
+    /// `tick::wipe_hate` clears a player from it as from the live ledger.
+    pub charm_ledger: HashMap<EntityId, f32>,
     /// Named-mob enrage. `None` for ordinary mobs and for named mobs whose
     /// `enrage_threshold` is 0. Once it fires it stays on for the rest of the
     /// life — enrage is a last stand, not a temporary buff, so unlike
@@ -367,6 +375,7 @@ impl Entity {
             owner: None,
             command_at: None,
             charm_expires_at: None,
+            charm_ledger: HashMap::new(),
             enrage: None,
             stance: PetStance::Follow,
             stats: PrimaryStats::default(),
@@ -430,6 +439,7 @@ impl Entity {
             owner: Some(owner),
             command_at: None,
             charm_expires_at: None,
+            charm_ledger: HashMap::new(),
             enrage: None,
             stance: PetStance::Follow,
             stats: base,
@@ -443,7 +453,8 @@ impl Entity {
     /// 2026-10-06, EQ's rule; the v1 "mob runs away" despawn is gone). A
     /// fresh enemy id (ids are never reused), the camp slot and home position
     /// the charm carried along, the pet's current HP and position, the same
-    /// template. `from_spawn`'s named scaling is skipped on purpose:
+    /// template, and the damage ledger it had when charmed (`charm_ledger`).
+    /// `from_spawn`'s named scaling is skipped on purpose:
     /// `apply_named` multiplied this template's hp and dmg in place when the
     /// mob first spawned and the charm cloned it scaled, so a second pass
     /// would double a named mob. Hostility is the caller's choice (`turn_on`):
@@ -458,6 +469,8 @@ impl Entity {
         e.last_bcast_pos = pet.pos;
         e.hp = pet.hp;
         e.max_hp = pet.max_hp;
+        // Who had hurt it before the charm still has (see `charm_ledger`).
+        e.aggro = pet.charm_ledger.clone();
         e
     }
 

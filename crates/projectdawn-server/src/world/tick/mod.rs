@@ -82,7 +82,9 @@ use kills::{
     apply_spell_damage_to_enemy, award_kill, clear_player_dots_from, kill_enemy, wipe_hate,
     FactionKill,
 };
-use pet_life::{despawn_owned_pets, pet_owner_cid, return_charmed_mob, summon_scaled_pet};
+use pet_life::{
+    charm_mob, despawn_owned_pets, pet_owner_cid, return_charmed_mob, summon_scaled_pet,
+};
 use session::{shut_down_world, PENDING_SAVE_GIVE_UP, PENDING_SAVE_RETRY};
 use spell_buffs::{
     apply_buff, apply_mp_regen_exclusive, apply_pet_spell_buffs, apply_player_spell_buffs,

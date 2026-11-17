@@ -1600,31 +1600,25 @@ pub(super) fn apply_casts(
                         continue;
                     };
                     let owner_id = intent.caster;
-                    // Look up the target; copy out the stats we
-                    // need then remove it from the map + AOI.
-                    let extracted: Option<(
-                        crate::world::zones::MobTemplate,
-                        f32,
-                        f32,
-                        Vec3f,
-                        f32,
-                        usize,
-                        Vec3f,
-                    )> = enemies
-                        .get(&target_id)
-                        .filter(|e| e.is_alive() && !e.is_pet())
-                        .map(|e| {
-                            (
-                                e.mob.clone(),
-                                e.hp,
-                                e.max_hp,
-                                e.pos,
-                                e.yaw,
-                                e.spawn_point_idx,
-                                e.spawn_pos,
-                            )
-                        });
-                    let Some((mob, hp, max_hp, pos, yaw, slot_idx, home_pos)) = extracted else {
+                    let duration = if spell.duration > 0.0 {
+                        spell.duration
+                    } else {
+                        30.0
+                    };
+                    // The helper releases whatever pet the caster already
+                    // has (one pet at a time), re-keys the mob into a pet
+                    // and fans both. None = the victim vanished since the
+                    // pre-flight.
+                    let Some(pet_id) = charm_mob(
+                        &mut *server,
+                        in_world_recipients_now,
+                        &mut *enemies,
+                        &mut *aoi,
+                        owner_id,
+                        target_id,
+                        duration,
+                        now,
+                    ) else {
                         cast_resolution_lost(
                             &mut *server,
                             &mut *connections,
@@ -1638,61 +1632,6 @@ pub(super) fn apply_casts(
                         );
                         continue;
                     };
-                    // Despawn the old enemy id from AOI + fan.
-                    let enemy_cell = aoi::cell_for(pos.x, pos.z);
-                    aoi.remove(target_id, enemy_cell);
-                    let despawn_visible = aoi.entities_visible_from(enemy_cell);
-                    for &recipient in in_world_recipients_now.iter() {
-                        if despawn_visible.contains(&recipient) {
-                            handlers::send_entity_despawn(&mut *server, recipient, target_id);
-                        }
-                    }
-                    // The camp slot stays OCCUPIED for the charm's
-                    // life. It used to be freed here, so the camp
-                    // respawned a replacement while the charmed mob
-                    // still existed; now that the mob comes back
-                    // when the charm ends, freeing it would let a
-                    // charm-and-wait add a mob to the camp per cast.
-                    // The slot rides on the pet: the return puts the
-                    // mob back into it, and a pet that dies charmed
-                    // frees it through the corpse sweep like any
-                    // death.
-                    enemies.remove(&target_id);
-                    // Build the fresh pet entity. Override hp/
-                    // max_hp/yaw from the original so the charm
-                    // preserves the mob's current state, and carry
-                    // its slot and home so it can be given back.
-                    let mut pet = Entity::from_pet_summon(owner_id, pos, mob, now);
-                    pet.max_hp = max_hp;
-                    pet.hp = hp;
-                    pet.yaw = yaw;
-                    pet.spawn_point_idx = slot_idx;
-                    pet.spawn_pos = home_pos;
-                    let duration = if spell.duration > 0.0 {
-                        spell.duration
-                    } else {
-                        30.0
-                    };
-                    pet.charm_expires_at = Some(now + std::time::Duration::from_secs_f32(duration));
-                    let pet_id = pet.id;
-                    let pet_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
-                    aoi.insert(pet_id, pet_cell);
-                    let spawn_visible = aoi.entities_visible_from(pet_cell);
-                    let pet_recipients: Vec<ClientId> = in_world_recipients_now
-                        .iter()
-                        .copied()
-                        .filter(|id| spawn_visible.contains(id))
-                        .collect();
-                    if !pet_recipients.is_empty() {
-                        // Same creature, new id: the caster keeps it targeted.
-                        handlers::fan_out_pet_spawn(
-                            &mut *server,
-                            &pet_recipients,
-                            &pet,
-                            Some(target_id),
-                        );
-                    }
-                    enemies.insert(pet_id, pet);
                     tracing::info!(
                         owner = owner_id,
                         old_enemy_id = target_id,

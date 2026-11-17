@@ -537,6 +537,9 @@ pub(super) fn wipe_hate(
     for entity in enemies.values_mut() {
         for id in players {
             entity.aggro.remove(id);
+            // A charmed pet keeps its mob's ledger for the hand-back; a
+            // player wiped from the live ledgers is wiped from that too.
+            entity.charm_ledger.remove(id);
             entity.threat.remove(id);
             // Their DoTs end with their hate (spell batch step 5): a
             // player who died or ported is paid nothing by what they left

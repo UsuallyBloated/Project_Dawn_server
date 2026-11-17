@@ -721,10 +721,14 @@ impl Entity {
     /// one side, then the other, keeping to the side it last went: the mob
     /// walks along the wall to its end and comes round.
     ///
-    /// Returns whether the step was taken as aimed. A refusal, a slide and a
-    /// detour all return false: the stuck clock starts on any of them and
-    /// ends when the mob is a metre nearer its goal, and the evade rule
-    /// reads them as "not on a clear run at its target".
+    /// Returns whether the step got on with it: taken as aimed, or turned
+    /// aside but still most of the way (a glance off a trunk). A step the
+    /// slope rule refused, or one held so short that it needed a way round
+    /// (whether or not one was found), returns false: the stuck clock starts
+    /// on those and ends when the mob is a metre nearer its goal, and the
+    /// evade rule reads them as "not on a clear run at its target". A mob
+    /// sliding past trees in a chase is never held; one following a wall is,
+    /// for as long as it takes.
     fn step_on(&mut self, terrain: &crate::world::terrain::Terrain, to: Vec3f) -> bool {
         // Sine and cosine of the two turns tried.
         const TURNS: [(f32, f32); 2] = [
@@ -740,9 +744,11 @@ impl Entity {
         let want = from.dist_to(aim);
         let direct = obstacles.resolve(from, aim, BODY_RADIUS);
         let mut end = P2::new(direct.x, direct.z);
+        let held =
+            direct.deflected && want > 0.0 && from.dist_to(end) < want * crate::world::DETOUR_BELOW;
         if !direct.deflected {
             self.detour = 0;
-        } else if want > 0.0 && from.dist_to(end) < want * crate::world::DETOUR_BELOW {
+        } else if held {
             let first: f32 = if self.detour < 0 { -1.0 } else { 1.0 };
             let (dx, dz) = (aim.x - from.x, aim.z - from.z);
             'sides: for side in [first, -first] {
@@ -768,7 +774,7 @@ impl Entity {
             return false;
         }
         self.pos = terrain.ground_vec(to);
-        !direct.deflected
+        !held
     }
 
     /// The stuck clock after a step toward `goal`, now `dist` away, was tried
@@ -2579,6 +2585,60 @@ mod tests {
             }
         }
         assert!(arrived, "never arrived: {:?} at {:?}", e.state, e.pos);
+    }
+
+    /// A wall lying at a shallow angle across a chase turns the mob aside,
+    /// and the mob slides along it nearly as fast as it ran: that is not
+    /// being held. Its stuck clock never starts on the slide, so a mob
+    /// brushing past trees and walls after a fleeing player neither turns
+    /// immune nor gives the chase up eight seconds later.
+    #[test]
+    fn a_mob_glancing_along_a_wall_is_not_held() {
+        use crate::world::obstacles::{Obstacles, Prism, FLAG_SIGHT, FLAG_WALK};
+        // 8.5 m of wall, 0.4 m thick, at twenty degrees to the chase.
+        let wall = Prism {
+            flags: FLAG_WALK | FLAG_SIGHT,
+            base: 0.0,
+            top: 3.0,
+            sight_scale: 1.0,
+            corners: vec![
+                P2::new(-4.0, -0.5),
+                P2::new(4.0, 2.4),
+                P2::new(3.864, 2.776),
+                P2::new(-4.136, -0.124),
+            ],
+        };
+        let t = crate::world::terrain::Terrain::flat(8, 10.0, 0.0).with_obstacles(
+            std::sync::Arc::new(Obstacles::from_prisms(&[wall]).unwrap()),
+        );
+        let start = Instant::now();
+        let player: EntityId = 1;
+        let mut e = chaser(on_plate(-8.0, 0.6), player, start);
+        let targets = vec![(player, on_plate(9.0, 2.2))];
+        let mut now = start;
+        let mut slid = false;
+        let mut arrived = false;
+        for _ in 0..300 {
+            now += Duration::from_millis(50);
+            let before = e.pos;
+            let _ = e.tick_ai(&targets, &[], &[], 0.05, now, &t);
+            // Along the wall's face, short of its far end.
+            if e.pos.x > -3.0 && e.pos.x < 3.0 {
+                slid |= (e.pos.z - before.z) > 0.01;
+                assert!(e.stuck.is_none(), "held on a slide at {:?}", e.pos);
+                assert!(!e.is_evading(now));
+            }
+            if matches!(e.state, EnemyState::Attack) {
+                arrived = true;
+                break;
+            }
+        }
+        assert!(slid, "the wall turned it aside");
+        assert!(
+            arrived,
+            "and it came round the end: {:?} at {:?}",
+            e.state, e.pos
+        );
     }
 
     /// A mob in a dead end (three walls, its target beyond the closed one)

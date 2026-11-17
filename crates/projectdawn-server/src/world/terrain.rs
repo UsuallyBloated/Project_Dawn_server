@@ -172,6 +172,12 @@ impl Terrain {
         self.floor_y
     }
 
+    /// World x and z of the grid's first vertex (its lowest x and z corner).
+    pub fn min_corner(&self) -> (f32, f32) {
+        let half = self.half();
+        (self.origin.x - half, self.origin.z - half)
+    }
+
     /// One line for the boot log: which ground this binary runs.
     pub fn describe(&self) -> String {
         let short: String = self.hash_hex().chars().take(12).collect();

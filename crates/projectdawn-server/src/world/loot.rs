@@ -211,11 +211,17 @@ pub fn roll_for_mob(mob_name: &str) -> Option<Vec<LootItemStack>> {
 }
 
 fn find_table(mob_name: &str) -> Option<&'static MobLootTable> {
+    find_entry(mob_name).map(|(_, table)| table)
+}
+
+/// The `TABLES` entry a mob name resolves to: an exact match first, then a
+/// case-insensitive substring match in either direction, in table order.
+fn find_entry(mob_name: &str) -> Option<(&'static str, &'static MobLootTable)> {
     let lower = mob_name.to_lowercase();
     // Exact match first.
     for (key, table) in TABLES {
         if key.eq_ignore_ascii_case(mob_name) {
-            return Some(table);
+            return Some((key, table));
         }
     }
     // Partial substring match (matches the GDScript `containsn`
@@ -223,10 +229,22 @@ fn find_table(mob_name: &str) -> Option<&'static MobLootTable> {
     for (key, table) in TABLES {
         let key_lower = key.to_lowercase();
         if lower.contains(&key_lower) || key_lower.contains(&lower) {
-            return Some(table);
+            return Some((key, table));
         }
     }
     None
+}
+
+/// Which species' item table a mob of this name rolls, by the species the
+/// table belongs to ("Snake" for an adder), or `None` for a name with no
+/// table. For the data checks that hold every authored mob name to the
+/// species it is meant to be (`roam.rs`); the roll itself uses `find_table`.
+#[cfg(test)]
+pub fn table_key_for(mob_name: &str) -> Option<&'static str> {
+    find_entry(mob_name).map(|(key, _)| match key {
+        "Adder" | "Viper" => "Snake",
+        other => other,
+    })
 }
 
 // ── Coin drops (see docs/design/group_loot_and_coin.md) ───────────────
@@ -243,8 +261,8 @@ fn find_table(mob_name: &str) -> Option<&'static MobLootTable> {
 /// coin. Uses the same loose substring match as the loot-table lookup,
 /// so an off name ("Bearer") can misfire — keep the list specific.
 const BEAST_NAMES: &[&str] = &[
-    "wolf", "rat", "boar", "snake", "bear", "spider", "bat", "crawler", "wasp", "beetle", "lion",
-    "tiger", "scorpion", "drake",
+    "wolf", "rat", "boar", "snake", "adder", "viper", "bear", "spider", "bat", "crawler", "wasp",
+    "beetle", "lion", "tiger", "scorpion", "drake",
 ];
 
 pub fn is_beast(mob_name: &str) -> bool {
@@ -421,6 +439,12 @@ const TABLES: &[(&str, &MobLootTable)] = &[
     ("Bat", &T_BAT),
     ("Zombie", &T_ZOMBIE),
     ("Bandit", &T_BANDIT),
+    // The wandering snakes (wandering wildlife): an adder or a viper is a
+    // snake by another name. Last, so no older name changes its table. (No
+    // snake is a "Rattlesnake": "rat" would make it a rat here and for the
+    // quest rule.)
+    ("Adder", &T_SNAKE),
+    ("Viper", &T_SNAKE),
 ];
 
 #[cfg(test)]

@@ -35,6 +35,8 @@ async fn start_server() -> (String, TempDir) {
         fizzles: true,
         panic_probe: None,
         terrain: None,
+        roamers: false,
+        roam_table: None,
     };
 
     let pool = db::open(&url).await.expect("open pool");

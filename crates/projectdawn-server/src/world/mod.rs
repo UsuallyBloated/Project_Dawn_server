@@ -43,6 +43,8 @@ mod pet_templates;
 mod progression;
 mod quests;
 mod regen;
+pub mod roam;
+pub mod roam_map;
 mod safe_areas;
 mod songs;
 // `pub` so the persistence layer (`crate::db::load_character`) can read MAX_LEVEL

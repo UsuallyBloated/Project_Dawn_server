@@ -124,6 +124,9 @@ pub(super) struct WorldState {
     /// The ground (world/terrain.rs): what every body stands on and every
     /// sight line is checked against.
     pub(super) terrain: std::sync::Arc<crate::world::terrain::Terrain>,
+    /// Where a wandering animal may stand (world/roam_map.rs): the floors
+    /// reachable from the town without crossing a face.
+    pub(super) roam_map: std::sync::Arc<crate::world::roam_map::RoamMap>,
 }
 
 // Track 6 sub-task 5 — group intents buffered for the

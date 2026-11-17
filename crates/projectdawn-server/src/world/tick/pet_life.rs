@@ -147,6 +147,9 @@ pub(super) fn charm_mob(
     // (`Entity::charm_ledger`): a charm is no way to take a kill from whoever
     // did the work.
     pet.charm_ledger = victim.aggro;
+    // A charmed wanderer stays a wanderer for the hand-back (a pet never
+    // walks its legs: `tick_roam`).
+    pet.roam = victim.roam;
     pet.charm_expires_at = Some(now + std::time::Duration::from_secs_f32(duration_secs));
     let pet_id = pet.id;
     let pet_cell = aoi::cell_for(pet.pos.x, pet.pos.z);

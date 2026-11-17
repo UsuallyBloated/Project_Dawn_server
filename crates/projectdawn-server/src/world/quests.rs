@@ -176,6 +176,21 @@ fn table() -> &'static HashMap<String, Quest> {
     TABLE.get_or_init(|| parse(QUESTS_TOML))
 }
 
+/// Every kill objective's target pattern, for the data checks that hold a
+/// mob name to the quests it should and should not tick (`roam.rs`).
+#[cfg(test)]
+pub fn kill_targets() -> Vec<String> {
+    let mut out: Vec<String> = table()
+        .values()
+        .flat_map(|q| q.objectives.iter())
+        .filter(|o| o.kind == "kill")
+        .map(|o| o.target.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Look up a quest by id (`None` = unknown / forged id).
 pub fn lookup(quest_id: &str) -> Option<&'static Quest> {
     table().get(quest_id)

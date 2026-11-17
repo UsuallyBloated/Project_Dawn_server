@@ -17,7 +17,7 @@ use super::{
     hunger, inventory, items,
     ledger::{self, ItemAction},
     loot::{self, LootBag},
-    persistence, pet_templates, regen, skills,
+    persistence, pet_templates, regen, roam, skills,
     spawn_points::Spawner,
     spells, ATTACK_RANGE_TOLERANCE, BAN_SWEEP_INTERVAL, CAMP_SECS, CHANNEL_POSITION,
     CHANNEL_SYSTEM, CHECKPOINT_INTERVAL, ENEMY_DESPAWN_LINGER_SECS, ENEMY_FAN_REPORT_INTERVAL,
@@ -152,7 +152,6 @@ pub async fn run(
     // respawn timers per authored spawn point; `enemies` holds the live
     // instances. AI ticking + position/HP fan-out land in 1C; this commit
     // wires spawn lifecycle + EnemySpawn fan-out only (mobs stand idle).
-    let spawner = Spawner::new(Instant::now());
     let enemies: HashMap<EntityId, Entity> = HashMap::new();
     // Track 5 sub-task 4 — server-owned loot bags. Rolled and spawned
     // in step 4h's on-death branch; expire after LOOT_BAG_LINGER_SECS
@@ -174,6 +173,31 @@ pub async fn run(
         .terrain
         .clone()
         .unwrap_or_else(|| Arc::new(super::terrain::compiled().clone()));
+    // Wandering wildlife (world/roam.rs): the roam map is the ground an
+    // animal may stand on, flooded once from the town (the starter spawn)
+    // over this server's own terrain. With `Config::roamers` off
+    // (`PD_NO_ROAMERS=1`) the roam table is not loaded and only the camps
+    // spawn.
+    let roam_map = Arc::new(super::roam_map::RoamMap::build(
+        &terrain,
+        (super::STARTER_SPAWN.x, super::STARTER_SPAWN.z),
+    ));
+    let spawner = if cfg.roamers {
+        Spawner::with_roamers(
+            Instant::now(),
+            super::roam::load(cfg.roam_table.as_deref()),
+            roam_map.clone(),
+        )
+    } else {
+        Spawner::new(Instant::now())
+    };
+    tracing::info!(
+        roamers = %if cfg.roamers { "on" } else { "off" },
+        slots = spawner.roams.len(),
+        animals = spawner.roam_heads(),
+        roam_map_share = %format_args!("{:.1}%", roam_map.share() * 100.0),
+        "wandering wildlife"
+    );
 
     // Corpse / resurrection Slice 1 — server-owned player corpses (persisted
     // LootBags). Load every persisted corpse BEFORE the loop (so before any login
@@ -254,6 +278,7 @@ pub async fn run(
         trade_manager,
         corpses,
         terrain,
+        roam_map,
     };
 
     loop {

@@ -36,6 +36,8 @@ async fn run() -> anyhow::Result<()> {
     // Same shape as dev_cmds: a dangerous env toggle belongs on the boot line so
     // it is never ambiguous which posture the process is running in.
     let rate_limit = std::env::var("PD_NO_RATE_LIMIT").as_deref() != Ok("1");
+    // Wandering wildlife's off switch (`PD_NO_ROAMERS=1`, `Config::roamers`).
+    let roamers = if cfg.roamers { "on" } else { "off" };
     tracing::info!(
         build = env!("PD_BUILD_COMMIT"),
         auth_bind = %cfg.auth_bind,
@@ -45,6 +47,7 @@ async fn run() -> anyhow::Result<()> {
         min_client = %cfg.min_client_version,
         dev_cmds,
         rate_limit,
+        roamers = %roamers,
         terrain = %world::terrain::compiled().describe(),
         "starting projectdawn-server"
     );

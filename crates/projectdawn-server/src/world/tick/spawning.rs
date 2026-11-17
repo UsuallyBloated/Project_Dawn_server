@@ -35,7 +35,23 @@ pub(super) fn run_spawning(
     //     spawn — no duplicate seeds because the seed loop above ran
     //     against the pre-spawn map.
     {
-        let newly_spawned = spawner.tick(now, terrain);
+        // A wanderer never appears on top of a body: every in-world player
+        // counts, living, dead or linkdead.
+        let bodies: Vec<Vec3f> = connections
+            .values()
+            .filter(|c| c.in_world)
+            .map(|c| c.pos)
+            .collect();
+        let hour = clock::current_hour();
+        let newly_spawned = spawner.tick(
+            now,
+            terrain,
+            &crate::world::spawn_points::SpawnWorld {
+                enemies,
+                bodies: &bodies,
+                hour,
+            },
+        );
         if !newly_spawned.is_empty() {
             let spawn_recipients: Vec<ClientId> = connections
                 .iter()
@@ -61,6 +77,37 @@ pub(super) fn run_spawning(
                 }
                 enemies.insert(entity.id, entity);
             }
+        }
+    }
+
+    // Night animals leave by day (wandering wildlife): one that is idle,
+    // unhurt and seen by no player is taken out of the world, whenever in
+    // daylight that becomes true, and its slot waits for dusk. No loot, no
+    // XP, no body. One still fighting at dawn stays until it dies or walks
+    // home and heals; one a player can see stays; a charmed one is a pet and
+    // is left alone until it is handed back. Here, not in the AI step, since
+    // that step sleeps while nobody is online and dawn comes regardless.
+    if !spawner.roams.is_empty() && !clock::is_night(clock::current_hour()) {
+        let leaving: Vec<EntityId> = enemies
+            .values()
+            .filter(|e| {
+                e.roam.is_some_and(|r| r.night_only)
+                    && e.owner.is_none()
+                    && e.state == EnemyState::Idle
+                    && e.hp >= e.max_hp
+            })
+            .filter(|e| {
+                let seen = aoi.entities_visible_from(aoi::cell_for(e.pos.x, e.pos.z));
+                !in_world_recipients_now.iter().any(|cid| seen.contains(cid))
+            })
+            .map(|e| e.id)
+            .collect();
+        for id in leaving {
+            let Some(entity) = enemies.remove(&id) else {
+                continue;
+            };
+            aoi.remove(entity.id, aoi::cell_for(entity.pos.x, entity.pos.z));
+            spawner.on_night_animal_left(entity.spawn_point_idx, now);
         }
     }
 

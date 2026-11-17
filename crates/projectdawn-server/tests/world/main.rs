@@ -22,6 +22,7 @@ mod inventory;
 mod melee;
 mod pets;
 mod presence;
+mod roam;
 mod smoke;
 mod songs;
 mod spells;

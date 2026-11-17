@@ -10,6 +10,8 @@
 //! launcher-mode client will be a render-only consumer (sub-task 2).
 
 use super::buffs::{ActiveBuff, BuffEffect};
+use super::roam::{self, Roam};
+use super::roam_map::RoamMap;
 use super::{connection::Vec3f, zones::MobTemplate};
 use protocol::world::{EntityId, ENEMY_ID_BASE, PET_ID_BASE};
 use std::collections::HashMap;
@@ -272,6 +274,12 @@ pub struct Entity {
     /// Since when, and toward what, this entity has been held by the slope
     /// rule (`StuckClock`); `None` while it is getting somewhere.
     pub stuck: Option<StuckClock>,
+
+    /// A wanderer's region and where it is in its walk (`roam.rs`,
+    /// `tick_roam`); `None` for a camp mob, a dev spawn and a summoned pet.
+    /// A charmed wanderer keeps it (and does not walk: it is a pet) so the
+    /// mob handed back is a wanderer again.
+    pub roam: Option<Roam>,
 }
 
 /// The stuck clock (the first hills): started by a step the slope rule refused
@@ -382,6 +390,7 @@ impl Entity {
             base_stats: PrimaryStats::default(),
             active_buffs: Vec::new(),
             stuck: None,
+            roam: None,
         };
         // Single choke point for both spawn paths (camp spawner and dev
         // spawn), so a named mob is scaled exactly once no matter how it
@@ -446,6 +455,7 @@ impl Entity {
             base_stats: base,
             active_buffs: Vec::new(),
             stuck: None,
+            roam: None,
         }
     }
 
@@ -471,6 +481,10 @@ impl Entity {
         e.max_hp = pet.max_hp;
         // Who had hurt it before the charm still has (see `charm_ledger`).
         e.aggro = pet.charm_ledger.clone();
+        // A wanderer is a wanderer again, its walk forgotten. Its home is the
+        // one it had when charmed, never where the charm ended (often in
+        // town, where the charmer took it).
+        e.roam = pet.roam.map(Roam::rested);
         e
     }
 
@@ -1438,6 +1452,173 @@ impl Entity {
         }
     }
 
+    // ── Wandering (roam.rs) ──────────────────────────────────────────────
+
+    /// A wanderer's fight began here: where it stands becomes its home, the
+    /// place it walks back to and heals at when the fight is over, and its
+    /// walk is forgotten. So a leash is a short walk back to where it was
+    /// roaming, not a trek to where it first appeared. Called when it picks a
+    /// target while idle (its own scan, or a packmate's fight), never when a
+    /// charm ends (`turn_on`): a home in town, where a charmer let it go,
+    /// would put it at the vendors for good. Only ground on the roam map
+    /// becomes home, so home is always somewhere it can walk on from.
+    pub fn roam_fight_began(&mut self, map: &RoamMap) {
+        let Some(roam) = self.roam else {
+            return;
+        };
+        if map.roamable(self.pos.x, self.pos.z) {
+            self.spawn_pos = self.pos;
+        }
+        self.roam = Some(roam.rested());
+    }
+
+    /// Pack social aggro: an idle packmate takes a member's target as its own
+    /// (on its own hate list, so its kill pays and answers as any fight's
+    /// does) and its fight begins here. The caller has checked that its own
+    /// leash reaches the target (`tick_chase` drops one past it at once) and
+    /// that the target is not hidden.
+    pub fn join_pack_fight(&mut self, target: EntityId, map: &RoamMap, now: Instant) {
+        self.threat.entry(target).or_insert(roam::PACK_JOIN_THREAT);
+        self.target = Some(target);
+        self.roam_fight_began(map);
+        self.transition(EnemyState::Chase, now);
+    }
+
+    /// One tick of a wanderer's walk, run after the AI step while it is still
+    /// idle (so it has already looked for a target this tick, exactly as a
+    /// standing mob does, and roaming is never the `Leash` state: a wanderer
+    /// on its legs can be hit). It stands a while, picks a point in its
+    /// region, ambles there, and stands again. `leader` is its pack leader's
+    /// position when it is a follower; a follower keeps to its leader instead
+    /// of picking legs of its own.
+    ///
+    /// Every step ends on the roam map (floors it can walk back from), so a
+    /// wanderer never walks onto a face or down one; a step that would is not
+    /// taken and the leg is dropped. Root holds it, snare slows it.
+    pub fn tick_roam(
+        &mut self,
+        map: &RoamMap,
+        leader: Option<Vec3f>,
+        dt: f32,
+        now: Instant,
+        terrain: &crate::world::terrain::Terrain,
+        rng: &mut impl rand::Rng,
+    ) {
+        let Some(mut walk) = self.roam else {
+            return;
+        };
+        if self.is_pet() || self.state != EnemyState::Idle || self.is_mezzed() || self.is_stunned()
+        {
+            return;
+        }
+        // Idle off the roam map (within the metre a walk home stops short of
+        // home, or where a charm ended beside it): step onto home itself,
+        // which is on the map, so the walk below starts from ground it can
+        // leave.
+        if !map.roamable(self.pos.x, self.pos.z) {
+            self.pos = terrain.ground_vec(self.spawn_pos);
+            walk = walk.rested();
+        }
+        if self.is_rooted() {
+            self.roam = Some(walk);
+            return;
+        }
+        let run = self.enraged_speed() * (1.0 - self.snare_factor()) * dt;
+        let amble = run * roam::ROAM_SPEED_MULT;
+
+        if let Some(leader_pos) = leader {
+            if walk.solo_until.is_none_or(|until| now >= until) {
+                walk = walk.rested();
+                let dist = self.pos.xz_distance_to(leader_pos);
+                if dist > roam::PACK_FOLLOW_DISTANCE {
+                    let step = if dist > roam::PACK_CATCHUP_DISTANCE {
+                        run
+                    } else {
+                        amble
+                    };
+                    let to = self.pos.step_toward(leader_pos, step);
+                    // Straight to the leader, unless that line cuts the town
+                    // or the next step leaves the map: then it walks its own
+                    // legs for a while and tries again.
+                    if roam::segment_clears_town(
+                        (self.pos.x, self.pos.z),
+                        (leader_pos.x, leader_pos.z),
+                    ) && self.roam_step(map, terrain, to)
+                    {
+                        self.face_toward(leader_pos);
+                    } else {
+                        walk.solo_until = Some(now + secs(roam::PACK_SOLO_SECS));
+                    }
+                }
+                self.roam = Some(walk);
+                return;
+            }
+        }
+
+        if let Some(until) = walk.pause_until {
+            if now < until {
+                self.roam = Some(walk);
+                return;
+            }
+            walk.pause_until = None;
+        }
+        let pause = |rng: &mut _| {
+            Some(
+                now + secs(rand::Rng::gen_range(
+                    rng,
+                    roam::ROAM_PAUSE_MIN..=roam::ROAM_PAUSE_MAX,
+                )),
+            )
+        };
+        let goal = match walk.goal {
+            Some(goal) => goal,
+            None => match roam::pick_leg(map, &walk.region, self.pos, rng) {
+                Some(goal) => goal,
+                None => {
+                    walk.pause_until = pause(rng);
+                    self.roam = Some(walk);
+                    return;
+                }
+            },
+        };
+        let goal_pos = Vec3f {
+            x: goal.0,
+            y: self.pos.y,
+            z: goal.1,
+        };
+        self.face_toward(goal_pos);
+        let to = self.pos.step_toward(goal_pos, amble);
+        if !self.roam_step(map, terrain, to) {
+            // A face in the way. The same step would be refused next tick
+            // too, so the leg is over now; no clock runs.
+            walk.goal = None;
+            walk.pause_until = pause(rng);
+        } else if self.pos.xz_distance_to(goal_pos) < LEASH_HOME_TOLERANCE {
+            walk.goal = None;
+            walk.pause_until = pause(rng);
+        } else {
+            walk.goal = Some(goal);
+        }
+        self.roam = Some(walk);
+    }
+
+    /// One roam step to `to`, taken only onto the roam map (and never against
+    /// the slope rule, which the map's floors satisfy anyway). Returns
+    /// whether it moved. A refusal here is not a player's and never counts on
+    /// the `slope_refusals` health line.
+    fn roam_step(
+        &mut self,
+        map: &RoamMap,
+        terrain: &crate::world::terrain::Terrain,
+        to: Vec3f,
+    ) -> bool {
+        if !map.roamable(to.x, to.z) || !terrain.slope_ok(self.pos, to) {
+            return false;
+        }
+        self.pos = terrain.ground_vec(to);
+        true
+    }
+
     fn face_toward(&mut self, target_pos: Vec3f) {
         let dx = target_pos.x - self.pos.x;
         let dz = target_pos.z - self.pos.z;
@@ -1483,6 +1664,10 @@ fn nearest_target_within(
 
 fn target_pos(targets: &[(EntityId, Vec3f)], id: EntityId) -> Option<Vec3f> {
     targets.iter().find(|(p, _)| *p == id).map(|(_, pos)| *pos)
+}
+
+fn secs(s: f32) -> std::time::Duration {
+    std::time::Duration::from_secs_f32(s)
 }
 
 /// How close to its spawn position a leashing mob must get before it counts
@@ -2550,5 +2735,369 @@ mod tests {
             "still fighting: {:?}",
             e.state
         );
+    }
+
+    // ── Wandering (roam.rs) ──────────────────────────────────────────────
+
+    use crate::world::roam::Region;
+    use crate::world::terrain::Terrain;
+    use rand::SeedableRng;
+
+    const TICK: f32 = 0.05;
+
+    /// An 800 m flat plate and its roam map.
+    fn roam_plate() -> (Terrain, RoamMap) {
+        let t = Terrain::flat(40, 20.0, 0.0);
+        let map = RoamMap::build(&t, (0.0, 0.0));
+        (t, map)
+    }
+
+    /// A circle 300 m south of the town.
+    fn south() -> Region {
+        Region {
+            center: [0.0, 300.0],
+            radius: 90.0,
+            min_from_town: 0.0,
+            z_min: None,
+            z_max: None,
+        }
+    }
+
+    fn wanderer(pos: Vec3f, region: Region, now: Instant) -> Entity {
+        let mut e = Entity::from_spawn(60, pos, template(), now);
+        e.roam = Some(Roam {
+            region,
+            night_only: false,
+            pack: false,
+            pause_until: None,
+            goal: None,
+            solo_until: None,
+        });
+        e
+    }
+
+    fn xz(x: f32, z: f32) -> Vec3f {
+        Vec3f { x, y: 0.0, z }
+    }
+
+    /// A wanderer's walk: it picks a leg, ambles along it at `ROAM_SPEED_MULT`
+    /// of its speed facing the way it goes, arrives, stands at least
+    /// `ROAM_PAUSE_MIN`, and sets off again within `ROAM_PAUSE_MAX`. All the
+    /// while it is Idle (never the evading walk home), on the roam map, in
+    /// its region and outside the town.
+    #[test]
+    fn a_wanderer_walks_a_leg_at_an_amble_then_stands_a_while() {
+        let (ground, map) = roam_plate();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+        let mut now = Instant::now();
+        let mut e = wanderer(xz(0.0, 300.0), south(), now);
+        let amble = e.mob.speed * roam::ROAM_SPEED_MULT * TICK;
+        let mut walked_ticks = 0;
+        let mut arrived_at: Option<Instant> = None;
+        // The first leg: at most ROAM_LEG_MAX at the amble.
+        for _ in 0..(roam::ROAM_LEG_MAX / amble) as usize + 10 {
+            let before = e.pos;
+            e.tick_roam(&map, None, TICK, now, &ground, &mut rng);
+            now += Duration::from_millis(50);
+            let step = e.pos.xz_distance_to(before);
+            assert!(
+                step <= amble + 1e-4,
+                "a step of {step} at an amble of {amble}"
+            );
+            assert_eq!(e.state, EnemyState::Idle);
+            assert!(!e.is_evading(now), "a wanderer on its legs can be hit");
+            assert!(map.roamable(e.pos.x, e.pos.z) && south().contains(e.pos.x, e.pos.z));
+            if step > 0.0 {
+                walked_ticks += 1;
+                let facing = (e.pos.x - before.x).atan2(e.pos.z - before.z);
+                assert!((e.yaw - facing).abs() < 1e-3, "it faces the way it walks");
+            }
+            let walk = e.roam.expect("a wanderer");
+            if walk.goal.is_none() && walk.pause_until.is_some() {
+                arrived_at = Some(now);
+                break;
+            }
+        }
+        let arrived_at = arrived_at.expect("the leg ends");
+        let leg = walked_ticks as f32 * amble;
+        assert!(
+            (roam::ROAM_LEG_MIN - 1.5..=roam::ROAM_LEG_MAX + 0.5).contains(&leg),
+            "a leg of {leg} m"
+        );
+        // It stands for the pause.
+        let stood_at = e.pos;
+        let mut moved_after = None;
+        for tick in 0..(roam::ROAM_PAUSE_MAX / TICK) as usize + 5 {
+            e.tick_roam(&map, None, TICK, now, &ground, &mut rng);
+            now += Duration::from_millis(50);
+            if e.pos.xz_distance_to(stood_at) > 0.0 {
+                moved_after = Some(tick as f32 * TICK);
+                break;
+            }
+        }
+        let stood = moved_after.expect("it sets off again");
+        assert!(
+            stood >= roam::ROAM_PAUSE_MIN - 0.1 && now >= arrived_at,
+            "it stood only {stood} s"
+        );
+    }
+
+    /// A plateau 40 m up with a cliff down its south side, away from the
+    /// town: ground at z < 0 is the top, at z > 10 the bottom, between them a
+    /// face (76 degrees). The grid is centred on x = 1000.
+    fn cliff() -> Terrain {
+        let gs = 8;
+        let mut heights = vec![0.0; (gs + 1) * (gs + 1)];
+        for iz in 0..=4 {
+            for ix in 0..=gs {
+                heights[iz * (gs + 1) + ix] = 40.0;
+            }
+        }
+        Terrain::from_heights(gs, 10.0, [1000.0, 0.0, 0.0], 0.0, heights).expect("grid")
+    }
+
+    fn everywhere() -> Region {
+        Region {
+            center: [1000.0, 0.0],
+            radius: 100.0,
+            min_from_town: 0.0,
+            z_min: None,
+            z_max: None,
+        }
+    }
+
+    /// A wanderer never walks onto a face, in EITHER direction. The slope
+    /// rule alone refuses only a step that rises onto one, and a mob never
+    /// falls, so it would walk down a cliff pinned to it and into ground it
+    /// cannot leave. A leg across the cliff's lip ends at the lip, at once
+    /// (no stuck clock runs), and one from the foot ends at the foot.
+    #[test]
+    fn a_roam_step_onto_a_face_is_refused_going_down_as_well_as_up() {
+        let ground = cliff();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let now = Instant::now();
+
+        // From the top, toward the bottom.
+        let top = RoamMap::build(&ground, (1000.0, -30.0));
+        assert!(top.roamable(1000.0, -1.0) && !top.roamable(1000.0, 5.0));
+        let mut e = wanderer(ground.ground_vec(xz(1000.0, -3.0)), everywhere(), now);
+        e.roam = e.roam.map(|w| Roam {
+            goal: Some((1000.0, 30.0)),
+            ..w
+        });
+        let mut t = now;
+        for _ in 0..200 {
+            e.tick_roam(&top, None, TICK, t, &ground, &mut rng);
+            t += Duration::from_millis(50);
+            assert!(e.pos.z <= 1e-3, "it walked off the lip to z = {}", e.pos.z);
+            assert!((e.pos.y - 40.0).abs() < 1e-3, "it is still on the top");
+        }
+        let walk = e.roam.expect("a wanderer");
+        assert!(e.pos.z > -0.2, "it walked to the lip");
+        assert!(e.stuck.is_none(), "no stuck clock runs for a leg");
+        assert!(
+            walk.goal != Some((1000.0, 30.0)),
+            "the leg across the cliff was dropped"
+        );
+        // The slope rule alone would have let it down.
+        assert!(ground.slope_ok(e.pos, xz(1000.0, 0.5)));
+
+        // From the bottom, toward the top.
+        let bottom = RoamMap::build(&ground, (1000.0, 30.0));
+        let mut e = wanderer(ground.ground_vec(xz(1000.0, 13.0)), everywhere(), now);
+        e.roam = e.roam.map(|w| Roam {
+            goal: Some((1000.0, -30.0)),
+            ..w
+        });
+        let mut t = now;
+        for _ in 0..200 {
+            e.tick_roam(&bottom, None, TICK, t, &ground, &mut rng);
+            t += Duration::from_millis(50);
+            assert!(e.pos.z >= 10.0 - 1e-3 && e.pos.y.abs() < 1e-3);
+        }
+    }
+
+    /// Root holds a wanderer where it stands and snare slows its amble; a
+    /// mezzed or stunned one, a charmed one (a pet) and one in a fight do not
+    /// walk at all.
+    #[test]
+    fn root_holds_a_wanderer_snare_slows_it_and_only_an_idle_mob_walks() {
+        let (ground, map) = roam_plate();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(2);
+        let now = Instant::now();
+        let start = xz(0.0, 300.0);
+        let step_of = |prepare: &dyn Fn(&mut Entity), rng: &mut rand::rngs::StdRng| {
+            let mut e = wanderer(start, south(), now);
+            prepare(&mut e);
+            e.tick_roam(&map, None, TICK, now, &ground, rng);
+            e.pos.xz_distance_to(start)
+        };
+        let amble = template().speed * roam::ROAM_SPEED_MULT * TICK;
+        assert!((step_of(&|_| {}, &mut rng) - amble).abs() < 1e-4);
+        assert_eq!(
+            step_of(&|e| e.apply_cc(ActiveCc::new_root(10.0)), &mut rng),
+            0.0
+        );
+        let snared = step_of(&|e| e.apply_cc(ActiveCc::new_snare(0.5, 10.0)), &mut rng);
+        assert!((snared - amble * 0.5).abs() < 1e-4, "half speed: {snared}");
+        assert_eq!(
+            step_of(&|e| e.apply_cc(ActiveCc::new_mez(10.0)), &mut rng),
+            0.0
+        );
+        assert_eq!(
+            step_of(&|e| e.apply_cc(ActiveCc::new_stun(10.0)), &mut rng),
+            0.0
+        );
+        assert_eq!(step_of(&|e| e.owner = Some(7), &mut rng), 0.0, "a pet");
+        assert_eq!(
+            step_of(&|e| e.transition(EnemyState::Chase, now), &mut rng),
+            0.0
+        );
+        assert_eq!(
+            step_of(&|e| e.transition(EnemyState::Leash, now), &mut rng),
+            0.0
+        );
+        // A camp mob (no roam record) never walks.
+        let mut camp = Entity::from_spawn(0, start, template(), now);
+        camp.tick_roam(&map, None, TICK, now, &ground, &mut rng);
+        assert_eq!(camp.pos.xz_distance_to(start), 0.0);
+    }
+
+    /// A wanderer's home is where its fight began (so the walk back after a
+    /// leash is short), set when it picks a target while idle and never by a
+    /// charm ending: a charmed wanderer handed back keeps the home it had
+    /// when charmed, wherever its charmer took it (town, usually), and is a
+    /// wanderer again. Ground off the roam map never becomes home.
+    #[test]
+    fn a_wanderers_home_is_where_its_fight_began_and_never_where_a_charm_ended() {
+        let (ground, map) = roam_plate();
+        let now = Instant::now();
+        let first = xz(0.0, 300.0);
+        let mut e = wanderer(first, south(), now);
+        e.pos = xz(30.0, 320.0);
+        e.roam = e.roam.map(|w| Roam {
+            goal: Some((60.0, 330.0)),
+            pause_until: Some(now),
+            ..w
+        });
+        e.roam_fight_began(&map);
+        assert_eq!(e.spawn_pos.xz_distance_to(xz(30.0, 320.0)), 0.0);
+        let walk = e.roam.expect("still a wanderer");
+        assert!(walk.goal.is_none() && walk.pause_until.is_none());
+
+        // Off the map (off the plate): the old home stays.
+        e.pos = xz(900.0, 320.0);
+        e.roam_fight_began(&map);
+        assert_eq!(e.spawn_pos.xz_distance_to(xz(30.0, 320.0)), 0.0);
+
+        // Charmed at home, walked into town by its charmer, handed back.
+        e.pos = xz(30.0, 320.0);
+        let mut pet = Entity::from_pet_summon(42, e.pos, e.mob.clone(), now);
+        pet.spawn_point_idx = e.spawn_point_idx;
+        pet.spawn_pos = e.spawn_pos;
+        pet.roam = e.roam;
+        pet.charm_expires_at = Some(now);
+        pet.pos = xz(2.0, 3.0);
+        // A pet never walks its legs.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(4);
+        pet.tick_roam(&map, None, TICK, now, &ground, &mut rng);
+        assert_eq!(pet.pos.xz_distance_to(xz(2.0, 3.0)), 0.0);
+        let mut back = Entity::released_from_charm(&pet, now);
+        back.turn_on(42, now);
+        assert!(back.roam.is_some(), "a wanderer again");
+        assert_eq!(
+            back.spawn_pos.xz_distance_to(xz(30.0, 320.0)),
+            0.0,
+            "its home is not the town"
+        );
+
+        // A packmate that joins a fight: on its hate list, chasing, home here.
+        let mut mate = wanderer(first, south(), now);
+        mate.pos = xz(10.0, 290.0);
+        mate.join_pack_fight(99, &map, now);
+        assert_eq!(mate.target, Some(99));
+        assert_eq!(mate.state, EnemyState::Chase);
+        assert_eq!(mate.threat.get(&99), Some(&roam::PACK_JOIN_THREAT));
+        assert_eq!(mate.spawn_pos.xz_distance_to(xz(10.0, 290.0)), 0.0);
+    }
+
+    /// An idle wanderer standing off the roam map (the walk home stops within
+    /// a metre of home, which can be the wrong side of a face's edge) steps
+    /// onto its home, which is on the map, instead of standing there for
+    /// good with every first step refused.
+    #[test]
+    fn an_idle_wanderer_off_the_map_steps_onto_its_home() {
+        let ground = cliff();
+        let top = RoamMap::build(&ground, (1000.0, -30.0));
+        let mut rng = rand::rngs::StdRng::seed_from_u64(6);
+        let now = Instant::now();
+        let home = ground.ground_vec(xz(1000.0, -0.5));
+        let mut e = wanderer(home, everywhere(), now);
+        // Half a metre past the lip, on the face.
+        e.pos = ground.ground_vec(xz(1000.0, 0.4));
+        assert!(!top.roamable(e.pos.x, e.pos.z));
+        e.apply_cc(ActiveCc::new_root(1.0));
+        e.tick_roam(&top, None, TICK, now, &ground, &mut rng);
+        assert_eq!(e.pos.xz_distance_to(home), 0.0);
+        assert!((e.pos.y - 40.0).abs() < 1e-3);
+    }
+
+    /// A pack follower keeps to its leader: it stands when close, ambles
+    /// after it, runs when it has fallen behind, and picks no legs of its
+    /// own. When the straight line to the leader cuts the town it does not
+    /// take it (a wolf through the vendors): it walks its own legs for
+    /// `PACK_SOLO_SECS` and tries again.
+    #[test]
+    fn a_follower_keeps_to_its_leader_and_never_cuts_through_the_town() {
+        let (ground, map) = roam_plate();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(9);
+        let now = Instant::now();
+        let leader = xz(0.0, 300.0);
+        let speed = template().speed * TICK;
+        let step_from = |dz: f32, rng: &mut rand::rngs::StdRng| {
+            let start = xz(0.0, 300.0 + dz);
+            let mut e = wanderer(start, south(), now);
+            e.tick_roam(&map, Some(leader), TICK, now, &ground, rng);
+            assert!(
+                e.roam.expect("a wanderer").goal.is_none(),
+                "no leg of its own"
+            );
+            (e.pos.z - start.z, e.pos.xz_distance_to(start))
+        };
+        assert_eq!(step_from(3.0, &mut rng).1, 0.0, "close enough: it stands");
+        let (dz, amble) = step_from(8.0, &mut rng);
+        assert!(dz < 0.0, "toward the leader");
+        assert!((amble - speed * roam::ROAM_SPEED_MULT).abs() < 1e-4);
+        let (_, run) = step_from(30.0, &mut rng);
+        assert!((run - speed).abs() < 1e-4, "fallen behind: it runs");
+
+        // The leader is on the far side of the town.
+        let mut e = wanderer(xz(0.0, 300.0), south(), now);
+        let far_leader = xz(0.0, -300.0);
+        e.tick_roam(&map, Some(far_leader), TICK, now, &ground, &mut rng);
+        let walk = e.roam.expect("a wanderer");
+        assert_eq!(
+            e.pos.xz_distance_to(xz(0.0, 300.0)),
+            0.0,
+            "not a step toward town"
+        );
+        let until = walk.solo_until.expect("it walks alone for a while");
+        assert!(until > now);
+        // Alone, it walks legs of its own, in its region.
+        e.tick_roam(&map, Some(far_leader), TICK, now, &ground, &mut rng);
+        let goal = e.roam.expect("a wanderer").goal.expect("a leg of its own");
+        assert!(south().contains(goal.0, goal.1));
+        // And tries its leader again afterwards.
+        let later = until + Duration::from_millis(50);
+        e.tick_roam(
+            &map,
+            Some(xz(e.pos.x, e.pos.z + 8.0)),
+            TICK,
+            later,
+            &ground,
+            &mut rng,
+        );
+        let walk = e.roam.expect("a wanderer");
+        assert!(walk.solo_until.is_none() && walk.goal.is_none());
     }
 }

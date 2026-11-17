@@ -8,9 +8,10 @@
 //! clock at the same rate in between and only uses the broadcasts to stay in
 //! step (`autoloads/time_of_day.gd` in the client repo).
 //!
-//! Nothing on the server reads the hour. The sky is cosmetic today; if a
-//! rule ever does depend on it (night-only spawns, say), it must ask this
-//! module, never a client.
+//! One rule on the server reads the hour: the night animals of the roam table
+//! are alive only at night (`is_night`, read by the spawner). The sky itself
+//! is cosmetic. Any rule that depends on the hour asks this module, never a
+//! client.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -24,6 +25,22 @@ pub const DAY_LENGTH_SECS: f64 = 1200.0;
 /// 50 real seconds at the day length above, and clients keep time themselves
 /// between sends, so this is drift correction, not animation.
 pub const BROADCAST_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Night runs from `NIGHT_START_HOUR` through midnight to `NIGHT_END_HOUR`:
+/// the hours the client's sky is fully dark. LOCKSTEP with the client's
+/// `NIGHT_START_HOUR` and `NIGHT_END_HOUR` in `autoloads/time_of_day.gd`
+/// (`night_factor`), so the night animals are out exactly while it looks like
+/// night. At the day length above a night is 400 real seconds.
+pub const NIGHT_START_HOUR: f32 = 21.0;
+pub const NIGHT_END_HOUR: f32 = 5.0;
+
+/// Whether `hour` (in `[0, 24)`) is night. Keep-only-when-night, so an hour
+/// that is not finite is day (the range form clippy offers would call it
+/// night).
+#[allow(clippy::manual_range_contains)]
+pub fn is_night(hour: f32) -> bool {
+    hour >= NIGHT_START_HOUR || hour < NIGHT_END_HOUR
+}
 
 /// The game hour, in `[0, 24)`, at `unix_secs` seconds since the Unix epoch.
 pub fn hour_at(unix_secs: f64) -> f32 {
@@ -58,6 +75,25 @@ mod tests {
         assert_eq!(hour_at(0.0), 0.0);
         assert_eq!(hour_at(DAY_LENGTH_SECS), 0.0);
         assert_eq!(hour_at(DAY_LENGTH_SECS * 1_000_000.0), 0.0);
+    }
+
+    #[test]
+    fn night_is_nine_in_the_evening_to_five_in_the_morning() {
+        for (hour, night) in [
+            (0.0, true),
+            (4.99, true),
+            (5.0, false),
+            (12.0, false),
+            (20.99, false),
+            (21.0, true),
+            (23.99, true),
+        ] {
+            assert_eq!(is_night(hour), night, "hour {hour}");
+        }
+        assert!(!is_night(f32::NAN));
+        // A third of the day: 400 real seconds at the day length.
+        let night_hours = (24.0 - NIGHT_START_HOUR) + NIGHT_END_HOUR;
+        assert_eq!(night_hours as f64 / 24.0 * DAY_LENGTH_SECS, 400.0);
     }
 
     #[test]

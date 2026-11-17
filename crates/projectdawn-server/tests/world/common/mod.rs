@@ -42,26 +42,45 @@ pub async fn start_both() -> Harness {
 }
 
 pub async fn start_both_opts(fizzles: bool) -> Harness {
-    start_with(fizzles, None, None).await
+    start_with(fizzles, None, None, None).await
 }
 
 /// A server where saying `line` panics the speaker's message handler
 /// (`Config::panic_probe`), for the panic containment test.
 pub async fn start_with_panic_probe(line: &str) -> Harness {
-    start_with(false, Some(line.to_string()), None).await
+    start_with(false, Some(line.to_string()), None, None).await
 }
 
 /// A server on a ground of the test's own (`Config::terrain`, the height
 /// model): a ramp or a ridge in place of the flat default. Fizzles off, as
 /// `start_both`.
 pub async fn start_with_terrain(terrain: projectdawn_server::world::terrain::Terrain) -> Harness {
-    start_with(false, None, Some(Arc::new(terrain))).await
+    start_with(false, None, Some(Arc::new(terrain)), None).await
+}
+
+/// A server with wandering wildlife ON, running `roam_table` (a
+/// `zone_roam.toml` of the test's own: small regions and short respawns, so a
+/// walk and a respawn are quick and where the test expects them) on `terrain`.
+/// Every other harness runs with roaming off: the zone's seventy animals
+/// would walk through every test.
+pub async fn start_with_roamers(
+    terrain: projectdawn_server::world::terrain::Terrain,
+    roam_table: &str,
+) -> Harness {
+    start_with(
+        false,
+        None,
+        Some(Arc::new(terrain)),
+        Some(roam_table.to_string()),
+    )
+    .await
 }
 
 async fn start_with(
     fizzles: bool,
     panic_probe: Option<String>,
     terrain: Option<Arc<projectdawn_server::world::terrain::Terrain>>,
+    roam_table: Option<String>,
 ) -> Harness {
     // Opt-in server tracing for triage: RUST_LOG=info cargo test ... --nocapture
     // makes the in-process server's tracing lines visible. try_init so the
@@ -105,6 +124,8 @@ async fn start_with(
                 20, 20.0, 0.0,
             ))
         })),
+        roamers: roam_table.is_some(),
+        roam_table,
     });
 
     let pool = db::open(&url).await.expect("open pool");

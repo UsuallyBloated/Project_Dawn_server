@@ -49,6 +49,7 @@ async fn run() -> anyhow::Result<()> {
         rate_limit,
         roamers = %roamers,
         terrain = %world::terrain::compiled().describe(),
+        obstacles = %world::obstacles::compiled().describe(),
         "starting projectdawn-server"
     );
     if dev_cmds {

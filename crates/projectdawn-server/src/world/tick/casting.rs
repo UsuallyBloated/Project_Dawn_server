@@ -19,6 +19,7 @@ pub(super) fn apply_casts(
         group_manager,
         corpses,
         terrain,
+        obstacles,
         ..
     } = world;
     let Intents {
@@ -1757,9 +1758,10 @@ pub(super) fn apply_casts(
                         _ => crate::world::safe_areas::nearest_arrival(caster_pos_now)
                             .unwrap_or(crate::world::STARTER_SPAWN),
                     };
-                    // Every arrival stands on the ground, whatever the bind
-                    // or the arrival point was saved with.
-                    let dest = terrain.ground_vec(dest);
+                    // Every arrival stands on the ground, clear of whatever
+                    // stands on it, whatever the bind or the arrival point
+                    // was saved with.
+                    let dest = obstacles.place(terrain, dest);
                     let mut movers: Vec<ClientId> = vec![caster_cid];
                     if spell.port_group {
                         if let Some(g) = group_manager.group_of(caster_cid) {

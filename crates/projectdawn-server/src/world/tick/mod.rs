@@ -173,6 +173,15 @@ pub async fn run(
         .terrain
         .clone()
         .unwrap_or_else(|| Arc::new(super::terrain::compiled().clone()));
+    // What stands on that ground (world/obstacles.rs): the compiled
+    // obstacles, or the ones the integration harness hands in. The ground
+    // carries them from here on, so every sight line is checked against both.
+    let obstacles: Arc<super::obstacles::Obstacles> = cfg
+        .obstacles
+        .clone()
+        .unwrap_or_else(|| Arc::new(super::obstacles::compiled().clone()));
+    let terrain = Arc::new((*terrain).clone().with_obstacles(obstacles.clone()));
+    tracing::info!(obstacles = %obstacles.describe(), "what stands on the ground");
     // Wandering wildlife (world/roam.rs): the roam map is the ground an
     // animal may stand on, flooded once from the town (the starter spawn)
     // over this server's own terrain. With `Config::roamers` off
@@ -278,6 +287,7 @@ pub async fn run(
         trade_manager,
         corpses,
         terrain,
+        obstacles,
         roam_map,
     };
 

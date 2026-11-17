@@ -7,11 +7,17 @@
 //! whether a player may step from here to there (`slope_ok`), and whether two
 //! points can see each other across it (`can_see`). Every answer is total: a
 //! non-finite input gets the floor, a refused step, no sight.
+//!
+//! The ground also carries what stands on it (`obstacles`, `obstacles.rs`):
+//! none for a terrain built on its own, the zone's for the world's. Sight is
+//! asked here once for both, so nothing that asks whether two points see each
+//! other can forget the trees and the walls.
 
 use super::connection::Vec3f;
+use super::obstacles::Obstacles;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 const TERRAIN_TOML: &str = include_str!("../../data/terrain.toml");
 
@@ -57,6 +63,9 @@ pub struct Terrain {
     origin: Vec3f,
     floor_y: f32,
     heights: Vec<f32>,
+    /// What stands on this ground (`with_obstacles`); nothing, for a terrain
+    /// built on its own.
+    obstacles: Arc<Obstacles>,
 }
 
 /// Where one tick of a player's movement ends (`Terrain::player_step`), and
@@ -125,7 +134,20 @@ impl Terrain {
             origin,
             floor_y,
             heights,
+            obstacles: Arc::new(Obstacles::empty()),
         })
+    }
+
+    /// The same ground with `obstacles` standing on it: what the world runs
+    /// on. `can_see` then looks through them as well as over the hills.
+    pub fn with_obstacles(mut self, obstacles: Arc<Obstacles>) -> Self {
+        self.obstacles = obstacles;
+        self
+    }
+
+    /// What stands on this ground.
+    pub fn obstacles(&self) -> &Obstacles {
+        &self.obstacles
     }
 
     /// A flat terrain at the floor: what today's world is.
@@ -458,8 +480,9 @@ impl Terrain {
         Step::taken(self.ground_vec(to))
     }
 
-    /// Whether `a` and `b`, each raised by `LOS_HEIGHT`, see each other over
-    /// the terrain. Inside one triangle the ground is a plane and the sight
+    /// Whether `a` and `b`, each raised by `LOS_HEIGHT`, see each other: over
+    /// the terrain, and past everything that stands on it (a wall, a trunk, a
+    /// rock, a crown: `Obstacles::sight_blocked`). Inside one triangle the ground is a plane and the sight
     /// line is a line, so their difference is linear there: the clearance is
     /// checked at both ends and wherever the line crosses a cell edge or a cell
     /// diagonal, and if it holds at all of those it holds between them (the
@@ -479,7 +502,7 @@ impl Terrain {
             y: b.y + LOS_HEIGHT,
             ..b
         };
-        self.min_clearance(a, b) >= -LOS_TOLERANCE
+        self.min_clearance(a, b) >= -LOS_TOLERANCE && !self.obstacles.sight_blocked(a, b)
     }
 
     /// The lowest height of the segment `a` to `b` over the ground, found at

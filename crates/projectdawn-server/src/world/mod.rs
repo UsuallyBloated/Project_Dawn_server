@@ -38,6 +38,7 @@ pub mod ledger;
 mod loot;
 mod named;
 mod npcs;
+pub mod obstacles;
 mod persistence;
 mod pet_templates;
 mod progression;
@@ -49,6 +50,8 @@ mod safe_areas;
 mod songs;
 // `pub` so the persistence layer (`crate::db::load_character`) can read MAX_LEVEL
 // to clamp a stored level into the cap on load.
+#[cfg(test)]
+mod obstacles_content;
 pub mod skills;
 mod spawn_points;
 mod spell_gems;

@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::world::fall;
+use crate::world::obstacles::{BODY_RADIUS, P2};
 
 /// A landing's consequences (`fall.rs`): the damage as a share of max HP, with
 /// no armor, evasion or shield (the user's call of 2026-10-24), no attacker
@@ -59,6 +60,7 @@ pub(super) fn run_movement(
         loot_bags,
         corpses,
         terrain,
+        obstacles,
         tick_health,
         ..
     } = world;
@@ -165,6 +167,18 @@ pub(super) fn run_movement(
             } else if met > before.y {
                 (x, z) = (before.x, before.z);
             }
+            // What stands on the ground is a column of any height
+            // (world/obstacles.rs): a falling body is turned aside by it as a
+            // walking one is, so it comes down beside a trunk or a house and
+            // never inside one. Turned onto ground above it, it holds its place.
+            let walked = obstacles.resolve(P2::of(before), P2::new(x, z), BODY_RADIUS);
+            if walked.deflected {
+                (x, z) = if terrain.ground(walked.x, walked.z) > before.y {
+                    (before.x, before.z)
+                } else {
+                    (walked.x, walked.z)
+                };
+            }
             let to = Vec3f { x, y: before.y, z };
             let (y, landing) = fall::vertical_step(
                 &mut conn.vertical,
@@ -195,18 +209,44 @@ pub(super) fn run_movement(
             if step.refused {
                 tick_health.record_slope_refusal();
             }
+            // Then what stands on the ground (world/obstacles.rs): the step
+            // the terrain allowed is turned aside or stopped by a trunk, a
+            // rock or a wall, the body sliding along it as the client's does.
+            // The server takes the step itself, so a client that ignores its
+            // own obstacles is held at the server's. A step turned onto a face
+            // the slope rule forbids is not taken (a rock at a cliff's foot
+            // must not push a body up the cliff). A standing body is asked
+            // too: one found inside a solid (the scenery changed under it) is
+            // put out at the nearest free point, slope rule or not, since
+            // that is a placement and not a step.
+            let mut to = step.pos;
+            let walked = obstacles.resolve(P2::of(before), P2::of(step.pos), BODY_RADIUS);
+            if walked.deflected {
+                let aside = Vec3f {
+                    x: walked.x,
+                    y: before.y,
+                    z: walked.z,
+                };
+                to = if obstacles.is_free(P2::of(before), BODY_RADIUS)
+                    && !terrain.slope_ok(before, aside)
+                {
+                    terrain.ground_vec(before)
+                } else {
+                    terrain.ground_vec(aside)
+                };
+            }
             let (y, landing) = fall::vertical_step(
                 &mut conn.vertical,
                 before.y,
-                step.pos.y,
-                fall::is_floor(terrain.gradient(step.pos.x, step.pos.z)),
-                before.xz_distance_to(step.pos),
+                to.y,
+                fall::is_floor(terrain.gradient(to.x, to.z)),
+                before.xz_distance_to(to),
                 dt,
             );
             conn.pos = Vec3f {
-                x: step.pos.x,
+                x: to.x,
                 y,
-                z: step.pos.z,
+                z: to.z,
             };
             if let Some(landing) = landing {
                 land(&mut *server, *client_id, conn, landing, now);

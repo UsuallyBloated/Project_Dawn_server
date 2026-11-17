@@ -20,6 +20,7 @@ mod height;
 mod hunger;
 mod inventory;
 mod melee;
+mod obstacles;
 mod pets;
 mod presence;
 mod roam;

@@ -483,9 +483,10 @@ impl NetClient {
     fn group_invited(from_id: i64, from_name: GString);
 
     /// Track 6 sub-task 5 — server-authoritative group roster update.
-    /// `member_ids` and `member_names` are parallel arrays. Empty
-    /// arrays signal the group dissolved (last-member or kicked-self
-    /// notification).
+    /// `member_ids`, `member_names`, `member_levels` and `member_classes`
+    /// are parallel arrays (the last two since PD_W0031; the class is the
+    /// full name, "Warrior"). Empty arrays signal the group dissolved
+    /// (last-member or kicked-self notification).
     #[signal]
     fn group_roster(
         group_id: i64,
@@ -493,6 +494,8 @@ impl NetClient {
         member_ids: PackedInt64Array,
         member_names: PackedStringArray,
         loot_mode: i64,
+        member_levels: PackedInt32Array,
+        member_classes: PackedStringArray,
     );
 
     /// Track 6 — damage-shield reflect. Fanned to all peers when a
@@ -1943,6 +1946,8 @@ enum Incoming {
         leader_id: i64,
         member_ids: Vec<i64>,
         member_names: Vec<String>,
+        member_levels: Vec<i32>,
+        member_classes: Vec<String>,
         loot_mode: u8,
     },
     DamageShieldTrigger {
@@ -2760,6 +2765,8 @@ impl NetClient {
                     leader_id,
                     member_ids,
                     member_names,
+                    member_levels,
+                    member_classes,
                     loot_mode,
                 } => {
                     let mut ids_arr = PackedInt64Array::new();
@@ -2772,6 +2779,16 @@ impl NetClient {
                     for (i, n) in member_names.iter().enumerate() {
                         names_arr[i] = GString::from(n.as_str());
                     }
+                    let mut levels_arr = PackedInt32Array::new();
+                    levels_arr.resize(member_levels.len());
+                    for (i, v) in member_levels.iter().enumerate() {
+                        levels_arr[i] = *v;
+                    }
+                    let mut classes_arr = PackedStringArray::new();
+                    classes_arr.resize(member_classes.len());
+                    for (i, c) in member_classes.iter().enumerate() {
+                        classes_arr[i] = GString::from(c.as_str());
+                    }
                     self.base_mut().emit_signal(
                         "group_roster",
                         &[
@@ -2780,6 +2797,8 @@ impl NetClient {
                             ids_arr.to_variant(),
                             names_arr.to_variant(),
                             (loot_mode as i64).to_variant(),
+                            levels_arr.to_variant(),
+                            classes_arr.to_variant(),
                         ],
                     );
                 }
@@ -3264,15 +3283,21 @@ fn classify(channel: u8, msg: ServerWorldMsg, raw: &[u8]) -> Incoming {
         } => {
             let mut member_ids = Vec::with_capacity(members.len());
             let mut member_names = Vec::with_capacity(members.len());
-            for (id, name) in members {
-                member_ids.push(id as i64);
-                member_names.push(name);
+            let mut member_levels = Vec::with_capacity(members.len());
+            let mut member_classes = Vec::with_capacity(members.len());
+            for m in members {
+                member_ids.push(m.id as i64);
+                member_names.push(m.name);
+                member_levels.push(i32::try_from(m.level).unwrap_or(i32::MAX));
+                member_classes.push(m.class);
             }
             Incoming::GroupRoster {
                 group_id: group_id as i64,
                 leader_id: leader_id as i64,
                 member_ids,
                 member_names,
+                member_levels,
+                member_classes,
                 loot_mode,
             }
         }

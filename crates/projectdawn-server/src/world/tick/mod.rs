@@ -417,6 +417,8 @@ pub async fn run(
 
         death_sweep::run_death_sweep(&mut world, &mut q, now, &in_world_recipients_now).await;
 
+        grouping::refan_rosters_on_level_change(&mut world);
+
         regen_tick::run_regen(&mut world, &mut q, now, dt);
 
         position_fan::fan_out_positions(&mut world, &mut q, now, &in_world_recipients_now);

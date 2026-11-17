@@ -151,29 +151,9 @@ pub(super) async fn reap_connection(
             for m in &remaining {
                 handlers::fan_group_roster(server, std::slice::from_ref(m), gid, *m, Vec::new(), 0);
             }
-        } else if let Some(g) = group_manager.groups.get(&gid) {
-            // Re-fetch the group with name lookups for the survivor fan-out.
-            let members_with_names: Vec<(u64, String)> = g
-                .members
-                .iter()
-                .filter_map(|m| connections.get(m).map(|c| (*m, c.name.clone())))
-                .collect();
-            let recipients: Vec<ClientId> = g.members.clone();
-            handlers::fan_group_roster(
-                server,
-                &recipients,
-                gid,
-                g.leader,
-                members_with_names,
-                g.loot_mode.to_u8(),
-            );
-            // Same panel-row seed as the intent-path roster fan: the
-            // survivors' rosters just changed shape, so refill every row.
-            for m in &g.members {
-                if let Some(c) = connections.get(m) {
-                    handlers::fan_out_resources(server, &recipients, c);
-                }
-            }
+        } else {
+            // The survivors get the new roster and the panel-row seed.
+            handlers::fan_current_roster(server, connections, group_manager, gid);
         }
     }
 

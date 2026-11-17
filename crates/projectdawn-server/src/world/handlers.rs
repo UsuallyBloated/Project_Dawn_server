@@ -5,12 +5,14 @@
 use super::{
     connection::{DevCmdAuth, PerConnection, Vec3f},
     entity::Entity,
+    groups::{GroupId, GroupManager},
     loot::LootBag,
     CHANNEL_POSITION, CHANNEL_SYSTEM,
 };
 use bincode::config::standard as bincode_cfg;
-use protocol::world::{ClientWorldMsg, Coins, IdKind, KickCode, ServerWorldMsg, Vec3};
+use protocol::world::{ClientWorldMsg, Coins, GroupMember, IdKind, KickCode, ServerWorldMsg, Vec3};
 use renet::{ClientId, RenetServer};
+use std::collections::HashMap;
 use std::time::Instant;
 
 /// Outcome of dispatching a single decoded `ClientWorldMsg`. The tick loop
@@ -2658,7 +2660,7 @@ pub fn fan_group_roster(
     recipients: &[ClientId],
     group_id: u64,
     leader_id: u64,
-    members: Vec<(u64, String)>,
+    members: Vec<GroupMember>,
     loot_mode: u8,
 ) {
     if recipients.is_empty() {
@@ -2674,6 +2676,59 @@ pub fn fan_group_roster(
     for &recipient in recipients {
         server.send_message(recipient, CHANNEL_SYSTEM, bytes.clone());
     }
+}
+
+/// The roster rows for a group: each member still connected, with the level
+/// and base class the server holds for them (PD_W0031). A member whose
+/// connection is gone is left out, as before.
+pub fn group_member_rows(
+    connections: &HashMap<ClientId, PerConnection>,
+    members: &[ClientId],
+) -> Vec<GroupMember> {
+    members
+        .iter()
+        .filter_map(|m| {
+            connections.get(m).map(|c| GroupMember {
+                id: *m,
+                name: c.name.clone(),
+                level: c.level.max(0) as u32,
+                class: c.class.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Send group `gid`'s current roster to every member, then one shot of each
+/// member's resource updates so the panel rows fill at once (playtest
+/// 2026-08-27: rows build zeroed client-side and resources otherwise fan only
+/// on a change, so an idle full-HP member showed blank bars). The one home for
+/// "the group changed, tell the group": membership changes, a member leaving
+/// the world, and a member's level moving. Returns false when no such group
+/// exists.
+pub fn fan_current_roster(
+    server: &mut RenetServer,
+    connections: &HashMap<ClientId, PerConnection>,
+    group_manager: &GroupManager,
+    gid: GroupId,
+) -> bool {
+    let Some(g) = group_manager.groups.get(&gid) else {
+        return false;
+    };
+    let recipients: Vec<ClientId> = g.members.clone();
+    fan_group_roster(
+        server,
+        &recipients,
+        gid,
+        g.leader,
+        group_member_rows(connections, &g.members),
+        g.loot_mode.to_u8(),
+    );
+    for m in &g.members {
+        if let Some(c) = connections.get(m) {
+            fan_out_resources(server, &recipients, c);
+        }
+    }
+    true
 }
 
 /// Private XP grant to the kill-credit recipient. Mirrors

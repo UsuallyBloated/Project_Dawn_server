@@ -78,6 +78,9 @@ pub fn award_xp(server: &mut RenetServer, conn: &mut PerConnection, amount: i32)
     let leveled = conn.level != old_level;
     if leveled {
         apply_intrinsic_delta(conn, old_level, conn.level);
+        // Group-mates see each other's levels (PD_W0031): the tick re-sends
+        // this player's group roster once this step is done.
+        conn.group_roster_stale = true;
         handlers::send_level_up(
             server,
             owner_cid,

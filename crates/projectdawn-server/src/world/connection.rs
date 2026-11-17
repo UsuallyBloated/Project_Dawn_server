@@ -322,6 +322,10 @@ pub struct PerConnection {
     /// Captured in `apply_death_penalty` and read by the corpse-creation pass
     /// onto the corpse, so a Cleric/Paladin res can refund a % of it.
     pub death_lost_xp: i32,
+    /// Set by `progression::award_xp` when this player's level moved (up or
+    /// down). The tick's roster step re-sends their group's `GroupRoster`,
+    /// which carries every member's level (PD_W0031), then clears it.
+    pub group_roster_stale: bool,
     /// Corpse/resurrection Slice 3: a pending resurrection offer on this player's
     /// corpse — `(corpse_id, xp_percent)` recorded when a Cleric/Paladin casts a
     /// res on it, read when the player accepts (so the refund % can't be forged by
@@ -761,6 +765,7 @@ impl PerConnection {
             dead_refusal_told: false,
             corpse_pending: false,
             death_lost_xp: 0,
+            group_roster_stale: false,
             pending_res_offer: None,
             completed_quests,
             active_quests,

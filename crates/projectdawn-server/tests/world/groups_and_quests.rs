@@ -611,3 +611,65 @@ async fn a_plain_account_cannot_set_faction_and_a_consider_names_no_standing() {
         "{line:?}"
     );
 }
+
+/// Group-mates see each other's level and class (user, 2026-11-17; PD_W0031).
+/// The roster carries both from the moment the group forms; a member's level
+/// change re-sends it to the group, on the way up (an XP grant) and on the way
+/// down (a death's de-level). On the previous protocol the roster carried ids
+/// and names only and was never re-sent on a level change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn group_mates_see_each_others_level_and_class_both_ways() {
+    let h = start_both().await;
+    let (mut a, mut b, _dummy, b_id) =
+        grouped_pair_with_dummy(&h, "lvlsharer", "lvlmate", 5.0).await;
+    let a_id = a._char_id as u64;
+
+    // The row a roster carries for `id`, as (level, class).
+    fn row(m: &ServerWorldMsg, id: u64) -> Option<(u32, String)> {
+        match m {
+            ServerWorldMsg::GroupRoster { members, .. } => members
+                .iter()
+                .find(|r| r.id == id)
+                .map(|r| (r.level, r.class.clone())),
+            _ => None,
+        }
+    }
+
+    // The roster that formed the group names both classes at level 1.
+    let formed = b
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::GroupRoster { members, .. } if members.len() == 2),
+        )
+        .await
+        .expect("B holds the roster that formed the group");
+    assert_eq!(row(&formed, a_id), Some((1, "Cleric".to_string())));
+    assert_eq!(row(&formed, b_id as u64), Some((1, "Warrior".to_string())));
+
+    // A (a GM) takes exactly levels 1 to 5's XP plus one point: level 6 with
+    // 1 xp into the band. B's roster must follow with A at 6.
+    let to_six: i32 = (1..=5).map(char_data::xp_to_next_for).sum::<i32>() + 1;
+    a.send_grant_quest_xp(to_six);
+    a.pump_for(Duration::from_millis(300)).await;
+    let up = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            row(m, a_id).is_some_and(|(lvl, _)| lvl == 6)
+        })
+        .await
+        .expect("the partner's roster shows the level-up");
+    assert_eq!(row(&up, a_id), Some((6, "Cleric".to_string())));
+    assert_eq!(row(&up, b_id as u64), Some((1, "Warrior".to_string())));
+
+    // A dies: 5% of level 6's band is far more than the 1 xp held, so A drops
+    // to level 5, and B's roster must drop with it.
+    a.send_death();
+    a.pump_for(Duration::from_millis(300)).await;
+    let down = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            row(m, a_id).is_some_and(|(lvl, _)| lvl == 5)
+        })
+        .await
+        .expect("the partner's roster shows the death's de-level");
+    assert_eq!(row(&down, a_id), Some((5, "Cleric".to_string())));
+}

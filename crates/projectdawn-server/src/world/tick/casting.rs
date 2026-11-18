@@ -737,86 +737,7 @@ pub(super) fn apply_casts(
                     );
                 }
                 "SUMMON_ITEM" => cast_summon_item(ctx, w),
-                "SELF" => {
-                    tracing::info!(
-                        char_id = intent.caster,
-                        spell = %spell.name,
-                        absorb = spell.absorb_amount,
-                        "SELF cast received"
-                    );
-                    // Heal the caster (or damage in the rare "self
-                    // damage" case). base_damage is treated as a
-                    // self-damage; heal_amount as a heal.
-                    let heal = spell.heal_amount;
-                    let dmg = spell.base_damage;
-                    if heal > 0.0 || dmg > 0.0 {
-                        let (final_hp, max_hp) = {
-                            let Some(cc) = connections.get_mut(&caster_cid) else {
-                                tracing::error!(char_id = intent.caster, spell = %spell.name, "caster missing mid-cast; intent dropped");
-                                continue;
-                            };
-                            cc.hp = (cc.hp + heal - dmg).clamp(0.0, cc.max_hp);
-                            regen::mark_dirty(cc);
-                            (cc.hp, cc.max_hp)
-                        };
-                        handlers::fan_out_health_update(
-                            &mut *server,
-                            in_world_recipients_now,
-                            intent.caster,
-                            final_hp,
-                            max_hp,
-                        );
-                        tracing::info!(
-                            char_id = intent.caster,
-                            spell = %spell.name,
-                            heal,
-                            dmg,
-                            final_hp,
-                            "spell self effect applied"
-                        );
-                    }
-                    // Track 6 — apply caster buffs. Lich Form is a
-                    // SELF-only toggle handled inline; the rest of the
-                    // beneficial buffs (HoT / MP-regen / speed / haste /
-                    // shield / absorb / accuracy / primary stat) flow
-                    // through the shared apply_player_spell_buffs so the
-                    // SELF and ALLY arms stay in lockstep.
-                    let mut buff_changed = false;
-                    if spell.is_lich_form {
-                        // Toggle semantics — second cast clears.
-                        let Some(cc) = connections.get_mut(&caster_cid) else {
-                            tracing::error!(char_id = intent.caster, spell = %spell.name, "caster missing mid-cast; intent dropped");
-                            continue;
-                        };
-                        let was_active = buffs::is_lich_form_active(&cc.active_buffs);
-                        cc.active_buffs
-                            .retain(|b| !matches!(b.effect, buffs::BuffEffect::LichForm { .. }));
-                        if !was_active {
-                            cc.active_buffs.push(ActiveBuff::new_lich_form(
-                                spell.name.clone(),
-                                spell.lich_mp_regen,
-                                now,
-                            ));
-                        }
-                        buff_changed = true;
-                    }
-                    let Some(cc) = connections.get_mut(&caster_cid) else {
-                        tracing::error!(char_id = intent.caster, spell = %spell.name, "caster missing mid-cast; intent dropped");
-                        continue;
-                    };
-                    if apply_player_spell_buffs(cc, spell, now) {
-                        buff_changed = true;
-                    }
-                    if buff_changed {
-                        if let Some(cc) = connections.get(&caster_cid) {
-                            handlers::fan_out_buff_snapshot(
-                                &mut *server,
-                                in_world_recipients_now,
-                                cc,
-                            );
-                        }
-                    }
-                }
+                "SELF" => cast_self(ctx, w),
                 "ALLY" => cast_ally(ctx, w),
                 "ENEMY" => cast_enemy(ctx, w),
                 "AOE" => cast_aoe(ctx, w),
@@ -2060,6 +1981,98 @@ fn cast_summon_item(ctx: CastContext<'_>, w: CastWorld<'_>) {
                 hp_cost,
             );
             handlers::send_refusal(&mut *server, caster_cid, "Your bags are full.");
+        }
+    }
+}
+
+/// The SELF arm: a self-targeted heal or buff. Moved out of `apply_casts` verbatim on
+/// 2026-11-18 (R2), its arm-level `continue`s now `return`s.
+fn cast_self(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        caster_cid,
+        in_world_recipients_now,
+        now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        ..
+    } = w;
+    tracing::info!(
+        char_id = intent.caster,
+        spell = %spell.name,
+        absorb = spell.absorb_amount,
+        "SELF cast received"
+    );
+    // Heal the caster (or damage in the rare "self
+    // damage" case). base_damage is treated as a
+    // self-damage; heal_amount as a heal.
+    let heal = spell.heal_amount;
+    let dmg = spell.base_damage;
+    if heal > 0.0 || dmg > 0.0 {
+        let (final_hp, max_hp) = {
+            let Some(cc) = connections.get_mut(&caster_cid) else {
+                tracing::error!(char_id = intent.caster, spell = %spell.name, "caster missing mid-cast; intent dropped");
+                return;
+            };
+            cc.hp = (cc.hp + heal - dmg).clamp(0.0, cc.max_hp);
+            regen::mark_dirty(cc);
+            (cc.hp, cc.max_hp)
+        };
+        handlers::fan_out_health_update(
+            &mut *server,
+            in_world_recipients_now,
+            intent.caster,
+            final_hp,
+            max_hp,
+        );
+        tracing::info!(
+            char_id = intent.caster,
+            spell = %spell.name,
+            heal,
+            dmg,
+            final_hp,
+            "spell self effect applied"
+        );
+    }
+    // Track 6 — apply caster buffs. Lich Form is a
+    // SELF-only toggle handled inline; the rest of the
+    // beneficial buffs (HoT / MP-regen / speed / haste /
+    // shield / absorb / accuracy / primary stat) flow
+    // through the shared apply_player_spell_buffs so the
+    // SELF and ALLY arms stay in lockstep.
+    let mut buff_changed = false;
+    if spell.is_lich_form {
+        // Toggle semantics — second cast clears.
+        let Some(cc) = connections.get_mut(&caster_cid) else {
+            tracing::error!(char_id = intent.caster, spell = %spell.name, "caster missing mid-cast; intent dropped");
+            return;
+        };
+        let was_active = buffs::is_lich_form_active(&cc.active_buffs);
+        cc.active_buffs
+            .retain(|b| !matches!(b.effect, buffs::BuffEffect::LichForm { .. }));
+        if !was_active {
+            cc.active_buffs.push(ActiveBuff::new_lich_form(
+                spell.name.clone(),
+                spell.lich_mp_regen,
+                now,
+            ));
+        }
+        buff_changed = true;
+    }
+    let Some(cc) = connections.get_mut(&caster_cid) else {
+        tracing::error!(char_id = intent.caster, spell = %spell.name, "caster missing mid-cast; intent dropped");
+        return;
+    };
+    if apply_player_spell_buffs(cc, spell, now) {
+        buff_changed = true;
+    }
+    if buff_changed {
+        if let Some(cc) = connections.get(&caster_cid) {
+            handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, cc);
         }
     }
 }

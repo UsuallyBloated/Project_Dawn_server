@@ -1,6 +1,13 @@
 //! Spell casts (step 4ha): each CastSpell judged and applied by its target type. The
 //! rules it is judged by (the target pre-flight, refusals, interrupts, songs) live in
 //! `cast_rules`.
+//!
+//! Shape (R2, 2026-11-18): `apply_casts` is the per-cast prelude, every gate in its
+//! fixed order and then the spend, and ends in a `match` on the target type whose arms
+//! are the `cast_*` functions below, one per target type. The prelude's order is the
+//! security property ("a refusal costs nothing": nothing is spent before the last
+//! check), so it stays one body; an arm only applies what the prelude decided, handed
+//! to it as a `CastContext`, and borrows the world through a `CastWorld`.
 
 use super::*;
 

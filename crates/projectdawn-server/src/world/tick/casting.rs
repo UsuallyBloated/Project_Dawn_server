@@ -702,45 +702,7 @@ pub(super) fn apply_casts(
                 "AOE" => cast_aoe(ctx, w),
                 "PET_SUMMON" => cast_pet_summon(ctx, w),
                 "PET_CHARM" => cast_pet_charm(ctx, w),
-                "PET_HEAL" => {
-                    // Mends the caster's own pet, whatever is targeted;
-                    // the pre-flight found it alive and in reach. Warder's
-                    // Mend was the one client-only pet spell (ported
-                    // 2026-10-07 after the tester asked for none).
-                    let ResolvedTarget::Pet(pet_id) = resolved else {
-                        cast_resolution_lost(
-                            &mut *server,
-                            &mut *connections,
-                            in_world_recipients_now,
-                            caster_cid,
-                            intent.caster,
-                            mana_cost,
-                            hp_cost,
-                            &spell.name,
-                            "own pet",
-                        );
-                        continue;
-                    };
-                    let heal = spell.heal_amount.max(0.0);
-                    if let Some(pet) = enemies.get_mut(&pet_id) {
-                        pet.hp = (pet.hp + heal).min(pet.max_hp);
-                        let (new_hp, max_hp) = (pet.hp, pet.max_hp);
-                        handlers::fan_out_health_update(
-                            &mut *server,
-                            in_world_recipients_now,
-                            pet_id,
-                            new_hp,
-                            max_hp,
-                        );
-                        tracing::info!(
-                            char_id = intent.caster,
-                            pet_id,
-                            spell = %spell.name,
-                            heal,
-                            "PET_HEAL applied"
-                        );
-                    }
-                }
+                "PET_HEAL" => cast_pet_heal(ctx, w),
                 "BIND" => cast_bind(ctx, w),
                 "PORT" => cast_port(ctx, w),
                 _ => {
@@ -2154,4 +2116,62 @@ fn cast_corpse(ctx: CastContext<'_>, w: CastWorld<'_>) {
         xp_percent,
         "resurrection offered"
     );
+}
+
+/// The PET_HEAL arm: Warder's Mend on the caster's own pet. Moved out of `apply_casts`
+/// verbatim on 2026-11-18 (R2), its arm-level `continue` now a `return`.
+fn cast_pet_heal(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        resolved,
+        caster_cid,
+        mana_cost,
+        hp_cost,
+        in_world_recipients_now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        enemies,
+        ..
+    } = w;
+    // Mends the caster's own pet, whatever is targeted;
+    // the pre-flight found it alive and in reach. Warder's
+    // Mend was the one client-only pet spell (ported
+    // 2026-10-07 after the tester asked for none).
+    let ResolvedTarget::Pet(pet_id) = resolved else {
+        cast_resolution_lost(
+            &mut *server,
+            &mut *connections,
+            in_world_recipients_now,
+            caster_cid,
+            intent.caster,
+            mana_cost,
+            hp_cost,
+            &spell.name,
+            "own pet",
+        );
+        return;
+    };
+    let heal = spell.heal_amount.max(0.0);
+    if let Some(pet) = enemies.get_mut(&pet_id) {
+        pet.hp = (pet.hp + heal).min(pet.max_hp);
+        let (new_hp, max_hp) = (pet.hp, pet.max_hp);
+        handlers::fan_out_health_update(
+            &mut *server,
+            in_world_recipients_now,
+            pet_id,
+            new_hp,
+            max_hp,
+        );
+        tracing::info!(
+            char_id = intent.caster,
+            pet_id,
+            spell = %spell.name,
+            heal,
+            "PET_HEAL applied"
+        );
+    }
 }

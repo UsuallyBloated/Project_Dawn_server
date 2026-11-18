@@ -907,161 +907,7 @@ pub(super) fn apply_casts(
                         }
                     }
                 }
-                "ALLY" => {
-                    // The pre-flight resolved the target (a pet, a player,
-                    // or oneself) and decided reach, liveness and the PvP
-                    // heal gates; the arm only applies.
-                    let (pet_target, target_cid) = match resolved {
-                        ResolvedTarget::Pet(id) => (Some(id), caster_cid),
-                        ResolvedTarget::Player(cid) => (None, cid),
-                        _ => {
-                            cast_resolution_lost(
-                                &mut *server,
-                                &mut *connections,
-                                in_world_recipients_now,
-                                caster_cid,
-                                intent.caster,
-                                mana_cost,
-                                hp_cost,
-                                &spell.name,
-                                "ally",
-                            );
-                            continue;
-                        }
-                    };
-                    if let Some(raw_target) = pet_target {
-                        let heal = spell.heal_amount;
-                        if heal > 0.0 {
-                            if let Some(pet) = enemies.get_mut(&raw_target) {
-                                pet.hp = (pet.hp + heal).min(pet.max_hp);
-                                let new_hp = pet.hp;
-                                let max_hp = pet.max_hp;
-                                handlers::fan_out_health_update(
-                                    &mut *server,
-                                    in_world_recipients_now,
-                                    raw_target,
-                                    new_hp,
-                                    max_hp,
-                                );
-                                tracing::info!(
-                                    char_id = intent.caster,
-                                    target = raw_target,
-                                    spell = %spell.name,
-                                    heal,
-                                    "ALLY pet heal applied"
-                                );
-                            }
-                        }
-                        // Track 13 — apply the pet-relevant buff set
-                        // (HoT / speed / haste / damage shield / stat)
-                        // to the pet and fan a BuffSnapshot under the
-                        // pet id.
-                        let mut pet_buff_changed = false;
-                        if let Some(pet) = enemies.get_mut(&raw_target) {
-                            pet_buff_changed = apply_pet_spell_buffs(pet, spell, now);
-                        }
-                        if pet_buff_changed {
-                            if let Some(pet) = enemies.get(&raw_target) {
-                                // Valor-style buffs grow max_hp — fan a
-                                // HealthUpdate so the bar shows the new cap.
-                                if spell.max_hp_buff != 0.0 {
-                                    handlers::fan_out_health_update(
-                                        &mut *server,
-                                        in_world_recipients_now,
-                                        raw_target,
-                                        pet.hp,
-                                        pet.max_hp,
-                                    );
-                                }
-                                fan_out_pet_buff_snapshot(
-                                    &mut *server,
-                                    in_world_recipients_now,
-                                    pet,
-                                );
-                                tracing::info!(
-                                    char_id = intent.caster,
-                                    target = raw_target,
-                                    spell = %spell.name,
-                                    "ALLY pet buff applied"
-                                );
-                            }
-                        }
-                        continue;
-                    }
-                    let target_entity_id = target_cid;
-                    let heal = spell.heal_amount;
-                    if heal > 0.0 {
-                        let (final_hp, max_hp) = {
-                            let Some(tc) = connections.get_mut(&target_cid) else {
-                                cast_resolution_lost(
-                                    &mut *server,
-                                    &mut *connections,
-                                    in_world_recipients_now,
-                                    caster_cid,
-                                    intent.caster,
-                                    mana_cost,
-                                    hp_cost,
-                                    &spell.name,
-                                    "ally",
-                                );
-                                continue;
-                            };
-                            tc.hp = (tc.hp + heal).min(tc.max_hp);
-                            regen::mark_dirty(tc);
-                            (tc.hp, tc.max_hp)
-                        };
-                        handlers::fan_out_health_update(
-                            &mut *server,
-                            in_world_recipients_now,
-                            target_entity_id,
-                            final_hp,
-                            max_hp,
-                        );
-                        tracing::info!(
-                            char_id = intent.caster,
-                            target = target_entity_id,
-                            spell = %spell.name,
-                            heal,
-                            "ALLY heal applied"
-                        );
-                    }
-                    // Apply HoT + every beneficial buff to the ally,
-                    // same set the SELF arm grants the caster. Stat
-                    // buffs mutate the target conn's effective stats
-                    // (combat math reads them); the fanned BuffSnapshot
-                    // lets the target's client reconstruct the buff
-                    // locally (BuffManager.reconcile_with_server_snapshot).
-                    let Some(tc) = connections.get_mut(&target_cid) else {
-                        cast_resolution_lost(
-                            &mut *server,
-                            &mut *connections,
-                            in_world_recipients_now,
-                            caster_cid,
-                            intent.caster,
-                            mana_cost,
-                            hp_cost,
-                            &spell.name,
-                            "ally",
-                        );
-                        continue;
-                    };
-                    let ally_buff_changed = apply_player_spell_buffs(tc, spell, now);
-                    if ally_buff_changed {
-                        if let Some(tc) = connections.get(&target_cid) {
-                            handlers::fan_out_buff_snapshot(
-                                &mut *server,
-                                in_world_recipients_now,
-                                tc,
-                            );
-                        }
-                        tracing::info!(
-                            char_id = intent.caster,
-                            target = target_entity_id,
-                            spell = %spell.name,
-                            "ALLY buff applied"
-                        );
-                    }
-                }
+                "ALLY" => cast_ally(ctx, w),
                 "ENEMY" => cast_enemy(ctx, w),
                 "AOE" => {
                     // Track 9 — server-authoritative AOE damage.
@@ -2018,4 +1864,173 @@ fn cast_port(ctx: CastContext<'_>, w: CastWorld<'_>) {
         x = dest.x, z = dest.z,
         "PORT applied"
     );
+}
+
+/// The ALLY arm: a heal or buff on a player or a pet (the untargeted heal is a
+/// self-heal). The pre-flight decided presence, reach and liveness; this only applies.
+/// Moved out of `apply_casts` verbatim on 2026-11-18 (R2), its arm-level `continue`s
+/// now `return`s.
+fn cast_ally(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        resolved,
+        caster_cid,
+        mana_cost,
+        hp_cost,
+        in_world_recipients_now,
+        now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        enemies,
+        ..
+    } = w;
+    // The pre-flight resolved the target (a pet, a player,
+    // or oneself) and decided reach, liveness and the PvP
+    // heal gates; the arm only applies.
+    let (pet_target, target_cid) = match resolved {
+        ResolvedTarget::Pet(id) => (Some(id), caster_cid),
+        ResolvedTarget::Player(cid) => (None, cid),
+        _ => {
+            cast_resolution_lost(
+                &mut *server,
+                &mut *connections,
+                in_world_recipients_now,
+                caster_cid,
+                intent.caster,
+                mana_cost,
+                hp_cost,
+                &spell.name,
+                "ally",
+            );
+            return;
+        }
+    };
+    if let Some(raw_target) = pet_target {
+        let heal = spell.heal_amount;
+        if heal > 0.0 {
+            if let Some(pet) = enemies.get_mut(&raw_target) {
+                pet.hp = (pet.hp + heal).min(pet.max_hp);
+                let new_hp = pet.hp;
+                let max_hp = pet.max_hp;
+                handlers::fan_out_health_update(
+                    &mut *server,
+                    in_world_recipients_now,
+                    raw_target,
+                    new_hp,
+                    max_hp,
+                );
+                tracing::info!(
+                    char_id = intent.caster,
+                    target = raw_target,
+                    spell = %spell.name,
+                    heal,
+                    "ALLY pet heal applied"
+                );
+            }
+        }
+        // Track 13 — apply the pet-relevant buff set
+        // (HoT / speed / haste / damage shield / stat)
+        // to the pet and fan a BuffSnapshot under the
+        // pet id.
+        let mut pet_buff_changed = false;
+        if let Some(pet) = enemies.get_mut(&raw_target) {
+            pet_buff_changed = apply_pet_spell_buffs(pet, spell, now);
+        }
+        if pet_buff_changed {
+            if let Some(pet) = enemies.get(&raw_target) {
+                // Valor-style buffs grow max_hp — fan a
+                // HealthUpdate so the bar shows the new cap.
+                if spell.max_hp_buff != 0.0 {
+                    handlers::fan_out_health_update(
+                        &mut *server,
+                        in_world_recipients_now,
+                        raw_target,
+                        pet.hp,
+                        pet.max_hp,
+                    );
+                }
+                fan_out_pet_buff_snapshot(&mut *server, in_world_recipients_now, pet);
+                tracing::info!(
+                    char_id = intent.caster,
+                    target = raw_target,
+                    spell = %spell.name,
+                    "ALLY pet buff applied"
+                );
+            }
+        }
+        return;
+    }
+    let target_entity_id = target_cid;
+    let heal = spell.heal_amount;
+    if heal > 0.0 {
+        let (final_hp, max_hp) = {
+            let Some(tc) = connections.get_mut(&target_cid) else {
+                cast_resolution_lost(
+                    &mut *server,
+                    &mut *connections,
+                    in_world_recipients_now,
+                    caster_cid,
+                    intent.caster,
+                    mana_cost,
+                    hp_cost,
+                    &spell.name,
+                    "ally",
+                );
+                return;
+            };
+            tc.hp = (tc.hp + heal).min(tc.max_hp);
+            regen::mark_dirty(tc);
+            (tc.hp, tc.max_hp)
+        };
+        handlers::fan_out_health_update(
+            &mut *server,
+            in_world_recipients_now,
+            target_entity_id,
+            final_hp,
+            max_hp,
+        );
+        tracing::info!(
+            char_id = intent.caster,
+            target = target_entity_id,
+            spell = %spell.name,
+            heal,
+            "ALLY heal applied"
+        );
+    }
+    // Apply HoT + every beneficial buff to the ally,
+    // same set the SELF arm grants the caster. Stat
+    // buffs mutate the target conn's effective stats
+    // (combat math reads them); the fanned BuffSnapshot
+    // lets the target's client reconstruct the buff
+    // locally (BuffManager.reconcile_with_server_snapshot).
+    let Some(tc) = connections.get_mut(&target_cid) else {
+        cast_resolution_lost(
+            &mut *server,
+            &mut *connections,
+            in_world_recipients_now,
+            caster_cid,
+            intent.caster,
+            mana_cost,
+            hp_cost,
+            &spell.name,
+            "ally",
+        );
+        return;
+    };
+    let ally_buff_changed = apply_player_spell_buffs(tc, spell, now);
+    if ally_buff_changed {
+        if let Some(tc) = connections.get(&target_cid) {
+            handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, tc);
+        }
+        tracing::info!(
+            char_id = intent.caster,
+            target = target_entity_id,
+            spell = %spell.name,
+            "ALLY buff applied"
+        );
+    }
 }

@@ -4,6 +4,37 @@
 
 use super::*;
 
+/// What the prelude of `apply_casts` decided about one accepted cast, lent to the
+/// target-type arm that applies it. The prelude (every gate in its fixed order, then
+/// the spend) stays in `apply_casts`: an arm only applies, and never refuses for a
+/// reason the pre-flight already judged. `spell` is the spell as cast, the off-side
+/// penalised copy when alignment cut it.
+#[derive(Clone, Copy)]
+struct CastContext<'a> {
+    intent: &'a CastSpellIntent,
+    spell: &'a spells::Spell,
+    resolved: ResolvedTarget,
+    caster_cid: ClientId,
+    caster_int: i32,
+    mana_cost: f32,
+    hp_cost: f32,
+    dmg_type: DamageType,
+    now: Instant,
+    in_world_recipients_now: &'a [ClientId],
+}
+
+/// The world as the arms borrow it: `apply_casts` destructures `WorldState` once for
+/// the prelude and reborrows these for the arm, which takes them by value and
+/// destructures what it uses.
+struct CastWorld<'a> {
+    server: &'a mut RenetServer,
+    connections: &'a mut HashMap<ClientId, PerConnection>,
+    aoi: &'a mut AoiGrid,
+    enemies: &'a mut HashMap<EntityId, Entity>,
+    loot_bags: &'a mut HashMap<EntityId, LootBag>,
+    group_manager: &'a mut GroupManager,
+}
+
 pub(super) fn apply_casts(
     world: &mut WorldState,
     q: &mut Intents,
@@ -636,6 +667,26 @@ pub(super) fn apply_casts(
                 stop_song(&mut *server, &mut *connections, caster_cid);
             }
 
+            let ctx = CastContext {
+                intent: &intent,
+                spell,
+                resolved,
+                caster_cid,
+                caster_int,
+                mana_cost,
+                hp_cost,
+                dmg_type,
+                now,
+                in_world_recipients_now,
+            };
+            let w = CastWorld {
+                server: &mut *server,
+                connections: &mut *connections,
+                aoi: &mut *aoi,
+                enemies: &mut *enemies,
+                loot_bags: &mut *loot_bags,
+                group_manager: &mut *group_manager,
+            };
             match spell.target_type.as_str() {
                 "CORPSE" => {
                     // Corpse / resurrection Slice 3 — a res spell targets a
@@ -1007,407 +1058,7 @@ pub(super) fn apply_casts(
                         );
                     }
                 }
-                "ENEMY" => {
-                    // The pre-flight resolved the target and decided
-                    // presence, reach, liveness and the PvP gates (for a
-                    // player, and for another player's pet); the arm only
-                    // applies.
-                    let (target_id, pvp_target) = match resolved {
-                        ResolvedTarget::Player(cid) => (cid, Some(cid)),
-                        ResolvedTarget::Mob(id) | ResolvedTarget::Pet(id) => (id, None),
-                        _ => {
-                            cast_resolution_lost(
-                                &mut *server,
-                                &mut *connections,
-                                in_world_recipients_now,
-                                caster_cid,
-                                intent.caster,
-                                mana_cost,
-                                hp_cost,
-                                &spell.name,
-                                "enemy",
-                            );
-                            continue;
-                        }
-                    };
-                    if let Some(target_cid) = pvp_target {
-                        // Track 6 sub-task 4c — absorb pool +
-                        // damage shield apply on PvP spell hit
-                        // too. Armor reduction is skipped for
-                        // spells (matches GDScript wrapping).
-                        let shield_back: f32;
-                        let shield_back_name: Option<String>;
-                        let mut absorb_strip_idx: Option<usize> = None;
-                        // The spell crit (spell_power.rs), before the absorb
-                        // shield takes its share, as on the client.
-                        let flat = spell.base_damage.max(0.0) as i32;
-                        let (rolled, crit) = if flat > 0 {
-                            crate::world::spell_power::roll_hit(
-                                flat,
-                                caster_int,
-                                &mut rand::thread_rng(),
-                            )
-                        } else {
-                            (0, false)
-                        };
-                        let (final_hp, max_hp, applied) = {
-                            let Some(tc) = connections.get_mut(&target_cid) else {
-                                cast_resolution_lost(
-                                    &mut *server,
-                                    &mut *connections,
-                                    in_world_recipients_now,
-                                    caster_cid,
-                                    intent.caster,
-                                    mana_cost,
-                                    hp_cost,
-                                    &spell.name,
-                                    "enemy",
-                                );
-                                continue;
-                            };
-                            let mut dmg = rolled;
-                            let (after_absorb, exhausted) =
-                                buffs::consume_absorb(&mut tc.active_buffs, dmg);
-                            dmg = after_absorb;
-                            if exhausted {
-                                absorb_strip_idx = tc.active_buffs.iter().position(|b| {
-                                    matches!(b.effect, buffs::BuffEffect::Absorb { .. })
-                                });
-                            }
-                            shield_back = buffs::damage_shield_total(&tc.active_buffs);
-                            shield_back_name = buffs::first_damage_shield_name(&tc.active_buffs)
-                                .map(|s| s.to_string());
-                            tc.hp = (tc.hp - dmg as f32).max(0.0);
-                            regen::mark_dirty(tc);
-                            tc.note_damage_taken(now); // camp breaks on damage
-                            (tc.hp, tc.max_hp, dmg)
-                        };
-                        if let Some(idx) = absorb_strip_idx {
-                            if let Some(tc) = connections.get_mut(&target_cid) {
-                                if idx < tc.active_buffs.len() {
-                                    tc.active_buffs.remove(idx);
-                                }
-                            }
-                            if let Some(tc) = connections.get(&target_cid) {
-                                handlers::fan_out_buff_snapshot(
-                                    &mut *server,
-                                    in_world_recipients_now,
-                                    tc,
-                                );
-                            }
-                        }
-                        handlers::fan_out_hit(
-                            &mut *server,
-                            in_world_recipients_now,
-                            intent.caster,
-                            target_id,
-                            applied,
-                            crit,
-                            dmg_type,
-                        );
-                        handlers::fan_out_health_update(
-                            &mut *server,
-                            in_world_recipients_now,
-                            target_id,
-                            final_hp,
-                            max_hp,
-                        );
-                        tracing::info!(
-                            char_id = intent.caster,
-                            target = target_id,
-                            spell = %spell.name,
-                            applied,
-                            "PvP spell applied"
-                        );
-                        // Track 22.E — PvP spell damage interrupts
-                        // the target's cast (mirror of the PvP
-                        // melee interrupt wired in Track 19A).
-                        if let Some(tc) = connections.get_mut(&target_cid) {
-                            let outcome = roll_cast_interrupt(tc, now, applied);
-                            let (tc_mp, tc_max_mp) = (tc.mp, tc.max_mp);
-                            match &outcome {
-                                InterruptOutcome::Interrupted {
-                                    spell_name,
-                                    mana_charged,
-                                } => {
-                                    handlers::fan_out_cast_fail(
-                                        &mut *server,
-                                        in_world_recipients_now,
-                                        target_id,
-                                        "interrupted (hit during cast)".to_string(),
-                                    );
-                                    tell_interrupt_charge(
-                                        &mut *server,
-                                        target_cid,
-                                        target_id,
-                                        tc_mp,
-                                        tc_max_mp,
-                                        *mana_charged,
-                                    );
-                                    tracing::info!(
-                                        caster = target_id,
-                                        spell = %spell_name,
-                                        mana_charged,
-                                        "PvP cast interrupted by incoming spell damage"
-                                    );
-                                }
-                                InterruptOutcome::Survived {
-                                    advanced_to: Some(new_score),
-                                } => {
-                                    handlers::send_skill_progress_update(
-                                        &mut *server,
-                                        target_cid,
-                                        skills::Skill::Casting.as_protocol(),
-                                        "channeling".to_string(),
-                                        *new_score,
-                                    );
-                                }
-                                InterruptOutcome::Survived { advanced_to: None }
-                                | InterruptOutcome::NotCasting => {}
-                            }
-                        }
-                        // Damage shield reflects to caster.
-                        if shield_back > 0.0 {
-                            if let Some(att) = connections.get_mut(&caster_cid) {
-                                if att.hp > 0.0 {
-                                    let reflect_dmg = shield_back as i32;
-                                    att.hp = (att.hp - shield_back).max(0.0);
-                                    regen::mark_dirty(att);
-                                    att.note_damage_taken(now); // camp breaks on damage
-                                    let new_att_hp = att.hp;
-                                    let att_max = att.max_hp;
-                                    handlers::fan_out_health_update(
-                                        &mut *server,
-                                        in_world_recipients_now,
-                                        intent.caster,
-                                        new_att_hp,
-                                        att_max,
-                                    );
-                                    if let Some(name) = shield_back_name.as_ref() {
-                                        handlers::fan_out_damage_shield_trigger(
-                                            &mut *server,
-                                            in_world_recipients_now,
-                                            target_id,
-                                            intent.caster,
-                                            reflect_dmg,
-                                            name.clone(),
-                                        );
-                                    }
-                                    // Track 22.E — shield reflect
-                                    // damage also interrupts the
-                                    // caster (their own thorns
-                                    // hits their cast). Note this
-                                    // is rarely meaningful since
-                                    // CastSpell already cleared
-                                    // cast_spell_name above when
-                                    // the cast resolved — left
-                                    // here for the case where a
-                                    // future spell type leaves
-                                    // the cache populated.
-                                    let outcome = roll_cast_interrupt(att, now, reflect_dmg);
-                                    let (att_mp, att_max_mp) = (att.mp, att.max_mp);
-                                    if let InterruptOutcome::Interrupted {
-                                        spell_name,
-                                        mana_charged,
-                                    } = &outcome
-                                    {
-                                        handlers::fan_out_cast_fail(
-                                            &mut *server,
-                                            in_world_recipients_now,
-                                            intent.caster,
-                                            "interrupted (hit during cast)".to_string(),
-                                        );
-                                        tell_interrupt_charge(
-                                            &mut *server,
-                                            caster_cid,
-                                            intent.caster,
-                                            att_mp,
-                                            att_max_mp,
-                                            *mana_charged,
-                                        );
-                                        tracing::info!(
-                                            char_id = intent.caster,
-                                            spell = %spell_name,
-                                            mana_charged,
-                                            "PvP caster interrupted by own shield reflect"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        // Track 6 sub-task 4d — CC application on
-                        // PvP spell. Mez, Root, Snare, AttackSlow,
-                        // Silence, Dispel land on the target's
-                        // active_buffs after damage. Refresh
-                        // semantics (same-name re-cast renews
-                        // duration via apply_buff).
-                        let mut cc_changed = false;
-                        // A PvP DoT rides the same buff list (spell
-                        // batch step 5), ticking in the buff sweep.
-                        if spell.dot_dps > 0.0 && spell.dot_duration > 0.0 {
-                            if let Some(tc) = connections.get_mut(&target_cid) {
-                                apply_buff(
-                                    tc,
-                                    ActiveBuff::new_dot(
-                                        spell.name.clone(),
-                                        spell.dot_dps,
-                                        intent.caster,
-                                        dmg_type,
-                                        spell.dot_duration,
-                                        now,
-                                    ),
-                                );
-                                cc_changed = true;
-                            }
-                        }
-                        if spell.cc_duration > 0.0 {
-                            if let Some(tc) = connections.get_mut(&target_cid) {
-                                apply_buff(
-                                    tc,
-                                    ActiveBuff::new_mez(spell.name.clone(), spell.cc_duration, now),
-                                );
-                                cc_changed = true;
-                            }
-                        }
-                        if spell.root_duration > 0.0 {
-                            if let Some(tc) = connections.get_mut(&target_cid) {
-                                apply_buff(
-                                    tc,
-                                    ActiveBuff::new_root(
-                                        spell.name.clone(),
-                                        spell.root_duration,
-                                        now,
-                                    ),
-                                );
-                                cc_changed = true;
-                            }
-                        }
-                        if spell.slow_amount > 0.0 && spell.slow_duration > 0.0 {
-                            if let Some(tc) = connections.get_mut(&target_cid) {
-                                apply_buff(
-                                    tc,
-                                    ActiveBuff::new_snare(
-                                        spell.name.clone(),
-                                        spell.slow_amount,
-                                        spell.slow_duration,
-                                        now,
-                                    ),
-                                );
-                                cc_changed = true;
-                            }
-                        }
-                        if spell.attack_slow_amount > 0.0 && spell.attack_slow_duration > 0.0 {
-                            if let Some(tc) = connections.get_mut(&target_cid) {
-                                apply_buff(
-                                    tc,
-                                    ActiveBuff::new_attack_slow(
-                                        spell.name.clone(),
-                                        spell.attack_slow_amount,
-                                        spell.attack_slow_duration,
-                                        now,
-                                    ),
-                                );
-                                cc_changed = true;
-                            }
-                        }
-                        if spell.silence_duration > 0.0 {
-                            if let Some(tc) = connections.get_mut(&target_cid) {
-                                apply_buff(
-                                    tc,
-                                    ActiveBuff::new_silence(
-                                        spell.name.clone(),
-                                        spell.silence_duration,
-                                        now,
-                                    ),
-                                );
-                                cc_changed = true;
-                            }
-                        }
-                        if spell.is_dispel {
-                            // Strip one non-CC buff from target.
-                            // Stat buffs need their deltas undone
-                            // first.
-                            if let Some(tc) = connections.get_mut(&target_cid) {
-                                if let Some(idx) = buffs::first_dispellable_index(&tc.active_buffs)
-                                {
-                                    if let buffs::BuffEffect::StatBuff {
-                                        strength,
-                                        agility,
-                                        intelligence,
-                                        wisdom,
-                                        constitution,
-                                        max_hp_delta,
-                                        max_mp_delta,
-                                    } = tc.active_buffs[idx].effect
-                                    {
-                                        buffs::undo_stat_deltas(
-                                            tc,
-                                            strength,
-                                            agility,
-                                            intelligence,
-                                            wisdom,
-                                            constitution,
-                                            max_hp_delta,
-                                            max_mp_delta,
-                                        );
-                                        regen::mark_dirty(tc);
-                                    }
-                                    tc.active_buffs.remove(idx);
-                                    cc_changed = true;
-                                }
-                            }
-                        }
-                        if cc_changed {
-                            if let Some(tc) = connections.get(&target_cid) {
-                                handlers::fan_out_buff_snapshot(
-                                    &mut *server,
-                                    in_world_recipients_now,
-                                    tc,
-                                );
-                            }
-                        }
-                        continue;
-                    }
-                    // A mob, or another player's pet the pre-flight
-                    // admitted: apply spell damage via the shared helper
-                    // (Track 9; the same path AOE uses per victim).
-                    apply_spell_damage_to_enemy(
-                        &mut *server,
-                        in_world_recipients_now,
-                        &mut *connections,
-                        &mut *enemies,
-                        &mut *loot_bags,
-                        &mut *aoi,
-                        group_manager,
-                        intent.caster,
-                        target_id,
-                        spell,
-                        dmg_type,
-                        now,
-                    );
-                    // Visibility log for PvP spell-on-pet. The
-                    // pet-target path doesn't reach the
-                    // "PvP spell applied" trace at line ~3002 (which
-                    // is in the player-target arm), so without this
-                    // line a spell-on-pet hit is invisible in
-                    // server.log and hard to triage.
-                    if IdKind::of(target_id) == IdKind::Pet {
-                        tracing::info!(
-                            char_id = intent.caster,
-                            target = target_id,
-                            spell = %spell.name,
-                            "PvP spell applied vs pet"
-                        );
-                    }
-                    // Track 11.3 — refresh pet target inheritance
-                    // on every single-target damage spell too, so
-                    // a Necromancer casting Bone Shards at an
-                    // enemy directs the skeleton onto it.
-                    if let Some(att) = connections.get_mut(&caster_cid) {
-                        att.last_attacked_enemy = Some(target_id);
-                        att.last_attacked_at = Some(now);
-                    }
-                }
+                "ENEMY" => cast_enemy(ctx, w),
                 "AOE" => {
                     // Track 9 — server-authoritative AOE damage.
                     // Search the caster's AOI neighbourhood (3×3
@@ -1948,5 +1599,412 @@ pub(super) fn apply_casts(
                 }
             }
         }
+    }
+}
+
+/// The ENEMY arm: a hostile single-target spell on a mob, a pet or a PvP-flagged
+/// player. The pre-flight resolved the target and decided presence, reach, liveness
+/// and the PvP gates; this only applies. Moved out of `apply_casts` verbatim on
+/// 2026-11-18 (R2), its arm-level `continue`s now `return`s.
+fn cast_enemy(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        resolved,
+        caster_cid,
+        caster_int,
+        mana_cost,
+        hp_cost,
+        dmg_type,
+        now,
+        in_world_recipients_now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        aoi,
+        enemies,
+        loot_bags,
+        group_manager,
+        ..
+    } = w;
+    // The pre-flight resolved the target and decided
+    // presence, reach, liveness and the PvP gates (for a
+    // player, and for another player's pet); the arm only
+    // applies.
+    let (target_id, pvp_target) = match resolved {
+        ResolvedTarget::Player(cid) => (cid, Some(cid)),
+        ResolvedTarget::Mob(id) | ResolvedTarget::Pet(id) => (id, None),
+        _ => {
+            cast_resolution_lost(
+                &mut *server,
+                &mut *connections,
+                in_world_recipients_now,
+                caster_cid,
+                intent.caster,
+                mana_cost,
+                hp_cost,
+                &spell.name,
+                "enemy",
+            );
+            return;
+        }
+    };
+    if let Some(target_cid) = pvp_target {
+        // Track 6 sub-task 4c — absorb pool +
+        // damage shield apply on PvP spell hit
+        // too. Armor reduction is skipped for
+        // spells (matches GDScript wrapping).
+        let shield_back: f32;
+        let shield_back_name: Option<String>;
+        let mut absorb_strip_idx: Option<usize> = None;
+        // The spell crit (spell_power.rs), before the absorb
+        // shield takes its share, as on the client.
+        let flat = spell.base_damage.max(0.0) as i32;
+        let (rolled, crit) = if flat > 0 {
+            crate::world::spell_power::roll_hit(flat, caster_int, &mut rand::thread_rng())
+        } else {
+            (0, false)
+        };
+        let (final_hp, max_hp, applied) = {
+            let Some(tc) = connections.get_mut(&target_cid) else {
+                cast_resolution_lost(
+                    &mut *server,
+                    &mut *connections,
+                    in_world_recipients_now,
+                    caster_cid,
+                    intent.caster,
+                    mana_cost,
+                    hp_cost,
+                    &spell.name,
+                    "enemy",
+                );
+                return;
+            };
+            let mut dmg = rolled;
+            let (after_absorb, exhausted) = buffs::consume_absorb(&mut tc.active_buffs, dmg);
+            dmg = after_absorb;
+            if exhausted {
+                absorb_strip_idx = tc
+                    .active_buffs
+                    .iter()
+                    .position(|b| matches!(b.effect, buffs::BuffEffect::Absorb { .. }));
+            }
+            shield_back = buffs::damage_shield_total(&tc.active_buffs);
+            shield_back_name =
+                buffs::first_damage_shield_name(&tc.active_buffs).map(|s| s.to_string());
+            tc.hp = (tc.hp - dmg as f32).max(0.0);
+            regen::mark_dirty(tc);
+            tc.note_damage_taken(now); // camp breaks on damage
+            (tc.hp, tc.max_hp, dmg)
+        };
+        if let Some(idx) = absorb_strip_idx {
+            if let Some(tc) = connections.get_mut(&target_cid) {
+                if idx < tc.active_buffs.len() {
+                    tc.active_buffs.remove(idx);
+                }
+            }
+            if let Some(tc) = connections.get(&target_cid) {
+                handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, tc);
+            }
+        }
+        handlers::fan_out_hit(
+            &mut *server,
+            in_world_recipients_now,
+            intent.caster,
+            target_id,
+            applied,
+            crit,
+            dmg_type,
+        );
+        handlers::fan_out_health_update(
+            &mut *server,
+            in_world_recipients_now,
+            target_id,
+            final_hp,
+            max_hp,
+        );
+        tracing::info!(
+            char_id = intent.caster,
+            target = target_id,
+            spell = %spell.name,
+            applied,
+            "PvP spell applied"
+        );
+        // Track 22.E — PvP spell damage interrupts
+        // the target's cast (mirror of the PvP
+        // melee interrupt wired in Track 19A).
+        if let Some(tc) = connections.get_mut(&target_cid) {
+            let outcome = roll_cast_interrupt(tc, now, applied);
+            let (tc_mp, tc_max_mp) = (tc.mp, tc.max_mp);
+            match &outcome {
+                InterruptOutcome::Interrupted {
+                    spell_name,
+                    mana_charged,
+                } => {
+                    handlers::fan_out_cast_fail(
+                        &mut *server,
+                        in_world_recipients_now,
+                        target_id,
+                        "interrupted (hit during cast)".to_string(),
+                    );
+                    tell_interrupt_charge(
+                        &mut *server,
+                        target_cid,
+                        target_id,
+                        tc_mp,
+                        tc_max_mp,
+                        *mana_charged,
+                    );
+                    tracing::info!(
+                        caster = target_id,
+                        spell = %spell_name,
+                        mana_charged,
+                        "PvP cast interrupted by incoming spell damage"
+                    );
+                }
+                InterruptOutcome::Survived {
+                    advanced_to: Some(new_score),
+                } => {
+                    handlers::send_skill_progress_update(
+                        &mut *server,
+                        target_cid,
+                        skills::Skill::Casting.as_protocol(),
+                        "channeling".to_string(),
+                        *new_score,
+                    );
+                }
+                InterruptOutcome::Survived { advanced_to: None } | InterruptOutcome::NotCasting => {
+                }
+            }
+        }
+        // Damage shield reflects to caster.
+        if shield_back > 0.0 {
+            if let Some(att) = connections.get_mut(&caster_cid) {
+                if att.hp > 0.0 {
+                    let reflect_dmg = shield_back as i32;
+                    att.hp = (att.hp - shield_back).max(0.0);
+                    regen::mark_dirty(att);
+                    att.note_damage_taken(now); // camp breaks on damage
+                    let new_att_hp = att.hp;
+                    let att_max = att.max_hp;
+                    handlers::fan_out_health_update(
+                        &mut *server,
+                        in_world_recipients_now,
+                        intent.caster,
+                        new_att_hp,
+                        att_max,
+                    );
+                    if let Some(name) = shield_back_name.as_ref() {
+                        handlers::fan_out_damage_shield_trigger(
+                            &mut *server,
+                            in_world_recipients_now,
+                            target_id,
+                            intent.caster,
+                            reflect_dmg,
+                            name.clone(),
+                        );
+                    }
+                    // Track 22.E — shield reflect
+                    // damage also interrupts the
+                    // caster (their own thorns
+                    // hits their cast). Note this
+                    // is rarely meaningful since
+                    // CastSpell already cleared
+                    // cast_spell_name above when
+                    // the cast resolved — left
+                    // here for the case where a
+                    // future spell type leaves
+                    // the cache populated.
+                    let outcome = roll_cast_interrupt(att, now, reflect_dmg);
+                    let (att_mp, att_max_mp) = (att.mp, att.max_mp);
+                    if let InterruptOutcome::Interrupted {
+                        spell_name,
+                        mana_charged,
+                    } = &outcome
+                    {
+                        handlers::fan_out_cast_fail(
+                            &mut *server,
+                            in_world_recipients_now,
+                            intent.caster,
+                            "interrupted (hit during cast)".to_string(),
+                        );
+                        tell_interrupt_charge(
+                            &mut *server,
+                            caster_cid,
+                            intent.caster,
+                            att_mp,
+                            att_max_mp,
+                            *mana_charged,
+                        );
+                        tracing::info!(
+                            char_id = intent.caster,
+                            spell = %spell_name,
+                            mana_charged,
+                            "PvP caster interrupted by own shield reflect"
+                        );
+                    }
+                }
+            }
+        }
+        // Track 6 sub-task 4d — CC application on
+        // PvP spell. Mez, Root, Snare, AttackSlow,
+        // Silence, Dispel land on the target's
+        // active_buffs after damage. Refresh
+        // semantics (same-name re-cast renews
+        // duration via apply_buff).
+        let mut cc_changed = false;
+        // A PvP DoT rides the same buff list (spell
+        // batch step 5), ticking in the buff sweep.
+        if spell.dot_dps > 0.0 && spell.dot_duration > 0.0 {
+            if let Some(tc) = connections.get_mut(&target_cid) {
+                apply_buff(
+                    tc,
+                    ActiveBuff::new_dot(
+                        spell.name.clone(),
+                        spell.dot_dps,
+                        intent.caster,
+                        dmg_type,
+                        spell.dot_duration,
+                        now,
+                    ),
+                );
+                cc_changed = true;
+            }
+        }
+        if spell.cc_duration > 0.0 {
+            if let Some(tc) = connections.get_mut(&target_cid) {
+                apply_buff(
+                    tc,
+                    ActiveBuff::new_mez(spell.name.clone(), spell.cc_duration, now),
+                );
+                cc_changed = true;
+            }
+        }
+        if spell.root_duration > 0.0 {
+            if let Some(tc) = connections.get_mut(&target_cid) {
+                apply_buff(
+                    tc,
+                    ActiveBuff::new_root(spell.name.clone(), spell.root_duration, now),
+                );
+                cc_changed = true;
+            }
+        }
+        if spell.slow_amount > 0.0 && spell.slow_duration > 0.0 {
+            if let Some(tc) = connections.get_mut(&target_cid) {
+                apply_buff(
+                    tc,
+                    ActiveBuff::new_snare(
+                        spell.name.clone(),
+                        spell.slow_amount,
+                        spell.slow_duration,
+                        now,
+                    ),
+                );
+                cc_changed = true;
+            }
+        }
+        if spell.attack_slow_amount > 0.0 && spell.attack_slow_duration > 0.0 {
+            if let Some(tc) = connections.get_mut(&target_cid) {
+                apply_buff(
+                    tc,
+                    ActiveBuff::new_attack_slow(
+                        spell.name.clone(),
+                        spell.attack_slow_amount,
+                        spell.attack_slow_duration,
+                        now,
+                    ),
+                );
+                cc_changed = true;
+            }
+        }
+        if spell.silence_duration > 0.0 {
+            if let Some(tc) = connections.get_mut(&target_cid) {
+                apply_buff(
+                    tc,
+                    ActiveBuff::new_silence(spell.name.clone(), spell.silence_duration, now),
+                );
+                cc_changed = true;
+            }
+        }
+        if spell.is_dispel {
+            // Strip one non-CC buff from target.
+            // Stat buffs need their deltas undone
+            // first.
+            if let Some(tc) = connections.get_mut(&target_cid) {
+                if let Some(idx) = buffs::first_dispellable_index(&tc.active_buffs) {
+                    if let buffs::BuffEffect::StatBuff {
+                        strength,
+                        agility,
+                        intelligence,
+                        wisdom,
+                        constitution,
+                        max_hp_delta,
+                        max_mp_delta,
+                    } = tc.active_buffs[idx].effect
+                    {
+                        buffs::undo_stat_deltas(
+                            tc,
+                            strength,
+                            agility,
+                            intelligence,
+                            wisdom,
+                            constitution,
+                            max_hp_delta,
+                            max_mp_delta,
+                        );
+                        regen::mark_dirty(tc);
+                    }
+                    tc.active_buffs.remove(idx);
+                    cc_changed = true;
+                }
+            }
+        }
+        if cc_changed {
+            if let Some(tc) = connections.get(&target_cid) {
+                handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, tc);
+            }
+        }
+        return;
+    }
+    // A mob, or another player's pet the pre-flight
+    // admitted: apply spell damage via the shared helper
+    // (Track 9; the same path AOE uses per victim).
+    apply_spell_damage_to_enemy(
+        &mut *server,
+        in_world_recipients_now,
+        &mut *connections,
+        &mut *enemies,
+        &mut *loot_bags,
+        &mut *aoi,
+        group_manager,
+        intent.caster,
+        target_id,
+        spell,
+        dmg_type,
+        now,
+    );
+    // Visibility log for PvP spell-on-pet. The
+    // pet-target path doesn't reach the
+    // "PvP spell applied" trace at line ~3002 (which
+    // is in the player-target arm), so without this
+    // line a spell-on-pet hit is invisible in
+    // server.log and hard to triage.
+    if IdKind::of(target_id) == IdKind::Pet {
+        tracing::info!(
+            char_id = intent.caster,
+            target = target_id,
+            spell = %spell.name,
+            "PvP spell applied vs pet"
+        );
+    }
+    // Track 11.3 — refresh pet target inheritance
+    // on every single-target damage spell too, so
+    // a Necromancer casting Bone Shards at an
+    // enemy directs the skeleton onto it.
+    if let Some(att) = connections.get_mut(&caster_cid) {
+        att.last_attacked_enemy = Some(target_id);
+        att.last_attacked_at = Some(now);
     }
 }

@@ -742,73 +742,7 @@ pub(super) fn apply_casts(
                 "ENEMY" => cast_enemy(ctx, w),
                 "AOE" => cast_aoe(ctx, w),
                 "PET_SUMMON" => cast_pet_summon(ctx, w),
-                "PET_CHARM" => {
-                    // Track 12 Piece C — convert the targeted
-                    // enemy into a player-owned pet for
-                    // `spell.duration` seconds. Re-keys the id
-                    // partition: EntityDespawn the old enemy id,
-                    // PetSpawn a fresh pet id at the same pos
-                    // with the same hp/max_hp, owner = caster.
-                    // When the charm ends (the sweep below, or the
-                    // owner leaving) the mob is handed back as the
-                    // enemy it was, hostile to its charmer; see
-                    // `return_charmed_mob`.
-                    let ResolvedTarget::Mob(target_id) = resolved else {
-                        cast_resolution_lost(
-                            &mut *server,
-                            &mut *connections,
-                            in_world_recipients_now,
-                            caster_cid,
-                            intent.caster,
-                            mana_cost,
-                            hp_cost,
-                            &spell.name,
-                            "charm",
-                        );
-                        continue;
-                    };
-                    let owner_id = intent.caster;
-                    let duration = if spell.duration > 0.0 {
-                        spell.duration
-                    } else {
-                        30.0
-                    };
-                    // The helper releases whatever pet the caster already
-                    // has (one pet at a time), re-keys the mob into a pet
-                    // and fans both. None = the victim vanished since the
-                    // pre-flight.
-                    let Some(pet_id) = charm_mob(
-                        &mut *server,
-                        in_world_recipients_now,
-                        &mut *enemies,
-                        &mut *aoi,
-                        owner_id,
-                        target_id,
-                        duration,
-                        now,
-                    ) else {
-                        cast_resolution_lost(
-                            &mut *server,
-                            &mut *connections,
-                            in_world_recipients_now,
-                            caster_cid,
-                            intent.caster,
-                            mana_cost,
-                            hp_cost,
-                            &spell.name,
-                            "charm victim",
-                        );
-                        continue;
-                    };
-                    tracing::info!(
-                        owner = owner_id,
-                        old_enemy_id = target_id,
-                        new_pet_id = pet_id,
-                        duration_secs = duration,
-                        spell = %spell.name,
-                        "enemy charmed into pet"
-                    );
-                }
+                "PET_CHARM" => cast_pet_charm(ctx, w),
                 "PET_HEAL" => {
                     // Mends the caster's own pet, whatever is targeted;
                     // the pre-flight found it alive and in reach. Warder's
@@ -2098,5 +2032,94 @@ fn cast_pet_summon(ctx: CastContext<'_>, w: CastWorld<'_>) {
         level = pet_level,
         owner_level,
         "pet summoned"
+    );
+}
+
+/// The PET_CHARM arm: a mob made the caster's pet for the charm's duration (its
+/// earlier pet released first). Moved out of `apply_casts` verbatim on 2026-11-18 (R2),
+/// its arm-level `continue`s now `return`s.
+fn cast_pet_charm(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        resolved,
+        caster_cid,
+        mana_cost,
+        hp_cost,
+        in_world_recipients_now,
+        now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        aoi,
+        enemies,
+        ..
+    } = w;
+    // Track 12 Piece C — convert the targeted
+    // enemy into a player-owned pet for
+    // `spell.duration` seconds. Re-keys the id
+    // partition: EntityDespawn the old enemy id,
+    // PetSpawn a fresh pet id at the same pos
+    // with the same hp/max_hp, owner = caster.
+    // When the charm ends (the sweep below, or the
+    // owner leaving) the mob is handed back as the
+    // enemy it was, hostile to its charmer; see
+    // `return_charmed_mob`.
+    let ResolvedTarget::Mob(target_id) = resolved else {
+        cast_resolution_lost(
+            &mut *server,
+            &mut *connections,
+            in_world_recipients_now,
+            caster_cid,
+            intent.caster,
+            mana_cost,
+            hp_cost,
+            &spell.name,
+            "charm",
+        );
+        return;
+    };
+    let owner_id = intent.caster;
+    let duration = if spell.duration > 0.0 {
+        spell.duration
+    } else {
+        30.0
+    };
+    // The helper releases whatever pet the caster already
+    // has (one pet at a time), re-keys the mob into a pet
+    // and fans both. None = the victim vanished since the
+    // pre-flight.
+    let Some(pet_id) = charm_mob(
+        &mut *server,
+        in_world_recipients_now,
+        &mut *enemies,
+        &mut *aoi,
+        owner_id,
+        target_id,
+        duration,
+        now,
+    ) else {
+        cast_resolution_lost(
+            &mut *server,
+            &mut *connections,
+            in_world_recipients_now,
+            caster_cid,
+            intent.caster,
+            mana_cost,
+            hp_cost,
+            &spell.name,
+            "charm victim",
+        );
+        return;
+    };
+    tracing::info!(
+        owner = owner_id,
+        old_enemy_id = target_id,
+        new_pet_id = pet_id,
+        duration_secs = duration,
+        spell = %spell.name,
+        "enemy charmed into pet"
     );
 }

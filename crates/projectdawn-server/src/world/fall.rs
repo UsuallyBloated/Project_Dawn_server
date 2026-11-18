@@ -40,6 +40,11 @@ pub struct Vertical {
     pub airborne: bool,
     pub vy: f32,
     pub from_y: f32,
+    /// A fall that costs nothing when it lands: set only when a GM ends their
+    /// flight in the air (`/fly off`, docs/design/handoff_gm_flight.md, the
+    /// user's call 4). Every other way into the air (a walk-off, `DevFling`)
+    /// builds a fresh `Vertical`, so it is never harmless.
+    pub harmless: bool,
 }
 
 /// A body touching down: the height of the fall (from where it left the
@@ -47,10 +52,12 @@ pub struct Vertical {
 /// height amounts to in free fall, `sqrt(2 g drop)`. The tick-by-tick `vy`
 /// moves the body for the Position fan and finds the landing tick; the cost
 /// never reads it, so a fall costs the same however the ticks fell.
+/// `harmless` carries the fall's own flag: such a landing costs nothing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Landing {
     pub impact_speed: f32,
     pub drop: f32,
+    pub harmless: bool,
 }
 
 /// The steepest floor's gradient: `tan(FLOOR_MAX_ANGLE_DEG)`.
@@ -119,6 +126,7 @@ pub fn vertical_step(
             airborne: true,
             vy: 0.0,
             from_y: y,
+            harmless: false,
         };
     }
     let (vy, next) = fallen(v.vy, y, dt);
@@ -149,10 +157,23 @@ pub fn settle(v: &mut Vertical, ground_y: f32) -> Option<Landing> {
 /// lands softly.
 fn touch_down(v: &mut Vertical, ground_y: f32) -> Landing {
     let drop = (v.from_y - ground_y).max(0.0);
+    let harmless = v.harmless;
     *v = Vertical::default();
     Landing {
         impact_speed: (2.0 * GRAVITY * drop).sqrt(),
         drop,
+        harmless,
+    }
+}
+
+/// A body let go in the air at `y` that costs nothing when it lands: the
+/// state a GM's `/fly off` leaves them in.
+pub fn harmless_drop(y: f32) -> Vertical {
+    Vertical {
+        airborne: true,
+        vy: 0.0,
+        from_y: y,
+        harmless: true,
     }
 }
 
@@ -228,6 +249,7 @@ mod tests {
             airborne: true,
             vy: -8.0,
             from_y: 30.0,
+            harmless: false,
         };
         assert_eq!(
             vertical_step(&mut v, 12.0, 11.8, false, 0.0, DT),
@@ -238,7 +260,8 @@ mod tests {
             Vertical {
                 airborne: true,
                 vy: 0.0,
-                from_y: 30.0
+                from_y: 30.0,
+                harmless: false,
             }
         );
         // A floor at that height lands it, charged from where it began.
@@ -246,6 +269,7 @@ mod tests {
             airborne: true,
             vy: -8.0,
             from_y: 30.0,
+            harmless: false,
         };
         let (y, landing) = vertical_step(&mut v, 12.0, 11.8, true, 0.0, DT);
         assert_eq!(y, 11.8);
@@ -335,6 +359,7 @@ mod tests {
             airborne: true,
             vy: -20.0,
             from_y: 30.0,
+            harmless: false,
         };
         let predicted = next_height(&fast, 10.0, DT);
         assert!((predicted - (10.0 - 21.0 * DT)).abs() < 1e-5);
@@ -350,6 +375,7 @@ mod tests {
             airborne: true,
             vy: -10.0,
             from_y: 7.5,
+            harmless: false,
         };
         let landing = settle(&mut v, 0.0).expect("a body in the air lands");
         assert!(
@@ -365,8 +391,38 @@ mod tests {
             airborne: true,
             vy: -4.0,
             from_y: 1.8,
+            harmless: false,
         };
         let l = settle(&mut under, 3.0).expect("lands");
         assert_eq!((l.impact_speed, l.drop), (0.0, 0.0));
+    }
+
+    /// A GM's `/fly off` in the air: the fall is real (the body falls and lands
+    /// where gravity takes it) and its landing says it is harmless, however
+    /// it ends, at a floor or settled by a port. Any ordinary walk-off from
+    /// the ground after it is a fresh fall and is not.
+    #[test]
+    fn a_harmless_drop_lands_harmless_and_the_next_fall_does_not() {
+        let mut v = harmless_drop(60.0);
+        let mut y = 60.0;
+        let landing = loop {
+            let (ny, landing) = vertical_step(&mut v, y, 0.0, true, 0.0, DT);
+            y = ny;
+            if let Some(l) = landing {
+                break l;
+            }
+        };
+        assert!(landing.harmless, "{landing:?}");
+        assert!(
+            (landing.drop - 60.0).abs() < 1e-4,
+            "the drop is still measured"
+        );
+        assert_eq!(v, Vertical::default());
+        let mut v = harmless_drop(30.0);
+        assert!(settle(&mut v, 0.0).expect("lands").harmless);
+        // Back on the ground, a walk-off is an ordinary fall.
+        let mut v = Vertical::default();
+        let (_, _) = vertical_step(&mut v, 10.0, 0.0, true, STEP, DT);
+        assert!(v.airborne && !v.harmless, "{v:?}");
     }
 }

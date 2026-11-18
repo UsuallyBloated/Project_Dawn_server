@@ -38,11 +38,16 @@ pub mod ledger;
 mod loot;
 mod named;
 mod npcs;
+pub mod obstacles;
+#[cfg(test)]
+mod obstacles_content;
 mod persistence;
 mod pet_templates;
 mod progression;
 mod quests;
 mod regen;
+pub mod roam;
+pub mod roam_map;
 mod safe_areas;
 mod songs;
 // `pub` so the persistence layer (`crate::db::load_character`) can read MAX_LEVEL
@@ -294,6 +299,21 @@ pub const STARTER_SPAWN: connection::Vec3f = connection::Vec3f::ZERO;
 /// to carry the client's own speed against a 7.5 m/s ceiling, so a modified
 /// client ran 1.5x and an honest one under Spirit of Wolf got the buff twice.
 pub const RUN_SPEED: f32 = 5.0;
+/// GM flight (docs/design/handoff_gm_flight.md): the speed `/fly` with no
+/// number gives, m/s. Each of these five is a lockstep pair with `player.gd`
+/// (`tools/check_constant_lockstep.gd`).
+pub const DEFAULT_FLY_SPEED: f32 = 25.0;
+/// The slowest and fastest speed `fly <m/s>` accepts; anything else (or a
+/// number that is not finite) is dropped before the audit row.
+pub const MIN_FLY_SPEED: f32 = 1.0;
+pub const MAX_FLY_SPEED: f32 = 100.0;
+/// How much longer than 1 a flier's Move direction may be: the client sends
+/// its boost (Ctrl, Minecraft's sprint) as a direction this long, so the top
+/// speed is `MAX_FLY_SPEED * FLY_BOOST`.
+pub const FLY_BOOST: f32 = 2.0;
+/// The highest a flier may go, as a world height (the zone's highest
+/// mountains stand about 440 m).
+pub const FLY_CEILING: f32 = 1000.0;
 /// The least time between two relayed jumps from one player. An honest
 /// client cannot jump again until it lands (0.7 s at its 7 m/s and 20 m/s²),
 /// so this never clips a real jump, and it caps what a forged stream of
@@ -363,6 +383,29 @@ pub const MOB_STUCK_SECS: f32 = 8.0;
 /// sliding along the foot of a face after a player walking the lip above would
 /// never give up. A knob.
 pub const STUCK_PROGRESS_M: f32 = 1.0;
+
+/// A mob's or a pet's step that gets less than this share of the way it
+/// aimed (a wall square in front of it) is held: it sets off along the wall
+/// instead of pushing into it (`Entity::step_on`). There is no pathfinder;
+/// this is what lets a mob round a house. A knob.
+pub const DETOUR_BELOW: f32 = 0.5;
+
+/// A mob walking along a wall turns for its goal again once this much of the
+/// straight line to the goal is clear of everything a body would touch
+/// (`Entity::step_on`). Long enough to be past the wall's end and not turn
+/// back into it; short enough that a tree further on does not keep it on
+/// the wall. A knob.
+pub const DETOUR_LOOKAHEAD: f32 = 3.0;
+
+/// How far along a wall a held mob looks for its end, each way, to choose
+/// the shorter way round (`scout_way_round`). About as far as it could walk
+/// before `MOB_STUCK_SECS` ends the attempt anyway. A knob.
+pub const DETOUR_SCOUT_M: f32 = 24.0;
+
+/// A held mob that has had this long of steps all taken as aimed is no longer
+/// held (`StuckClock`): it bumped something, went round, and is running
+/// freely, whether or not it has gained on its target. A knob.
+pub const STUCK_CLEAN_SECS: f32 = 1.0;
 
 /// How long a chasing mob may be held below a face before it evades
 /// (`Entity::is_evading`, WoW's rule, the user's call of 2026-11-05): from then

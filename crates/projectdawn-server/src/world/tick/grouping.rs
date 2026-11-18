@@ -28,47 +28,8 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
     //      Leave: GroupManager.leave; fan roster (or empty for
     //      dissolved) to remaining + the leaver.
     //      Kick: leader-only action; remove target; fan rosters.
-    // Helper to fan the current roster of a group with names
-    // looked up from the connections map. Empty members = group
-    // dissolved (last-member signal).
-    let fan_roster = |srv: &mut renet::RenetServer,
-                      conns: &HashMap<ClientId, PerConnection>,
-                      gm: &GroupManager,
-                      gid: groups::GroupId,
-                      also_notify_dissolved: Option<ClientId>| {
-        if let Some(g) = gm.groups.get(&gid) {
-            let members_with_names: Vec<(u64, String)> = g
-                .members
-                .iter()
-                .filter_map(|m| conns.get(m).map(|c| (*m, c.name.clone())))
-                .collect();
-            let recipients: Vec<ClientId> = g.members.clone();
-            handlers::fan_group_roster(
-                srv,
-                &recipients,
-                gid,
-                g.leader,
-                members_with_names,
-                g.loot_mode.to_u8(),
-            );
-            // Seed the group panel rows (playtest 2026-08-27: rows
-            // build zeroed client-side and resources otherwise fan
-            // only on CHANGE, so a full-HP idle member showed blank
-            // bars until something moved). One shot of the ordinary
-            // resource updates per member, sent to the group, fills
-            // every row the moment the roster lands. Existing
-            // message types; no protocol change.
-            for m in &g.members {
-                if let Some(c) = conns.get(m) {
-                    handlers::fan_out_resources(srv, &recipients, c);
-                }
-            }
-        } else if let Some(last) = also_notify_dissolved {
-            // Group dissolved — send an empty roster to the
-            // last member as a "your group dissolved" signal.
-            handlers::fan_group_roster(srv, std::slice::from_ref(&last), gid, last, Vec::new(), 0);
-        }
-    };
+    //      Every live roster goes out through
+    //      `handlers::fan_current_roster` (levels, classes, row seed).
 
     for intent in group_invite_intents.drain(..) {
         // Resolve target by name (case-insensitive). The
@@ -119,7 +80,7 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
                 gid,
                 "GroupAccept — invitee joined"
             );
-            fan_roster(&mut *server, connections, group_manager, gid, None);
+            handlers::fan_current_roster(&mut *server, connections, group_manager, gid);
         } else {
             tracing::debug!(
                 invitee = intent.invitee,
@@ -140,29 +101,13 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
                 "GroupLeave processed"
             );
             // The leaver always gets an empty roster so their HUD clears.
-            handlers::fan_group_roster(
-                &mut *server,
-                std::slice::from_ref(&cid),
-                gid,
-                cid,
-                Vec::new(),
-                0,
-            );
+            handlers::fan_group_ended(&mut *server, std::slice::from_ref(&cid), gid);
             if dissolved {
                 // Survivors (0 or 1) also need a dissolution notice
                 // so their HUD clears.
-                for m in &remaining {
-                    handlers::fan_group_roster(
-                        &mut *server,
-                        std::slice::from_ref(m),
-                        gid,
-                        *m,
-                        Vec::new(),
-                        0,
-                    );
-                }
+                handlers::fan_group_ended(&mut *server, &remaining, gid);
             } else {
-                fan_roster(&mut *server, connections, group_manager, gid, None);
+                handlers::fan_current_roster(&mut *server, connections, group_manager, gid);
             }
         }
     }
@@ -226,28 +171,12 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
                 "GroupKick processed"
             );
             // Notify the kicked member their group ended (from their POV).
-            handlers::fan_group_roster(
-                &mut *server,
-                std::slice::from_ref(&target_cid),
-                gid,
-                target_cid,
-                Vec::new(),
-                0,
-            );
+            handlers::fan_group_ended(&mut *server, std::slice::from_ref(&target_cid), gid);
             if dissolved {
                 // Survivors (0 or 1) also need a dissolution notice.
-                for m in &remaining {
-                    handlers::fan_group_roster(
-                        &mut *server,
-                        std::slice::from_ref(m),
-                        gid,
-                        *m,
-                        Vec::new(),
-                        0,
-                    );
-                }
+                handlers::fan_group_ended(&mut *server, &remaining, gid);
             } else {
-                fan_roster(&mut *server, connections, group_manager, gid, None);
+                handlers::fan_current_roster(&mut *server, connections, group_manager, gid);
             }
         }
     }
@@ -270,7 +199,7 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
             mode = intent.mode,
             "group loot mode set"
         );
-        fan_roster(&mut *server, connections, group_manager, gid, None);
+        handlers::fan_current_roster(&mut *server, connections, group_manager, gid);
     }
 
     // 4hbb-bis. PD_W0014 — a player toggled /autosplit. Fan a one-line
@@ -321,7 +250,34 @@ pub(super) fn apply_group_intents(world: &mut WorldState, q: &mut Intents, _now:
                 gid,
                 "group leadership passed"
             );
-            fan_roster(&mut *server, connections, group_manager, gid, None);
+            handlers::fan_current_roster(&mut *server, connections, group_manager, gid);
         }
+    }
+}
+
+/// Re-send the roster of every group with a member whose level moved this
+/// tick (`PerConnection::group_roster_stale`, set by `progression::award_xp`),
+/// so group-mates see a level-up, or a death's de-level, at once (PD_W0031).
+/// One roster per group however many of its members moved.
+pub(super) fn refan_rosters_on_level_change(world: &mut WorldState) {
+    let WorldState {
+        server,
+        connections,
+        group_manager,
+        ..
+    } = world;
+    let mut stale: Vec<groups::GroupId> = Vec::new();
+    for (cid, conn) in connections.iter_mut() {
+        if !std::mem::take(&mut conn.group_roster_stale) {
+            continue;
+        }
+        if let Some(g) = group_manager.group_of(*cid) {
+            if !stale.contains(&g.id) {
+                stale.push(g.id);
+            }
+        }
+    }
+    for gid in stale {
+        handlers::fan_current_roster(&mut *server, connections, group_manager, gid);
     }
 }

@@ -42,6 +42,9 @@ pub enum ItemType {
     Misc,
     Augment,
     Bag,
+    /// Ammunition (2026-11-13): fits the ammo slot alone; a bow shot takes
+    /// one unit of the stack. The Arrow Bundle, whose count is its arrows.
+    Ammo,
 }
 
 fn default_stack_size() -> u32 {
@@ -225,8 +228,8 @@ pub fn lookup_by_name(name: &str) -> Option<&'static Item> {
 /// Track 14.1 — equip-slot validation. Maps an item to whether it
 /// can sit in the given paperdoll slot. The slot indices match
 /// `protocol::world::EquipSlot` order (weapon=0, offhand=1, head=2,
-/// chest=3, legs=4, feet=5, hands=6, ring=7, neck=8). Unknown paths
-/// reject — the server only trusts items it has authored data for.
+/// chest=3, legs=4, feet=5, hands=6, ring=7, neck=8, ammo=9). Unknown
+/// paths reject — the server only trusts items it has authored data for.
 ///
 /// Weapons may sit in slot 0 (main hand) or slot 1 (offhand) — the
 /// dual-wield skill gate stays client-side for now (the server-auth
@@ -246,6 +249,7 @@ pub fn is_equippable_in_slot(path: &str, slot: u8) -> bool {
             | (ItemType::Hands, 6)
             | (ItemType::Ring, 7)
             | (ItemType::Neck, 8)
+            | (ItemType::Ammo, super::inventory::AMMO_SLOT)
     )
 }
 
@@ -364,10 +368,45 @@ mod tests {
         assert!(!is_equippable_in_slot(p, 1));
     }
 
+    // The ammo slot (2026-11-13): arrows go there and nowhere else, and
+    // nothing else goes there.
+    #[test]
+    fn ammo_fits_the_ammo_slot_alone() {
+        let arrows = "res://data/loot/items/arrow_bundle.tres";
+        assert_eq!(lookup(arrows).map(|i| i.item_type), Some(ItemType::Ammo));
+        assert!(is_equippable_in_slot(
+            arrows,
+            super::super::inventory::AMMO_SLOT
+        ));
+        for slot in 0..super::super::inventory::AMMO_SLOT {
+            assert!(
+                !is_equippable_in_slot(arrows, slot),
+                "arrows must not fit slot {slot}"
+            );
+        }
+        for p in [
+            "res://data/loot/items/iron_short_sword.tres",
+            "res://data/loot/items/hunters_shortbow.tres",
+            "res://data/loot/items/cloth_robe.tres",
+            "res://data/loot/items/minor_healing_potion.tres",
+            "res://data/loot/items/arrow_fletching.tres",
+        ] {
+            assert_ne!(
+                lookup(p).map(|i| i.item_type),
+                Some(ItemType::Ammo),
+                "{p} is not ammunition"
+            );
+            assert!(
+                !is_equippable_in_slot(p, super::super::inventory::AMMO_SLOT),
+                "{p} must not fit the ammo slot"
+            );
+        }
+    }
+
     #[test]
     fn is_equippable_consumable_never() {
         let p = "res://data/loot/items/minor_healing_potion.tres";
-        for slot in 0..=8u8 {
+        for slot in 0..=9u8 {
             assert!(
                 !is_equippable_in_slot(p, slot),
                 "potion must not be equippable in slot {slot}"

@@ -33,6 +33,21 @@ pub struct Config {
     /// `terrain.toml`, for a running server; only the integration harness
     /// hands in a ramp or a ridge to prove the pinning and the sight rules.
     pub terrain: Option<std::sync::Arc<crate::world::terrain::Terrain>>,
+    /// What stands on the ground (`world::obstacles`). None, the compiled
+    /// `obstacles.bin`, for a running server; only the integration harness
+    /// hands in its own (nothing at all for every test that is not about
+    /// obstacles, or the zone's trees would stand in every test's way).
+    pub obstacles: Option<std::sync::Arc<crate::world::obstacles::Obstacles>>,
+    /// Whether the wandering wildlife of the roam table spawns
+    /// (`world::roam`). On unless `PD_NO_ROAMERS=1` is set: the way back,
+    /// without a rebuild, if the wilds misbehave. Off, the camps are
+    /// untouched and nothing roams. The integration harness turns it off (or
+    /// every test would get the zone's animals walking through it) and on,
+    /// with a small table of its own, for the tests about roaming.
+    pub roamers: bool,
+    /// The roam table to run in place of the compiled `zone_roam.toml`. None
+    /// for a running server; only the integration harness hands one in.
+    pub roam_table: Option<String>,
 }
 
 /// The 32-byte renet netcode private key. A newtype so its `Debug` can never
@@ -111,6 +126,9 @@ impl Config {
             fizzles: true,
             panic_probe: None,
             terrain: None,
+            obstacles: None,
+            roamers: env::var("PD_NO_ROAMERS").as_deref() != Ok("1"),
+            roam_table: None,
         })
     }
 }
@@ -158,6 +176,9 @@ mod tests {
             fizzles: true,
             panic_probe: None,
             terrain: None,
+            obstacles: None,
+            roamers: true,
+            roam_table: None,
         };
         let shown = format!("{cfg:?}");
         assert!(shown.contains("<redacted>"), "{shown}");

@@ -39,6 +39,8 @@ async fn run() -> anyhow::Result<()> {
     // The auth socket's public-port posture (invite-gated registration and the
     // socket limits); `require_invite` joins the boot line for the same reason.
     let auth_policy = auth::AuthPolicy::from_env();
+    // Wandering wildlife's off switch (`PD_NO_ROAMERS=1`, `Config::roamers`).
+    let roamers = if cfg.roamers { "on" } else { "off" };
     tracing::info!(
         build = env!("PD_BUILD_COMMIT"),
         auth_bind = %cfg.auth_bind,
@@ -48,8 +50,10 @@ async fn run() -> anyhow::Result<()> {
         min_client = %cfg.min_client_version,
         dev_cmds,
         rate_limit,
+        roamers = %roamers,
         terrain = %world::terrain::compiled().describe(),
         require_invite = auth_policy.require_invite,
+        obstacles = %world::obstacles::compiled().describe(),
         "starting projectdawn-server"
     );
     if dev_cmds {

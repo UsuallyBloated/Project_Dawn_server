@@ -151,32 +151,10 @@ pub(super) async fn reap_connection(
         if dissolved {
             // Group dissolved. Survivors (0 or 1) get an empty roster so their
             // HUD clears. The leaver's transport is already torn down.
-            for m in &remaining {
-                handlers::fan_group_roster(server, std::slice::from_ref(m), gid, *m, Vec::new(), 0);
-            }
-        } else if let Some(g) = group_manager.groups.get(&gid) {
-            // Re-fetch the group with name lookups for the survivor fan-out.
-            let members_with_names: Vec<(u64, String)> = g
-                .members
-                .iter()
-                .filter_map(|m| connections.get(m).map(|c| (*m, c.name.clone())))
-                .collect();
-            let recipients: Vec<ClientId> = g.members.clone();
-            handlers::fan_group_roster(
-                server,
-                &recipients,
-                gid,
-                g.leader,
-                members_with_names,
-                g.loot_mode.to_u8(),
-            );
-            // Same panel-row seed as the intent-path roster fan: the
-            // survivors' rosters just changed shape, so refill every row.
-            for m in &g.members {
-                if let Some(c) = connections.get(m) {
-                    handlers::fan_out_resources(server, &recipients, c);
-                }
-            }
+            handlers::fan_group_ended(server, &remaining, gid);
+        } else {
+            // The survivors get the new roster and the panel-row seed.
+            handlers::fan_current_roster(server, connections, group_manager, gid);
         }
     }
 
@@ -555,9 +533,10 @@ pub(super) async fn handle_transport_events(
                             }
                         };
                         let mut fresh = PerConnection::from_spawn(spawn, now);
-                        // Standing on the ground as it is now, whatever the
-                        // save holds (the terrain may have changed since).
-                        fresh.pos = terrain.ground_vec(fresh.pos);
+                        // Standing on the ground as it is now, clear of
+                        // whatever stands on it now, whatever the save holds
+                        // (the terrain and the scenery may have changed since).
+                        fresh.pos = terrain.obstacles().place(terrain, fresh.pos);
                         fresh.fizzles = cfg.fizzles;
                         fresh.panic_probe = cfg.panic_probe.clone();
                         connections.insert(client_id, fresh);

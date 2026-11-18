@@ -23,6 +23,7 @@ pub(super) fn run_spawning(
         newly_in_world,
         dev_spawn_intents,
         dev_despawn_intents,
+        fly_takeoffs,
         ..
     } = q;
     // 4g. Enemy spawner phase. Tick the respawn timers; for any spawn
@@ -34,7 +35,23 @@ pub(super) fn run_spawning(
     //     spawn — no duplicate seeds because the seed loop above ran
     //     against the pre-spawn map.
     {
-        let newly_spawned = spawner.tick(now, terrain);
+        // A wanderer never appears on top of a body: every in-world player
+        // counts, living, dead or linkdead.
+        let bodies: Vec<Vec3f> = connections
+            .values()
+            .filter(|c| c.in_world)
+            .map(|c| c.pos)
+            .collect();
+        let hour = clock::current_hour();
+        let newly_spawned = spawner.tick(
+            now,
+            terrain,
+            &crate::world::spawn_points::SpawnWorld {
+                enemies,
+                bodies: &bodies,
+                hour,
+            },
+        );
         if !newly_spawned.is_empty() {
             let spawn_recipients: Vec<ClientId> = connections
                 .iter()
@@ -63,6 +80,37 @@ pub(super) fn run_spawning(
         }
     }
 
+    // Night animals leave by day (wandering wildlife): one that is idle,
+    // unhurt and seen by no player is taken out of the world, whenever in
+    // daylight that becomes true, and its slot waits for dusk. No loot, no
+    // XP, no body. One still fighting at dawn stays until it dies or walks
+    // home and heals; one a player can see stays; a charmed one is a pet and
+    // is left alone until it is handed back. Here, not in the AI step, since
+    // that step sleeps while nobody is online and dawn comes regardless.
+    if !spawner.roams.is_empty() && !clock::is_night(clock::current_hour()) {
+        let leaving: Vec<EntityId> = enemies
+            .values()
+            .filter(|e| {
+                e.roam.is_some_and(|r| r.night_only)
+                    && e.owner.is_none()
+                    && e.state == EnemyState::Idle
+                    && e.hp >= e.max_hp
+            })
+            .filter(|e| {
+                let seen = aoi.entities_visible_from(aoi::cell_for(e.pos.x, e.pos.z));
+                !in_world_recipients_now.iter().any(|cid| seen.contains(cid))
+            })
+            .map(|e| e.id)
+            .collect();
+        for id in leaving {
+            let Some(entity) = enemies.remove(&id) else {
+                continue;
+            };
+            aoi.remove(entity.id, aoi::cell_for(entity.pos.x, entity.pos.z));
+            spawner.on_night_animal_left(entity.spawn_point_idx, now);
+        }
+    }
+
     // PD_W0023 — dev-gated Test Panel spawns: same AOI-insert + EnemySpawn
     // fan as the natural spawner above, but one-shot (spawn_point_idx =
     // usize::MAX like pets, so death never arms a respawn timer — the
@@ -74,10 +122,11 @@ pub(super) fn run_spawning(
             .map(|(id, _)| *id)
             .collect();
         for (pos, mob) in dev_spawn_intents.drain(..) {
-            // On the ground in front of the GM, like a camp spawn.
+            // On the ground in front of the GM, clear of what stands there,
+            // like a camp spawn.
             let entity = crate::world::entity::Entity::from_spawn(
                 usize::MAX,
-                terrain.ground_vec(pos),
+                terrain.obstacles().place(terrain, pos),
                 mob,
                 now,
             );
@@ -144,6 +193,37 @@ pub(super) fn run_spawning(
             requester,
             &format!("Despawned {} enemies.", doomed.len()),
         );
+    }
+
+    // GM flight takeoffs (the flight was set in the drain): every mob forgets
+    // the flier, as for a port, and what they left ticking ends with their
+    // hate. Mobs never see a flier again until it lands (`enemy_ai`), and a
+    // flier cannot fight, so nothing is paid from where no mob can answer.
+    if !fly_takeoffs.is_empty() {
+        let flier_cids: Vec<ClientId> = std::mem::take(fly_takeoffs);
+        let fliers: Vec<EntityId> = flier_cids.iter().map(|c| *c as EntityId).collect();
+        for mob_id in wipe_hate(&mut *enemies, &fliers) {
+            handlers::fan_out_entity_target(&mut *server, in_world_recipients_now, mob_id, None);
+        }
+        for bearer in clear_player_dots_from(&mut *connections, &fliers) {
+            if let Some(conn) = connections.get(&bearer) {
+                handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, conn);
+            }
+        }
+        // A flier fights through nothing: their pets drop their targets (and
+        // the pet command arm refuses a `/pet attack` from the air), and a
+        // Bard's song stops, or Aria of Dismay would keep slowing a mob from a
+        // body it cannot answer. Review findings, 2026-11-15.
+        for pet in enemies
+            .values_mut()
+            .filter(|e| e.owner.is_some_and(|o| fliers.contains(&o)) && e.target.is_some())
+        {
+            pet.target = None;
+            handlers::fan_out_entity_target(&mut *server, in_world_recipients_now, pet.id, None);
+        }
+        for cid in flier_cids {
+            stop_song(&mut *server, &mut *connections, cid);
+        }
     }
 
     // 4g2. Track 12 Piece B — auto-summon a warder for each

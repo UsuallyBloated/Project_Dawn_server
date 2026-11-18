@@ -121,15 +121,20 @@ pub fn load_camps() -> Vec<CampSpawn> {
 /// GM's test mob answers for its kills as the camp's does. A named mob is
 /// found by its `named_id` (its camp template carries the base name, "Dire
 /// Wolf" for Rotfang, never the display name the panel sends). None for a
-/// mob no camp spawns.
+/// mob neither a camp nor the roam table (`roam.rs`) spawns.
 pub fn faction_of_camp_mob(name: &str, named_id: Option<&str>) -> (Option<String>, Option<String>) {
-    load_camps()
+    let camps = load_camps();
+    // The wanderers of the roam table answer by name as the camps' mobs do.
+    let roamers = crate::world::roam::load(None);
+    camps
         .iter()
-        .find(|c| match named_id {
-            Some(id) => c.mob.named_id.as_deref() == Some(id),
-            None => c.mob.name == name,
+        .map(|c| &c.mob)
+        .chain(roamers.iter().map(|r| &r.mob))
+        .find(|mob| match named_id {
+            Some(id) => mob.named_id.as_deref() == Some(id),
+            None => mob.name == name,
         })
-        .map(|c| (c.mob.faction.clone(), c.mob.alignment.clone()))
+        .map(|mob| (mob.faction.clone(), mob.alignment.clone()))
         .unwrap_or((None, None))
 }
 

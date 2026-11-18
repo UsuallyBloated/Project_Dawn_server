@@ -160,9 +160,32 @@ use serde::{Deserialize, Serialize};
 /// name what the player holds (sell-from-cursor); `BankStoreItem` already
 /// took `"cursor"` as a location string. The first hills (2026-11-04) append
 /// the dev-gated `DevFling` after `DevSetFaction`.
-pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3239; // "PD_W0029"
+///
+/// PD_W0030: the ammo slot (user, 2026-11-13: an equip slot on the paperdoll,
+/// EQ's shape, one arrow per shot). `EquipSlot` gains `Ammo`, appended last
+/// (the slot index 9 rides the existing `EquipItem` / `UnequipItem` bytes and
+/// the `"equip"` location; only the enum's domain grew). The DLL and the
+/// server move together.
+///
+/// PD_W0031: group-mates' levels and classes (user, 2026-11-17: "Players
+/// should see the class and level of their group mates"). `GroupRoster`'s
+/// members become `GroupMember { id, name, level, class }` (a shape change
+/// inside the Vec, not an append), and the server re-sends the roster to the
+/// group whenever a member's level moves, up or down. Both sides move together.
+pub const WORLD_PROTOCOL_ID: u64 = 0x5044_5f57_3030_3331; // "PD_W0031"
 
 pub type EntityId = u64;
+
+/// One row of a `GroupRoster` (PD_W0031): the member's id and name, their
+/// level, and their base class name as the server holds it ("Warrior",
+/// "Necromancer"). The client abbreviates the class for display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupMember {
+    pub id: EntityId,
+    pub name: String,
+    pub level: u32,
+    pub class: String,
+}
 
 /// A player wallet: four independent coin stacks at 100:1 ratios
 /// (100 copper = 1 silver, 100 silver = 1 gold, 100 gold = 1 platinum).
@@ -509,6 +532,9 @@ pub enum EquipSlot {
     Hands,
     Ring,
     Neck,
+    /// PD_W0030: the quiver. Only an ammo-typed item goes here; a bow shot
+    /// takes one from it (`world/tick/melee.rs`). Appended last.
+    Ammo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1439,13 +1465,14 @@ pub enum ServerWorldMsg {
     },
     /// Track 6 sub-task 5 — full group roster update. Fanned to every
     /// online group member whenever membership changes (invite
-    /// accepted, member left, member kicked, leader changed). Empty
-    /// `members` means the group dissolved (last remaining member
-    /// receives this as their cleanup signal).
+    /// accepted, member left, member kicked, leader changed) and, since
+    /// PD_W0031, whenever a member's level changes. Empty `members` means
+    /// the group dissolved (last remaining member receives this as their
+    /// cleanup signal).
     GroupRoster {
         group_id: u64,
         leader_id: EntityId,
-        members: Vec<(EntityId, String)>,
+        members: Vec<GroupMember>,
         /// PD_W0014 — the group's loot distribution mode
         /// (`groups::LootMode` as u8: 0 = Round Robin, 1 = Free-for-all).
         /// Carried on every roster so members always see the current mode.

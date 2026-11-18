@@ -18,6 +18,7 @@ pub(super) fn run_enemy_ai(
         loot_bags,
         group_manager,
         terrain,
+        roam_map,
         ..
     } = world;
     // 4i. Enemy AI tick. Each alive enemy evaluates its state machine
@@ -41,9 +42,12 @@ pub(super) fn run_enemy_ai(
         // Dropping the dead from the list makes an enemy lose its target the
         // moment you die, so it leashes home instead of beating your body
         // (playtest 2026-08-12).
+        // A GM in flight is left out as well: no mob notices, chases or
+        // swings at one (docs/design/handoff_gm_flight.md), as no mob could
+        // reach one.
         let player_snapshots: Vec<(EntityId, Vec3f)> = connections
             .values()
-            .filter(|c| c.in_world && c.hp > 0.0)
+            .filter(|c| c.in_world && c.hp > 0.0 && !c.is_flying())
             .map(|c| (c.char_id as u64, c.pos))
             .collect();
         // Track 11.4 — enemies aggro on pets too. Build a combined
@@ -53,10 +57,12 @@ pub(super) fn run_enemy_ai(
         // enemy's POV; the new enemy→pet hit dispatch below
         // applies damage to pets.
         // Players a Hide holds (active skills): an idle mob's proximity
-        // scan passes over them; a provoked mob still finds them.
+        // scan passes over them; a provoked mob still finds them. A GM in
+        // flight counts as hidden here too, so their pet's hits put no owner
+        // token on a mob's hate list for a body it could never reach.
         let hidden_players: Vec<EntityId> = connections
             .values()
-            .filter(|c| c.in_world && buffs::is_hidden(&c.active_buffs))
+            .filter(|c| c.in_world && (buffs::is_hidden(&c.active_buffs) || c.is_flying()))
             .map(|c| c.char_id as u64)
             .collect();
         let mut targets_for_enemy_ai: Vec<(EntityId, Vec3f)> = player_snapshots.clone();
@@ -194,6 +200,33 @@ pub(super) fn run_enemy_ai(
                 pet.command_at = None;
             }
         }
+        // Packs (wandering wildlife): a pack is the living, unowned mobs of
+        // one roam slot. Its leader is the member with the lowest id (no
+        // stored state: a leader that dies or is charmed hands the lead on
+        // by not being there), and its fights are the targets its members
+        // are on now. A charmed member is a pet and no part of either.
+        let mut pack_leaders: HashMap<usize, (EntityId, Vec3f)> = HashMap::new();
+        let mut pack_fights: HashMap<usize, Vec<(Vec3f, EntityId)>> = HashMap::new();
+        for e in enemies.values() {
+            if !e.roam.is_some_and(|r| r.pack) || e.owner.is_some() || !e.is_alive() {
+                continue;
+            }
+            let lead = pack_leaders
+                .entry(e.spawn_point_idx)
+                .or_insert((e.id, e.pos));
+            if e.id < lead.0 {
+                *lead = (e.id, e.pos);
+            }
+            if matches!(e.state, EnemyState::Chase | EnemyState::Attack) {
+                if let Some(target) = e.target {
+                    pack_fights
+                        .entry(e.spawn_point_idx)
+                        .or_default()
+                        .push((e.pos, target));
+                }
+            }
+        }
+        let mut roam_rng = rand::thread_rng();
         let mut target_changes: Vec<(EntityId, Option<EntityId>)> = Vec::new();
         let mut healed_home: Vec<(EntityId, f32, f32)> = Vec::new();
         let mut enemy_hits: Vec<(EntityId, HitIntent)> = Vec::new();
@@ -268,6 +301,29 @@ pub(super) fn run_enemy_ai(
                 continue;
             }
             let old_enemy_cell = aoi::cell_for(entity.pos.x, entity.pos.z);
+            let was_idle = entity.state == EnemyState::Idle && entity.owner.is_none();
+            let in_pack = entity.roam.is_some_and(|r| r.pack) && entity.owner.is_none();
+            // Pack social aggro: an idle member near a packmate's fight takes
+            // that target, when the target is one a mob may notice (present,
+            // not hidden) and the member's OWN leash reaches it. A target
+            // past it would be dropped by `tick_chase` on the spot, and the
+            // member would walk home evading for nothing. Looked at every
+            // tick, so a member that arrives late still joins.
+            if was_idle && in_pack && !entity.is_mezzed() && !entity.is_stunned() {
+                let joined = pack_fights.get(&entity.spawn_point_idx).and_then(|fights| {
+                    roam::pack_fight_to_join(
+                        entity.pos,
+                        entity.leash_range(),
+                        fights,
+                        &targets_for_enemy_ai,
+                        &hidden_players,
+                    )
+                });
+                if let Some(target) = joined {
+                    entity.join_pack_fight(target, roam_map, now);
+                    target_changes.push((entity.id, Some(target)));
+                }
+            }
             let events = entity.tick_ai(
                 &targets_for_enemy_ai,
                 &enemy_target_snapshots,
@@ -276,6 +332,22 @@ pub(super) fn run_enemy_ai(
                 now,
                 terrain,
             );
+            // A wanderer (wandering wildlife). One that was idle and now
+            // chases picked its target this tick (the idle scan's two paths
+            // are the only way from Idle to Chase inside `tick_ai`; a charm
+            // ending enters Chase elsewhere and never comes through here):
+            // its fight begins where it stands. One still idle walks.
+            if entity.roam.is_some() && was_idle {
+                if entity.state == EnemyState::Chase {
+                    entity.roam_fight_began(roam_map);
+                } else if entity.state == EnemyState::Idle {
+                    let leader = pack_leaders
+                        .get(&entity.spawn_point_idx)
+                        .filter(|(id, _)| in_pack && *id != entity.id)
+                        .map(|(_, pos)| *pos);
+                    entity.tick_roam(roam_map, leader, dt, now, terrain, &mut roam_rng);
+                }
+            }
             if let Some(new_target) = events.target_changed {
                 target_changes.push((entity.id, new_target));
             }

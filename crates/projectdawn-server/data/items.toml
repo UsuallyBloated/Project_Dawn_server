@@ -33,10 +33,10 @@ weight = 0.3
 [[item]]
 path = "res://data/loot/items/arrow_bundle.tres"
 name = "Arrow Bundle"
-item_type = "misc"
+item_type = "ammo"
 stack_size = 20
-vendor_price = 10
-weight = 1.0
+vendor_price = 1
+weight = 0.1
 
 [[item]]
 path = "res://data/loot/items/arrow_fletching.tres"

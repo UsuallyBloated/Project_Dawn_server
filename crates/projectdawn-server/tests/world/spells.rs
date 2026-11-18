@@ -892,6 +892,7 @@ async fn lifesteal_spell_heals_caster() {
         .await
         .expect("bump level + low hp");
 
+    seed_position(&h.db_url, a_char_id, CAMP_PULL_START.x, CAMP_PULL_START.z).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
 
     // Walk toward camp 0's enemy spawn â€” same pattern as the AOE
@@ -913,11 +914,7 @@ async fn lifesteal_spell_heals_caster() {
         &mut a,
         &mut seq,
         a_char_id,
-        Vec3 {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-        },
+        CAMP_PULL_START,
         BONEPILE_SPAWN,
         2.0,
     )

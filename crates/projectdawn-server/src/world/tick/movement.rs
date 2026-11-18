@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::world::fall;
+use crate::world::obstacles::{BODY_RADIUS, P2};
 
 /// A landing's consequences (`fall.rs`): the damage as a share of max HP, with
 /// no armor, evasion or shield (the user's call of 2026-10-24), no attacker
@@ -11,7 +12,7 @@ use crate::world::fall;
 /// stands them and breaks a `/camp`. The HP bar follows on the resource fan,
 /// and a death goes through the death sweep like any other, the corpse where
 /// the body landed. A drop inside the safe height costs nothing and says
-/// nothing.
+/// nothing, and so does a harmless one (a GM's `/fly off` in the air).
 pub(super) fn land(
     server: &mut RenetServer,
     client_id: ClientId,
@@ -19,6 +20,9 @@ pub(super) fn land(
     landing: fall::Landing,
     now: Instant,
 ) {
+    if landing.harmless {
+        return;
+    }
     let damage = fall::damage(landing.drop, conn.max_hp);
     if damage <= 0.0 {
         return;
@@ -59,6 +63,7 @@ pub(super) fn run_movement(
         tick_health,
         ..
     } = world;
+    let obstacles = terrain.obstacles();
     // 5. Integrate movement intent exactly once per tick. The Move
     //    handler stores the latest direction on the connection; we
     //    advance position here so the rate is bound to wall-clock
@@ -94,7 +99,8 @@ pub(super) fn run_movement(
         // player; the server mirrors it so a Sit intent dropped on
         // the wire doesn't leave the server thinking the player is
         // seated while they're running around.
-        if dir.x != 0.0 || dir.z != 0.0 {
+        // (Only a GM in flight ever carries a vertical; it stands them too.)
+        if dir.x != 0.0 || dir.y != 0.0 || dir.z != 0.0 {
             conn.is_sitting = false;
             // Moving ends a feign death (standing up) and a hide (active
             // skills): the mobs that forgot or never noticed the player
@@ -106,8 +112,9 @@ pub(super) fn run_movement(
         // The server decides the speed (RUN_SPEED's note): its own speed
         // buff (Spirit of Wolf, Selos' Melody), snare (floored at 10% so
         // the player can still inch along) and encumbrance. The weight
-        // is only worked out for a player who is actually moving.
-        let speed = if dir.x != 0.0 || dir.z != 0.0 {
+        // is only worked out for a player who is actually moving, on foot (a
+        // flier's speed is its own, below).
+        let speed = if !conn.is_flying() && (dir.x != 0.0 || dir.z != 0.0) {
             let speed_buff = buffs::speed_mult(&conn.active_buffs);
             let snare = buffs::snare_amount(&conn.active_buffs);
             let snare_mult = (1.0 - snare).max(0.1);
@@ -121,9 +128,27 @@ pub(super) fn run_movement(
         if conn.hp <= 0.0 || conn.death_processed {
             // The dead lie on the ground where they are (the death lock holds
             // their Moves); a body killed in the air stops falling, its corpse
-            // already on the ground below it.
+            // already on the ground below it. Death ends a GM's flight; the
+            // client ends its own on the death screen.
             conn.vertical = fall::Vertical::default();
+            conn.end_flight();
             conn.pos = terrain.ground_vec(before);
+        } else if let Some(flight) = conn.flight.as_mut() {
+            // GM flight (docs/design/handoff_gm_flight.md): three dimensions
+            // at the flier's own speed (the boost is the direction's length),
+            // untouched by speed buffs, snare or encumbrance (Minecraft's
+            // Speed effect does not touch flight either). No slope rule and
+            // no fall: the body is held above the server's own ground, on the
+            // plate and under the ceiling, the same clamps the client's body
+            // applies to itself. Nothing is counted as a slope refusal.
+            let reach = flight.speed * dt;
+            let (x, z) = terrain.clamp_to_plate(before.x + dir.x * reach, before.z + dir.z * reach);
+            let ground = terrain.ground(x, z);
+            let ceiling = crate::world::FLY_CEILING.max(ground);
+            let y = (before.y + dir.y * reach).clamp(ground, ceiling);
+            flight.ground_y = ground;
+            conn.vertical = fall::Vertical::default();
+            conn.pos = Vec3f { x, y, z };
         } else if conn.vertical.airborne {
             // In the air the body keeps its heading at its ground speed: no
             // slope under it to shrink the step or to refuse it. Ground it
@@ -141,6 +166,18 @@ pub(super) fn run_movement(
                 (x, z) = terrain.slide_clear(x, z, falling_to, fall::floor_tan());
             } else if met > before.y {
                 (x, z) = (before.x, before.z);
+            }
+            // What stands on the ground is a column of any height
+            // (world/obstacles.rs): a falling body is turned aside by it as a
+            // walking one is, so it comes down beside a trunk or a house and
+            // never inside one. Turned onto ground above it, it holds its place.
+            let walked = obstacles.resolve(P2::of(before), P2::new(x, z), BODY_RADIUS);
+            if walked.deflected {
+                (x, z) = if terrain.ground(walked.x, walked.z) > before.y {
+                    (before.x, before.z)
+                } else {
+                    (walked.x, walked.z)
+                };
             }
             let to = Vec3f { x, y: before.y, z };
             let (y, landing) = fall::vertical_step(
@@ -172,18 +209,44 @@ pub(super) fn run_movement(
             if step.refused {
                 tick_health.record_slope_refusal();
             }
+            // Then what stands on the ground (world/obstacles.rs): the step
+            // the terrain allowed is turned aside or stopped by a trunk, a
+            // rock or a wall, the body sliding along it as the client's does.
+            // The server takes the step itself, so a client that ignores its
+            // own obstacles is held at the server's. A step turned onto a face
+            // the slope rule forbids is not taken (a rock at a cliff's foot
+            // must not push a body up the cliff). A standing body is asked
+            // too: one found inside a solid (the scenery changed under it) is
+            // put out at the nearest free point, slope rule or not, since
+            // that is a placement and not a step.
+            let mut to = step.pos;
+            let walked = obstacles.resolve(P2::of(before), P2::of(step.pos), BODY_RADIUS);
+            if walked.deflected {
+                let aside = Vec3f {
+                    x: walked.x,
+                    y: before.y,
+                    z: walked.z,
+                };
+                to = if obstacles.is_free(P2::of(before), BODY_RADIUS)
+                    && !terrain.slope_ok(before, aside)
+                {
+                    terrain.ground_vec(before)
+                } else {
+                    terrain.ground_vec(aside)
+                };
+            }
             let (y, landing) = fall::vertical_step(
                 &mut conn.vertical,
                 before.y,
-                step.pos.y,
-                fall::is_floor(terrain.gradient(step.pos.x, step.pos.z)),
-                before.xz_distance_to(step.pos),
+                to.y,
+                fall::is_floor(terrain.gradient(to.x, to.z)),
+                before.xz_distance_to(to),
                 dt,
             );
             conn.pos = Vec3f {
-                x: step.pos.x,
+                x: to.x,
                 y,
-                z: step.pos.z,
+                z: to.z,
             };
             if let Some(landing) = landing {
                 land(&mut *server, *client_id, conn, landing, now);

@@ -60,6 +60,8 @@ pub enum ItemAction {
     Eat,
     /// Any other consumable used.
     Use,
+    /// An arrow spent by a bow shot, out of the ammo slot (2026-11-13).
+    Shoot,
     /// Handed to a trade partner, who gets a `TradeIn`.
     TradeOut,
     TradeIn,
@@ -107,6 +109,7 @@ impl ItemAction {
             ItemAction::Destroy => "destroy",
             ItemAction::Eat => "eat",
             ItemAction::Use => "use",
+            ItemAction::Shoot => "shoot",
             ItemAction::TradeOut => "trade_out",
             ItemAction::TradeIn => "trade_in",
             ItemAction::TradeCoins => "trade_coins",

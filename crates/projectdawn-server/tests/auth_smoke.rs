@@ -45,6 +45,9 @@ async fn start_server_with(policy: AuthPolicy) -> (String, String, TempDir) {
         fizzles: true,
         panic_probe: None,
         terrain: None,
+        obstacles: None,
+        roamers: false,
+        roam_table: None,
     };
 
     let pool = db::open(&url).await.expect("open pool");

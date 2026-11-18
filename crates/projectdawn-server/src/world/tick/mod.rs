@@ -17,7 +17,7 @@ use super::{
     hunger, inventory, items,
     ledger::{self, ItemAction},
     loot::{self, LootBag},
-    persistence, pet_templates, regen, skills,
+    persistence, pet_templates, regen, roam, skills,
     spawn_points::Spawner,
     spells, Stop, ATTACK_RANGE_TOLERANCE, BAN_SWEEP_INTERVAL, CAMP_SECS, CHANNEL_POSITION,
     CHANNEL_SYSTEM, CHECKPOINT_INTERVAL, ENEMY_DESPAWN_LINGER_SECS, ENEMY_FAN_REPORT_INTERVAL,
@@ -83,7 +83,9 @@ use kills::{
     apply_spell_damage_to_enemy, award_kill, clear_player_dots_from, kill_enemy, wipe_hate,
     FactionKill,
 };
-use pet_life::{despawn_owned_pets, pet_owner_cid, return_charmed_mob, summon_scaled_pet};
+use pet_life::{
+    charm_mob, despawn_owned_pets, pet_owner_cid, return_charmed_mob, summon_scaled_pet,
+};
 use session::{shut_down_world, PENDING_SAVE_GIVE_UP, PENDING_SAVE_RETRY};
 use spell_buffs::{
     apply_buff, apply_mp_regen_exclusive, apply_pet_spell_buffs, apply_player_spell_buffs,
@@ -151,7 +153,6 @@ pub async fn run(
     // respawn timers per authored spawn point; `enemies` holds the live
     // instances. AI ticking + position/HP fan-out land in 1C; this commit
     // wires spawn lifecycle + EnemySpawn fan-out only (mobs stand idle).
-    let spawner = Spawner::new(Instant::now());
     let enemies: HashMap<EntityId, Entity> = HashMap::new();
     // Track 5 sub-task 4 — server-owned loot bags. Rolled and spawned
     // in step 4h's on-death branch; expire after LOOT_BAG_LINGER_SECS
@@ -173,6 +174,41 @@ pub async fn run(
         .terrain
         .clone()
         .unwrap_or_else(|| Arc::new(super::terrain::compiled().clone()));
+    // What stands on that ground (world/obstacles.rs): the compiled
+    // obstacles, or the ones the integration harness hands in. The ground
+    // carries them from here on (`Terrain::obstacles`), the one handle every
+    // step, placement and sight line reads.
+    let obstacles: Arc<super::obstacles::Obstacles> = cfg
+        .obstacles
+        .clone()
+        .unwrap_or_else(|| Arc::clone(super::obstacles::compiled()));
+    tracing::info!(obstacles = %obstacles.describe(), "what stands on the ground");
+    let terrain = Arc::new((*terrain).clone().with_obstacles(obstacles));
+    // Wandering wildlife (world/roam.rs): the roam map is the ground an
+    // animal may stand on, flooded once from the town (the starter spawn)
+    // over this server's own terrain. With `Config::roamers` off
+    // (`PD_NO_ROAMERS=1`) the roam table is not loaded and only the camps
+    // spawn.
+    let roam_map = Arc::new(super::roam_map::RoamMap::build(
+        &terrain,
+        (super::STARTER_SPAWN.x, super::STARTER_SPAWN.z),
+    ));
+    let spawner = if cfg.roamers {
+        Spawner::with_roamers(
+            Instant::now(),
+            super::roam::load(cfg.roam_table.as_deref()),
+            roam_map.clone(),
+        )
+    } else {
+        Spawner::new(Instant::now())
+    };
+    tracing::info!(
+        roamers = %if cfg.roamers { "on" } else { "off" },
+        slots = spawner.roams.len(),
+        animals = spawner.roam_heads(),
+        roam_map_share = %format_args!("{:.1}%", roam_map.share() * 100.0),
+        "wandering wildlife"
+    );
 
     // Corpse / resurrection Slice 1 — server-owned player corpses (persisted
     // LootBags). Load every persisted corpse BEFORE the loop (so before any login
@@ -186,10 +222,12 @@ pub async fn run(
             let mut max_id: EntityId = 0;
             for r in rows {
                 let id = r.corpse_id as EntityId;
-                // Re-pinned at load: the ground may have changed since the
-                // corpse was saved, and a corpse in the air or underground
-                // would be out of every reach.
-                let pos = terrain.ground_vec(super::connection::Vec3f::from_tuple(r.pos));
+                // Re-placed at load: the ground and the scenery may have
+                // changed since the corpse was saved, and a corpse in the air,
+                // underground or inside a wall would be out of every reach.
+                let pos = terrain
+                    .obstacles()
+                    .place(&terrain, super::connection::Vec3f::from_tuple(r.pos));
                 let items: Vec<super::loot::LootItemStack> = r
                     .items
                     .into_iter()
@@ -253,6 +291,7 @@ pub async fn run(
         trade_manager,
         corpses,
         terrain,
+        roam_map,
     };
 
     loop {
@@ -398,6 +437,8 @@ pub async fn run(
         camp::camp_sweep(&mut world, &mut q, now);
 
         death_sweep::run_death_sweep(&mut world, &mut q, now, &in_world_recipients_now).await;
+
+        grouping::refan_rosters_on_level_change(&mut world);
 
         regen_tick::run_regen(&mut world, &mut q, now, dt);
 

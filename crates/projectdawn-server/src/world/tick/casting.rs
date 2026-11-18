@@ -1,8 +1,49 @@
 //! Spell casts (step 4ha): each CastSpell judged and applied by its target type. The
 //! rules it is judged by (the target pre-flight, refusals, interrupts, songs) live in
 //! `cast_rules`.
+//!
+//! Shape (R2, 2026-11-18): `apply_casts` is the per-cast prelude, every gate in its
+//! fixed order and then the spend, and ends in a `match` on the target type whose arms
+//! are the `cast_*` functions below, one per target type. The prelude's order is the
+//! security property ("a refusal costs nothing": nothing is spent before the last
+//! check), so it stays one body; an arm only applies what the prelude decided, handed
+//! to it as a `CastContext`, and borrows the world through a `CastWorld`.
 
 use super::*;
+
+/// What the prelude of `apply_casts` decided about one accepted cast, lent to the
+/// target-type arm that applies it. The prelude (every gate in its fixed order, then
+/// the spend) stays in `apply_casts`: an arm only applies, and never refuses for a
+/// reason the pre-flight already judged. `spell` is the spell as cast, the off-side
+/// penalised copy when alignment cut it.
+#[derive(Clone, Copy)]
+struct CastContext<'a> {
+    intent: &'a CastSpellIntent,
+    spell: &'a spells::Spell,
+    resolved: ResolvedTarget,
+    caster_cid: ClientId,
+    caster_pos: Vec3f,
+    caster_int: i32,
+    mana_cost: f32,
+    hp_cost: f32,
+    dmg_type: DamageType,
+    now: Instant,
+    in_world_recipients_now: &'a [ClientId],
+}
+
+/// The world as the arms borrow it: `apply_casts` destructures `WorldState` once for
+/// the prelude and reborrows these for the arm, which takes them by value and
+/// destructures what it uses.
+struct CastWorld<'a> {
+    server: &'a mut RenetServer,
+    connections: &'a mut HashMap<ClientId, PerConnection>,
+    aoi: &'a mut AoiGrid,
+    enemies: &'a mut HashMap<EntityId, Entity>,
+    loot_bags: &'a mut HashMap<EntityId, LootBag>,
+    group_manager: &'a mut GroupManager,
+    terrain: &'a std::sync::Arc<crate::world::terrain::Terrain>,
+    bind_intents: &'a mut Vec<(i64, Option<String>, (f32, f32, f32))>,
+}
 
 pub(super) fn apply_casts(
     world: &mut WorldState,
@@ -636,1367 +677,1526 @@ pub(super) fn apply_casts(
                 stop_song(&mut *server, &mut *connections, caster_cid);
             }
 
+            let ctx = CastContext {
+                intent: &intent,
+                spell,
+                resolved,
+                caster_cid,
+                caster_pos,
+                caster_int,
+                mana_cost,
+                hp_cost,
+                dmg_type,
+                now,
+                in_world_recipients_now,
+            };
+            let w = CastWorld {
+                server: &mut *server,
+                connections: &mut *connections,
+                aoi: &mut *aoi,
+                enemies: &mut *enemies,
+                loot_bags: &mut *loot_bags,
+                group_manager: &mut *group_manager,
+                terrain: &*terrain,
+                bind_intents: &mut *bind_intents,
+            };
             match spell.target_type.as_str() {
-                "CORPSE" => {
-                    // Corpse / resurrection Slice 3 — a res spell targets a
-                    // corpse; offer the res to its owner, who summons + gets an
-                    // xp refund on accept. Mana was already deducted above
-                    // (consistent with the rest of the cast pipeline).
-                    let ResolvedTarget::Corpse(corpse_id, owner_cid) = resolved else {
-                        cast_resolution_lost(
-                            &mut *server,
-                            &mut *connections,
-                            in_world_recipients_now,
-                            caster_cid,
-                            intent.caster,
-                            mana_cost,
-                            hp_cost,
-                            &spell.name,
-                            "corpse",
-                        );
-                        continue;
-                    };
-                    tracing::info!(char_id = intent.caster, spell = %spell.name, corpse_id, "resurrection cast received");
-                    let xp_percent = spell.res_xp_percent.round() as u32;
-                    let caster_name = connections
-                        .get(&caster_cid)
-                        .map(|c| c.name.clone())
-                        .unwrap_or_default();
-                    // Record the pending offer on the owner so the accept can't
-                    // forge the refund %, then send the offer privately.
-                    if let Some(owner_conn) = connections.get_mut(&owner_cid) {
-                        owner_conn.pending_res_offer = Some((corpse_id, xp_percent));
-                    }
-                    handlers::send_resurrect_offer(
-                        &mut *server,
-                        owner_cid,
-                        corpse_id,
-                        caster_name,
-                        xp_percent,
-                    );
-                    tracing::info!(
-                        char_id = intent.caster,
-                        corpse_id,
-                        xp_percent,
-                        "resurrection offered"
-                    );
+                "CORPSE" => cast_corpse(ctx, w),
+                "SUMMON_ITEM" => cast_summon_item(ctx, w),
+                "SELF" => cast_self(ctx, w),
+                "ALLY" => cast_ally(ctx, w),
+                "ENEMY" => cast_enemy(ctx, w),
+                "AOE" => cast_aoe(ctx, w),
+                "PET_SUMMON" => cast_pet_summon(ctx, w),
+                "PET_CHARM" => cast_pet_charm(ctx, w),
+                "PET_HEAL" => cast_pet_heal(ctx, w),
+                "BIND" => cast_bind(ctx, w),
+                "PORT" => cast_port(ctx, w),
+                _ => cast_unhandled(ctx, w),
+            }
+        }
+    }
+}
+
+/// The ENEMY arm: a hostile single-target spell on a mob, a pet or a PvP-flagged
+/// player. The pre-flight resolved the target and decided presence, reach, liveness
+/// and the PvP gates; this only applies. Moved out of `apply_casts` verbatim on
+/// 2026-11-18 (R2), its arm-level `continue`s now `return`s.
+fn cast_enemy(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        resolved,
+        caster_cid,
+        caster_int,
+        mana_cost,
+        hp_cost,
+        dmg_type,
+        now,
+        in_world_recipients_now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        aoi,
+        enemies,
+        loot_bags,
+        group_manager,
+        ..
+    } = w;
+    // The pre-flight resolved the target and decided
+    // presence, reach, liveness and the PvP gates (for a
+    // player, and for another player's pet); the arm only
+    // applies.
+    let (target_id, pvp_target) = match resolved {
+        ResolvedTarget::Player(cid) => (cid, Some(cid)),
+        ResolvedTarget::Mob(id) | ResolvedTarget::Pet(id) => (id, None),
+        _ => {
+            cast_resolution_lost(
+                &mut *server,
+                &mut *connections,
+                in_world_recipients_now,
+                caster_cid,
+                intent.caster,
+                mana_cost,
+                hp_cost,
+                &spell.name,
+                "enemy",
+            );
+            return;
+        }
+    };
+    if let Some(target_cid) = pvp_target {
+        // Track 6 sub-task 4c — absorb pool +
+        // damage shield apply on PvP spell hit
+        // too. Armor reduction is skipped for
+        // spells (matches GDScript wrapping).
+        let shield_back: f32;
+        let shield_back_name: Option<String>;
+        let mut absorb_strip_idx: Option<usize> = None;
+        // The spell crit (spell_power.rs), before the absorb
+        // shield takes its share, as on the client.
+        let flat = spell.base_damage.max(0.0) as i32;
+        let (rolled, crit) = if flat > 0 {
+            crate::world::spell_power::roll_hit(flat, caster_int, &mut rand::thread_rng())
+        } else {
+            (0, false)
+        };
+        let (final_hp, max_hp, applied) = {
+            let Some(tc) = connections.get_mut(&target_cid) else {
+                cast_resolution_lost(
+                    &mut *server,
+                    &mut *connections,
+                    in_world_recipients_now,
+                    caster_cid,
+                    intent.caster,
+                    mana_cost,
+                    hp_cost,
+                    &spell.name,
+                    "enemy",
+                );
+                return;
+            };
+            let mut dmg = rolled;
+            let (after_absorb, exhausted) = buffs::consume_absorb(&mut tc.active_buffs, dmg);
+            dmg = after_absorb;
+            if exhausted {
+                absorb_strip_idx = tc
+                    .active_buffs
+                    .iter()
+                    .position(|b| matches!(b.effect, buffs::BuffEffect::Absorb { .. }));
+            }
+            shield_back = buffs::damage_shield_total(&tc.active_buffs);
+            shield_back_name =
+                buffs::first_damage_shield_name(&tc.active_buffs).map(|s| s.to_string());
+            tc.hp = (tc.hp - dmg as f32).max(0.0);
+            regen::mark_dirty(tc);
+            tc.note_damage_taken(now); // camp breaks on damage
+            (tc.hp, tc.max_hp, dmg)
+        };
+        if let Some(idx) = absorb_strip_idx {
+            if let Some(tc) = connections.get_mut(&target_cid) {
+                if idx < tc.active_buffs.len() {
+                    tc.active_buffs.remove(idx);
                 }
-                "SUMMON_ITEM" => {
-                    // Summon Food / Drink (food slice 2): conjure the
-                    // spell's item into the caster's bags, the count
-                    // scaling with level; the pre-flight checked the
-                    // item and the room. Into the bags rather than onto
-                    // the cursor (EQ landed summoned items on the
-                    // cursor; flagged, not built). The placement block
-                    // ends the connection borrow before any refund.
-                    let placement = {
-                        let Some(conn) = connections.get_mut(&caster_cid) else {
-                            continue;
-                        };
-                        let n = spells::summon_count(spell, &conn.class, conn.level);
-                        match conn.inventory.add_item_locating(&spell.summon_item, n) {
-                            Ok((touched, leftover)) => {
-                                let placed = n - leftover;
-                                if placed > 0 {
-                                    conn.inventory_dirty = true;
-                                    conn.ledger(ledger::item_event(
-                                        ItemAction::Summon,
-                                        &spell.summon_item,
-                                        placed,
-                                        i64::from(placed),
-                                        Some(spell.name.clone()),
-                                    ));
-                                }
-                                let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
-                                    .iter()
-                                    .map(|(loc, slot)| {
-                                        (loc.clone(), *slot, conn.inventory.peek_at(loc, *slot))
-                                    })
-                                    .collect();
-                                Ok((placed, leftover, deltas))
-                            }
-                            Err(e) => Err(e),
-                        }
-                    };
-                    match placement {
-                        Ok((placed, leftover, deltas)) if placed > 0 => {
-                            for (loc, slot, payload) in deltas {
-                                handlers::send_slot_delta(
-                                    &mut *server,
-                                    caster_cid,
-                                    loc,
-                                    slot,
-                                    payload,
-                                );
-                            }
-                            let item_name = items::lookup(&spell.summon_item)
-                                .map(|i| i.name.clone())
-                                .unwrap_or_else(|| spell.summon_item.clone());
-                            handlers::fan_out_chat_message(
-                                &mut *server,
-                                &[caster_cid],
-                                "",
-                                protocol::world::ChatChannel::System,
-                                &format!("You conjure {} x{}.", item_name, placed),
-                            );
-                            tracing::info!(
-                                char_id = intent.caster,
-                                spell = %spell.name,
-                                item = %spell.summon_item,
-                                qty = placed,
-                                leftover,
-                                "SUMMON_ITEM applied"
-                            );
-                        }
-                        other => {
-                            // The pre-flight found room a moment ago, so
-                            // this is the placer disagreeing with its own
-                            // probe; say so, refund, and refuse.
-                            tracing::warn!(
-                                char_id = intent.caster,
-                                spell = %spell.name,
-                                outcome = ?other.as_ref().map(|(p, l, _)| (*p, *l)),
-                                "SUMMON_ITEM placed nothing after the pre-flight accepted it; refunded"
-                            );
-                            refund_spell_cost(
-                                &mut *server,
-                                &mut *connections,
-                                in_world_recipients_now,
-                                caster_cid,
-                                intent.caster,
-                                mana_cost,
-                                hp_cost,
-                            );
-                            handlers::send_refusal(&mut *server, caster_cid, "Your bags are full.");
-                            continue;
-                        }
-                    }
-                }
-                "SELF" => {
-                    tracing::info!(
-                        char_id = intent.caster,
-                        spell = %spell.name,
-                        absorb = spell.absorb_amount,
-                        "SELF cast received"
-                    );
-                    // Heal the caster (or damage in the rare "self
-                    // damage" case). base_damage is treated as a
-                    // self-damage; heal_amount as a heal.
-                    let heal = spell.heal_amount;
-                    let dmg = spell.base_damage;
-                    if heal > 0.0 || dmg > 0.0 {
-                        let (final_hp, max_hp) = {
-                            let Some(cc) = connections.get_mut(&caster_cid) else {
-                                tracing::error!(char_id = intent.caster, spell = %spell.name, "caster missing mid-cast; intent dropped");
-                                continue;
-                            };
-                            cc.hp = (cc.hp + heal - dmg).clamp(0.0, cc.max_hp);
-                            regen::mark_dirty(cc);
-                            (cc.hp, cc.max_hp)
-                        };
-                        handlers::fan_out_health_update(
-                            &mut *server,
-                            in_world_recipients_now,
-                            intent.caster,
-                            final_hp,
-                            max_hp,
-                        );
-                        tracing::info!(
-                            char_id = intent.caster,
-                            spell = %spell.name,
-                            heal,
-                            dmg,
-                            final_hp,
-                            "spell self effect applied"
-                        );
-                    }
-                    // Track 6 — apply caster buffs. Lich Form is a
-                    // SELF-only toggle handled inline; the rest of the
-                    // beneficial buffs (HoT / MP-regen / speed / haste /
-                    // shield / absorb / accuracy / primary stat) flow
-                    // through the shared apply_player_spell_buffs so the
-                    // SELF and ALLY arms stay in lockstep.
-                    let mut buff_changed = false;
-                    if spell.is_lich_form {
-                        // Toggle semantics — second cast clears.
-                        let Some(cc) = connections.get_mut(&caster_cid) else {
-                            tracing::error!(char_id = intent.caster, spell = %spell.name, "caster missing mid-cast; intent dropped");
-                            continue;
-                        };
-                        let was_active = buffs::is_lich_form_active(&cc.active_buffs);
-                        cc.active_buffs
-                            .retain(|b| !matches!(b.effect, buffs::BuffEffect::LichForm { .. }));
-                        if !was_active {
-                            cc.active_buffs.push(ActiveBuff::new_lich_form(
-                                spell.name.clone(),
-                                spell.lich_mp_regen,
-                                now,
-                            ));
-                        }
-                        buff_changed = true;
-                    }
-                    let Some(cc) = connections.get_mut(&caster_cid) else {
-                        tracing::error!(char_id = intent.caster, spell = %spell.name, "caster missing mid-cast; intent dropped");
-                        continue;
-                    };
-                    if apply_player_spell_buffs(cc, spell, now) {
-                        buff_changed = true;
-                    }
-                    if buff_changed {
-                        if let Some(cc) = connections.get(&caster_cid) {
-                            handlers::fan_out_buff_snapshot(
-                                &mut *server,
-                                in_world_recipients_now,
-                                cc,
-                            );
-                        }
-                    }
-                }
-                "ALLY" => {
-                    // The pre-flight resolved the target (a pet, a player,
-                    // or oneself) and decided reach, liveness and the PvP
-                    // heal gates; the arm only applies.
-                    let (pet_target, target_cid) = match resolved {
-                        ResolvedTarget::Pet(id) => (Some(id), caster_cid),
-                        ResolvedTarget::Player(cid) => (None, cid),
-                        _ => {
-                            cast_resolution_lost(
-                                &mut *server,
-                                &mut *connections,
-                                in_world_recipients_now,
-                                caster_cid,
-                                intent.caster,
-                                mana_cost,
-                                hp_cost,
-                                &spell.name,
-                                "ally",
-                            );
-                            continue;
-                        }
-                    };
-                    if let Some(raw_target) = pet_target {
-                        let heal = spell.heal_amount;
-                        if heal > 0.0 {
-                            if let Some(pet) = enemies.get_mut(&raw_target) {
-                                pet.hp = (pet.hp + heal).min(pet.max_hp);
-                                let new_hp = pet.hp;
-                                let max_hp = pet.max_hp;
-                                handlers::fan_out_health_update(
-                                    &mut *server,
-                                    in_world_recipients_now,
-                                    raw_target,
-                                    new_hp,
-                                    max_hp,
-                                );
-                                tracing::info!(
-                                    char_id = intent.caster,
-                                    target = raw_target,
-                                    spell = %spell.name,
-                                    heal,
-                                    "ALLY pet heal applied"
-                                );
-                            }
-                        }
-                        // Track 13 — apply the pet-relevant buff set
-                        // (HoT / speed / haste / damage shield / stat)
-                        // to the pet and fan a BuffSnapshot under the
-                        // pet id.
-                        let mut pet_buff_changed = false;
-                        if let Some(pet) = enemies.get_mut(&raw_target) {
-                            pet_buff_changed = apply_pet_spell_buffs(pet, spell, now);
-                        }
-                        if pet_buff_changed {
-                            if let Some(pet) = enemies.get(&raw_target) {
-                                // Valor-style buffs grow max_hp — fan a
-                                // HealthUpdate so the bar shows the new cap.
-                                if spell.max_hp_buff != 0.0 {
-                                    handlers::fan_out_health_update(
-                                        &mut *server,
-                                        in_world_recipients_now,
-                                        raw_target,
-                                        pet.hp,
-                                        pet.max_hp,
-                                    );
-                                }
-                                fan_out_pet_buff_snapshot(
-                                    &mut *server,
-                                    in_world_recipients_now,
-                                    pet,
-                                );
-                                tracing::info!(
-                                    char_id = intent.caster,
-                                    target = raw_target,
-                                    spell = %spell.name,
-                                    "ALLY pet buff applied"
-                                );
-                            }
-                        }
-                        continue;
-                    }
-                    let target_entity_id = target_cid;
-                    let heal = spell.heal_amount;
-                    if heal > 0.0 {
-                        let (final_hp, max_hp) = {
-                            let Some(tc) = connections.get_mut(&target_cid) else {
-                                cast_resolution_lost(
-                                    &mut *server,
-                                    &mut *connections,
-                                    in_world_recipients_now,
-                                    caster_cid,
-                                    intent.caster,
-                                    mana_cost,
-                                    hp_cost,
-                                    &spell.name,
-                                    "ally",
-                                );
-                                continue;
-                            };
-                            tc.hp = (tc.hp + heal).min(tc.max_hp);
-                            regen::mark_dirty(tc);
-                            (tc.hp, tc.max_hp)
-                        };
-                        handlers::fan_out_health_update(
-                            &mut *server,
-                            in_world_recipients_now,
-                            target_entity_id,
-                            final_hp,
-                            max_hp,
-                        );
-                        tracing::info!(
-                            char_id = intent.caster,
-                            target = target_entity_id,
-                            spell = %spell.name,
-                            heal,
-                            "ALLY heal applied"
-                        );
-                    }
-                    // Apply HoT + every beneficial buff to the ally,
-                    // same set the SELF arm grants the caster. Stat
-                    // buffs mutate the target conn's effective stats
-                    // (combat math reads them); the fanned BuffSnapshot
-                    // lets the target's client reconstruct the buff
-                    // locally (BuffManager.reconcile_with_server_snapshot).
-                    let Some(tc) = connections.get_mut(&target_cid) else {
-                        cast_resolution_lost(
-                            &mut *server,
-                            &mut *connections,
-                            in_world_recipients_now,
-                            caster_cid,
-                            intent.caster,
-                            mana_cost,
-                            hp_cost,
-                            &spell.name,
-                            "ally",
-                        );
-                        continue;
-                    };
-                    let ally_buff_changed = apply_player_spell_buffs(tc, spell, now);
-                    if ally_buff_changed {
-                        if let Some(tc) = connections.get(&target_cid) {
-                            handlers::fan_out_buff_snapshot(
-                                &mut *server,
-                                in_world_recipients_now,
-                                tc,
-                            );
-                        }
-                        tracing::info!(
-                            char_id = intent.caster,
-                            target = target_entity_id,
-                            spell = %spell.name,
-                            "ALLY buff applied"
-                        );
-                    }
-                }
-                "ENEMY" => {
-                    // The pre-flight resolved the target and decided
-                    // presence, reach, liveness and the PvP gates (for a
-                    // player, and for another player's pet); the arm only
-                    // applies.
-                    let (target_id, pvp_target) = match resolved {
-                        ResolvedTarget::Player(cid) => (cid, Some(cid)),
-                        ResolvedTarget::Mob(id) | ResolvedTarget::Pet(id) => (id, None),
-                        _ => {
-                            cast_resolution_lost(
-                                &mut *server,
-                                &mut *connections,
-                                in_world_recipients_now,
-                                caster_cid,
-                                intent.caster,
-                                mana_cost,
-                                hp_cost,
-                                &spell.name,
-                                "enemy",
-                            );
-                            continue;
-                        }
-                    };
-                    if let Some(target_cid) = pvp_target {
-                        // Track 6 sub-task 4c — absorb pool +
-                        // damage shield apply on PvP spell hit
-                        // too. Armor reduction is skipped for
-                        // spells (matches GDScript wrapping).
-                        let shield_back: f32;
-                        let shield_back_name: Option<String>;
-                        let mut absorb_strip_idx: Option<usize> = None;
-                        // The spell crit (spell_power.rs), before the absorb
-                        // shield takes its share, as on the client.
-                        let flat = spell.base_damage.max(0.0) as i32;
-                        let (rolled, crit) = if flat > 0 {
-                            crate::world::spell_power::roll_hit(
-                                flat,
-                                caster_int,
-                                &mut rand::thread_rng(),
-                            )
-                        } else {
-                            (0, false)
-                        };
-                        let (final_hp, max_hp, applied) = {
-                            let Some(tc) = connections.get_mut(&target_cid) else {
-                                cast_resolution_lost(
-                                    &mut *server,
-                                    &mut *connections,
-                                    in_world_recipients_now,
-                                    caster_cid,
-                                    intent.caster,
-                                    mana_cost,
-                                    hp_cost,
-                                    &spell.name,
-                                    "enemy",
-                                );
-                                continue;
-                            };
-                            let mut dmg = rolled;
-                            let (after_absorb, exhausted) =
-                                buffs::consume_absorb(&mut tc.active_buffs, dmg);
-                            dmg = after_absorb;
-                            if exhausted {
-                                absorb_strip_idx = tc.active_buffs.iter().position(|b| {
-                                    matches!(b.effect, buffs::BuffEffect::Absorb { .. })
-                                });
-                            }
-                            shield_back = buffs::damage_shield_total(&tc.active_buffs);
-                            shield_back_name = buffs::first_damage_shield_name(&tc.active_buffs)
-                                .map(|s| s.to_string());
-                            tc.hp = (tc.hp - dmg as f32).max(0.0);
-                            regen::mark_dirty(tc);
-                            tc.note_damage_taken(now); // camp breaks on damage
-                            (tc.hp, tc.max_hp, dmg)
-                        };
-                        if let Some(idx) = absorb_strip_idx {
-                            if let Some(tc) = connections.get_mut(&target_cid) {
-                                if idx < tc.active_buffs.len() {
-                                    tc.active_buffs.remove(idx);
-                                }
-                            }
-                            if let Some(tc) = connections.get(&target_cid) {
-                                handlers::fan_out_buff_snapshot(
-                                    &mut *server,
-                                    in_world_recipients_now,
-                                    tc,
-                                );
-                            }
-                        }
-                        handlers::fan_out_hit(
-                            &mut *server,
-                            in_world_recipients_now,
-                            intent.caster,
-                            target_id,
-                            applied,
-                            crit,
-                            dmg_type,
-                        );
-                        handlers::fan_out_health_update(
-                            &mut *server,
-                            in_world_recipients_now,
-                            target_id,
-                            final_hp,
-                            max_hp,
-                        );
-                        tracing::info!(
-                            char_id = intent.caster,
-                            target = target_id,
-                            spell = %spell.name,
-                            applied,
-                            "PvP spell applied"
-                        );
-                        // Track 22.E — PvP spell damage interrupts
-                        // the target's cast (mirror of the PvP
-                        // melee interrupt wired in Track 19A).
-                        if let Some(tc) = connections.get_mut(&target_cid) {
-                            let outcome = roll_cast_interrupt(tc, now, applied);
-                            let (tc_mp, tc_max_mp) = (tc.mp, tc.max_mp);
-                            match &outcome {
-                                InterruptOutcome::Interrupted {
-                                    spell_name,
-                                    mana_charged,
-                                } => {
-                                    handlers::fan_out_cast_fail(
-                                        &mut *server,
-                                        in_world_recipients_now,
-                                        target_id,
-                                        "interrupted (hit during cast)".to_string(),
-                                    );
-                                    tell_interrupt_charge(
-                                        &mut *server,
-                                        target_cid,
-                                        target_id,
-                                        tc_mp,
-                                        tc_max_mp,
-                                        *mana_charged,
-                                    );
-                                    tracing::info!(
-                                        caster = target_id,
-                                        spell = %spell_name,
-                                        mana_charged,
-                                        "PvP cast interrupted by incoming spell damage"
-                                    );
-                                }
-                                InterruptOutcome::Survived {
-                                    advanced_to: Some(new_score),
-                                } => {
-                                    handlers::send_skill_progress_update(
-                                        &mut *server,
-                                        target_cid,
-                                        skills::Skill::Casting.as_protocol(),
-                                        "channeling".to_string(),
-                                        *new_score,
-                                    );
-                                }
-                                InterruptOutcome::Survived { advanced_to: None }
-                                | InterruptOutcome::NotCasting => {}
-                            }
-                        }
-                        // Damage shield reflects to caster.
-                        if shield_back > 0.0 {
-                            if let Some(att) = connections.get_mut(&caster_cid) {
-                                if att.hp > 0.0 {
-                                    let reflect_dmg = shield_back as i32;
-                                    att.hp = (att.hp - shield_back).max(0.0);
-                                    regen::mark_dirty(att);
-                                    att.note_damage_taken(now); // camp breaks on damage
-                                    let new_att_hp = att.hp;
-                                    let att_max = att.max_hp;
-                                    handlers::fan_out_health_update(
-                                        &mut *server,
-                                        in_world_recipients_now,
-                                        intent.caster,
-                                        new_att_hp,
-                                        att_max,
-                                    );
-                                    if let Some(name) = shield_back_name.as_ref() {
-                                        handlers::fan_out_damage_shield_trigger(
-                                            &mut *server,
-                                            in_world_recipients_now,
-                                            target_id,
-                                            intent.caster,
-                                            reflect_dmg,
-                                            name.clone(),
-                                        );
-                                    }
-                                    // Track 22.E — shield reflect
-                                    // damage also interrupts the
-                                    // caster (their own thorns
-                                    // hits their cast). Note this
-                                    // is rarely meaningful since
-                                    // CastSpell already cleared
-                                    // cast_spell_name above when
-                                    // the cast resolved — left
-                                    // here for the case where a
-                                    // future spell type leaves
-                                    // the cache populated.
-                                    let outcome = roll_cast_interrupt(att, now, reflect_dmg);
-                                    let (att_mp, att_max_mp) = (att.mp, att.max_mp);
-                                    if let InterruptOutcome::Interrupted {
-                                        spell_name,
-                                        mana_charged,
-                                    } = &outcome
-                                    {
-                                        handlers::fan_out_cast_fail(
-                                            &mut *server,
-                                            in_world_recipients_now,
-                                            intent.caster,
-                                            "interrupted (hit during cast)".to_string(),
-                                        );
-                                        tell_interrupt_charge(
-                                            &mut *server,
-                                            caster_cid,
-                                            intent.caster,
-                                            att_mp,
-                                            att_max_mp,
-                                            *mana_charged,
-                                        );
-                                        tracing::info!(
-                                            char_id = intent.caster,
-                                            spell = %spell_name,
-                                            mana_charged,
-                                            "PvP caster interrupted by own shield reflect"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        // Track 6 sub-task 4d — CC application on
-                        // PvP spell. Mez, Root, Snare, AttackSlow,
-                        // Silence, Dispel land on the target's
-                        // active_buffs after damage. Refresh
-                        // semantics (same-name re-cast renews
-                        // duration via apply_buff).
-                        let mut cc_changed = false;
-                        // A PvP DoT rides the same buff list (spell
-                        // batch step 5), ticking in the buff sweep.
-                        if spell.dot_dps > 0.0 && spell.dot_duration > 0.0 {
-                            if let Some(tc) = connections.get_mut(&target_cid) {
-                                apply_buff(
-                                    tc,
-                                    ActiveBuff::new_dot(
-                                        spell.name.clone(),
-                                        spell.dot_dps,
-                                        intent.caster,
-                                        dmg_type,
-                                        spell.dot_duration,
-                                        now,
-                                    ),
-                                );
-                                cc_changed = true;
-                            }
-                        }
-                        if spell.cc_duration > 0.0 {
-                            if let Some(tc) = connections.get_mut(&target_cid) {
-                                apply_buff(
-                                    tc,
-                                    ActiveBuff::new_mez(spell.name.clone(), spell.cc_duration, now),
-                                );
-                                cc_changed = true;
-                            }
-                        }
-                        if spell.root_duration > 0.0 {
-                            if let Some(tc) = connections.get_mut(&target_cid) {
-                                apply_buff(
-                                    tc,
-                                    ActiveBuff::new_root(
-                                        spell.name.clone(),
-                                        spell.root_duration,
-                                        now,
-                                    ),
-                                );
-                                cc_changed = true;
-                            }
-                        }
-                        if spell.slow_amount > 0.0 && spell.slow_duration > 0.0 {
-                            if let Some(tc) = connections.get_mut(&target_cid) {
-                                apply_buff(
-                                    tc,
-                                    ActiveBuff::new_snare(
-                                        spell.name.clone(),
-                                        spell.slow_amount,
-                                        spell.slow_duration,
-                                        now,
-                                    ),
-                                );
-                                cc_changed = true;
-                            }
-                        }
-                        if spell.attack_slow_amount > 0.0 && spell.attack_slow_duration > 0.0 {
-                            if let Some(tc) = connections.get_mut(&target_cid) {
-                                apply_buff(
-                                    tc,
-                                    ActiveBuff::new_attack_slow(
-                                        spell.name.clone(),
-                                        spell.attack_slow_amount,
-                                        spell.attack_slow_duration,
-                                        now,
-                                    ),
-                                );
-                                cc_changed = true;
-                            }
-                        }
-                        if spell.silence_duration > 0.0 {
-                            if let Some(tc) = connections.get_mut(&target_cid) {
-                                apply_buff(
-                                    tc,
-                                    ActiveBuff::new_silence(
-                                        spell.name.clone(),
-                                        spell.silence_duration,
-                                        now,
-                                    ),
-                                );
-                                cc_changed = true;
-                            }
-                        }
-                        if spell.is_dispel {
-                            // Strip one non-CC buff from target.
-                            // Stat buffs need their deltas undone
-                            // first.
-                            if let Some(tc) = connections.get_mut(&target_cid) {
-                                if let Some(idx) = buffs::first_dispellable_index(&tc.active_buffs)
-                                {
-                                    if let buffs::BuffEffect::StatBuff {
-                                        strength,
-                                        agility,
-                                        intelligence,
-                                        wisdom,
-                                        constitution,
-                                        max_hp_delta,
-                                        max_mp_delta,
-                                    } = tc.active_buffs[idx].effect
-                                    {
-                                        buffs::undo_stat_deltas(
-                                            tc,
-                                            strength,
-                                            agility,
-                                            intelligence,
-                                            wisdom,
-                                            constitution,
-                                            max_hp_delta,
-                                            max_mp_delta,
-                                        );
-                                        regen::mark_dirty(tc);
-                                    }
-                                    tc.active_buffs.remove(idx);
-                                    cc_changed = true;
-                                }
-                            }
-                        }
-                        if cc_changed {
-                            if let Some(tc) = connections.get(&target_cid) {
-                                handlers::fan_out_buff_snapshot(
-                                    &mut *server,
-                                    in_world_recipients_now,
-                                    tc,
-                                );
-                            }
-                        }
-                        continue;
-                    }
-                    // A mob, or another player's pet the pre-flight
-                    // admitted: apply spell damage via the shared helper
-                    // (Track 9; the same path AOE uses per victim).
-                    apply_spell_damage_to_enemy(
+            }
+            if let Some(tc) = connections.get(&target_cid) {
+                handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, tc);
+            }
+        }
+        handlers::fan_out_hit(
+            &mut *server,
+            in_world_recipients_now,
+            intent.caster,
+            target_id,
+            applied,
+            crit,
+            dmg_type,
+        );
+        handlers::fan_out_health_update(
+            &mut *server,
+            in_world_recipients_now,
+            target_id,
+            final_hp,
+            max_hp,
+        );
+        tracing::info!(
+            char_id = intent.caster,
+            target = target_id,
+            spell = %spell.name,
+            applied,
+            "PvP spell applied"
+        );
+        // Track 22.E — PvP spell damage interrupts
+        // the target's cast (mirror of the PvP
+        // melee interrupt wired in Track 19A).
+        if let Some(tc) = connections.get_mut(&target_cid) {
+            let outcome = roll_cast_interrupt(tc, now, applied);
+            let (tc_mp, tc_max_mp) = (tc.mp, tc.max_mp);
+            match &outcome {
+                InterruptOutcome::Interrupted {
+                    spell_name,
+                    mana_charged,
+                } => {
+                    handlers::fan_out_cast_fail(
                         &mut *server,
                         in_world_recipients_now,
-                        &mut *connections,
-                        &mut *enemies,
-                        &mut *loot_bags,
-                        &mut *aoi,
-                        group_manager,
-                        intent.caster,
                         target_id,
-                        spell,
-                        dmg_type,
-                        now,
+                        "interrupted (hit during cast)".to_string(),
                     );
-                    // Visibility log for PvP spell-on-pet. The
-                    // pet-target path doesn't reach the
-                    // "PvP spell applied" trace at line ~3002 (which
-                    // is in the player-target arm), so without this
-                    // line a spell-on-pet hit is invisible in
-                    // server.log and hard to triage.
-                    if IdKind::of(target_id) == IdKind::Pet {
-                        tracing::info!(
-                            char_id = intent.caster,
-                            target = target_id,
-                            spell = %spell.name,
-                            "PvP spell applied vs pet"
-                        );
-                    }
-                    // Track 11.3 — refresh pet target inheritance
-                    // on every single-target damage spell too, so
-                    // a Necromancer casting Bone Shards at an
-                    // enemy directs the skeleton onto it.
-                    if let Some(att) = connections.get_mut(&caster_cid) {
-                        att.last_attacked_enemy = Some(target_id);
-                        att.last_attacked_at = Some(now);
-                    }
-                }
-                "AOE" => {
-                    // Track 9 — server-authoritative AOE damage.
-                    // Search the caster's AOI neighbourhood (3×3
-                    // cells around the caster, 360 m on a side at
-                    // CELL_SIZE=120), then filter by spell radius.
-                    // AOE spell radii top out around 6 m today, so
-                    // this is a tiny working set in practice.
-                    let radius = spell.aoe_radius;
-                    let radius_sq = radius * radius;
-                    let caster_cell = aoi::cell_for(caster_pos.x, caster_pos.z);
-                    let visible = aoi.entities_visible_from(caster_cell);
-                    let mut victims: Vec<EntityId> = Vec::new();
-                    for id in visible {
-                        // Eligible AOE victims: world enemies
-                        // [ENEMY_ID_BASE, LOOT_BAG_ID_BASE) and pets
-                        // [PET_ID_BASE, …). Players (< ENEMY_ID_BASE) and
-                        // loot bags ([LOOT_BAG_ID_BASE, PET_ID_BASE)) are
-                        // excluded. Pets are included so AOE hits them like
-                        // melee/single-target does — the owner PvP gate
-                        // below decides whether each pet is actually hit.
-                        if !matches!(IdKind::of(id), IdKind::Enemy | IdKind::Pet) {
-                            continue;
-                        }
-                        if let Some(entity) = enemies.get(&id) {
-                            if !entity.is_alive() {
-                                continue;
-                            }
-                            // Pet PvP gate (mirrors the single-target
-                            // melee/spell paths): a player-owned pet is
-                            // only a valid AOE victim if the caster
-                            // could attack its owner directly — and
-                            // never the caster's own pet. NPC mobs
-                            // (owner None) are always eligible.
-                            if let Some(owner_id) = entity.owner {
-                                let owner_cid = owner_id as ClientId;
-                                let allowed = owner_cid != caster_cid
-                                    && match (
-                                        connections.get(&caster_cid),
-                                        connections.get(&owner_cid),
-                                    ) {
-                                        (Some(a), Some(o)) => combat::can_attack(
-                                            a,
-                                            o,
-                                            a.zone.as_deref(),
-                                            o.zone.as_deref(),
-                                        ),
-                                        _ => false,
-                                    };
-                                if !allowed {
-                                    continue;
-                                }
-                            }
-                            let dx = entity.pos.x - caster_pos.x;
-                            let dy = entity.pos.y - caster_pos.y;
-                            let dz = entity.pos.z - caster_pos.z;
-                            // Inside the radius and in sight: an AoE on a
-                            // crest hits the near side of the ridge, not
-                            // the far one (the height model, 3.8).
-                            // An evading mob takes nothing (`is_evading`).
-                            if dx * dx + dy * dy + dz * dz <= radius_sq
-                                && terrain.can_see(caster_pos, entity.pos)
-                                && !entity.is_evading(now)
-                            {
-                                victims.push(id);
-                            }
-                        }
-                    }
-                    let mut hits = 0;
-                    for victim in victims {
-                        if apply_spell_damage_to_enemy(
-                            &mut *server,
-                            in_world_recipients_now,
-                            &mut *connections,
-                            &mut *enemies,
-                            &mut *loot_bags,
-                            &mut *aoi,
-                            group_manager,
-                            intent.caster,
-                            victim,
-                            spell,
-                            dmg_type,
-                            now,
-                        ) {
-                            hits += 1;
-                        }
-                    }
+                    tell_interrupt_charge(
+                        &mut *server,
+                        target_cid,
+                        target_id,
+                        tc_mp,
+                        tc_max_mp,
+                        *mana_charged,
+                    );
                     tracing::info!(
-                        char_id = intent.caster,
-                        spell = %spell.name,
-                        radius,
-                        hits,
-                        "AOE spell applied"
+                        caster = target_id,
+                        spell = %spell_name,
+                        mana_charged,
+                        "PvP cast interrupted by incoming spell damage"
                     );
                 }
-                "PET_SUMMON" => {
-                    // Track 11 — spawn a player-owned pet at the
-                    // caster's position. One pet per owner: any
-                    // existing pet for this caster is despawned
-                    // first (mark Dead + EntityDespawn fan-out;
-                    // corpse cleanup phase removes it from the
-                    // map and AOI next tick).
-                    let pet_type = spell.pet_type.clone();
-                    // Owner-derived level (pet interim A): manual
-                    // summons take the EQ re-summon gamble — a 0..=2
-                    // roll off owner - 1 — so paying mana again can
-                    // land a better pet. The skeleton's tier cap
-                    // lives in `pet_templates::scaled`.
-                    let Some(owner_level) = connections
-                        .get(&(intent.caster as ClientId))
-                        .map(|c| c.level.max(1) as u32)
-                    else {
-                        // Caster vanished between queueing the intent and
-                        // resolution — skip, like the other resolver arms,
-                        // rather than spawning an ownerless level-1 pet.
-                        tracing::debug!(
-                            char_id = intent.caster,
-                            spell = %spell.name,
-                            "PET_SUMMON dropped — caster no longer connected"
-                        );
-                        continue;
-                    };
-                    let variance = rand::thread_rng().gen_range(0..=2u32);
-                    let owner_id = intent.caster;
-                    // Helper handles the scaled template, spawn offset,
-                    // despawn-existing, AOI insert, fan-out, and map
-                    // insert. None = unknown pet_type.
-                    let Some((pet_id, pet_level)) = summon_scaled_pet(
+                InterruptOutcome::Survived {
+                    advanced_to: Some(new_score),
+                } => {
+                    handlers::send_skill_progress_update(
+                        &mut *server,
+                        target_cid,
+                        skills::Skill::Casting.as_protocol(),
+                        "channeling".to_string(),
+                        *new_score,
+                    );
+                }
+                InterruptOutcome::Survived { advanced_to: None } | InterruptOutcome::NotCasting => {
+                }
+            }
+        }
+        // Damage shield reflects to caster.
+        if shield_back > 0.0 {
+            if let Some(att) = connections.get_mut(&caster_cid) {
+                if att.hp > 0.0 {
+                    let reflect_dmg = shield_back as i32;
+                    att.hp = (att.hp - shield_back).max(0.0);
+                    regen::mark_dirty(att);
+                    att.note_damage_taken(now); // camp breaks on damage
+                    let new_att_hp = att.hp;
+                    let att_max = att.max_hp;
+                    handlers::fan_out_health_update(
                         &mut *server,
                         in_world_recipients_now,
-                        &mut *enemies,
-                        &mut *aoi,
-                        owner_id,
-                        owner_level,
-                        caster_pos,
-                        &pet_type,
-                        variance,
-                        1.0,
-                        now,
-                        terrain,
-                    ) else {
-                        // The pre-flight checked the pet type is known
-                        // (`pet_templates::scaled` at variance 0), so a
-                        // miss here is the template vanishing between.
-                        cast_resolution_lost(
-                            &mut *server,
-                            &mut *connections,
-                            in_world_recipients_now,
-                            caster_cid,
-                            intent.caster,
-                            mana_cost,
-                            hp_cost,
-                            &spell.name,
-                            "pet template",
-                        );
-                        continue;
-                    };
-                    tracing::info!(
-                        owner = owner_id,
-                        pet_id,
-                        spell = %spell.name,
-                        pet_type = %pet_type,
-                        level = pet_level,
-                        owner_level,
-                        "pet summoned"
-                    );
-                }
-                "PET_CHARM" => {
-                    // Track 12 Piece C — convert the targeted
-                    // enemy into a player-owned pet for
-                    // `spell.duration` seconds. Re-keys the id
-                    // partition: EntityDespawn the old enemy id,
-                    // PetSpawn a fresh pet id at the same pos
-                    // with the same hp/max_hp, owner = caster.
-                    // When the charm ends (the sweep below, or the
-                    // owner leaving) the mob is handed back as the
-                    // enemy it was, hostile to its charmer; see
-                    // `return_charmed_mob`.
-                    let ResolvedTarget::Mob(target_id) = resolved else {
-                        cast_resolution_lost(
-                            &mut *server,
-                            &mut *connections,
-                            in_world_recipients_now,
-                            caster_cid,
-                            intent.caster,
-                            mana_cost,
-                            hp_cost,
-                            &spell.name,
-                            "charm",
-                        );
-                        continue;
-                    };
-                    let owner_id = intent.caster;
-                    // Look up the target; copy out the stats we
-                    // need then remove it from the map + AOI.
-                    let extracted: Option<(
-                        crate::world::zones::MobTemplate,
-                        f32,
-                        f32,
-                        Vec3f,
-                        f32,
-                        usize,
-                        Vec3f,
-                    )> = enemies
-                        .get(&target_id)
-                        .filter(|e| e.is_alive() && !e.is_pet())
-                        .map(|e| {
-                            (
-                                e.mob.clone(),
-                                e.hp,
-                                e.max_hp,
-                                e.pos,
-                                e.yaw,
-                                e.spawn_point_idx,
-                                e.spawn_pos,
-                            )
-                        });
-                    let Some((mob, hp, max_hp, pos, yaw, slot_idx, home_pos)) = extracted else {
-                        cast_resolution_lost(
-                            &mut *server,
-                            &mut *connections,
-                            in_world_recipients_now,
-                            caster_cid,
-                            intent.caster,
-                            mana_cost,
-                            hp_cost,
-                            &spell.name,
-                            "charm victim",
-                        );
-                        continue;
-                    };
-                    // Despawn the old enemy id from AOI + fan.
-                    let enemy_cell = aoi::cell_for(pos.x, pos.z);
-                    aoi.remove(target_id, enemy_cell);
-                    let despawn_visible = aoi.entities_visible_from(enemy_cell);
-                    for &recipient in in_world_recipients_now.iter() {
-                        if despawn_visible.contains(&recipient) {
-                            handlers::send_entity_despawn(&mut *server, recipient, target_id);
-                        }
-                    }
-                    // The camp slot stays OCCUPIED for the charm's
-                    // life. It used to be freed here, so the camp
-                    // respawned a replacement while the charmed mob
-                    // still existed; now that the mob comes back
-                    // when the charm ends, freeing it would let a
-                    // charm-and-wait add a mob to the camp per cast.
-                    // The slot rides on the pet: the return puts the
-                    // mob back into it, and a pet that dies charmed
-                    // frees it through the corpse sweep like any
-                    // death.
-                    enemies.remove(&target_id);
-                    // Build the fresh pet entity. Override hp/
-                    // max_hp/yaw from the original so the charm
-                    // preserves the mob's current state, and carry
-                    // its slot and home so it can be given back.
-                    let mut pet = Entity::from_pet_summon(owner_id, pos, mob, now);
-                    pet.max_hp = max_hp;
-                    pet.hp = hp;
-                    pet.yaw = yaw;
-                    pet.spawn_point_idx = slot_idx;
-                    pet.spawn_pos = home_pos;
-                    let duration = if spell.duration > 0.0 {
-                        spell.duration
-                    } else {
-                        30.0
-                    };
-                    pet.charm_expires_at = Some(now + std::time::Duration::from_secs_f32(duration));
-                    let pet_id = pet.id;
-                    let pet_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
-                    aoi.insert(pet_id, pet_cell);
-                    let spawn_visible = aoi.entities_visible_from(pet_cell);
-                    let pet_recipients: Vec<ClientId> = in_world_recipients_now
-                        .iter()
-                        .copied()
-                        .filter(|id| spawn_visible.contains(id))
-                        .collect();
-                    if !pet_recipients.is_empty() {
-                        // Same creature, new id: the caster keeps it targeted.
-                        handlers::fan_out_pet_spawn(
-                            &mut *server,
-                            &pet_recipients,
-                            &pet,
-                            Some(target_id),
-                        );
-                    }
-                    enemies.insert(pet_id, pet);
-                    tracing::info!(
-                        owner = owner_id,
-                        old_enemy_id = target_id,
-                        new_pet_id = pet_id,
-                        duration_secs = duration,
-                        spell = %spell.name,
-                        "enemy charmed into pet"
-                    );
-                }
-                "PET_HEAL" => {
-                    // Mends the caster's own pet, whatever is targeted;
-                    // the pre-flight found it alive and in reach. Warder's
-                    // Mend was the one client-only pet spell (ported
-                    // 2026-10-07 after the tester asked for none).
-                    let ResolvedTarget::Pet(pet_id) = resolved else {
-                        cast_resolution_lost(
-                            &mut *server,
-                            &mut *connections,
-                            in_world_recipients_now,
-                            caster_cid,
-                            intent.caster,
-                            mana_cost,
-                            hp_cost,
-                            &spell.name,
-                            "own pet",
-                        );
-                        continue;
-                    };
-                    let heal = spell.heal_amount.max(0.0);
-                    if let Some(pet) = enemies.get_mut(&pet_id) {
-                        pet.hp = (pet.hp + heal).min(pet.max_hp);
-                        let (new_hp, max_hp) = (pet.hp, pet.max_hp);
-                        handlers::fan_out_health_update(
-                            &mut *server,
-                            in_world_recipients_now,
-                            pet_id,
-                            new_hp,
-                            max_hp,
-                        );
-                        tracing::info!(
-                            char_id = intent.caster,
-                            pet_id,
-                            spell = %spell.name,
-                            heal,
-                            "PET_HEAL applied"
-                        );
-                    }
-                }
-                "BIND" => {
-                    // Spell batch step 2: bind the target (self, or the
-                    // group member the pre-flight admitted) where THEY
-                    // stand, and persist it like the Soul Binder does.
-                    let ResolvedTarget::Player(bound_cid) = resolved else {
-                        cast_resolution_lost(
-                            &mut *server,
-                            &mut *connections,
-                            in_world_recipients_now,
-                            caster_cid,
-                            intent.caster,
-                            mana_cost,
-                            hp_cost,
-                            &spell.name,
-                            "bind",
-                        );
-                        continue;
-                    };
-                    let Some(bc) = connections.get_mut(&bound_cid) else {
-                        cast_resolution_lost(
-                            &mut *server,
-                            &mut *connections,
-                            in_world_recipients_now,
-                            caster_cid,
-                            intent.caster,
-                            mana_cost,
-                            hp_cost,
-                            &spell.name,
-                            "bind target",
-                        );
-                        continue;
-                    };
-                    let pos = bc.pos.into_tuple();
-                    bc.bind = Some(crate::db::BindPoint { pos });
-                    bind_intents.push((bc.char_id, bc.zone.clone(), pos));
-                    tracing::info!(
-                        char_id = intent.caster,
-                        bound = bound_cid,
-                        x = pos.0,
-                        y = pos.1,
-                        z = pos.2,
-                        "BIND applied"
-                    );
-                    handlers::send_system_line(
-                        &mut *server,
-                        bound_cid,
-                        "Your soul is bound to this place.",
-                    );
-                    if bound_cid != caster_cid {
-                        handlers::send_system_line(
-                            &mut *server,
-                            caster_cid,
-                            "Their soul is bound to this place.",
-                        );
-                    }
-                }
-                "PORT" => {
-                    // Spell batch step 2: the destination is the server's
-                    // (the caster's bind, or the nearest safe area's
-                    // arrival), never the client's. Evacuate also moves the
-                    // caster's alive, present group members within friendly
-                    // reach; a corpse or a linkdead body stays. Everyone
-                    // moved is wiped from every mob's tables first, so no
-                    // train follows them, and their pets come along.
-                    let caster_pos_now = connections
-                        .get(&caster_cid)
-                        .map(|c| c.pos)
-                        .unwrap_or(caster_pos);
-                    let dest = match spell.port.as_str() {
-                        "bind" => connections
-                            .get(&caster_cid)
-                            .and_then(|c| c.bind)
-                            .map(|b| Vec3f::from_tuple(b.pos))
-                            .unwrap_or(crate::world::STARTER_SPAWN),
-                        _ => crate::world::safe_areas::nearest_arrival(caster_pos_now)
-                            .unwrap_or(crate::world::STARTER_SPAWN),
-                    };
-                    // Every arrival stands on the ground, whatever the bind
-                    // or the arrival point was saved with.
-                    let dest = terrain.ground_vec(dest);
-                    let mut movers: Vec<ClientId> = vec![caster_cid];
-                    if spell.port_group {
-                        if let Some(g) = group_manager.group_of(caster_cid) {
-                            for &m in &g.members {
-                                if m == caster_cid {
-                                    continue;
-                                }
-                                let eligible = connections.get(&m).is_some_and(|c| {
-                                    c.in_world
-                                        && c.linkdead_since.is_none()
-                                        && c.hp > 0.0
-                                        && !c.death_processed
-                                        && c.pos.distance_to(caster_pos_now) <= spell.reach()
-                                });
-                                if eligible {
-                                    movers.push(m);
-                                }
-                            }
-                        }
-                    }
-                    let mover_ids: Vec<EntityId> = movers.iter().map(|m| *m as EntityId).collect();
-                    for mob_id in wipe_hate(&mut *enemies, &mover_ids) {
-                        handlers::fan_out_entity_target(
-                            &mut *server,
-                            in_world_recipients_now,
-                            mob_id,
-                            None,
-                        );
-                    }
-                    for bearer in clear_player_dots_from(&mut *connections, &mover_ids) {
-                        if let Some(conn) = connections.get(&bearer) {
-                            handlers::fan_out_buff_snapshot(
-                                &mut *server,
-                                in_world_recipients_now,
-                                conn,
-                            );
-                        }
-                    }
-                    for &m in &movers {
-                        if let Some(c) = connections.get_mut(&m) {
-                            // A mover still in the air lands where they are
-                            // first (fall.rs; the fall design's ledger, row
-                            // 6): a port is no way out of a fall, and one it
-                            // kills is not moved.
-                            let ground_here = terrain.ground(c.pos.x, c.pos.z);
-                            if let Some(landing) =
-                                crate::world::fall::settle(&mut c.vertical, ground_here)
-                            {
-                                super::movement::land(&mut *server, m, c, landing, now);
-                                if c.hp <= 0.0 {
-                                    continue;
-                                }
-                            }
-                            c.pos = dest;
-                            // The fight is over for the mover: without this
-                            // the pet pre-pass (step 4i) re-inherits the
-                            // owner's last target for up to 10 s and the
-                            // pet walks straight back out of town to it.
-                            c.last_attacked_enemy = None;
-                            c.last_attacked_at = None;
-                            regen::mark_dirty(c);
-                        }
-                        handlers::send_teleport(&mut *server, m, dest);
-                        // The mover's summoned pets come along (user call
-                        // D4), set to follow so a parked one does not stand
-                        // alone across the zone. Their AOI cell changes
-                        // right here, so the players who gain or lose sight
-                        // of them are told now rather than never. A CHARMED
-                        // mob is not a pet the mover owns: it is released
-                        // where it stands and walks home, as when its
-                        // charmer logs out. Carrying it would put a camp
-                        // mob (a named one, even) inside the safe area to
-                        // turn hostile when the charm ends.
-                        let pets: Vec<EntityId> = enemies
-                            .iter()
-                            .filter(|(_, e)| e.owner == Some(m as EntityId) && e.is_alive())
-                            .map(|(id, _)| *id)
-                            .collect();
-                        for pet_id in pets {
-                            if enemies
-                                .get(&pet_id)
-                                .is_some_and(|e| e.charm_expires_at.is_some())
-                            {
-                                if let Some(pet) = enemies.remove(&pet_id) {
-                                    let mob_id = return_charmed_mob(
-                                        &mut *server,
-                                        &mut *aoi,
-                                        &mut *enemies,
-                                        in_world_recipients_now,
-                                        pet,
-                                        None,
-                                        now,
-                                    );
-                                    tracing::info!(
-                                        owner = m,
-                                        pet_id,
-                                        mob_id,
-                                        "charm broken by the owner porting away — mob returned"
-                                    );
-                                }
-                                continue;
-                            }
-                            let (old_cell, new_cell) = {
-                                let Some(pet) = enemies.get_mut(&pet_id) else {
-                                    continue;
-                                };
-                                let old_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
-                                pet.pos = Vec3f {
-                                    x: dest.x + 1.5,
-                                    y: dest.y,
-                                    z: dest.z,
-                                };
-                                // last_bcast_pos is left where it was, so the
-                                // move fans on the next tick instead of
-                                // waiting for the keepalive.
-                                pet.target = None;
-                                pet.stance = entity::PetStance::Follow;
-                                (old_cell, aoi::cell_for(pet.pos.x, pet.pos.z))
-                            };
-                            if new_cell != old_cell {
-                                let (gained, lost) = aoi.update(pet_id, old_cell, new_cell);
-                                if let Some(pet) = enemies.get(&pet_id) {
-                                    fan_entity_cell_crossing(
-                                        &mut *server,
-                                        aoi,
-                                        connections,
-                                        pet,
-                                        &gained,
-                                        &lost,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    tracing::info!(
-                        char_id = intent.caster,
-                        spell = %spell.name,
-                        port = %spell.port,
-                        moved = movers.len(),
-                        x = dest.x, z = dest.z,
-                        "PORT applied"
-                    );
-                }
-                _ => {
-                    // A target type with no arm. Every type in today's
-                    // spells.toml has one (BIND and PORT gained theirs in
-                    // spell batch step 2), and the pre-flight refuses an
-                    // unknown type before the mana comes off, so this is
-                    // reached only by a new type added to the data ahead of
-                    // its arm. Mana is gone and nothing happens, which is
-                    // indistinguishable from a bug. Say so, and give the cost
-                    // back. Raised to info! as well: a player-visible
-                    // failure should not be invisible at the default log
-                    // level.
-                    tracing::info!(
-                        char_id = intent.caster,
-                        spell = %spell.name,
-                        target_type = %spell.target_type,
-                        "spell target_type not yet processed server-side; mana deducted only"
-                    );
-                    refund_spell_cost(
-                        &mut *server,
-                        &mut *connections,
-                        in_world_recipients_now,
-                        caster_cid,
                         intent.caster,
-                        mana_cost,
-                        hp_cost,
+                        new_att_hp,
+                        att_max,
                     );
-                    handlers::send_refusal(
-                        &mut *server,
-                        caster_cid,
-                        "That magic has no effect here yet.",
-                    );
+                    if let Some(name) = shield_back_name.as_ref() {
+                        handlers::fan_out_damage_shield_trigger(
+                            &mut *server,
+                            in_world_recipients_now,
+                            target_id,
+                            intent.caster,
+                            reflect_dmg,
+                            name.clone(),
+                        );
+                    }
+                    // Track 22.E — shield reflect
+                    // damage also interrupts the
+                    // caster (their own thorns
+                    // hits their cast). Note this
+                    // is rarely meaningful since
+                    // CastSpell already cleared
+                    // cast_spell_name above when
+                    // the cast resolved — left
+                    // here for the case where a
+                    // future spell type leaves
+                    // the cache populated.
+                    let outcome = roll_cast_interrupt(att, now, reflect_dmg);
+                    let (att_mp, att_max_mp) = (att.mp, att.max_mp);
+                    if let InterruptOutcome::Interrupted {
+                        spell_name,
+                        mana_charged,
+                    } = &outcome
+                    {
+                        handlers::fan_out_cast_fail(
+                            &mut *server,
+                            in_world_recipients_now,
+                            intent.caster,
+                            "interrupted (hit during cast)".to_string(),
+                        );
+                        tell_interrupt_charge(
+                            &mut *server,
+                            caster_cid,
+                            intent.caster,
+                            att_mp,
+                            att_max_mp,
+                            *mana_charged,
+                        );
+                        tracing::info!(
+                            char_id = intent.caster,
+                            spell = %spell_name,
+                            mana_charged,
+                            "PvP caster interrupted by own shield reflect"
+                        );
+                    }
+                }
+            }
+        }
+        // Track 6 sub-task 4d — CC application on
+        // PvP spell. Mez, Root, Snare, AttackSlow,
+        // Silence, Dispel land on the target's
+        // active_buffs after damage. Refresh
+        // semantics (same-name re-cast renews
+        // duration via apply_buff).
+        let mut cc_changed = false;
+        // A PvP DoT rides the same buff list (spell
+        // batch step 5), ticking in the buff sweep.
+        if spell.dot_dps > 0.0 && spell.dot_duration > 0.0 {
+            if let Some(tc) = connections.get_mut(&target_cid) {
+                apply_buff(
+                    tc,
+                    ActiveBuff::new_dot(
+                        spell.name.clone(),
+                        spell.dot_dps,
+                        intent.caster,
+                        dmg_type,
+                        spell.dot_duration,
+                        now,
+                    ),
+                );
+                cc_changed = true;
+            }
+        }
+        if spell.cc_duration > 0.0 {
+            if let Some(tc) = connections.get_mut(&target_cid) {
+                apply_buff(
+                    tc,
+                    ActiveBuff::new_mez(spell.name.clone(), spell.cc_duration, now),
+                );
+                cc_changed = true;
+            }
+        }
+        if spell.root_duration > 0.0 {
+            if let Some(tc) = connections.get_mut(&target_cid) {
+                apply_buff(
+                    tc,
+                    ActiveBuff::new_root(spell.name.clone(), spell.root_duration, now),
+                );
+                cc_changed = true;
+            }
+        }
+        if spell.slow_amount > 0.0 && spell.slow_duration > 0.0 {
+            if let Some(tc) = connections.get_mut(&target_cid) {
+                apply_buff(
+                    tc,
+                    ActiveBuff::new_snare(
+                        spell.name.clone(),
+                        spell.slow_amount,
+                        spell.slow_duration,
+                        now,
+                    ),
+                );
+                cc_changed = true;
+            }
+        }
+        if spell.attack_slow_amount > 0.0 && spell.attack_slow_duration > 0.0 {
+            if let Some(tc) = connections.get_mut(&target_cid) {
+                apply_buff(
+                    tc,
+                    ActiveBuff::new_attack_slow(
+                        spell.name.clone(),
+                        spell.attack_slow_amount,
+                        spell.attack_slow_duration,
+                        now,
+                    ),
+                );
+                cc_changed = true;
+            }
+        }
+        if spell.silence_duration > 0.0 {
+            if let Some(tc) = connections.get_mut(&target_cid) {
+                apply_buff(
+                    tc,
+                    ActiveBuff::new_silence(spell.name.clone(), spell.silence_duration, now),
+                );
+                cc_changed = true;
+            }
+        }
+        if spell.is_dispel {
+            // Strip one non-CC buff from target.
+            // Stat buffs need their deltas undone
+            // first.
+            if let Some(tc) = connections.get_mut(&target_cid) {
+                if let Some(idx) = buffs::first_dispellable_index(&tc.active_buffs) {
+                    if let buffs::BuffEffect::StatBuff {
+                        strength,
+                        agility,
+                        intelligence,
+                        wisdom,
+                        constitution,
+                        max_hp_delta,
+                        max_mp_delta,
+                    } = tc.active_buffs[idx].effect
+                    {
+                        buffs::undo_stat_deltas(
+                            tc,
+                            strength,
+                            agility,
+                            intelligence,
+                            wisdom,
+                            constitution,
+                            max_hp_delta,
+                            max_mp_delta,
+                        );
+                        regen::mark_dirty(tc);
+                    }
+                    tc.active_buffs.remove(idx);
+                    cc_changed = true;
+                }
+            }
+        }
+        if cc_changed {
+            if let Some(tc) = connections.get(&target_cid) {
+                handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, tc);
+            }
+        }
+        return;
+    }
+    // A mob, or another player's pet the pre-flight
+    // admitted: apply spell damage via the shared helper
+    // (Track 9; the same path AOE uses per victim).
+    apply_spell_damage_to_enemy(
+        &mut *server,
+        in_world_recipients_now,
+        &mut *connections,
+        &mut *enemies,
+        &mut *loot_bags,
+        &mut *aoi,
+        group_manager,
+        intent.caster,
+        target_id,
+        spell,
+        dmg_type,
+        now,
+    );
+    // Visibility log for PvP spell-on-pet. The
+    // pet-target path doesn't reach the
+    // "PvP spell applied" trace at line ~3002 (which
+    // is in the player-target arm), so without this
+    // line a spell-on-pet hit is invisible in
+    // server.log and hard to triage.
+    if IdKind::of(target_id) == IdKind::Pet {
+        tracing::info!(
+            char_id = intent.caster,
+            target = target_id,
+            spell = %spell.name,
+            "PvP spell applied vs pet"
+        );
+    }
+    // Track 11.3 — refresh pet target inheritance
+    // on every single-target damage spell too, so
+    // a Necromancer casting Bone Shards at an
+    // enemy directs the skeleton onto it.
+    if let Some(att) = connections.get_mut(&caster_cid) {
+        att.last_attacked_enemy = Some(target_id);
+        att.last_attacked_at = Some(now);
+    }
+}
+
+/// The PORT arm: Gate, Succor and Evacuate. The destination never comes from the
+/// client (the bind for Gate, the nearest safe area's arrival point otherwise); every
+/// mover is wiped from every mob's hate, summoned pets come along in Follow, and the
+/// move is the existing Teleport. Moved out of `apply_casts` verbatim on 2026-11-18
+/// (R2); its `continue`s all sit inside its own loops and stay.
+fn cast_port(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        caster_cid,
+        caster_pos,
+        now,
+        in_world_recipients_now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        aoi,
+        enemies,
+        group_manager,
+        terrain,
+        ..
+    } = w;
+    // Spell batch step 2: the destination is the server's
+    // (the caster's bind, or the nearest safe area's
+    // arrival), never the client's. Evacuate also moves the
+    // caster's alive, present group members within friendly
+    // reach; a corpse or a linkdead body stays. Everyone
+    // moved is wiped from every mob's tables first, so no
+    // train follows them, and their pets come along.
+    let caster_pos_now = connections
+        .get(&caster_cid)
+        .map(|c| c.pos)
+        .unwrap_or(caster_pos);
+    let dest = match spell.port.as_str() {
+        "bind" => connections
+            .get(&caster_cid)
+            .and_then(|c| c.bind)
+            .map(|b| Vec3f::from_tuple(b.pos))
+            .unwrap_or(crate::world::STARTER_SPAWN),
+        _ => crate::world::safe_areas::nearest_arrival(caster_pos_now)
+            .unwrap_or(crate::world::STARTER_SPAWN),
+    };
+    // Every arrival stands on the ground, clear of whatever
+    // stands on it, whatever the bind or the arrival point
+    // was saved with.
+    let dest = terrain.obstacles().place(terrain, dest);
+    let mut movers: Vec<ClientId> = vec![caster_cid];
+    if spell.port_group {
+        if let Some(g) = group_manager.group_of(caster_cid) {
+            for &m in &g.members {
+                if m == caster_cid {
+                    continue;
+                }
+                let eligible = connections.get(&m).is_some_and(|c| {
+                    c.in_world
+                        && c.linkdead_since.is_none()
+                        && c.hp > 0.0
+                        && !c.death_processed
+                        && c.pos.distance_to(caster_pos_now) <= spell.reach()
+                });
+                if eligible {
+                    movers.push(m);
                 }
             }
         }
     }
+    let mover_ids: Vec<EntityId> = movers.iter().map(|m| *m as EntityId).collect();
+    for mob_id in wipe_hate(&mut *enemies, &mover_ids) {
+        handlers::fan_out_entity_target(&mut *server, in_world_recipients_now, mob_id, None);
+    }
+    for bearer in clear_player_dots_from(&mut *connections, &mover_ids) {
+        if let Some(conn) = connections.get(&bearer) {
+            handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, conn);
+        }
+    }
+    for &m in &movers {
+        if let Some(c) = connections.get_mut(&m) {
+            // A mover still in the air lands where they are
+            // first (fall.rs; the fall design's ledger, row
+            // 6): a port is no way out of a fall, and one it
+            // kills is not moved.
+            let ground_here = terrain.ground(c.pos.x, c.pos.z);
+            if let Some(landing) = crate::world::fall::settle(&mut c.vertical, ground_here) {
+                super::movement::land(&mut *server, m, c, landing, now);
+                if c.hp <= 0.0 {
+                    continue;
+                }
+            }
+            c.teleport_to(dest);
+            // The fight is over for the mover: without this
+            // the pet pre-pass (step 4i) re-inherits the
+            // owner's last target for up to 10 s and the
+            // pet walks straight back out of town to it.
+            c.last_attacked_enemy = None;
+            c.last_attacked_at = None;
+            regen::mark_dirty(c);
+        }
+        handlers::send_teleport(&mut *server, m, dest);
+        // The mover's summoned pets come along (user call
+        // D4), set to follow so a parked one does not stand
+        // alone across the zone. Their AOI cell changes
+        // right here, so the players who gain or lose sight
+        // of them are told now rather than never. A CHARMED
+        // mob is not a pet the mover owns: it is released
+        // where it stands and walks home, as when its
+        // charmer logs out. Carrying it would put a camp
+        // mob (a named one, even) inside the safe area to
+        // turn hostile when the charm ends.
+        let pets: Vec<EntityId> = enemies
+            .iter()
+            .filter(|(_, e)| e.owner == Some(m as EntityId) && e.is_alive())
+            .map(|(id, _)| *id)
+            .collect();
+        for pet_id in pets {
+            if enemies
+                .get(&pet_id)
+                .is_some_and(|e| e.charm_expires_at.is_some())
+            {
+                if let Some(pet) = enemies.remove(&pet_id) {
+                    let mob_id = return_charmed_mob(
+                        &mut *server,
+                        &mut *aoi,
+                        &mut *enemies,
+                        in_world_recipients_now,
+                        pet,
+                        None,
+                        now,
+                    );
+                    tracing::info!(
+                        owner = m,
+                        pet_id,
+                        mob_id,
+                        "charm broken by the owner porting away — mob returned"
+                    );
+                }
+                continue;
+            }
+            let (old_cell, new_cell) = {
+                let Some(pet) = enemies.get_mut(&pet_id) else {
+                    continue;
+                };
+                let old_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
+                // 1.5 m east of where its owner arrives, as at
+                // a summon, and walked there from the owner in
+                // the same way: with a wall at the arrival
+                // point's shoulder the pet lands on its
+                // owner's side, never in the wall or beyond.
+                let beside = terrain.obstacles().resolve(
+                    crate::world::obstacles::P2::of(dest),
+                    crate::world::obstacles::P2::new(dest.x + 1.5, dest.z),
+                    crate::world::obstacles::BODY_RADIUS,
+                );
+                pet.pos = terrain.ground_vec(Vec3f {
+                    x: beside.x,
+                    y: dest.y,
+                    z: beside.z,
+                });
+                // last_bcast_pos is left where it was, so the
+                // move fans on the next tick instead of
+                // waiting for the keepalive.
+                pet.target = None;
+                pet.stance = entity::PetStance::Follow;
+                (old_cell, aoi::cell_for(pet.pos.x, pet.pos.z))
+            };
+            if new_cell != old_cell {
+                let (gained, lost) = aoi.update(pet_id, old_cell, new_cell);
+                if let Some(pet) = enemies.get(&pet_id) {
+                    fan_entity_cell_crossing(&mut *server, aoi, connections, pet, &gained, &lost);
+                }
+            }
+        }
+    }
+    tracing::info!(
+        char_id = intent.caster,
+        spell = %spell.name,
+        port = %spell.port,
+        moved = movers.len(),
+        x = dest.x, z = dest.z,
+        "PORT applied"
+    );
+}
+
+/// The ALLY arm: a heal or buff on a player or a pet (the untargeted heal is a
+/// self-heal). The pre-flight decided presence, reach and liveness; this only applies.
+/// Moved out of `apply_casts` verbatim on 2026-11-18 (R2), its arm-level `continue`s
+/// now `return`s.
+fn cast_ally(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        resolved,
+        caster_cid,
+        mana_cost,
+        hp_cost,
+        in_world_recipients_now,
+        now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        enemies,
+        ..
+    } = w;
+    // The pre-flight resolved the target (a pet, a player,
+    // or oneself) and decided reach, liveness and the PvP
+    // heal gates; the arm only applies.
+    let (pet_target, target_cid) = match resolved {
+        ResolvedTarget::Pet(id) => (Some(id), caster_cid),
+        ResolvedTarget::Player(cid) => (None, cid),
+        _ => {
+            cast_resolution_lost(
+                &mut *server,
+                &mut *connections,
+                in_world_recipients_now,
+                caster_cid,
+                intent.caster,
+                mana_cost,
+                hp_cost,
+                &spell.name,
+                "ally",
+            );
+            return;
+        }
+    };
+    if let Some(raw_target) = pet_target {
+        let heal = spell.heal_amount;
+        if heal > 0.0 {
+            if let Some(pet) = enemies.get_mut(&raw_target) {
+                pet.hp = (pet.hp + heal).min(pet.max_hp);
+                let new_hp = pet.hp;
+                let max_hp = pet.max_hp;
+                handlers::fan_out_health_update(
+                    &mut *server,
+                    in_world_recipients_now,
+                    raw_target,
+                    new_hp,
+                    max_hp,
+                );
+                tracing::info!(
+                    char_id = intent.caster,
+                    target = raw_target,
+                    spell = %spell.name,
+                    heal,
+                    "ALLY pet heal applied"
+                );
+            }
+        }
+        // Track 13 — apply the pet-relevant buff set
+        // (HoT / speed / haste / damage shield / stat)
+        // to the pet and fan a BuffSnapshot under the
+        // pet id.
+        let mut pet_buff_changed = false;
+        if let Some(pet) = enemies.get_mut(&raw_target) {
+            pet_buff_changed = apply_pet_spell_buffs(pet, spell, now);
+        }
+        if pet_buff_changed {
+            if let Some(pet) = enemies.get(&raw_target) {
+                // Valor-style buffs grow max_hp — fan a
+                // HealthUpdate so the bar shows the new cap.
+                if spell.max_hp_buff != 0.0 {
+                    handlers::fan_out_health_update(
+                        &mut *server,
+                        in_world_recipients_now,
+                        raw_target,
+                        pet.hp,
+                        pet.max_hp,
+                    );
+                }
+                fan_out_pet_buff_snapshot(&mut *server, in_world_recipients_now, pet);
+                tracing::info!(
+                    char_id = intent.caster,
+                    target = raw_target,
+                    spell = %spell.name,
+                    "ALLY pet buff applied"
+                );
+            }
+        }
+        return;
+    }
+    let target_entity_id = target_cid;
+    let heal = spell.heal_amount;
+    if heal > 0.0 {
+        let (final_hp, max_hp) = {
+            let Some(tc) = connections.get_mut(&target_cid) else {
+                cast_resolution_lost(
+                    &mut *server,
+                    &mut *connections,
+                    in_world_recipients_now,
+                    caster_cid,
+                    intent.caster,
+                    mana_cost,
+                    hp_cost,
+                    &spell.name,
+                    "ally",
+                );
+                return;
+            };
+            tc.hp = (tc.hp + heal).min(tc.max_hp);
+            regen::mark_dirty(tc);
+            (tc.hp, tc.max_hp)
+        };
+        handlers::fan_out_health_update(
+            &mut *server,
+            in_world_recipients_now,
+            target_entity_id,
+            final_hp,
+            max_hp,
+        );
+        tracing::info!(
+            char_id = intent.caster,
+            target = target_entity_id,
+            spell = %spell.name,
+            heal,
+            "ALLY heal applied"
+        );
+    }
+    // Apply HoT + every beneficial buff to the ally,
+    // same set the SELF arm grants the caster. Stat
+    // buffs mutate the target conn's effective stats
+    // (combat math reads them); the fanned BuffSnapshot
+    // lets the target's client reconstruct the buff
+    // locally (BuffManager.reconcile_with_server_snapshot).
+    let Some(tc) = connections.get_mut(&target_cid) else {
+        cast_resolution_lost(
+            &mut *server,
+            &mut *connections,
+            in_world_recipients_now,
+            caster_cid,
+            intent.caster,
+            mana_cost,
+            hp_cost,
+            &spell.name,
+            "ally",
+        );
+        return;
+    };
+    let ally_buff_changed = apply_player_spell_buffs(tc, spell, now);
+    if ally_buff_changed {
+        if let Some(tc) = connections.get(&target_cid) {
+            handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, tc);
+        }
+        tracing::info!(
+            char_id = intent.caster,
+            target = target_entity_id,
+            spell = %spell.name,
+            "ALLY buff applied"
+        );
+    }
+}
+
+/// The AOE arm: damage to every mob in the radius that the caster can see, with the
+/// kill step and loot for each. Moved out of `apply_casts` verbatim on 2026-11-18 (R2);
+/// its `continue`s all sit inside its own loops and stay.
+fn cast_aoe(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        caster_cid,
+        caster_pos,
+        dmg_type,
+        in_world_recipients_now,
+        now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        aoi,
+        enemies,
+        loot_bags,
+        group_manager,
+        terrain,
+        ..
+    } = w;
+    // Track 9 — server-authoritative AOE damage.
+    // Search the caster's AOI neighbourhood (3×3
+    // cells around the caster, 360 m on a side at
+    // CELL_SIZE=120), then filter by spell radius.
+    // AOE spell radii top out around 6 m today, so
+    // this is a tiny working set in practice.
+    let radius = spell.aoe_radius;
+    let radius_sq = radius * radius;
+    let caster_cell = aoi::cell_for(caster_pos.x, caster_pos.z);
+    let visible = aoi.entities_visible_from(caster_cell);
+    let mut victims: Vec<EntityId> = Vec::new();
+    for id in visible {
+        // Eligible AOE victims: world enemies
+        // [ENEMY_ID_BASE, LOOT_BAG_ID_BASE) and pets
+        // [PET_ID_BASE, …). Players (< ENEMY_ID_BASE) and
+        // loot bags ([LOOT_BAG_ID_BASE, PET_ID_BASE)) are
+        // excluded. Pets are included so AOE hits them like
+        // melee/single-target does — the owner PvP gate
+        // below decides whether each pet is actually hit.
+        if !matches!(IdKind::of(id), IdKind::Enemy | IdKind::Pet) {
+            continue;
+        }
+        if let Some(entity) = enemies.get(&id) {
+            if !entity.is_alive() {
+                continue;
+            }
+            // Pet PvP gate (mirrors the single-target
+            // melee/spell paths): a player-owned pet is
+            // only a valid AOE victim if the caster
+            // could attack its owner directly — and
+            // never the caster's own pet. NPC mobs
+            // (owner None) are always eligible.
+            if let Some(owner_id) = entity.owner {
+                let owner_cid = owner_id as ClientId;
+                let allowed = owner_cid != caster_cid
+                    && match (connections.get(&caster_cid), connections.get(&owner_cid)) {
+                        (Some(a), Some(o)) => {
+                            combat::can_attack(a, o, a.zone.as_deref(), o.zone.as_deref())
+                        }
+                        _ => false,
+                    };
+                if !allowed {
+                    continue;
+                }
+            }
+            let dx = entity.pos.x - caster_pos.x;
+            let dy = entity.pos.y - caster_pos.y;
+            let dz = entity.pos.z - caster_pos.z;
+            // Inside the radius and in sight: an AoE on a
+            // crest hits the near side of the ridge, not
+            // the far one (the height model, 3.8).
+            // An evading mob takes nothing (`is_evading`).
+            if dx * dx + dy * dy + dz * dz <= radius_sq
+                && terrain.can_see(caster_pos, entity.pos)
+                && !entity.is_evading(now)
+            {
+                victims.push(id);
+            }
+        }
+    }
+    let mut hits = 0;
+    for victim in victims {
+        if apply_spell_damage_to_enemy(
+            &mut *server,
+            in_world_recipients_now,
+            &mut *connections,
+            &mut *enemies,
+            &mut *loot_bags,
+            &mut *aoi,
+            group_manager,
+            intent.caster,
+            victim,
+            spell,
+            dmg_type,
+            now,
+        ) {
+            hits += 1;
+        }
+    }
+    tracing::info!(
+        char_id = intent.caster,
+        spell = %spell.name,
+        radius,
+        hits,
+        "AOE spell applied"
+    );
+}
+
+/// The SUMMON_ITEM arm: Summon Food and Summon Drink, the conjured stack placed in the
+/// caster's bags through the real placer. Moved out of `apply_casts` verbatim on
+/// 2026-11-18 (R2), its two arm-level `continue`s now `return`s.
+fn cast_summon_item(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        caster_cid,
+        mana_cost,
+        hp_cost,
+        in_world_recipients_now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        ..
+    } = w;
+    // Summon Food / Drink (food slice 2): conjure the
+    // spell's item into the caster's bags, the count
+    // scaling with level; the pre-flight checked the
+    // item and the room. Into the bags rather than onto
+    // the cursor (EQ landed summoned items on the
+    // cursor; flagged, not built). The placement block
+    // ends the connection borrow before any refund.
+    let placement = {
+        let Some(conn) = connections.get_mut(&caster_cid) else {
+            return;
+        };
+        let n = spells::summon_count(spell, &conn.class, conn.level);
+        match conn.inventory.add_item_locating(&spell.summon_item, n) {
+            Ok((touched, leftover)) => {
+                let placed = n - leftover;
+                if placed > 0 {
+                    conn.inventory_dirty = true;
+                    conn.ledger(ledger::item_event(
+                        ItemAction::Summon,
+                        &spell.summon_item,
+                        placed,
+                        i64::from(placed),
+                        Some(spell.name.clone()),
+                    ));
+                }
+                let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
+                    .iter()
+                    .map(|(loc, slot)| (loc.clone(), *slot, conn.inventory.peek_at(loc, *slot)))
+                    .collect();
+                Ok((placed, leftover, deltas))
+            }
+            Err(e) => Err(e),
+        }
+    };
+    match placement {
+        Ok((placed, leftover, deltas)) if placed > 0 => {
+            for (loc, slot, payload) in deltas {
+                handlers::send_slot_delta(&mut *server, caster_cid, loc, slot, payload);
+            }
+            let item_name = items::lookup(&spell.summon_item)
+                .map(|i| i.name.clone())
+                .unwrap_or_else(|| spell.summon_item.clone());
+            handlers::fan_out_chat_message(
+                &mut *server,
+                &[caster_cid],
+                "",
+                protocol::world::ChatChannel::System,
+                &format!("You conjure {} x{}.", item_name, placed),
+            );
+            tracing::info!(
+                char_id = intent.caster,
+                spell = %spell.name,
+                item = %spell.summon_item,
+                qty = placed,
+                leftover,
+                "SUMMON_ITEM applied"
+            );
+        }
+        other => {
+            // The pre-flight found room a moment ago, so
+            // this is the placer disagreeing with its own
+            // probe; say so, refund, and refuse.
+            tracing::warn!(
+                char_id = intent.caster,
+                spell = %spell.name,
+                outcome = ?other.as_ref().map(|(p, l, _)| (*p, *l)),
+                "SUMMON_ITEM placed nothing after the pre-flight accepted it; refunded"
+            );
+            refund_spell_cost(
+                &mut *server,
+                &mut *connections,
+                in_world_recipients_now,
+                caster_cid,
+                intent.caster,
+                mana_cost,
+                hp_cost,
+            );
+            handlers::send_refusal(&mut *server, caster_cid, "Your bags are full.");
+        }
+    }
+}
+
+/// The SELF arm: a self-targeted heal or buff. Moved out of `apply_casts` verbatim on
+/// 2026-11-18 (R2), its arm-level `continue`s now `return`s.
+fn cast_self(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        caster_cid,
+        in_world_recipients_now,
+        now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        ..
+    } = w;
+    tracing::info!(
+        char_id = intent.caster,
+        spell = %spell.name,
+        absorb = spell.absorb_amount,
+        "SELF cast received"
+    );
+    // Heal the caster (or damage in the rare "self
+    // damage" case). base_damage is treated as a
+    // self-damage; heal_amount as a heal.
+    let heal = spell.heal_amount;
+    let dmg = spell.base_damage;
+    if heal > 0.0 || dmg > 0.0 {
+        let (final_hp, max_hp) = {
+            let Some(cc) = connections.get_mut(&caster_cid) else {
+                tracing::error!(char_id = intent.caster, spell = %spell.name, "caster missing mid-cast; intent dropped");
+                return;
+            };
+            cc.hp = (cc.hp + heal - dmg).clamp(0.0, cc.max_hp);
+            regen::mark_dirty(cc);
+            (cc.hp, cc.max_hp)
+        };
+        handlers::fan_out_health_update(
+            &mut *server,
+            in_world_recipients_now,
+            intent.caster,
+            final_hp,
+            max_hp,
+        );
+        tracing::info!(
+            char_id = intent.caster,
+            spell = %spell.name,
+            heal,
+            dmg,
+            final_hp,
+            "spell self effect applied"
+        );
+    }
+    // Track 6 — apply caster buffs. Lich Form is a
+    // SELF-only toggle handled inline; the rest of the
+    // beneficial buffs (HoT / MP-regen / speed / haste /
+    // shield / absorb / accuracy / primary stat) flow
+    // through the shared apply_player_spell_buffs so the
+    // SELF and ALLY arms stay in lockstep.
+    let mut buff_changed = false;
+    if spell.is_lich_form {
+        // Toggle semantics — second cast clears.
+        let Some(cc) = connections.get_mut(&caster_cid) else {
+            tracing::error!(char_id = intent.caster, spell = %spell.name, "caster missing mid-cast; intent dropped");
+            return;
+        };
+        let was_active = buffs::is_lich_form_active(&cc.active_buffs);
+        cc.active_buffs
+            .retain(|b| !matches!(b.effect, buffs::BuffEffect::LichForm { .. }));
+        if !was_active {
+            cc.active_buffs.push(ActiveBuff::new_lich_form(
+                spell.name.clone(),
+                spell.lich_mp_regen,
+                now,
+            ));
+        }
+        buff_changed = true;
+    }
+    let Some(cc) = connections.get_mut(&caster_cid) else {
+        tracing::error!(char_id = intent.caster, spell = %spell.name, "caster missing mid-cast; intent dropped");
+        return;
+    };
+    if apply_player_spell_buffs(cc, spell, now) {
+        buff_changed = true;
+    }
+    if buff_changed {
+        if let Some(cc) = connections.get(&caster_cid) {
+            handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, cc);
+        }
+    }
+}
+
+/// The PET_SUMMON arm: a conjured pet beside its owner, scaled to the owner's level.
+/// Moved out of `apply_casts` verbatim on 2026-11-18 (R2), its arm-level `continue`s
+/// now `return`s.
+fn cast_pet_summon(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        caster_cid,
+        caster_pos,
+        mana_cost,
+        hp_cost,
+        in_world_recipients_now,
+        now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        aoi,
+        enemies,
+        terrain,
+        ..
+    } = w;
+    // Track 11 — spawn a player-owned pet at the
+    // caster's position. One pet per owner: any
+    // existing pet for this caster is despawned
+    // first (mark Dead + EntityDespawn fan-out;
+    // corpse cleanup phase removes it from the
+    // map and AOI next tick).
+    let pet_type = spell.pet_type.clone();
+    // Owner-derived level (pet interim A): manual
+    // summons take the EQ re-summon gamble — a 0..=2
+    // roll off owner - 1 — so paying mana again can
+    // land a better pet. The skeleton's tier cap
+    // lives in `pet_templates::scaled`.
+    let Some(owner_level) = connections
+        .get(&(intent.caster as ClientId))
+        .map(|c| c.level.max(1) as u32)
+    else {
+        // Caster vanished between queueing the intent and
+        // resolution — skip, like the other resolver arms,
+        // rather than spawning an ownerless level-1 pet.
+        tracing::debug!(
+            char_id = intent.caster,
+            spell = %spell.name,
+            "PET_SUMMON dropped — caster no longer connected"
+        );
+        return;
+    };
+    let variance = rand::thread_rng().gen_range(0..=2u32);
+    let owner_id = intent.caster;
+    // Helper handles the scaled template, spawn offset,
+    // despawn-existing, AOI insert, fan-out, and map
+    // insert. None = unknown pet_type.
+    let Some((pet_id, pet_level)) = summon_scaled_pet(
+        &mut *server,
+        in_world_recipients_now,
+        &mut *enemies,
+        &mut *aoi,
+        owner_id,
+        owner_level,
+        caster_pos,
+        &pet_type,
+        variance,
+        1.0,
+        now,
+        terrain,
+    ) else {
+        // The pre-flight checked the pet type is known
+        // (`pet_templates::scaled` at variance 0), so a
+        // miss here is the template vanishing between.
+        cast_resolution_lost(
+            &mut *server,
+            &mut *connections,
+            in_world_recipients_now,
+            caster_cid,
+            intent.caster,
+            mana_cost,
+            hp_cost,
+            &spell.name,
+            "pet template",
+        );
+        return;
+    };
+    tracing::info!(
+        owner = owner_id,
+        pet_id,
+        spell = %spell.name,
+        pet_type = %pet_type,
+        level = pet_level,
+        owner_level,
+        "pet summoned"
+    );
+}
+
+/// The PET_CHARM arm: a mob made the caster's pet for the charm's duration (its
+/// earlier pet released first). Moved out of `apply_casts` verbatim on 2026-11-18 (R2),
+/// its arm-level `continue`s now `return`s.
+fn cast_pet_charm(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        resolved,
+        caster_cid,
+        mana_cost,
+        hp_cost,
+        in_world_recipients_now,
+        now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        aoi,
+        enemies,
+        ..
+    } = w;
+    // Track 12 Piece C — convert the targeted
+    // enemy into a player-owned pet for
+    // `spell.duration` seconds. Re-keys the id
+    // partition: EntityDespawn the old enemy id,
+    // PetSpawn a fresh pet id at the same pos
+    // with the same hp/max_hp, owner = caster.
+    // When the charm ends (the sweep below, or the
+    // owner leaving) the mob is handed back as the
+    // enemy it was, hostile to its charmer; see
+    // `return_charmed_mob`.
+    let ResolvedTarget::Mob(target_id) = resolved else {
+        cast_resolution_lost(
+            &mut *server,
+            &mut *connections,
+            in_world_recipients_now,
+            caster_cid,
+            intent.caster,
+            mana_cost,
+            hp_cost,
+            &spell.name,
+            "charm",
+        );
+        return;
+    };
+    let owner_id = intent.caster;
+    let duration = if spell.duration > 0.0 {
+        spell.duration
+    } else {
+        30.0
+    };
+    // The helper releases whatever pet the caster already
+    // has (one pet at a time), re-keys the mob into a pet
+    // and fans both. None = the victim vanished since the
+    // pre-flight.
+    let Some(pet_id) = charm_mob(
+        &mut *server,
+        in_world_recipients_now,
+        &mut *enemies,
+        &mut *aoi,
+        owner_id,
+        target_id,
+        duration,
+        now,
+    ) else {
+        cast_resolution_lost(
+            &mut *server,
+            &mut *connections,
+            in_world_recipients_now,
+            caster_cid,
+            intent.caster,
+            mana_cost,
+            hp_cost,
+            &spell.name,
+            "charm victim",
+        );
+        return;
+    };
+    tracing::info!(
+        owner = owner_id,
+        old_enemy_id = target_id,
+        new_pet_id = pet_id,
+        duration_secs = duration,
+        spell = %spell.name,
+        "enemy charmed into pet"
+    );
+}
+
+/// The BIND arm: Bind Affinity on oneself anywhere, on a group member inside a safe
+/// area. Moved out of `apply_casts` verbatim on 2026-11-18 (R2), its arm-level
+/// `continue`s now `return`s.
+fn cast_bind(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        resolved,
+        caster_cid,
+        mana_cost,
+        hp_cost,
+        in_world_recipients_now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        bind_intents,
+        ..
+    } = w;
+    // Spell batch step 2: bind the target (self, or the
+    // group member the pre-flight admitted) where THEY
+    // stand, and persist it like the Soul Binder does.
+    let ResolvedTarget::Player(bound_cid) = resolved else {
+        cast_resolution_lost(
+            &mut *server,
+            &mut *connections,
+            in_world_recipients_now,
+            caster_cid,
+            intent.caster,
+            mana_cost,
+            hp_cost,
+            &spell.name,
+            "bind",
+        );
+        return;
+    };
+    let Some(bc) = connections.get_mut(&bound_cid) else {
+        cast_resolution_lost(
+            &mut *server,
+            &mut *connections,
+            in_world_recipients_now,
+            caster_cid,
+            intent.caster,
+            mana_cost,
+            hp_cost,
+            &spell.name,
+            "bind target",
+        );
+        return;
+    };
+    let pos = bc.pos.into_tuple();
+    bc.bind = Some(crate::db::BindPoint { pos });
+    bind_intents.push((bc.char_id, bc.zone.clone(), pos));
+    tracing::info!(
+        char_id = intent.caster,
+        bound = bound_cid,
+        x = pos.0,
+        y = pos.1,
+        z = pos.2,
+        "BIND applied"
+    );
+    handlers::send_system_line(&mut *server, bound_cid, "Your soul is bound to this place.");
+    if bound_cid != caster_cid {
+        handlers::send_system_line(
+            &mut *server,
+            caster_cid,
+            "Their soul is bound to this place.",
+        );
+    }
+}
+
+/// The CORPSE arm: a resurrection offered to the corpse's owner. Moved out of
+/// `apply_casts` verbatim on 2026-11-18 (R2), its arm-level `continue` now a `return`.
+fn cast_corpse(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        resolved,
+        caster_cid,
+        mana_cost,
+        hp_cost,
+        in_world_recipients_now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        ..
+    } = w;
+    // Corpse / resurrection Slice 3 — a res spell targets a
+    // corpse; offer the res to its owner, who summons + gets an
+    // xp refund on accept. Mana was already deducted above
+    // (consistent with the rest of the cast pipeline).
+    let ResolvedTarget::Corpse(corpse_id, owner_cid) = resolved else {
+        cast_resolution_lost(
+            &mut *server,
+            &mut *connections,
+            in_world_recipients_now,
+            caster_cid,
+            intent.caster,
+            mana_cost,
+            hp_cost,
+            &spell.name,
+            "corpse",
+        );
+        return;
+    };
+    tracing::info!(char_id = intent.caster, spell = %spell.name, corpse_id, "resurrection cast received");
+    let xp_percent = spell.res_xp_percent.round() as u32;
+    let caster_name = connections
+        .get(&caster_cid)
+        .map(|c| c.name.clone())
+        .unwrap_or_default();
+    // Record the pending offer on the owner so the accept can't
+    // forge the refund %, then send the offer privately.
+    if let Some(owner_conn) = connections.get_mut(&owner_cid) {
+        owner_conn.pending_res_offer = Some((corpse_id, xp_percent));
+    }
+    handlers::send_resurrect_offer(&mut *server, owner_cid, corpse_id, caster_name, xp_percent);
+    tracing::info!(
+        char_id = intent.caster,
+        corpse_id,
+        xp_percent,
+        "resurrection offered"
+    );
+}
+
+/// The PET_HEAL arm: Warder's Mend on the caster's own pet. Moved out of `apply_casts`
+/// verbatim on 2026-11-18 (R2), its arm-level `continue` now a `return`.
+fn cast_pet_heal(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        resolved,
+        caster_cid,
+        mana_cost,
+        hp_cost,
+        in_world_recipients_now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        enemies,
+        ..
+    } = w;
+    // Mends the caster's own pet, whatever is targeted;
+    // the pre-flight found it alive and in reach. Warder's
+    // Mend was the one client-only pet spell (ported
+    // 2026-10-07 after the tester asked for none).
+    let ResolvedTarget::Pet(pet_id) = resolved else {
+        cast_resolution_lost(
+            &mut *server,
+            &mut *connections,
+            in_world_recipients_now,
+            caster_cid,
+            intent.caster,
+            mana_cost,
+            hp_cost,
+            &spell.name,
+            "own pet",
+        );
+        return;
+    };
+    let heal = spell.heal_amount.max(0.0);
+    if let Some(pet) = enemies.get_mut(&pet_id) {
+        pet.hp = (pet.hp + heal).min(pet.max_hp);
+        let (new_hp, max_hp) = (pet.hp, pet.max_hp);
+        handlers::fan_out_health_update(
+            &mut *server,
+            in_world_recipients_now,
+            pet_id,
+            new_hp,
+            max_hp,
+        );
+        tracing::info!(
+            char_id = intent.caster,
+            pet_id,
+            spell = %spell.name,
+            heal,
+            "PET_HEAL applied"
+        );
+    }
+}
+
+/// A target type the server has no arm for: the mana is refunded and the caster told.
+/// Moved out of `apply_casts` verbatim on 2026-11-18 (R2).
+fn cast_unhandled(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        caster_cid,
+        mana_cost,
+        hp_cost,
+        in_world_recipients_now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        ..
+    } = w;
+    // A target type with no arm. Every type in today's
+    // spells.toml has one (BIND and PORT gained theirs in
+    // spell batch step 2), and the pre-flight refuses an
+    // unknown type before the mana comes off, so this is
+    // reached only by a new type added to the data ahead of
+    // its arm. Mana is gone and nothing happens, which is
+    // indistinguishable from a bug. Say so, and give the cost
+    // back. Raised to info! as well: a player-visible
+    // failure should not be invisible at the default log
+    // level.
+    tracing::info!(
+        char_id = intent.caster,
+        spell = %spell.name,
+        target_type = %spell.target_type,
+        "spell target_type not yet processed server-side; mana deducted only"
+    );
+    refund_spell_cost(
+        &mut *server,
+        &mut *connections,
+        in_world_recipients_now,
+        caster_cid,
+        intent.caster,
+        mana_cost,
+        hp_cost,
+    );
+    handlers::send_refusal(
+        &mut *server,
+        caster_cid,
+        "That magic has no effect here yet.",
+    );
 }

@@ -1,0 +1,178 @@
+# Wandering wildlife: the animals that live in a region instead of at a spawn
+# point (design: docs/design/wandering_wildlife.md in the client repo; code:
+# src/world/roam.rs, spawn_points.rs, Entity::tick_roam).
+#
+# A file of its own, NOT appended to zone_camps.toml: the client tools' camp
+# parser splits that file on `[[camp]]` and would read anything after the last
+# camp as part of it. Server only; the client needs no mirror.
+#
+# Each [[roam]] entry is `count` slots. A slot is one animal, or with
+# `pack = n` a pack of n that follows a leader and joins its fights. A slot
+# refills `respawn` seconds (rolled 25% either way) after a death, at a fresh
+# spot in its region: on the roam map (floors reachable from the town without
+# crossing a face), at least 150 m from the town's middle and 60 m from every
+# player. `time = "night"` slots are alive only from 21:00 to 05:00 game time.
+#
+# region = { center = [x, z], radius, min_from_town, z_min, z_max }
+#   WORLD coordinates: x east, z SOUTH (north is -z). The circle about
+#   `center`, less anything nearer the town's middle (the origin) than
+#   `min_from_town`, less anything outside the z band. The ridge runs from
+#   z = -1010 (its north foot) to z = -790 (its south foot), so `z_min = -760`
+#   keeps a region in the town's basin and `z_max = -1030` in the Greywood.
+#   To see the ground: `cargo test -p projectdawn-server --lib
+#   print_the_roam_map -- --ignored --nocapture`.
+#
+# mob: the camp table's keys (name, level, hp, dmg, speed, aggro; optional
+#   leash, melee_range, attack_interval, faction, alignment). `aggro = 0` is a
+#   passive animal: it never starts a fight and fights back when hit; it MUST
+#   carry `leash` of at least 35 (the loader refuses it otherwise). `xp` is
+#   not needed: a kill pays by level.
+#
+# Names matter (the unit tests in roam.rs hold all of this): an animal's name
+# must contain a word loot.rs knows (wolf, rat, snake, adder, viper, bear,
+# bat), or it rolls no items and drops coin like a humanoid. Wolves count for
+# the wolf quests ("Wolf" is a substring); nothing else here may match a quest
+# target, which is why the rats are not "Plague" rats and no snake is a
+# "Rattlesnake" ("rat").
+#
+# Hit points and damage follow the camp ladder at the same level; bears carry
+# a quarter more hit points and swing slower (2.8 s), snakes a quarter fewer
+# hit points and a short 6 m aggro (an ambush you can outrun at 2.4 m/s).
+# The bands follow the camp rings: 70 animals by day, 14 more at night.
+
+# ── Town meadows · 150-420 m · lvl 1-2 ────────────────────────────────
+[[roam]]
+desc = "Field rats in the meadows round the town; short-sighted, so they add to a fight only when it drifts onto them"
+mob = { name = "Field Rat", level = 1, hp = 16.0, dmg = 3, speed = 4.0, aggro = 6.0, faction = "wildlife", alignment = "neutral" }
+region = { center = [0.0, 0.0], radius = 420.0 }
+count = 6
+respawn = 180.0
+
+[[roam]]
+desc = "Grass snakes in the meadows; harmless unless trodden on"
+mob = { name = "Grass Snake", level = 2, hp = 20.0, dmg = 5, speed = 2.4, aggro = 0.0, leash = 35.0, faction = "wildlife", alignment = "neutral" }
+region = { center = [0.0, 0.0], radius = 420.0 }
+count = 6
+respawn = 180.0
+
+# ── The near basin · 450-750 m, south of the ridge · lvl 3-5 ──────────
+[[roam]]
+desc = "Prairie wolves hunting the near basin in pairs"
+mob = { name = "Prairie Wolf", level = 3, hp = 36.0, dmg = 7, speed = 4.0, aggro = 12.0, faction = "wildlife", alignment = "neutral" }
+region = { center = [0.0, 0.0], radius = 750.0, min_from_town = 450.0, z_min = -760.0 }
+count = 3
+pack = 2
+respawn = 180.0
+
+[[roam]]
+desc = "Prairie adders lying in the grass of the near basin"
+mob = { name = "Prairie Adder", level = 4, hp = 39.0, dmg = 9, speed = 2.4, aggro = 6.0, faction = "wildlife", alignment = "neutral" }
+region = { center = [0.0, 0.0], radius = 750.0, min_from_town = 450.0, z_min = -760.0 }
+count = 5
+respawn = 180.0
+
+[[roam]]
+desc = "Black bears foraging the near basin; they leave travellers alone"
+mob = { name = "Black Bear", level = 5, hp = 80.0, dmg = 10, speed = 3.6, aggro = 0.0, leash = 35.0, attack_interval = 2.8, faction = "wildlife", alignment = "neutral" }
+region = { center = [0.0, 0.0], radius = 750.0, min_from_town = 450.0, z_min = -760.0 }
+count = 2
+respawn = 240.0
+
+# ── The outer basin · 800-1300 m, the town's basin · lvl 6-8 ──────────
+[[roam]]
+desc = "Timber wolves running the outer basin in threes"
+mob = { name = "Timber Wolf", level = 7, hp = 104.0, dmg = 15, speed = 4.2, aggro = 14.0, faction = "wildlife", alignment = "neutral" }
+region = { center = [0.0, 0.0], radius = 1300.0, min_from_town = 800.0, z_min = -760.0 }
+count = 3
+pack = 3
+respawn = 180.0
+
+[[roam]]
+desc = "Brown bears of the outer basin, ill-tempered"
+mob = { name = "Brown Bear", level = 8, hp = 162.0, dmg = 17, speed = 3.6, aggro = 10.0, attack_interval = 2.8, faction = "wildlife", alignment = "neutral" }
+region = { center = [0.0, 0.0], radius = 1300.0, min_from_town = 800.0, z_min = -760.0 }
+count = 3
+respawn = 240.0
+
+[[roam]]
+desc = "Rock adders sunning on the outer basin's stones"
+mob = { name = "Rock Adder", level = 6, hp = 60.0, dmg = 12, speed = 2.4, aggro = 6.0, faction = "wildlife", alignment = "neutral" }
+region = { center = [0.0, 0.0], radius = 1300.0, min_from_town = 800.0, z_min = -760.0 }
+count = 4
+respawn = 180.0
+
+# ── The Greywood · north of the ridge · lvl 7-9 ───────────────────────
+[[roam]]
+desc = "Greywood wolves, the forest's packs"
+mob = { name = "Greywood Wolf", level = 8, hp = 130.0, dmg = 17, speed = 4.3, aggro = 14.0, faction = "wildlife", alignment = "neutral" }
+region = { center = [0.0, -1300.0], radius = 1100.0, z_max = -1030.0 }
+count = 3
+pack = 3
+respawn = 180.0
+
+[[roam]]
+desc = "Greywood bears"
+mob = { name = "Greywood Bear", level = 9, hp = 200.0, dmg = 20, speed = 3.6, aggro = 10.0, attack_interval = 2.8, faction = "wildlife", alignment = "neutral" }
+region = { center = [0.0, -1300.0], radius = 1100.0, z_max = -1030.0 }
+count = 3
+respawn = 240.0
+
+[[roam]]
+desc = "Forest vipers in the Greywood's undergrowth"
+mob = { name = "Forest Viper", level = 7, hp = 78.0, dmg = 15, speed = 2.4, aggro = 6.0, faction = "wildlife", alignment = "neutral" }
+region = { center = [0.0, -1300.0], radius = 1100.0, z_max = -1030.0 }
+count = 4
+respawn = 180.0
+
+# ── The far reaches · past 1350 m: the war camp's vale, the barrow hills,
+#    the east arm · lvl 11-12 ──────────────────────────────────────────
+[[roam]]
+desc = "Grizzly bears of the far reaches"
+mob = { name = "Grizzly Bear", level = 11, hp = 300.0, dmg = 24, speed = 3.6, aggro = 12.0, attack_interval = 2.8, faction = "wildlife", alignment = "neutral" }
+region = { center = [0.0, 0.0], radius = 2000.0, min_from_town = 1350.0, z_min = -760.0 }
+count = 4
+respawn = 240.0
+
+[[roam]]
+desc = "Hill wolves ranging the far reaches in pairs"
+mob = { name = "Hill Wolf", level = 11, hp = 240.0, dmg = 24, speed = 4.4, aggro = 14.0, faction = "wildlife", alignment = "neutral" }
+region = { center = [0.0, 0.0], radius = 2000.0, min_from_town = 1350.0, z_min = -760.0 }
+count = 3
+pack = 2
+respawn = 180.0
+
+[[roam]]
+desc = "Rock vipers among the far reaches' scree"
+mob = { name = "Rock Viper", level = 12, hp = 200.0, dmg = 26, speed = 2.4, aggro = 6.0, faction = "wildlife", alignment = "neutral" }
+region = { center = [0.0, 0.0], radius = 2000.0, min_from_town = 1350.0, z_min = -760.0 }
+count = 3
+respawn = 180.0
+
+# ── Night only · 21:00 to 05:00 game time (400 real seconds) ──────────
+# Short respawns, since a night is short. Shades are undead: they belong to
+# the restless dead, carry coin and no animal's loot, and stay in the outer
+# bands, so the standing and alignment an undead kill pays is not farmed at
+# the town's door.
+[[roam]]
+desc = "Bats over the near basin after dark"
+mob = { name = "Bat", level = 4, hp = 44.0, dmg = 8, speed = 4.5, aggro = 10.0, faction = "wildlife", alignment = "neutral" }
+region = { center = [0.0, 0.0], radius = 750.0, min_from_town = 450.0, z_min = -760.0 }
+count = 6
+respawn = 60.0
+time = "night"
+
+[[roam]]
+desc = "Wandering shades drifting the outer basin at night"
+mob = { name = "Wandering Shade", level = 7, hp = 104.0, dmg = 15, speed = 3.0, aggro = 12.0, faction = "restless_dead", alignment = "undead" }
+region = { center = [0.0, 0.0], radius = 1300.0, min_from_town = 800.0, z_min = -760.0 }
+count = 5
+respawn = 60.0
+time = "night"
+
+[[roam]]
+desc = "Barrow shades abroad in the barrow hills at night"
+mob = { name = "Barrow Shade", level = 10, hp = 215.0, dmg = 22, speed = 3.0, aggro = 12.0, faction = "restless_dead", alignment = "undead" }
+region = { center = [-1650.0, 0.0], radius = 400.0 }
+count = 3
+respawn = 60.0
+time = "night"

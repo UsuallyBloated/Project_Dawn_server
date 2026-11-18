@@ -123,7 +123,12 @@ pub(super) struct WorldState {
     pub(super) corpses: HashMap<EntityId, crate::world::corpses::Corpse>,
     /// The ground (world/terrain.rs): what every body stands on and every
     /// sight line is checked against.
+    /// What stands on it rides with it (`Terrain::obstacles`,
+    /// world/obstacles.rs): what stops a body and blocks a line of sight.
     pub(super) terrain: std::sync::Arc<crate::world::terrain::Terrain>,
+    /// Where a wandering animal may stand (world/roam_map.rs): the floors
+    /// reachable from the town without crossing a face.
+    pub(super) roam_map: std::sync::Arc<crate::world::roam_map::RoamMap>,
 }
 
 // Track 6 sub-task 5 — group intents buffered for the
@@ -403,6 +408,9 @@ pub(super) struct Intents {
     // The Test Panel's "Despawn All Enemies": the GM and their position,
     // applied with the dev spawns.
     pub(super) dev_despawn_intents: Vec<(ClientId, Vec3f)>,
+    // GM flight: the GMs who took to the air this tick (the flight itself is
+    // set in the drain). Every mob forgets them where the enemies map is.
+    pub(super) fly_takeoffs: Vec<ClientId>,
     // Spell bar writes (a memorize, a forget, the one-time seed), applied
     // after dispatch where the pool is.
     pub(super) spell_gem_saves: Vec<(i64, Vec<(i32, String)>, bool)>,

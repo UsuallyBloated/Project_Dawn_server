@@ -44,26 +44,55 @@ pub async fn start_both() -> Harness {
 }
 
 pub async fn start_both_opts(fizzles: bool) -> Harness {
-    start_with(fizzles, None, None).await
+    start_with(fizzles, None, None, None, None).await
 }
 
 /// A server where saying `line` panics the speaker's message handler
 /// (`Config::panic_probe`), for the panic containment test.
 pub async fn start_with_panic_probe(line: &str) -> Harness {
-    start_with(false, Some(line.to_string()), None).await
+    start_with(false, Some(line.to_string()), None, None, None).await
 }
 
 /// A server on a ground of the test's own (`Config::terrain`, the height
 /// model): a ramp or a ridge in place of the flat default. Fizzles off, as
 /// `start_both`.
 pub async fn start_with_terrain(terrain: projectdawn_server::world::terrain::Terrain) -> Harness {
-    start_with(false, None, Some(Arc::new(terrain))).await
+    start_with(false, None, Some(Arc::new(terrain)), None, None).await
+}
+
+/// A server whose flat world has `obstacles` standing on it (the obstacle
+/// model, `world::obstacles`). Fizzles off, as `start_both`.
+pub async fn start_with_obstacles(
+    obstacles: projectdawn_server::world::obstacles::Obstacles,
+) -> Harness {
+    start_with(false, None, None, None, Some(Arc::new(obstacles))).await
+}
+
+/// A server with wandering wildlife ON, running `roam_table` (a
+/// `zone_roam.toml` of the test's own: small regions and short respawns, so a
+/// walk and a respawn are quick and where the test expects them) on `terrain`.
+/// Every other harness runs with roaming off: the zone's seventy animals
+/// would walk through every test.
+pub async fn start_with_roamers(
+    terrain: projectdawn_server::world::terrain::Terrain,
+    roam_table: &str,
+) -> Harness {
+    start_with(
+        false,
+        None,
+        Some(Arc::new(terrain)),
+        Some(roam_table.to_string()),
+        None,
+    )
+    .await
 }
 
 async fn start_with(
     fizzles: bool,
     panic_probe: Option<String>,
     terrain: Option<Arc<projectdawn_server::world::terrain::Terrain>>,
+    roam_table: Option<String>,
+    obstacles: Option<Arc<projectdawn_server::world::obstacles::Obstacles>>,
 ) -> Harness {
     // Opt-in server tracing for triage: RUST_LOG=info cargo test ... --nocapture
     // makes the in-process server's tracing lines visible. try_init so the
@@ -84,30 +113,38 @@ async fn start_with(
     let world_socket = world::bind_world_socket("127.0.0.1:0").expect("bind world");
     let world_addr = world_socket.local_addr().expect("world local_addr");
 
-    let cfg = Arc::new(Config {
-        auth_bind: "127.0.0.1:0".into(),
-        world_bind: "127.0.0.1:0".into(),
-        world_endpoint: world_addr.to_string(),
-        database_url: url.clone(),
-        min_client_version: projectdawn_server::config::semver::Version {
-            major: 0,
-            minor: 1,
-            patch: 0,
-        },
-        netcode_private_key: projectdawn_server::config::NetcodeKey(netcode_key),
-        fizzles,
-        panic_probe,
-        // Every test that brings no ground of its own runs on the flat world
-        // it was written for (the 400 m plate at the floor), not the zone's
-        // compiled hills, which have their own tests (`height.rs`, and
-        // `world/terrain_content.rs` in the crate). The NPC and safe-area
-        // tables still stand on the compiled ground, whose town is flat.
-        terrain: Some(terrain.unwrap_or_else(|| {
-            Arc::new(projectdawn_server::world::terrain::Terrain::flat(
-                20, 20.0, 0.0,
-            ))
-        })),
-    });
+    let cfg =
+        Arc::new(Config {
+            auth_bind: "127.0.0.1:0".into(),
+            world_bind: "127.0.0.1:0".into(),
+            world_endpoint: world_addr.to_string(),
+            database_url: url.clone(),
+            min_client_version: projectdawn_server::config::semver::Version {
+                major: 0,
+                minor: 1,
+                patch: 0,
+            },
+            netcode_private_key: projectdawn_server::config::NetcodeKey(netcode_key),
+            fizzles,
+            panic_probe,
+            // Every test that brings no ground of its own runs on the flat world
+            // it was written for (the 400 m plate at the floor), not the zone's
+            // compiled hills, which have their own tests (`height.rs`, and
+            // `world/terrain_content.rs` in the crate). The NPC and safe-area
+            // tables still stand on the compiled ground, whose town is flat.
+            terrain: Some(terrain.unwrap_or_else(|| {
+                Arc::new(projectdawn_server::world::terrain::Terrain::flat(
+                    20, 20.0, 0.0,
+                ))
+            })),
+            // And with nothing standing on it: the zone's trees and walls have
+            // their own tests (`obstacles.rs` here and in the crate).
+            obstacles: Some(obstacles.unwrap_or_else(|| {
+                Arc::new(projectdawn_server::world::obstacles::Obstacles::empty())
+            })),
+            roamers: roam_table.is_some(),
+            roam_table,
+        });
 
     let pool = db::open(&url).await.expect("open pool");
     db::migrate(&pool).await.expect("migrate");
@@ -1243,13 +1280,23 @@ pub async fn walk_dir(c: &mut WorldClient, seq: &mut u32, dir: Vec3, metres: f32
     c.pump_for(Duration::from_millis(600)).await;
 }
 
-/// The Bonepile's isolated [-16, 0, -14] spawn: the one ring 1 spawn whose
-/// aggro circle overlaps no other, so exactly one slow level 1 Decrepit
-/// Skeleton pulls (the camp-walking tests' target).
+/// The Bonepile's isolated [-216, 0, -54] spawn (`data/zone_camps.toml`): the
+/// one ring 1 spawn whose aggro circle overlaps no other, so exactly one slow
+/// level 1 Decrepit Skeleton pulls (the camp-walking tests' target).
 pub const BONEPILE_SPAWN: Vec3 = Vec3 {
-    x: -16.0,
+    x: -216.0,
     y: 0.0,
-    z: -14.0,
+    z: -54.0,
+};
+
+/// Where a camp-walking test's character enters the world (`seed_position`
+/// before it connects): 21 m from `BONEPILE_SPAWN`, the walk these tests
+/// made from the town's spawn before the camps moved out to the 4 km plate.
+/// Clear of every other spawn's aggro (the rest of the Bonepile is 64 m off).
+pub const CAMP_PULL_START: Vec3 = Vec3 {
+    x: -200.0,
+    y: 0.0,
+    z: -68.0,
 };
 
 /// Walk toward `target` on the server's own word: each tick a Move aims at

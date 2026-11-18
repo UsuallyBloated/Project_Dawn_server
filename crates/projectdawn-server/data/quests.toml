@@ -36,7 +36,7 @@ alignment_delta = 20.0
 id = "rat_infestation"
 level_req = 1
 reward_tier = "trivial"
-objectives = [ { kind = "kill", target = "Rat", count = 8 } ]
+objectives = [ { kind = "kill", target = "Plague Rat", count = 8 } ]
 turn_in_npc = "brom"
 faction_hits = { greyveil_town = 25.0, greyveil_watch = 10.0 }
 alignment_delta = 20.0

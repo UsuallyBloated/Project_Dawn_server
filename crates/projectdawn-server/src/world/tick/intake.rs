@@ -157,6 +157,7 @@ fn route_outcome(
         bind_intents,
         dev_spawn_intents,
         dev_despawn_intents,
+        fly_takeoffs,
         spell_gem_saves,
         complete_quest_intents,
         quest_lifecycle_intents,
@@ -606,10 +607,11 @@ fn route_outcome(
             // to the bind as saved (the handler has no terrain), so the
             // server's copy is grounded here too, standing. Left as saved,
             // a bind whose ground was since lowered would read to the
-            // movement step as a walk-off, and the respawn would fall.
-            let dest = terrain.ground_vec(pos);
+            // movement step as a walk-off, and the respawn would fall. And
+            // clear of whatever stands there now (world/obstacles.rs).
+            let dest = terrain.obstacles().place(terrain, pos);
             if let Some(conn) = connections.get_mut(&client_id) {
-                conn.pos = dest;
+                conn.teleport_to(dest);
             }
             handlers::send_teleport(&mut *server, client_id, dest);
         }
@@ -628,6 +630,9 @@ fn route_outcome(
             // already falling keeps the height it left the ground at, if higher.
             if let Some(conn) = connections.get_mut(&requester) {
                 if conn.hp > 0.0 && !conn.death_processed {
+                    // A GM flinging from flight stops flying: the fling's fall
+                    // is the real test of a fall and costs what it costs.
+                    conn.end_flight();
                     conn.pos.y += height;
                     let from_y = if conn.vertical.airborne {
                         conn.vertical.from_y.max(conn.pos.y)
@@ -638,8 +643,68 @@ fn route_outcome(
                         airborne: true,
                         vy: 0.0,
                         from_y,
+                        harmless: false,
                     };
                     handlers::send_teleport(&mut *server, requester, conn.pos);
+                }
+            }
+        }
+        Outcome::FlyIntent { requester, speed } => {
+            // GM flight (docs/design/handoff_gm_flight.md). The handler
+            // already checked the gate, the speed and that the GM is alive.
+            if let Some(conn) = connections.get_mut(&requester) {
+                match (speed, conn.flight.as_mut()) {
+                    (Some(speed), Some(flight)) => {
+                        flight.speed = speed;
+                        handlers::send_system_line(
+                            &mut *server,
+                            requester,
+                            &format!("You fly at {speed:.0} m/s."),
+                        );
+                    }
+                    (Some(speed), None) => {
+                        // Takeoff catches a fall already in progress (a GM
+                        // power, invariant D1). The mobs forget the flier, the
+                        // flier's pets stand down and their song stops in the
+                        // spawning step, where the enemies map is; the fight
+                        // is over for them here as for a port, so the pet
+                        // pre-pass cannot hand their pet the old target back.
+                        conn.vertical = crate::world::fall::Vertical::default();
+                        conn.flight = Some(crate::world::connection::Flight {
+                            speed,
+                            ground_y: terrain.ground(conn.pos.x, conn.pos.z),
+                        });
+                        conn.last_attacked_enemy = None;
+                        conn.last_attacked_at = None;
+                        fly_takeoffs.push(requester);
+                        tracing::info!(
+                            char_id = conn.char_id,
+                            speed,
+                            x = conn.pos.x,
+                            y = conn.pos.y,
+                            z = conn.pos.z,
+                            "fly on"
+                        );
+                        handlers::send_system_line(
+                            &mut *server,
+                            requester,
+                            &format!("You take to the air ({speed:.0} m/s). /fly off to land."),
+                        );
+                    }
+                    (None, _) => {
+                        // Let go where the body is: it falls as any body
+                        // does and lands for nothing (the user's call 4).
+                        conn.end_flight();
+                        conn.vertical = crate::world::fall::harmless_drop(conn.pos.y);
+                        tracing::info!(
+                            char_id = conn.char_id,
+                            x = conn.pos.x,
+                            y = conn.pos.y,
+                            z = conn.pos.z,
+                            "fly off"
+                        );
+                        handlers::send_system_line(&mut *server, requester, "You stop flying.");
+                    }
                 }
             }
         }

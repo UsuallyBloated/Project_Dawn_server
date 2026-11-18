@@ -74,6 +74,16 @@ pub enum DevCmdAuth {
 /// (an item name, a mob name), so it is cut here rather than trusted.
 pub const GM_AUDIT_ARGS_MAX: usize = 200;
 
+/// A GM in flight (docs/design/handoff_gm_flight.md): the speed `fly <m/s>`
+/// set, and the ground under the body as of the last movement step, which is
+/// where a flier is saved (a body saved in the air would read as a walk-off at
+/// the next login and fall). Never persisted: every login starts on foot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Flight {
+    pub speed: f32,
+    pub ground_y: f32,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Vec3f {
     pub x: f32,
@@ -271,6 +281,11 @@ pub struct PerConnection {
     /// load lands the body standing (a move onto lower ground is never a
     /// fall), settling a fall in progress first.
     pub vertical: super::fall::Vertical,
+    /// GM flight: `Some` while a GM flies (`GmCommand` `fly <m/s>`). The
+    /// movement step moves a flier in three dimensions above the ground;
+    /// mobs do not see one, and one cannot fight. Every server move of the
+    /// body (`teleport_to`), a death and `fly off` end it.
+    pub flight: Option<Flight>,
 
     /// Wall-clock of this connection's most recent melee swing, stamped in the
     /// attack-apply. With `last_damaged_at` it marks "in combat" so the seated
@@ -331,6 +346,10 @@ pub struct PerConnection {
     /// Captured in `apply_death_penalty` and read by the corpse-creation pass
     /// onto the corpse, so a Cleric/Paladin res can refund a % of it.
     pub death_lost_xp: i32,
+    /// Set by `progression::award_xp` when this player's level moved (up or
+    /// down). The tick's roster step re-sends their group's `GroupRoster`,
+    /// which carries every member's level (PD_W0031), then clears it.
+    pub group_roster_stale: bool,
     /// Corpse/resurrection Slice 3: a pending resurrection offer on this player's
     /// corpse — `(corpse_id, xp_percent)` recorded when a Cleric/Paladin casts a
     /// res on it, read when the player accepts (so the refund % can't be forged by
@@ -764,6 +783,7 @@ impl PerConnection {
             camp_since: None,
             last_damaged_at: None,
             vertical: super::fall::Vertical::default(),
+            flight: None,
             last_attack_at: None,
             bind: spawn.bind,
             last_swing_at: [None, None],
@@ -780,6 +800,7 @@ impl PerConnection {
             dead_refusal_told: false,
             corpse_pending: false,
             death_lost_xp: 0,
+            group_roster_stale: false,
             pending_res_offer: None,
             completed_quests,
             active_quests,
@@ -1136,6 +1157,50 @@ impl PerConnection {
     pub fn mark_persisted(&mut self) {
         self.last_persisted_pos = self.pos;
         self.last_persisted_yaw = self.yaw;
+    }
+
+    /// True while this GM flies.
+    pub fn is_flying(&self) -> bool {
+        self.flight.is_some()
+    }
+
+    /// The position a save writes: where the body is, except that a flier is
+    /// saved on the ground under them. Every login starts on foot, and a body
+    /// saved in the air would read to the movement step as a walk-off.
+    pub fn saved_pos(&self) -> Vec3f {
+        match self.flight {
+            Some(f) => Vec3f {
+                x: self.pos.x,
+                y: f.ground_y,
+                z: self.pos.z,
+            },
+            None => self.pos,
+        }
+    }
+
+    /// The server moves the body to `pos` (a respawn, a port, a resurrection
+    /// summon): standing, any fall already settled by the caller, and no
+    /// longer flying. The caller sends the `Teleport`, which is also what ends
+    /// flight on the client (docs/design/handoff_gm_flight.md, section 3).
+    pub fn teleport_to(&mut self, pos: Vec3f) {
+        self.pos = pos;
+        self.vertical = super::fall::Vertical::default();
+        self.end_flight();
+    }
+
+    /// The one way a flight ends on the server (`teleport_to`, a death, the
+    /// fling, `fly off`): the flight state goes, and the direction the flier
+    /// last sent is cut back to a walk (no vertical, at most a full run), or
+    /// the on-foot step would integrate a boosted, climbing direction for the
+    /// stale-move window after the flight ended. A review finding, 2026-11-15.
+    pub fn end_flight(&mut self) {
+        self.flight = None;
+        self.latest_direction = Vec3f {
+            x: self.latest_direction.x,
+            y: 0.0,
+            z: self.latest_direction.z,
+        }
+        .clamp_length(1.0);
     }
 
     /// Track 6: resources / xp / level dirty since last

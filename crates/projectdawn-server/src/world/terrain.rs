@@ -7,11 +7,17 @@
 //! whether a player may step from here to there (`slope_ok`), and whether two
 //! points can see each other across it (`can_see`). Every answer is total: a
 //! non-finite input gets the floor, a refused step, no sight.
+//!
+//! The ground also carries what stands on it (`obstacles`, `obstacles.rs`):
+//! none for a terrain built on its own, the zone's for the world's. Sight is
+//! asked here once for both, so nothing that asks whether two points see each
+//! other can forget the trees and the walls.
 
 use super::connection::Vec3f;
+use super::obstacles::Obstacles;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 const TERRAIN_TOML: &str = include_str!("../../data/terrain.toml");
 
@@ -57,6 +63,9 @@ pub struct Terrain {
     origin: Vec3f,
     floor_y: f32,
     heights: Vec<f32>,
+    /// What stands on this ground (`with_obstacles`); nothing, for a terrain
+    /// built on its own.
+    obstacles: Arc<Obstacles>,
 }
 
 /// Where one tick of a player's movement ends (`Terrain::player_step`), and
@@ -125,7 +134,25 @@ impl Terrain {
             origin,
             floor_y,
             heights,
+            obstacles: Arc::new(Obstacles::empty()),
         })
+    }
+
+    /// The same ground with `obstacles` standing on it: what the world runs
+    /// on. `can_see` then looks through them as well as over the hills.
+    pub fn with_obstacles(mut self, obstacles: Arc<Obstacles>) -> Self {
+        self.obstacles = obstacles;
+        self
+    }
+
+    /// What stands on this ground.
+    pub fn obstacles(&self) -> &Obstacles {
+        &self.obstacles
+    }
+
+    /// The same, to keep (the roam map holds its own handle).
+    pub fn obstacles_handle(&self) -> Arc<Obstacles> {
+        self.obstacles.clone()
     }
 
     /// A flat terrain at the floor: what today's world is.
@@ -170,6 +197,12 @@ impl Terrain {
 
     pub fn floor_y(&self) -> f32 {
         self.floor_y
+    }
+
+    /// World x and z of the grid's first vertex (its lowest x and z corner).
+    pub fn min_corner(&self) -> (f32, f32) {
+        let half = self.half();
+        (self.origin.x - half, self.origin.z - half)
     }
 
     /// One line for the boot log: which ground this binary runs.
@@ -299,6 +332,22 @@ impl Terrain {
             }
         };
         self.ground_local(snap(lx), snap(lz))
+    }
+
+    /// The nearest point to (x, z) on the plate (the mesh's extent): where a
+    /// GM's flight is held, free to cross the mountains to the plate's edge
+    /// and never past it. A coordinate that is not finite comes back as the
+    /// plate's middle.
+    pub fn clamp_to_plate(&self, x: f32, z: f32) -> (f32, f32) {
+        let half = self.half();
+        let hold = |v: f32, mid: f32| {
+            if v.is_finite() {
+                v.clamp(mid - half, mid + half)
+            } else {
+                mid
+            }
+        };
+        (hold(x, self.origin.x), hold(z, self.origin.z))
     }
 
     /// The same XZ, standing on the ground.
@@ -436,8 +485,9 @@ impl Terrain {
         Step::taken(self.ground_vec(to))
     }
 
-    /// Whether `a` and `b`, each raised by `LOS_HEIGHT`, see each other over
-    /// the terrain. Inside one triangle the ground is a plane and the sight
+    /// Whether `a` and `b`, each raised by `LOS_HEIGHT`, see each other: over
+    /// the terrain, and past everything that stands on it (a wall, a trunk, a
+    /// rock, a crown: `Obstacles::sight_blocked`). Inside one triangle the ground is a plane and the sight
     /// line is a line, so their difference is linear there: the clearance is
     /// checked at both ends and wherever the line crosses a cell edge or a cell
     /// diagonal, and if it holds at all of those it holds between them (the
@@ -457,7 +507,7 @@ impl Terrain {
             y: b.y + LOS_HEIGHT,
             ..b
         };
-        self.min_clearance(a, b) >= -LOS_TOLERANCE
+        self.min_clearance(a, b) >= -LOS_TOLERANCE && !self.obstacles.sight_blocked(a, b)
     }
 
     /// The lowest height of the segment `a` to `b` over the ground, found at
@@ -698,22 +748,56 @@ mod tests {
     #[test]
     fn the_compiled_terrain_parses_and_its_hash_matches() {
         let t = compiled();
-        assert_eq!(t.grid_size(), 40);
+        assert_eq!(t.grid_size(), 400);
         assert_eq!(t.cell_size(), 10.0);
-        // The first hills (the client's data/terrain_features.toml): the town
-        // flat at the floor, the Wraith Gate plateau's top, the rim at the
-        // plate's edge (its outer vertices, which nothing else reaches).
+        // The 4 km plate (the client's data/terrain_features.toml): the town
+        // flat at the floor, the Wraith Gate plateau's cliff, the Greywood
+        // ridge's wall, the pass through it (its floor at the level of the
+        // ground at its mouths), and the mountains at the plate's edge, well
+        // over 160 m everywhere. The rolling ground rides over the plateau
+        // and the pass (2026-11-16), so they are held by their shapes, not
+        // by fixed heights.
         assert_eq!(t.ground(0.0, 0.0), t.floor_y());
         assert_eq!(t.mesh_height(12.5, 5.0), Some(0.0));
-        assert_eq!(t.mesh_height(170.0, 0.0), Some(18.0));
+        // The cliff: the plateau's west lip stands 50 m or more over the
+        // ground one cell past its foot (42 m of fall takes all of max HP).
+        let lip = t.ground(1455.0, 0.0);
+        let foot = t.ground(1435.0, 0.0);
+        assert!(
+            lip - foot >= 50.0,
+            "the Wraith Gate cliff: lip {lip}, foot {foot}"
+        );
+        let crest = t.ground(-700.0, -900.0);
+        assert!(crest >= 62.0, "the ridge's crest: {crest}");
+        // The pass: walked straight through, from 130 m before it to 130 m
+        // after, the ground never steps up or down more than 30 degrees (no
+        // bank at a mouth: the rolling ground rides over the cut), and its
+        // floor is far below the ridge beside it.
+        let floor = t.ground(0.0, -900.0);
+        let mut z = -640.0_f32;
+        while z > -1160.0 {
+            let rise = (t.ground(0.0, z - 2.0) - t.ground(0.0, z)).abs();
+            assert!(
+                rise <= 2.0 * 30.0_f32.to_radians().tan(),
+                "the pass steps {rise:.2} m over 2 m at z = {z}"
+            );
+            z -= 2.0;
+        }
+        assert!(
+            t.ground(60.0, -900.0) - floor >= 40.0,
+            "the pass's walls above its floor {floor}"
+        );
         for (x, z) in [
-            (-200.0, 0.0),
-            (200.0, 0.0),
-            (0.0, -200.0),
-            (0.0, 200.0),
-            (200.0, 200.0),
+            (-2000.0, 0.0),
+            (2000.0, 0.0),
+            (0.0, -2000.0),
+            (0.0, 2000.0),
+            (2000.0, 2000.0),
         ] {
-            assert_eq!(t.mesh_height(x, z), Some(40.0), "({x}, {z})");
+            let h = t
+                .mesh_height(x, z)
+                .expect("the plate's edge is on the mesh");
+            assert!(h >= 160.0, "({x}, {z}): {h}");
         }
     }
 
@@ -826,7 +910,7 @@ mod tests {
         assert!(face.slope_ok(on_face, at(4.75, 0.0)));
         let mut p = face.ground_vec(at(-2.0, -9.0));
         for i in 0..200 {
-            // Zigzag: north-east, then south-east.
+            // Zigzag: +x and +z, then +x and -z.
             let dz = if (i / 20) % 2 == 0 { d } else { -d };
             p = face.player_step(p, d, dz).pos;
             assert!(p.y < 0.01, "step {i}: the walker is {p:?}, up the face");

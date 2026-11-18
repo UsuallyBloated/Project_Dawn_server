@@ -5,12 +5,14 @@
 use super::{
     connection::{DevCmdAuth, IntentClass, PerConnection, Vec3f},
     entity::Entity,
+    groups::{GroupId, GroupManager},
     loot::LootBag,
     CHANNEL_POSITION, CHANNEL_SYSTEM,
 };
 use bincode::config::standard as bincode_cfg;
-use protocol::world::{ClientWorldMsg, Coins, IdKind, KickCode, ServerWorldMsg, Vec3};
+use protocol::world::{ClientWorldMsg, Coins, GroupMember, IdKind, KickCode, ServerWorldMsg, Vec3};
 use renet::{ClientId, RenetServer};
+use std::collections::HashMap;
 use std::time::Instant;
 
 /// Outcome of dispatching a single decoded `ClientWorldMsg`. The tick loop
@@ -414,6 +416,14 @@ pub enum Outcome {
         requester: ClientId,
         height: f32,
     },
+    /// GM flight (`GmCommand` `fly <m/s>` / `fly off`), dev-gated and audited
+    /// in the handler: `Some(speed)` takes to the air or changes speed,
+    /// `None` lets go. The tick loop applies it, since the takeoff wipes the
+    /// flier from every mob's hate (docs/design/handoff_gm_flight.md).
+    FlyIntent {
+        requester: ClientId,
+        speed: Option<f32>,
+    },
     /// A `Consider` of a mob (factions, 2026-10-23): answered in the tick
     /// loop, which holds the enemies map.
     ConsiderIntent {
@@ -503,6 +513,28 @@ pub const CAST_CANCELLED_RELAY: &str = "cancelled";
 /// `fall::LETHAL_DROP`, so a lethal fall can be tested, and bounded, so no
 /// height a client sends puts a body wherever it likes.
 pub const MAX_FLING_HEIGHT: f32 = 100.0;
+
+/// The refusal a GM in flight gets for a cast or a skill: a flier does not
+/// fight (docs/design/handoff_gm_flight.md, the user's call 5). The client
+/// refuses first with the same words, so only a modified client meets this.
+pub const FLYING_REFUSAL: &str = "You cannot do that while flying.";
+
+/// The speed a `GmCommand` `fly` argument asks for: `Some(None)` to land,
+/// `Some(Some(speed))` to fly, `None` for anything else (a speed that is not
+/// a finite number inside [`MIN_FLY_SPEED`, `MAX_FLY_SPEED`], rule A3). An
+/// empty argument is the default speed.
+fn parse_fly_arg(arg: &str) -> Option<Option<f32>> {
+    if arg.eq_ignore_ascii_case("off") {
+        return Some(None);
+    }
+    if arg.is_empty() {
+        return Some(Some(super::DEFAULT_FLY_SPEED));
+    }
+    let speed: f32 = arg.parse().ok()?;
+    let in_range =
+        speed.is_finite() && (super::MIN_FLY_SPEED..=super::MAX_FLY_SPEED).contains(&speed);
+    in_range.then_some(Some(speed))
+}
 
 /// Cut `text` to at most `max_chars` characters. Counting characters, never
 /// slicing by byte: `&text[..n]` panics when `n` falls inside a multibyte
@@ -786,6 +818,38 @@ pub fn handle_message(
             return Outcome::Continue;
         }
     }
+    // ── The flying gate (GM flight, docs/design/handoff_gm_flight.md) ─────
+    // A flier does not fight: no mob can reach one, so nothing a flier deals
+    // could be answered, and kill credit, loot and XP from the air would land
+    // in the GM's ledger and stats. A cast or a skill is told privately (the
+    // client drops what it began); a swing is dropped silently, as under a
+    // mez or a stun, since it arrives at the swing rate. The honest client
+    // refuses all three first.
+    if conn.is_flying() {
+        let caster = conn.char_id as u64;
+        match &msg {
+            ClientWorldMsg::Attack { .. } => return Outcome::Continue,
+            ClientWorldMsg::CastStartBroadcast { .. } | ClientWorldMsg::CastSpell { .. } => {
+                fan_out_cast_fail(server, &[client_id], caster, FLYING_REFUSAL.to_string());
+                fan_out_mana_update(server, &[client_id], caster, conn.mp, conn.max_mp);
+                return Outcome::Continue;
+            }
+            ClientWorldMsg::UseSkill { skill_name, .. } => {
+                send_skill_fail(server, client_id, skill_name, FLYING_REFUSAL);
+                return Outcome::Continue;
+            }
+            // Nor through a pet: a `/pet attack` from the air is refused (the
+            // other pet commands stand; the takeoff already stood the pet
+            // down). Review finding, 2026-11-15.
+            ClientWorldMsg::PetCommand { command, .. }
+                if *command == protocol::world::pet_command::ATTACK =>
+            {
+                send_refusal(server, client_id, FLYING_REFUSAL);
+                return Outcome::Continue;
+            }
+            _ => {}
+        }
+    }
     match msg {
         ClientWorldMsg::Connect {
             session_token: _,
@@ -900,11 +964,22 @@ pub fn handle_message(
                 || super::buffs::is_stunned(&conn.active_buffs)
             {
                 Vec3f::ZERO
+            } else if conn.is_flying() {
+                // GM flight: the vertical is the flier's too (climb and
+                // descend), and the boost is a direction up to FLY_BOOST long.
+                // The movement step clamps where it goes.
+                Vec3f {
+                    x: direction.x,
+                    y: direction.y,
+                    z: direction.z,
+                }
+                .clamp_length(super::FLY_BOOST)
             } else {
                 // Only the XZ direction is the client's. Nothing vertical is ever
                 // read from it: the ground decides height (the height model,
                 // `terrain::player_step` pins every player each tick), and there
-                // is no gravity or jumping to simulate.
+                // is no gravity or jumping to simulate. (A GM in flight is the
+                // one exception, above.)
                 let v = Vec3f {
                     x: direction.x,
                     y: 0.0,
@@ -1831,8 +1906,7 @@ pub fn handle_message(
             // Mutating pos makes `is_dirty_for_persist()` true on its own, so the
             // next checkpoint writes the bind location rather than leaving the DB
             // pointing at the death site. The respawn lands standing (fall.rs).
-            conn.vertical = super::fall::Vertical::default();
-            conn.pos = dest;
+            conn.teleport_to(dest);
             Outcome::RespawnTeleport { pos: dest }
         }
 
@@ -2528,6 +2602,39 @@ pub fn handle_message(
                     qty,
                 };
             }
+            // `fly [m/s]` / `fly off`: GM flight
+            // (docs/design/handoff_gm_flight.md). Everything is checked before
+            // the audit row, so a row means the command ran: the speed (A3),
+            // that the GM is alive (GmCommand is on the dead-state whitelist,
+            // so this branch refuses the dead itself), and that a `fly off`
+            // has a flight to end. One row per toggle, never per Move.
+            let fly_arg = if trimmed == "fly" {
+                Some("")
+            } else {
+                trimmed.strip_prefix("fly ").map(str::trim)
+            };
+            if let Some(arg) = fly_arg {
+                let Some(speed) = parse_fly_arg(arg) else {
+                    return Outcome::Continue;
+                };
+                if conn.hp <= 0.0 || conn.death_processed {
+                    return Outcome::Continue;
+                }
+                if speed.is_none() && !conn.is_flying() {
+                    return Outcome::Continue;
+                }
+                let audit_args = match speed {
+                    Some(s) => format!("speed={s:.1}"),
+                    None => "off".to_string(),
+                };
+                if !dev_cmd_allowed(server, conn, client_id, now, "fly", audit_args) {
+                    return Outcome::Continue;
+                }
+                return Outcome::FlyIntent {
+                    requester: client_id,
+                    speed,
+                };
+            }
             // Unknown gm sub-command — log and drop.
             tracing::info!(char_id = conn.char_id, %line, "unknown GmCommand");
             Outcome::Continue
@@ -2692,7 +2799,7 @@ pub fn fan_group_roster(
     recipients: &[ClientId],
     group_id: u64,
     leader_id: u64,
-    members: Vec<(u64, String)>,
+    members: Vec<GroupMember>,
     loot_mode: u8,
 ) {
     if recipients.is_empty() {
@@ -2707,6 +2814,67 @@ pub fn fan_group_roster(
     let Some(bytes) = encode(&msg) else { return };
     for &recipient in recipients {
         server.send_message(recipient, CHANNEL_SYSTEM, bytes.clone());
+    }
+}
+
+/// The roster rows for a group: each member still connected, with the level
+/// and base class the server holds for them (PD_W0031). A member whose
+/// connection is gone is left out, as before.
+pub fn group_member_rows(
+    connections: &HashMap<ClientId, PerConnection>,
+    members: &[ClientId],
+) -> Vec<GroupMember> {
+    members
+        .iter()
+        .filter_map(|m| {
+            connections.get(m).map(|c| GroupMember {
+                id: *m,
+                name: c.name.clone(),
+                level: c.level.max(0) as u32,
+                class: c.class.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Send group `gid`'s current roster to every member, then one shot of each
+/// member's resource updates so the panel rows fill at once (playtest
+/// 2026-08-27: rows build zeroed client-side and resources otherwise fan only
+/// on a change, so an idle full-HP member showed blank bars). The one home for
+/// "the group changed, tell the group": membership changes, a member leaving
+/// the world, and a member's level moving. Sends nothing for a group that no
+/// longer exists.
+pub fn fan_current_roster(
+    server: &mut RenetServer,
+    connections: &HashMap<ClientId, PerConnection>,
+    group_manager: &GroupManager,
+    gid: GroupId,
+) {
+    let Some(g) = group_manager.groups.get(&gid) else {
+        return;
+    };
+    let recipients: Vec<ClientId> = g.members.clone();
+    fan_group_roster(
+        server,
+        &recipients,
+        gid,
+        g.leader,
+        group_member_rows(connections, &g.members),
+        g.loot_mode.to_u8(),
+    );
+    for m in &g.members {
+        if let Some(c) = connections.get(m) {
+            fan_out_resources(server, &recipients, c);
+        }
+    }
+}
+
+/// Tell each of `members` that group `gid` is over for them: an empty roster,
+/// which the client reads as "clear the group" (the leaver, a kicked member,
+/// and the last one left when a group dissolves).
+pub fn fan_group_ended(server: &mut RenetServer, members: &[ClientId], gid: GroupId) {
+    for &m in members {
+        fan_group_roster(server, std::slice::from_ref(&m), gid, m, Vec::new(), 0);
     }
 }
 

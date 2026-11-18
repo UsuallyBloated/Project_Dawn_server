@@ -58,8 +58,9 @@ async fn an_xp_share_stops_past_200_m() {
 }
 
 /// Ledger item 4 (user call D2): a caster may bind a GROUP MEMBER only while
-/// that member stands in a safe area. B, grouped and 20 m out, is refused;
-/// C, grouped and in the town square, is bound where they stand.
+/// that member stands in a safe area. B, grouped and 75 m out (the town's
+/// safe area is the 60 m round the origin), is refused; C, grouped and inside
+/// it, is bound where they stand.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_group_member_is_bound_only_in_a_safe_area() {
     let h = start_both().await;
@@ -69,12 +70,13 @@ async fn a_group_member_is_bound_only_in_a_safe_area() {
         provision_client(&h.auth_url, "farbound", "Farwell", "Human", "Warrior").await;
     let (c_session, c_char_id, c_token) =
         provision_client(&h.auth_url, "nearbound", "Nearby", "Human", "Warrior").await;
-    // A stands at -4 (inside the square, away from the spawn and from C), so
-    // a bind written from the CASTER's position would read as -4 and one left
-    // at birth as 0: the DB check below tells all three apart.
-    set_char_pos(&h.db_url, a_char_id, -4.0, 0.0).await;
-    set_char_pos(&h.db_url, b_char_id, 20.0, 0.0).await;
-    set_char_pos(&h.db_url, c_char_id, 3.0, 0.0).await;
+    // A stands at 52 (inside the safe area, 23 m from B and 12 m from C, so
+    // both are in a friendly spell's reach), so a bind written from the
+    // CASTER's position would read as 52 and one left at birth as 0: the DB
+    // check below tells all three apart.
+    set_char_pos(&h.db_url, a_char_id, 52.0, 0.0).await;
+    set_char_pos(&h.db_url, b_char_id, 75.0, 0.0).await;
+    set_char_pos(&h.db_url, c_char_id, 40.0, 0.0).await;
     let mut a = WorldClient::start(a_token, &a_session, a_char_id).await;
     let mut b = WorldClient::start(b_token, &b_session, b_char_id).await;
     let mut c = WorldClient::start(c_token, &c_session, c_char_id).await;
@@ -122,7 +124,7 @@ async fn a_group_member_is_bound_only_in_a_safe_area() {
         .await;
     assert!(
         bound.is_some(),
-        "a group member in the town square is bound where they stand"
+        "a group member in the safe area is bound where they stand"
     );
 
     // The bind written is C's OWN position, persisted; B's was never touched.
@@ -135,8 +137,8 @@ async fn a_group_member_is_bound_only_in_a_safe_area() {
         .expect("C is bound")
         .pos;
     assert!(
-        (c_bind.0 - 3.0).abs() < 0.5 && c_bind.2.abs() < 0.5,
-        "C is bound where C stood (3, 0), not at the caster (-4, 0) or the spawn: got {c_bind:?}"
+        (c_bind.0 - 40.0).abs() < 0.5 && c_bind.2.abs() < 0.5,
+        "C is bound where C stood (40, 0), not at the caster (52, 0) or the spawn: got {c_bind:?}"
     );
     let b_bind = db::load_character(&pool, b_char_id)
         .await
@@ -608,4 +610,81 @@ async fn a_plain_account_cannot_set_faction_and_a_consider_names_no_standing() {
         matches!(&line, Some(ServerWorldMsg::ChatMessage { text, .. }) if text == "Brom kindly considers you."),
         "{line:?}"
     );
+}
+
+/// Group-mates see each other's level and class (user, 2026-11-17; PD_W0031).
+/// The roster carries both from the moment the group forms; a member's level
+/// change re-sends it to the group, on the way up (an XP grant) and on the way
+/// down (a death's de-level), and reaches nobody outside the group: a player
+/// standing beside them, ungrouped, learns neither. On the previous protocol
+/// the roster carried ids and names only and was never re-sent on a level
+/// change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn group_mates_see_each_others_level_and_class_both_ways() {
+    let h = start_both().await;
+    let (mut a, mut b, _dummy, b_id) =
+        grouped_pair_with_dummy(&h, "lvlsharer", "lvlmate", 5.0).await;
+    let a_id = a._char_id as u64;
+    // An ungrouped player standing at the spawn beside them.
+    let (c_session, c_char_id, c_token) =
+        provision_client(&h.auth_url, "lvloutsider", "Outsider", "Human", "Rogue").await;
+    let mut c = WorldClient::start(c_token, &c_session, c_char_id).await;
+    c.pump_for(Duration::from_millis(300)).await;
+
+    // The row a roster carries for `id`, as (level, class).
+    fn row(m: &ServerWorldMsg, id: u64) -> Option<(u32, String)> {
+        match m {
+            ServerWorldMsg::GroupRoster { members, .. } => members
+                .iter()
+                .find(|r| r.id == id)
+                .map(|r| (r.level, r.class.clone())),
+            _ => None,
+        }
+    }
+
+    // The roster that formed the group names both classes at level 1.
+    let formed = b
+        .wait_for(
+            CHANNEL_SYSTEM,
+            Duration::from_secs(3),
+            |m| matches!(m, ServerWorldMsg::GroupRoster { members, .. } if members.len() == 2),
+        )
+        .await
+        .expect("B holds the roster that formed the group");
+    assert_eq!(row(&formed, a_id), Some((1, "Cleric".to_string())));
+    assert_eq!(row(&formed, b_id as u64), Some((1, "Warrior".to_string())));
+
+    // A (a GM) takes exactly levels 1 to 5's XP plus one point: level 6 with
+    // 1 xp into the band. B's roster must follow with A at 6.
+    let to_six: i32 = (1..=5).map(char_data::xp_to_next_for).sum::<i32>() + 1;
+    a.send_grant_quest_xp(to_six);
+    a.pump_for(Duration::from_millis(300)).await;
+    let up = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            row(m, a_id).is_some_and(|(lvl, _)| lvl == 6)
+        })
+        .await
+        .expect("the partner's roster shows the level-up");
+    assert_eq!(row(&up, a_id), Some((6, "Cleric".to_string())));
+    assert_eq!(row(&up, b_id as u64), Some((1, "Warrior".to_string())));
+
+    // A dies: 5% of level 6's band is far more than the 1 xp held, so A drops
+    // to level 5, and B's roster must drop with it.
+    a.send_death();
+    a.pump_for(Duration::from_millis(300)).await;
+    let down = b
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(3), |m| {
+            row(m, a_id).is_some_and(|(lvl, _)| lvl == 5)
+        })
+        .await
+        .expect("the partner's roster shows the death's de-level");
+    assert_eq!(row(&down, a_id), Some((5, "Cleric".to_string())));
+
+    // The outsider heard none of it.
+    let leaked = c
+        .wait_for(CHANNEL_SYSTEM, Duration::from_secs(1), |m| {
+            matches!(m, ServerWorldMsg::GroupRoster { .. })
+        })
+        .await;
+    assert!(leaked.is_none(), "an ungrouped player is sent no roster");
 }

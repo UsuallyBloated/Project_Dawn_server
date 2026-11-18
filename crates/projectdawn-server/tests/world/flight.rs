@@ -91,6 +91,24 @@ fn says(msgs: &[ServerWorldMsg], prefix: &str) -> bool {
     system_lines(msgs).iter().any(|l| l.starts_with(prefix))
 }
 
+/// Send a GM line the server answers, and wait for the system line beginning `prefix`:
+/// up to 3 s, since under the whole suite's load a tick can run later than `gm_line`'s
+/// fixed window (the cross-over audit of 2026-11-17 saw two takeoffs miss it), then a
+/// moment more for what follows it. A line that must do nothing keeps `gm_line`.
+async fn gm_line_says(c: &mut WorldClient, line: &str, prefix: &str) -> Vec<ServerWorldMsg> {
+    c.send_gm_command(line);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut out = Vec::new();
+    while Instant::now() < deadline {
+        out.extend(c.collect_for(Duration::from_millis(100)).await);
+        if says(&out, prefix) {
+            break;
+        }
+    }
+    out.extend(c.collect_for(Duration::from_millis(300)).await);
+    out
+}
+
 /// A GM flies where it steers: up at its speed, sideways at twice it with the boost,
 /// and no further for a forged longer direction; `fly off` from 20 m lands on the ground
 /// with no damage and no line. Bad speeds, and `fly off` with no flight, record nothing.
@@ -115,7 +133,7 @@ async fn a_gm_flies_where_it_steers_and_lands_unhurt() {
     assert!(grounded.y.abs() < 0.05, "still on foot: {grounded:?}");
     assert_eq!(fly_rows(&h.db_url).await, 0, "refused lines record nothing");
 
-    let msgs = gm_line(&mut c, "fly 20").await;
+    let msgs = gm_line_says(&mut c, "fly 20", "You take to the air").await;
     assert!(
         says(&msgs, "You take to the air (20 m/s)."),
         "takeoff is announced: {msgs:?}"
@@ -157,7 +175,7 @@ async fn a_gm_flies_where_it_steers_and_lands_unhurt() {
         assert!((to.y - from.y).abs() < 0.05, "{what} keeps the height");
     }
 
-    let msgs = gm_line(&mut c, "fly off").await;
+    let msgs = gm_line_says(&mut c, "fly off", "You stop flying.").await;
     assert!(says(&msgs, "You stop flying."), "{msgs:?}");
     let msgs = c.collect_for(Duration::from_secs(3)).await;
     assert!(
@@ -204,7 +222,7 @@ async fn a_flier_is_held_above_the_ground_on_the_plate_and_under_the_ceiling() {
     let h = start_both().await;
     let (mut c, char_id, _max_hp) = gm(&h, "flybound").await;
     let mut seq: u32 = 1;
-    let msgs = gm_line(&mut c, "fly 100").await;
+    let msgs = gm_line_says(&mut c, "fly 100", "You take to the air").await;
     assert!(says(&msgs, "You take to the air"), "{msgs:?}");
 
     steer(&mut c, &mut seq, DOWN, 10).await;
@@ -266,7 +284,7 @@ async fn a_flier_is_saved_on_the_ground_and_logs_in_on_foot() {
     let mut c = WorldClient::start(token, &session, char_id).await;
     c.pump_for(Duration::from_millis(300)).await;
     let mut seq: u32 = 1;
-    let msgs = gm_line(&mut c, "fly 20").await;
+    let msgs = gm_line_says(&mut c, "fly 20", "You take to the air").await;
     assert!(says(&msgs, "You take to the air"), "{msgs:?}");
     steer(&mut c, &mut seq, UP, 40).await;
     steer(&mut c, &mut seq, EAST, 10).await;
@@ -327,7 +345,7 @@ async fn mobs_forget_a_flier_and_a_flier_cannot_fight() {
         "the dummy fights the GM on foot: {msgs:?}"
     );
 
-    let msgs = gm_line(&mut c, "fly 10").await;
+    let msgs = gm_line_says(&mut c, "fly 10", "You take to the air").await;
     let mut seen = msgs.clone();
     seen.extend(c.collect_for(Duration::from_millis(400)).await);
     assert!(
@@ -366,7 +384,7 @@ async fn mobs_forget_a_flier_and_a_flier_cannot_fight() {
         "a flier's skill is refused: {msgs:?}"
     );
 
-    let msgs = gm_line(&mut c, "fly off").await;
+    let msgs = gm_line_says(&mut c, "fly off", "You stop flying.").await;
     assert!(says(&msgs, "You stop flying."), "{msgs:?}");
     let msgs = c.collect_for(Duration::from_secs(4)).await;
     assert!(
@@ -383,7 +401,7 @@ async fn a_fling_or_a_death_ends_flight() {
     let (mut c, char_id, max_hp) = gm(&h, "flyend").await;
     let mut seq: u32 = 1;
 
-    let msgs = gm_line(&mut c, "fly 20").await;
+    let msgs = gm_line_says(&mut c, "fly 20", "You take to the air").await;
     assert!(says(&msgs, "You take to the air"), "{msgs:?}");
     c.send_dev_fling(20.0);
     let msgs = c.collect_for(Duration::from_secs(3)).await;
@@ -403,7 +421,7 @@ async fn a_fling_or_a_death_ends_flight() {
     );
 
     c.send_heal_self();
-    let msgs = gm_line(&mut c, "fly 20").await;
+    let msgs = gm_line_says(&mut c, "fly 20", "You take to the air").await;
     assert!(says(&msgs, "You take to the air"), "{msgs:?}");
     steer(&mut c, &mut seq, UP, 10).await;
     let rows_before = fly_rows(&h.db_url).await;
@@ -418,7 +436,8 @@ async fn a_fling_or_a_death_ends_flight() {
     c.pump_for(Duration::from_millis(300)).await;
     let dead = own_position_now(&mut c, char_id).await;
     assert!(dead.y.abs() < 0.05, "the body lies on the ground: {dead:?}");
-    let msgs = gm_line(&mut c, "fly 20").await;
+    // A line that must do nothing: the fixed window is the right wait.
+    let msgs = gm_line(&mut c, "fly 20" /* dead */).await;
     assert!(
         !says(&msgs, "You take to the air"),
         "the dead cannot fly: {msgs:?}"
@@ -486,7 +505,7 @@ async fn a_fliers_pet_stands_down_and_cannot_be_sent() {
         "on foot the skeleton fights for the GM: {msgs:?}"
     );
 
-    let mut seen = gm_line(&mut c, "fly 10").await;
+    let mut seen = gm_line_says(&mut c, "fly 10", "You take to the air").await;
     seen.extend(c.collect_for(Duration::from_millis(600)).await);
     assert!(says(&seen, "You take to the air"), "{seen:?}");
     assert!(
@@ -506,7 +525,7 @@ async fn a_fliers_pet_stands_down_and_cannot_be_sent() {
     );
     assert_eq!(pet_hits(&msgs), 0, "and the pet stays down: {msgs:?}");
 
-    let msgs = gm_line(&mut c, "fly off").await;
+    let msgs = gm_line_says(&mut c, "fly off", "You stop flying.").await;
     assert!(says(&msgs, "You stop flying."), "{msgs:?}");
     c.pump_for(Duration::from_millis(500)).await;
     c.send_pet_command(protocol::world::pet_command::ATTACK, Some(mob_id));

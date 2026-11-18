@@ -113,15 +113,19 @@ async fn a_wanderer_walks_its_region_on_its_own() {
         plate(),
         r#"
         [[roam]]
-        desc = "a quick rat in a 30 m circle"
+        desc = "a quick rat in a 60 m circle"
         mob = { name = "Roam Rat", level = 1, hp = 20.0, dmg = 1, speed = 5.0, aggro = 5.0 }
-        region = { center = [0.0, 330.0], radius = 30.0 }
+        region = { center = [0.0, 330.0], radius = 60.0 }
         count = 1
         respawn = 600.0
         "#,
     )
     .await;
-    // 50 m from the nearest point of the region: in view, far out of its aggro.
+    // 20 m from the nearest point of the region: in view, out of its 5 m aggro. (The
+    // region is 60 m, not 30: a leg is 20 to 80 m, and `pick_leg` gives up after eight
+    // draws that land outside the region, which in a 30 m circle happened often enough
+    // that the rat then stood its 5 to 25 s pause through the whole watch; the audit of
+    // 2026-11-17 saw it fail alone once in five runs, at 0.0 m.)
     let (mut c, _me) = enter_at(&h, "watcher", "Warrior", false, 0.0, 250.0).await;
     let mut at = HashMap::new();
     let seeded = watch(&mut c, Duration::from_millis(1_500), &mut at).await;
@@ -133,20 +137,22 @@ async fn a_wanderer_walks_its_region_on_its_own() {
     );
     let (rat, born) = rats[0];
     assert!(
-        flat_dist(born, REGION) <= 30.0,
+        flat_dist(born, REGION) <= 60.0,
         "it appeared in its region, at {born:?}"
     );
 
-    // An amble of 2 m/s (5.0 x 0.4): a leg is at least 20 m, so well over 5 m in 12 s.
+    // An amble of 2 m/s (5.0 x 0.4): a leg is at least 20 m, so 5 m takes about 3 s once
+    // it sets off. The watch ends as soon as it has, and otherwise runs long enough to
+    // cover one failed leg draw and its longest pause (25 s) with room to walk after.
     let mut furthest = 0.0_f32;
     let mut msgs = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(12);
-    while Instant::now() < deadline {
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while Instant::now() < deadline && furthest < 5.0 {
         msgs.extend(watch(&mut c, Duration::from_millis(250), &mut at).await);
         if let Some(pos) = at.get(&rat) {
             furthest = furthest.max(flat_dist(*pos, born));
             assert!(
-                flat_dist(*pos, REGION) <= 30.5,
+                flat_dist(*pos, REGION) <= 60.5,
                 "it left its region: {pos:?}"
             );
         }

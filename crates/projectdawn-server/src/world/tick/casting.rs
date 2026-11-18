@@ -741,78 +741,7 @@ pub(super) fn apply_casts(
                 "ALLY" => cast_ally(ctx, w),
                 "ENEMY" => cast_enemy(ctx, w),
                 "AOE" => cast_aoe(ctx, w),
-                "PET_SUMMON" => {
-                    // Track 11 — spawn a player-owned pet at the
-                    // caster's position. One pet per owner: any
-                    // existing pet for this caster is despawned
-                    // first (mark Dead + EntityDespawn fan-out;
-                    // corpse cleanup phase removes it from the
-                    // map and AOI next tick).
-                    let pet_type = spell.pet_type.clone();
-                    // Owner-derived level (pet interim A): manual
-                    // summons take the EQ re-summon gamble — a 0..=2
-                    // roll off owner - 1 — so paying mana again can
-                    // land a better pet. The skeleton's tier cap
-                    // lives in `pet_templates::scaled`.
-                    let Some(owner_level) = connections
-                        .get(&(intent.caster as ClientId))
-                        .map(|c| c.level.max(1) as u32)
-                    else {
-                        // Caster vanished between queueing the intent and
-                        // resolution — skip, like the other resolver arms,
-                        // rather than spawning an ownerless level-1 pet.
-                        tracing::debug!(
-                            char_id = intent.caster,
-                            spell = %spell.name,
-                            "PET_SUMMON dropped — caster no longer connected"
-                        );
-                        continue;
-                    };
-                    let variance = rand::thread_rng().gen_range(0..=2u32);
-                    let owner_id = intent.caster;
-                    // Helper handles the scaled template, spawn offset,
-                    // despawn-existing, AOI insert, fan-out, and map
-                    // insert. None = unknown pet_type.
-                    let Some((pet_id, pet_level)) = summon_scaled_pet(
-                        &mut *server,
-                        in_world_recipients_now,
-                        &mut *enemies,
-                        &mut *aoi,
-                        owner_id,
-                        owner_level,
-                        caster_pos,
-                        &pet_type,
-                        variance,
-                        1.0,
-                        now,
-                        terrain,
-                    ) else {
-                        // The pre-flight checked the pet type is known
-                        // (`pet_templates::scaled` at variance 0), so a
-                        // miss here is the template vanishing between.
-                        cast_resolution_lost(
-                            &mut *server,
-                            &mut *connections,
-                            in_world_recipients_now,
-                            caster_cid,
-                            intent.caster,
-                            mana_cost,
-                            hp_cost,
-                            &spell.name,
-                            "pet template",
-                        );
-                        continue;
-                    };
-                    tracing::info!(
-                        owner = owner_id,
-                        pet_id,
-                        spell = %spell.name,
-                        pet_type = %pet_type,
-                        level = pet_level,
-                        owner_level,
-                        "pet summoned"
-                    );
-                }
+                "PET_SUMMON" => cast_pet_summon(ctx, w),
                 "PET_CHARM" => {
                     // Track 12 Piece C — convert the targeted
                     // enemy into a player-owned pet for
@@ -2075,4 +2004,99 @@ fn cast_self(ctx: CastContext<'_>, w: CastWorld<'_>) {
             handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, cc);
         }
     }
+}
+
+/// The PET_SUMMON arm: a conjured pet beside its owner, scaled to the owner's level.
+/// Moved out of `apply_casts` verbatim on 2026-11-18 (R2), its arm-level `continue`s
+/// now `return`s.
+fn cast_pet_summon(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        caster_cid,
+        caster_pos,
+        mana_cost,
+        hp_cost,
+        in_world_recipients_now,
+        now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        aoi,
+        enemies,
+        terrain,
+        ..
+    } = w;
+    // Track 11 — spawn a player-owned pet at the
+    // caster's position. One pet per owner: any
+    // existing pet for this caster is despawned
+    // first (mark Dead + EntityDespawn fan-out;
+    // corpse cleanup phase removes it from the
+    // map and AOI next tick).
+    let pet_type = spell.pet_type.clone();
+    // Owner-derived level (pet interim A): manual
+    // summons take the EQ re-summon gamble — a 0..=2
+    // roll off owner - 1 — so paying mana again can
+    // land a better pet. The skeleton's tier cap
+    // lives in `pet_templates::scaled`.
+    let Some(owner_level) = connections
+        .get(&(intent.caster as ClientId))
+        .map(|c| c.level.max(1) as u32)
+    else {
+        // Caster vanished between queueing the intent and
+        // resolution — skip, like the other resolver arms,
+        // rather than spawning an ownerless level-1 pet.
+        tracing::debug!(
+            char_id = intent.caster,
+            spell = %spell.name,
+            "PET_SUMMON dropped — caster no longer connected"
+        );
+        return;
+    };
+    let variance = rand::thread_rng().gen_range(0..=2u32);
+    let owner_id = intent.caster;
+    // Helper handles the scaled template, spawn offset,
+    // despawn-existing, AOI insert, fan-out, and map
+    // insert. None = unknown pet_type.
+    let Some((pet_id, pet_level)) = summon_scaled_pet(
+        &mut *server,
+        in_world_recipients_now,
+        &mut *enemies,
+        &mut *aoi,
+        owner_id,
+        owner_level,
+        caster_pos,
+        &pet_type,
+        variance,
+        1.0,
+        now,
+        terrain,
+    ) else {
+        // The pre-flight checked the pet type is known
+        // (`pet_templates::scaled` at variance 0), so a
+        // miss here is the template vanishing between.
+        cast_resolution_lost(
+            &mut *server,
+            &mut *connections,
+            in_world_recipients_now,
+            caster_cid,
+            intent.caster,
+            mana_cost,
+            hp_cost,
+            &spell.name,
+            "pet template",
+        );
+        return;
+    };
+    tracing::info!(
+        owner = owner_id,
+        pet_id,
+        spell = %spell.name,
+        pet_type = %pet_type,
+        level = pet_level,
+        owner_level,
+        "pet summoned"
+    );
 }

@@ -35,6 +35,7 @@ struct CastWorld<'a> {
     loot_bags: &'a mut HashMap<EntityId, LootBag>,
     group_manager: &'a mut GroupManager,
     terrain: &'a std::sync::Arc<crate::world::terrain::Terrain>,
+    bind_intents: &'a mut Vec<(i64, Option<String>, (f32, f32, f32))>,
 }
 
 pub(super) fn apply_casts(
@@ -690,6 +691,7 @@ pub(super) fn apply_casts(
                 loot_bags: &mut *loot_bags,
                 group_manager: &mut *group_manager,
                 terrain: &*terrain,
+                bind_intents: &mut *bind_intents,
             };
             match spell.target_type.as_str() {
                 "CORPSE" => {
@@ -782,62 +784,7 @@ pub(super) fn apply_casts(
                         );
                     }
                 }
-                "BIND" => {
-                    // Spell batch step 2: bind the target (self, or the
-                    // group member the pre-flight admitted) where THEY
-                    // stand, and persist it like the Soul Binder does.
-                    let ResolvedTarget::Player(bound_cid) = resolved else {
-                        cast_resolution_lost(
-                            &mut *server,
-                            &mut *connections,
-                            in_world_recipients_now,
-                            caster_cid,
-                            intent.caster,
-                            mana_cost,
-                            hp_cost,
-                            &spell.name,
-                            "bind",
-                        );
-                        continue;
-                    };
-                    let Some(bc) = connections.get_mut(&bound_cid) else {
-                        cast_resolution_lost(
-                            &mut *server,
-                            &mut *connections,
-                            in_world_recipients_now,
-                            caster_cid,
-                            intent.caster,
-                            mana_cost,
-                            hp_cost,
-                            &spell.name,
-                            "bind target",
-                        );
-                        continue;
-                    };
-                    let pos = bc.pos.into_tuple();
-                    bc.bind = Some(crate::db::BindPoint { pos });
-                    bind_intents.push((bc.char_id, bc.zone.clone(), pos));
-                    tracing::info!(
-                        char_id = intent.caster,
-                        bound = bound_cid,
-                        x = pos.0,
-                        y = pos.1,
-                        z = pos.2,
-                        "BIND applied"
-                    );
-                    handlers::send_system_line(
-                        &mut *server,
-                        bound_cid,
-                        "Your soul is bound to this place.",
-                    );
-                    if bound_cid != caster_cid {
-                        handlers::send_system_line(
-                            &mut *server,
-                            caster_cid,
-                            "Their soul is bound to this place.",
-                        );
-                    }
-                }
+                "BIND" => cast_bind(ctx, w),
                 "PORT" => cast_port(ctx, w),
                 _ => {
                     // A target type with no arm. Every type in today's
@@ -2122,4 +2069,76 @@ fn cast_pet_charm(ctx: CastContext<'_>, w: CastWorld<'_>) {
         spell = %spell.name,
         "enemy charmed into pet"
     );
+}
+
+/// The BIND arm: Bind Affinity on oneself anywhere, on a group member inside a safe
+/// area. Moved out of `apply_casts` verbatim on 2026-11-18 (R2), its arm-level
+/// `continue`s now `return`s.
+fn cast_bind(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        resolved,
+        caster_cid,
+        mana_cost,
+        hp_cost,
+        in_world_recipients_now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        bind_intents,
+        ..
+    } = w;
+    // Spell batch step 2: bind the target (self, or the
+    // group member the pre-flight admitted) where THEY
+    // stand, and persist it like the Soul Binder does.
+    let ResolvedTarget::Player(bound_cid) = resolved else {
+        cast_resolution_lost(
+            &mut *server,
+            &mut *connections,
+            in_world_recipients_now,
+            caster_cid,
+            intent.caster,
+            mana_cost,
+            hp_cost,
+            &spell.name,
+            "bind",
+        );
+        return;
+    };
+    let Some(bc) = connections.get_mut(&bound_cid) else {
+        cast_resolution_lost(
+            &mut *server,
+            &mut *connections,
+            in_world_recipients_now,
+            caster_cid,
+            intent.caster,
+            mana_cost,
+            hp_cost,
+            &spell.name,
+            "bind target",
+        );
+        return;
+    };
+    let pos = bc.pos.into_tuple();
+    bc.bind = Some(crate::db::BindPoint { pos });
+    bind_intents.push((bc.char_id, bc.zone.clone(), pos));
+    tracing::info!(
+        char_id = intent.caster,
+        bound = bound_cid,
+        x = pos.0,
+        y = pos.1,
+        z = pos.2,
+        "BIND applied"
+    );
+    handlers::send_system_line(&mut *server, bound_cid, "Your soul is bound to this place.");
+    if bound_cid != caster_cid {
+        handlers::send_system_line(
+            &mut *server,
+            caster_cid,
+            "Their soul is bound to this place.",
+        );
+    }
 }

@@ -694,50 +694,7 @@ pub(super) fn apply_casts(
                 bind_intents: &mut *bind_intents,
             };
             match spell.target_type.as_str() {
-                "CORPSE" => {
-                    // Corpse / resurrection Slice 3 — a res spell targets a
-                    // corpse; offer the res to its owner, who summons + gets an
-                    // xp refund on accept. Mana was already deducted above
-                    // (consistent with the rest of the cast pipeline).
-                    let ResolvedTarget::Corpse(corpse_id, owner_cid) = resolved else {
-                        cast_resolution_lost(
-                            &mut *server,
-                            &mut *connections,
-                            in_world_recipients_now,
-                            caster_cid,
-                            intent.caster,
-                            mana_cost,
-                            hp_cost,
-                            &spell.name,
-                            "corpse",
-                        );
-                        continue;
-                    };
-                    tracing::info!(char_id = intent.caster, spell = %spell.name, corpse_id, "resurrection cast received");
-                    let xp_percent = spell.res_xp_percent.round() as u32;
-                    let caster_name = connections
-                        .get(&caster_cid)
-                        .map(|c| c.name.clone())
-                        .unwrap_or_default();
-                    // Record the pending offer on the owner so the accept can't
-                    // forge the refund %, then send the offer privately.
-                    if let Some(owner_conn) = connections.get_mut(&owner_cid) {
-                        owner_conn.pending_res_offer = Some((corpse_id, xp_percent));
-                    }
-                    handlers::send_resurrect_offer(
-                        &mut *server,
-                        owner_cid,
-                        corpse_id,
-                        caster_name,
-                        xp_percent,
-                    );
-                    tracing::info!(
-                        char_id = intent.caster,
-                        corpse_id,
-                        xp_percent,
-                        "resurrection offered"
-                    );
-                }
+                "CORPSE" => cast_corpse(ctx, w),
                 "SUMMON_ITEM" => cast_summon_item(ctx, w),
                 "SELF" => cast_self(ctx, w),
                 "ALLY" => cast_ally(ctx, w),
@@ -2141,4 +2098,60 @@ fn cast_bind(ctx: CastContext<'_>, w: CastWorld<'_>) {
             "Their soul is bound to this place.",
         );
     }
+}
+
+/// The CORPSE arm: a resurrection offered to the corpse's owner. Moved out of
+/// `apply_casts` verbatim on 2026-11-18 (R2), its arm-level `continue` now a `return`.
+fn cast_corpse(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        resolved,
+        caster_cid,
+        mana_cost,
+        hp_cost,
+        in_world_recipients_now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        ..
+    } = w;
+    // Corpse / resurrection Slice 3 — a res spell targets a
+    // corpse; offer the res to its owner, who summons + gets an
+    // xp refund on accept. Mana was already deducted above
+    // (consistent with the rest of the cast pipeline).
+    let ResolvedTarget::Corpse(corpse_id, owner_cid) = resolved else {
+        cast_resolution_lost(
+            &mut *server,
+            &mut *connections,
+            in_world_recipients_now,
+            caster_cid,
+            intent.caster,
+            mana_cost,
+            hp_cost,
+            &spell.name,
+            "corpse",
+        );
+        return;
+    };
+    tracing::info!(char_id = intent.caster, spell = %spell.name, corpse_id, "resurrection cast received");
+    let xp_percent = spell.res_xp_percent.round() as u32;
+    let caster_name = connections
+        .get(&caster_cid)
+        .map(|c| c.name.clone())
+        .unwrap_or_default();
+    // Record the pending offer on the owner so the accept can't
+    // forge the refund %, then send the offer privately.
+    if let Some(owner_conn) = connections.get_mut(&owner_cid) {
+        owner_conn.pending_res_offer = Some((corpse_id, xp_percent));
+    }
+    handlers::send_resurrect_offer(&mut *server, owner_cid, corpse_id, caster_name, xp_percent);
+    tracing::info!(
+        char_id = intent.caster,
+        corpse_id,
+        xp_percent,
+        "resurrection offered"
+    );
 }

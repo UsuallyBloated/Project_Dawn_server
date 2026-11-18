@@ -705,38 +705,7 @@ pub(super) fn apply_casts(
                 "PET_HEAL" => cast_pet_heal(ctx, w),
                 "BIND" => cast_bind(ctx, w),
                 "PORT" => cast_port(ctx, w),
-                _ => {
-                    // A target type with no arm. Every type in today's
-                    // spells.toml has one (BIND and PORT gained theirs in
-                    // spell batch step 2), and the pre-flight refuses an
-                    // unknown type before the mana comes off, so this is
-                    // reached only by a new type added to the data ahead of
-                    // its arm. Mana is gone and nothing happens, which is
-                    // indistinguishable from a bug. Say so, and give the cost
-                    // back. Raised to info! as well: a player-visible
-                    // failure should not be invisible at the default log
-                    // level.
-                    tracing::info!(
-                        char_id = intent.caster,
-                        spell = %spell.name,
-                        target_type = %spell.target_type,
-                        "spell target_type not yet processed server-side; mana deducted only"
-                    );
-                    refund_spell_cost(
-                        &mut *server,
-                        &mut *connections,
-                        in_world_recipients_now,
-                        caster_cid,
-                        intent.caster,
-                        mana_cost,
-                        hp_cost,
-                    );
-                    handlers::send_refusal(
-                        &mut *server,
-                        caster_cid,
-                        "That magic has no effect here yet.",
-                    );
-                }
+                _ => cast_unhandled(ctx, w),
             }
         }
     }
@@ -2174,4 +2143,53 @@ fn cast_pet_heal(ctx: CastContext<'_>, w: CastWorld<'_>) {
             "PET_HEAL applied"
         );
     }
+}
+
+/// A target type the server has no arm for: the mana is refunded and the caster told.
+/// Moved out of `apply_casts` verbatim on 2026-11-18 (R2).
+fn cast_unhandled(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        caster_cid,
+        mana_cost,
+        hp_cost,
+        in_world_recipients_now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        ..
+    } = w;
+    // A target type with no arm. Every type in today's
+    // spells.toml has one (BIND and PORT gained theirs in
+    // spell batch step 2), and the pre-flight refuses an
+    // unknown type before the mana comes off, so this is
+    // reached only by a new type added to the data ahead of
+    // its arm. Mana is gone and nothing happens, which is
+    // indistinguishable from a bug. Say so, and give the cost
+    // back. Raised to info! as well: a player-visible
+    // failure should not be invisible at the default log
+    // level.
+    tracing::info!(
+        char_id = intent.caster,
+        spell = %spell.name,
+        target_type = %spell.target_type,
+        "spell target_type not yet processed server-side; mana deducted only"
+    );
+    refund_spell_cost(
+        &mut *server,
+        &mut *connections,
+        in_world_recipients_now,
+        caster_cid,
+        intent.caster,
+        mana_cost,
+        hp_cost,
+    );
+    handlers::send_refusal(
+        &mut *server,
+        caster_cid,
+        "That magic has no effect here yet.",
+    );
 }

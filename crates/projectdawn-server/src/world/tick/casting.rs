@@ -736,97 +736,7 @@ pub(super) fn apply_casts(
                         "resurrection offered"
                     );
                 }
-                "SUMMON_ITEM" => {
-                    // Summon Food / Drink (food slice 2): conjure the
-                    // spell's item into the caster's bags, the count
-                    // scaling with level; the pre-flight checked the
-                    // item and the room. Into the bags rather than onto
-                    // the cursor (EQ landed summoned items on the
-                    // cursor; flagged, not built). The placement block
-                    // ends the connection borrow before any refund.
-                    let placement = {
-                        let Some(conn) = connections.get_mut(&caster_cid) else {
-                            continue;
-                        };
-                        let n = spells::summon_count(spell, &conn.class, conn.level);
-                        match conn.inventory.add_item_locating(&spell.summon_item, n) {
-                            Ok((touched, leftover)) => {
-                                let placed = n - leftover;
-                                if placed > 0 {
-                                    conn.inventory_dirty = true;
-                                    conn.ledger(ledger::item_event(
-                                        ItemAction::Summon,
-                                        &spell.summon_item,
-                                        placed,
-                                        i64::from(placed),
-                                        Some(spell.name.clone()),
-                                    ));
-                                }
-                                let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
-                                    .iter()
-                                    .map(|(loc, slot)| {
-                                        (loc.clone(), *slot, conn.inventory.peek_at(loc, *slot))
-                                    })
-                                    .collect();
-                                Ok((placed, leftover, deltas))
-                            }
-                            Err(e) => Err(e),
-                        }
-                    };
-                    match placement {
-                        Ok((placed, leftover, deltas)) if placed > 0 => {
-                            for (loc, slot, payload) in deltas {
-                                handlers::send_slot_delta(
-                                    &mut *server,
-                                    caster_cid,
-                                    loc,
-                                    slot,
-                                    payload,
-                                );
-                            }
-                            let item_name = items::lookup(&spell.summon_item)
-                                .map(|i| i.name.clone())
-                                .unwrap_or_else(|| spell.summon_item.clone());
-                            handlers::fan_out_chat_message(
-                                &mut *server,
-                                &[caster_cid],
-                                "",
-                                protocol::world::ChatChannel::System,
-                                &format!("You conjure {} x{}.", item_name, placed),
-                            );
-                            tracing::info!(
-                                char_id = intent.caster,
-                                spell = %spell.name,
-                                item = %spell.summon_item,
-                                qty = placed,
-                                leftover,
-                                "SUMMON_ITEM applied"
-                            );
-                        }
-                        other => {
-                            // The pre-flight found room a moment ago, so
-                            // this is the placer disagreeing with its own
-                            // probe; say so, refund, and refuse.
-                            tracing::warn!(
-                                char_id = intent.caster,
-                                spell = %spell.name,
-                                outcome = ?other.as_ref().map(|(p, l, _)| (*p, *l)),
-                                "SUMMON_ITEM placed nothing after the pre-flight accepted it; refunded"
-                            );
-                            refund_spell_cost(
-                                &mut *server,
-                                &mut *connections,
-                                in_world_recipients_now,
-                                caster_cid,
-                                intent.caster,
-                                mana_cost,
-                                hp_cost,
-                            );
-                            handlers::send_refusal(&mut *server, caster_cid, "Your bags are full.");
-                            continue;
-                        }
-                    }
-                }
+                "SUMMON_ITEM" => cast_summon_item(ctx, w),
                 "SELF" => {
                     tracing::info!(
                         char_id = intent.caster,
@@ -2052,4 +1962,104 @@ fn cast_aoe(ctx: CastContext<'_>, w: CastWorld<'_>) {
         hits,
         "AOE spell applied"
     );
+}
+
+/// The SUMMON_ITEM arm: Summon Food and Summon Drink, the conjured stack placed in the
+/// caster's bags through the real placer. Moved out of `apply_casts` verbatim on
+/// 2026-11-18 (R2), its two arm-level `continue`s now `return`s.
+fn cast_summon_item(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        caster_cid,
+        mana_cost,
+        hp_cost,
+        in_world_recipients_now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        ..
+    } = w;
+    // Summon Food / Drink (food slice 2): conjure the
+    // spell's item into the caster's bags, the count
+    // scaling with level; the pre-flight checked the
+    // item and the room. Into the bags rather than onto
+    // the cursor (EQ landed summoned items on the
+    // cursor; flagged, not built). The placement block
+    // ends the connection borrow before any refund.
+    let placement = {
+        let Some(conn) = connections.get_mut(&caster_cid) else {
+            return;
+        };
+        let n = spells::summon_count(spell, &conn.class, conn.level);
+        match conn.inventory.add_item_locating(&spell.summon_item, n) {
+            Ok((touched, leftover)) => {
+                let placed = n - leftover;
+                if placed > 0 {
+                    conn.inventory_dirty = true;
+                    conn.ledger(ledger::item_event(
+                        ItemAction::Summon,
+                        &spell.summon_item,
+                        placed,
+                        i64::from(placed),
+                        Some(spell.name.clone()),
+                    ));
+                }
+                let deltas: Vec<(String, u32, Option<(String, u32)>)> = touched
+                    .iter()
+                    .map(|(loc, slot)| (loc.clone(), *slot, conn.inventory.peek_at(loc, *slot)))
+                    .collect();
+                Ok((placed, leftover, deltas))
+            }
+            Err(e) => Err(e),
+        }
+    };
+    match placement {
+        Ok((placed, leftover, deltas)) if placed > 0 => {
+            for (loc, slot, payload) in deltas {
+                handlers::send_slot_delta(&mut *server, caster_cid, loc, slot, payload);
+            }
+            let item_name = items::lookup(&spell.summon_item)
+                .map(|i| i.name.clone())
+                .unwrap_or_else(|| spell.summon_item.clone());
+            handlers::fan_out_chat_message(
+                &mut *server,
+                &[caster_cid],
+                "",
+                protocol::world::ChatChannel::System,
+                &format!("You conjure {} x{}.", item_name, placed),
+            );
+            tracing::info!(
+                char_id = intent.caster,
+                spell = %spell.name,
+                item = %spell.summon_item,
+                qty = placed,
+                leftover,
+                "SUMMON_ITEM applied"
+            );
+        }
+        other => {
+            // The pre-flight found room a moment ago, so
+            // this is the placer disagreeing with its own
+            // probe; say so, refund, and refuse.
+            tracing::warn!(
+                char_id = intent.caster,
+                spell = %spell.name,
+                outcome = ?other.as_ref().map(|(p, l, _)| (*p, *l)),
+                "SUMMON_ITEM placed nothing after the pre-flight accepted it; refunded"
+            );
+            refund_spell_cost(
+                &mut *server,
+                &mut *connections,
+                in_world_recipients_now,
+                caster_cid,
+                intent.caster,
+                mana_cost,
+                hp_cost,
+            );
+            handlers::send_refusal(&mut *server, caster_cid, "Your bags are full.");
+        }
+    }
 }

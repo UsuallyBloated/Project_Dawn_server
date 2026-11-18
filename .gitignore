@@ -1,5 +1,7 @@
 /target/
 /**/target/
+# The gdext DLL build run with --target-dir target-gdext (717 MB; never commit it).
+/target-gdext/
 
 # SQLite databases (created at runtime / per-test)
 *.db

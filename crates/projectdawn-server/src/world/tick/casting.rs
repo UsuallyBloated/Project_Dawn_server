@@ -909,100 +909,7 @@ pub(super) fn apply_casts(
                 }
                 "ALLY" => cast_ally(ctx, w),
                 "ENEMY" => cast_enemy(ctx, w),
-                "AOE" => {
-                    // Track 9 — server-authoritative AOE damage.
-                    // Search the caster's AOI neighbourhood (3×3
-                    // cells around the caster, 360 m on a side at
-                    // CELL_SIZE=120), then filter by spell radius.
-                    // AOE spell radii top out around 6 m today, so
-                    // this is a tiny working set in practice.
-                    let radius = spell.aoe_radius;
-                    let radius_sq = radius * radius;
-                    let caster_cell = aoi::cell_for(caster_pos.x, caster_pos.z);
-                    let visible = aoi.entities_visible_from(caster_cell);
-                    let mut victims: Vec<EntityId> = Vec::new();
-                    for id in visible {
-                        // Eligible AOE victims: world enemies
-                        // [ENEMY_ID_BASE, LOOT_BAG_ID_BASE) and pets
-                        // [PET_ID_BASE, …). Players (< ENEMY_ID_BASE) and
-                        // loot bags ([LOOT_BAG_ID_BASE, PET_ID_BASE)) are
-                        // excluded. Pets are included so AOE hits them like
-                        // melee/single-target does — the owner PvP gate
-                        // below decides whether each pet is actually hit.
-                        if !matches!(IdKind::of(id), IdKind::Enemy | IdKind::Pet) {
-                            continue;
-                        }
-                        if let Some(entity) = enemies.get(&id) {
-                            if !entity.is_alive() {
-                                continue;
-                            }
-                            // Pet PvP gate (mirrors the single-target
-                            // melee/spell paths): a player-owned pet is
-                            // only a valid AOE victim if the caster
-                            // could attack its owner directly — and
-                            // never the caster's own pet. NPC mobs
-                            // (owner None) are always eligible.
-                            if let Some(owner_id) = entity.owner {
-                                let owner_cid = owner_id as ClientId;
-                                let allowed = owner_cid != caster_cid
-                                    && match (
-                                        connections.get(&caster_cid),
-                                        connections.get(&owner_cid),
-                                    ) {
-                                        (Some(a), Some(o)) => combat::can_attack(
-                                            a,
-                                            o,
-                                            a.zone.as_deref(),
-                                            o.zone.as_deref(),
-                                        ),
-                                        _ => false,
-                                    };
-                                if !allowed {
-                                    continue;
-                                }
-                            }
-                            let dx = entity.pos.x - caster_pos.x;
-                            let dy = entity.pos.y - caster_pos.y;
-                            let dz = entity.pos.z - caster_pos.z;
-                            // Inside the radius and in sight: an AoE on a
-                            // crest hits the near side of the ridge, not
-                            // the far one (the height model, 3.8).
-                            // An evading mob takes nothing (`is_evading`).
-                            if dx * dx + dy * dy + dz * dz <= radius_sq
-                                && terrain.can_see(caster_pos, entity.pos)
-                                && !entity.is_evading(now)
-                            {
-                                victims.push(id);
-                            }
-                        }
-                    }
-                    let mut hits = 0;
-                    for victim in victims {
-                        if apply_spell_damage_to_enemy(
-                            &mut *server,
-                            in_world_recipients_now,
-                            &mut *connections,
-                            &mut *enemies,
-                            &mut *loot_bags,
-                            &mut *aoi,
-                            group_manager,
-                            intent.caster,
-                            victim,
-                            spell,
-                            dmg_type,
-                            now,
-                        ) {
-                            hits += 1;
-                        }
-                    }
-                    tracing::info!(
-                        char_id = intent.caster,
-                        spell = %spell.name,
-                        radius,
-                        hits,
-                        "AOE spell applied"
-                    );
-                }
+                "AOE" => cast_aoe(ctx, w),
                 "PET_SUMMON" => {
                     // Track 11 — spawn a player-owned pet at the
                     // caster's position. One pet per owner: any
@@ -2033,4 +1940,116 @@ fn cast_ally(ctx: CastContext<'_>, w: CastWorld<'_>) {
             "ALLY buff applied"
         );
     }
+}
+
+/// The AOE arm: damage to every mob in the radius that the caster can see, with the
+/// kill step and loot for each. Moved out of `apply_casts` verbatim on 2026-11-18 (R2);
+/// its `continue`s all sit inside its own loops and stay.
+fn cast_aoe(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        caster_cid,
+        caster_pos,
+        dmg_type,
+        in_world_recipients_now,
+        now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        aoi,
+        enemies,
+        loot_bags,
+        group_manager,
+        terrain,
+        ..
+    } = w;
+    // Track 9 — server-authoritative AOE damage.
+    // Search the caster's AOI neighbourhood (3×3
+    // cells around the caster, 360 m on a side at
+    // CELL_SIZE=120), then filter by spell radius.
+    // AOE spell radii top out around 6 m today, so
+    // this is a tiny working set in practice.
+    let radius = spell.aoe_radius;
+    let radius_sq = radius * radius;
+    let caster_cell = aoi::cell_for(caster_pos.x, caster_pos.z);
+    let visible = aoi.entities_visible_from(caster_cell);
+    let mut victims: Vec<EntityId> = Vec::new();
+    for id in visible {
+        // Eligible AOE victims: world enemies
+        // [ENEMY_ID_BASE, LOOT_BAG_ID_BASE) and pets
+        // [PET_ID_BASE, …). Players (< ENEMY_ID_BASE) and
+        // loot bags ([LOOT_BAG_ID_BASE, PET_ID_BASE)) are
+        // excluded. Pets are included so AOE hits them like
+        // melee/single-target does — the owner PvP gate
+        // below decides whether each pet is actually hit.
+        if !matches!(IdKind::of(id), IdKind::Enemy | IdKind::Pet) {
+            continue;
+        }
+        if let Some(entity) = enemies.get(&id) {
+            if !entity.is_alive() {
+                continue;
+            }
+            // Pet PvP gate (mirrors the single-target
+            // melee/spell paths): a player-owned pet is
+            // only a valid AOE victim if the caster
+            // could attack its owner directly — and
+            // never the caster's own pet. NPC mobs
+            // (owner None) are always eligible.
+            if let Some(owner_id) = entity.owner {
+                let owner_cid = owner_id as ClientId;
+                let allowed = owner_cid != caster_cid
+                    && match (connections.get(&caster_cid), connections.get(&owner_cid)) {
+                        (Some(a), Some(o)) => {
+                            combat::can_attack(a, o, a.zone.as_deref(), o.zone.as_deref())
+                        }
+                        _ => false,
+                    };
+                if !allowed {
+                    continue;
+                }
+            }
+            let dx = entity.pos.x - caster_pos.x;
+            let dy = entity.pos.y - caster_pos.y;
+            let dz = entity.pos.z - caster_pos.z;
+            // Inside the radius and in sight: an AoE on a
+            // crest hits the near side of the ridge, not
+            // the far one (the height model, 3.8).
+            // An evading mob takes nothing (`is_evading`).
+            if dx * dx + dy * dy + dz * dz <= radius_sq
+                && terrain.can_see(caster_pos, entity.pos)
+                && !entity.is_evading(now)
+            {
+                victims.push(id);
+            }
+        }
+    }
+    let mut hits = 0;
+    for victim in victims {
+        if apply_spell_damage_to_enemy(
+            &mut *server,
+            in_world_recipients_now,
+            &mut *connections,
+            &mut *enemies,
+            &mut *loot_bags,
+            &mut *aoi,
+            group_manager,
+            intent.caster,
+            victim,
+            spell,
+            dmg_type,
+            now,
+        ) {
+            hits += 1;
+        }
+    }
+    tracing::info!(
+        char_id = intent.caster,
+        spell = %spell.name,
+        radius,
+        hits,
+        "AOE spell applied"
+    );
 }

@@ -179,16 +179,18 @@ async fn a_wanderer_goes_home_to_where_its_fight_began() {
         plate(),
         r#"
         [[roam]]
-        desc = "one wolf in a 30 m circle"
+        desc = "one wolf in a 60 m circle"
         mob = { name = "Roam Wolf", level = 1, hp = 500.0, dmg = 1, speed = 3.0, aggro = 12.0 }
-        region = { center = [0.0, 330.0], radius = 30.0 }
+        region = { center = [0.0, 330.0], radius = 60.0 }
         count = 1
         respawn = 600.0
         "#,
     )
     .await;
-    // 15 m outside the region's nearest edge: past the wolf's 12 m aggro wherever it is.
-    let (mut c, me) = enter_at(&h, "puller", "Warrior", true, 0.0, 285.0).await;
+    // 15 m outside the region's nearest edge (the region is 60 m: a 30 m one made the 20 to 80 m
+    // legs fail their draws and the wolf stand still for the pauses between): past the wolf's
+    // 12 m aggro wherever it is.
+    let (mut c, me) = enter_at(&h, "puller", "Warrior", true, 0.0, 255.0).await;
     let mut at = HashMap::new();
     let seeded = watch(&mut c, Duration::from_millis(1_500), &mut at).await;
     let (wolf, born) = *spawns_named(&seeded, "Roam Wolf")

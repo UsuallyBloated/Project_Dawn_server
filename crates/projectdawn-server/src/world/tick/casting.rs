@@ -15,6 +15,7 @@ struct CastContext<'a> {
     spell: &'a spells::Spell,
     resolved: ResolvedTarget,
     caster_cid: ClientId,
+    caster_pos: Vec3f,
     caster_int: i32,
     mana_cost: f32,
     hp_cost: f32,
@@ -33,6 +34,7 @@ struct CastWorld<'a> {
     enemies: &'a mut HashMap<EntityId, Entity>,
     loot_bags: &'a mut HashMap<EntityId, LootBag>,
     group_manager: &'a mut GroupManager,
+    terrain: &'a std::sync::Arc<crate::world::terrain::Terrain>,
 }
 
 pub(super) fn apply_casts(
@@ -672,6 +674,7 @@ pub(super) fn apply_casts(
                 spell,
                 resolved,
                 caster_cid,
+                caster_pos,
                 caster_int,
                 mana_cost,
                 hp_cost,
@@ -686,6 +689,7 @@ pub(super) fn apply_casts(
                 enemies: &mut *enemies,
                 loot_bags: &mut *loot_bags,
                 group_manager: &mut *group_manager,
+                terrain: &*terrain,
             };
             match spell.target_type.as_str() {
                 "CORPSE" => {
@@ -1387,184 +1391,7 @@ pub(super) fn apply_casts(
                         );
                     }
                 }
-                "PORT" => {
-                    // Spell batch step 2: the destination is the server's
-                    // (the caster's bind, or the nearest safe area's
-                    // arrival), never the client's. Evacuate also moves the
-                    // caster's alive, present group members within friendly
-                    // reach; a corpse or a linkdead body stays. Everyone
-                    // moved is wiped from every mob's tables first, so no
-                    // train follows them, and their pets come along.
-                    let caster_pos_now = connections
-                        .get(&caster_cid)
-                        .map(|c| c.pos)
-                        .unwrap_or(caster_pos);
-                    let dest = match spell.port.as_str() {
-                        "bind" => connections
-                            .get(&caster_cid)
-                            .and_then(|c| c.bind)
-                            .map(|b| Vec3f::from_tuple(b.pos))
-                            .unwrap_or(crate::world::STARTER_SPAWN),
-                        _ => crate::world::safe_areas::nearest_arrival(caster_pos_now)
-                            .unwrap_or(crate::world::STARTER_SPAWN),
-                    };
-                    // Every arrival stands on the ground, clear of whatever
-                    // stands on it, whatever the bind or the arrival point
-                    // was saved with.
-                    let dest = terrain.obstacles().place(terrain, dest);
-                    let mut movers: Vec<ClientId> = vec![caster_cid];
-                    if spell.port_group {
-                        if let Some(g) = group_manager.group_of(caster_cid) {
-                            for &m in &g.members {
-                                if m == caster_cid {
-                                    continue;
-                                }
-                                let eligible = connections.get(&m).is_some_and(|c| {
-                                    c.in_world
-                                        && c.linkdead_since.is_none()
-                                        && c.hp > 0.0
-                                        && !c.death_processed
-                                        && c.pos.distance_to(caster_pos_now) <= spell.reach()
-                                });
-                                if eligible {
-                                    movers.push(m);
-                                }
-                            }
-                        }
-                    }
-                    let mover_ids: Vec<EntityId> = movers.iter().map(|m| *m as EntityId).collect();
-                    for mob_id in wipe_hate(&mut *enemies, &mover_ids) {
-                        handlers::fan_out_entity_target(
-                            &mut *server,
-                            in_world_recipients_now,
-                            mob_id,
-                            None,
-                        );
-                    }
-                    for bearer in clear_player_dots_from(&mut *connections, &mover_ids) {
-                        if let Some(conn) = connections.get(&bearer) {
-                            handlers::fan_out_buff_snapshot(
-                                &mut *server,
-                                in_world_recipients_now,
-                                conn,
-                            );
-                        }
-                    }
-                    for &m in &movers {
-                        if let Some(c) = connections.get_mut(&m) {
-                            // A mover still in the air lands where they are
-                            // first (fall.rs; the fall design's ledger, row
-                            // 6): a port is no way out of a fall, and one it
-                            // kills is not moved.
-                            let ground_here = terrain.ground(c.pos.x, c.pos.z);
-                            if let Some(landing) =
-                                crate::world::fall::settle(&mut c.vertical, ground_here)
-                            {
-                                super::movement::land(&mut *server, m, c, landing, now);
-                                if c.hp <= 0.0 {
-                                    continue;
-                                }
-                            }
-                            c.teleport_to(dest);
-                            // The fight is over for the mover: without this
-                            // the pet pre-pass (step 4i) re-inherits the
-                            // owner's last target for up to 10 s and the
-                            // pet walks straight back out of town to it.
-                            c.last_attacked_enemy = None;
-                            c.last_attacked_at = None;
-                            regen::mark_dirty(c);
-                        }
-                        handlers::send_teleport(&mut *server, m, dest);
-                        // The mover's summoned pets come along (user call
-                        // D4), set to follow so a parked one does not stand
-                        // alone across the zone. Their AOI cell changes
-                        // right here, so the players who gain or lose sight
-                        // of them are told now rather than never. A CHARMED
-                        // mob is not a pet the mover owns: it is released
-                        // where it stands and walks home, as when its
-                        // charmer logs out. Carrying it would put a camp
-                        // mob (a named one, even) inside the safe area to
-                        // turn hostile when the charm ends.
-                        let pets: Vec<EntityId> = enemies
-                            .iter()
-                            .filter(|(_, e)| e.owner == Some(m as EntityId) && e.is_alive())
-                            .map(|(id, _)| *id)
-                            .collect();
-                        for pet_id in pets {
-                            if enemies
-                                .get(&pet_id)
-                                .is_some_and(|e| e.charm_expires_at.is_some())
-                            {
-                                if let Some(pet) = enemies.remove(&pet_id) {
-                                    let mob_id = return_charmed_mob(
-                                        &mut *server,
-                                        &mut *aoi,
-                                        &mut *enemies,
-                                        in_world_recipients_now,
-                                        pet,
-                                        None,
-                                        now,
-                                    );
-                                    tracing::info!(
-                                        owner = m,
-                                        pet_id,
-                                        mob_id,
-                                        "charm broken by the owner porting away — mob returned"
-                                    );
-                                }
-                                continue;
-                            }
-                            let (old_cell, new_cell) = {
-                                let Some(pet) = enemies.get_mut(&pet_id) else {
-                                    continue;
-                                };
-                                let old_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
-                                // 1.5 m east of where its owner arrives, as at
-                                // a summon, and walked there from the owner in
-                                // the same way: with a wall at the arrival
-                                // point's shoulder the pet lands on its
-                                // owner's side, never in the wall or beyond.
-                                let beside = terrain.obstacles().resolve(
-                                    crate::world::obstacles::P2::of(dest),
-                                    crate::world::obstacles::P2::new(dest.x + 1.5, dest.z),
-                                    crate::world::obstacles::BODY_RADIUS,
-                                );
-                                pet.pos = terrain.ground_vec(Vec3f {
-                                    x: beside.x,
-                                    y: dest.y,
-                                    z: beside.z,
-                                });
-                                // last_bcast_pos is left where it was, so the
-                                // move fans on the next tick instead of
-                                // waiting for the keepalive.
-                                pet.target = None;
-                                pet.stance = entity::PetStance::Follow;
-                                (old_cell, aoi::cell_for(pet.pos.x, pet.pos.z))
-                            };
-                            if new_cell != old_cell {
-                                let (gained, lost) = aoi.update(pet_id, old_cell, new_cell);
-                                if let Some(pet) = enemies.get(&pet_id) {
-                                    fan_entity_cell_crossing(
-                                        &mut *server,
-                                        aoi,
-                                        connections,
-                                        pet,
-                                        &gained,
-                                        &lost,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    tracing::info!(
-                        char_id = intent.caster,
-                        spell = %spell.name,
-                        port = %spell.port,
-                        moved = movers.len(),
-                        x = dest.x, z = dest.z,
-                        "PORT applied"
-                    );
-                }
+                "PORT" => cast_port(ctx, w),
                 _ => {
                     // A target type with no arm. Every type in today's
                     // spells.toml has one (BIND and PORT gained theirs in
@@ -2007,4 +1834,188 @@ fn cast_enemy(ctx: CastContext<'_>, w: CastWorld<'_>) {
         att.last_attacked_enemy = Some(target_id);
         att.last_attacked_at = Some(now);
     }
+}
+
+/// The PORT arm: Gate, Succor and Evacuate. The destination never comes from the
+/// client (the bind for Gate, the nearest safe area's arrival point otherwise); every
+/// mover is wiped from every mob's hate, summoned pets come along in Follow, and the
+/// move is the existing Teleport. Moved out of `apply_casts` verbatim on 2026-11-18
+/// (R2); its `continue`s all sit inside its own loops and stay.
+fn cast_port(ctx: CastContext<'_>, w: CastWorld<'_>) {
+    let CastContext {
+        intent,
+        spell,
+        caster_cid,
+        caster_pos,
+        now,
+        in_world_recipients_now,
+        ..
+    } = ctx;
+    let CastWorld {
+        server,
+        connections,
+        aoi,
+        enemies,
+        group_manager,
+        terrain,
+        ..
+    } = w;
+    // Spell batch step 2: the destination is the server's
+    // (the caster's bind, or the nearest safe area's
+    // arrival), never the client's. Evacuate also moves the
+    // caster's alive, present group members within friendly
+    // reach; a corpse or a linkdead body stays. Everyone
+    // moved is wiped from every mob's tables first, so no
+    // train follows them, and their pets come along.
+    let caster_pos_now = connections
+        .get(&caster_cid)
+        .map(|c| c.pos)
+        .unwrap_or(caster_pos);
+    let dest = match spell.port.as_str() {
+        "bind" => connections
+            .get(&caster_cid)
+            .and_then(|c| c.bind)
+            .map(|b| Vec3f::from_tuple(b.pos))
+            .unwrap_or(crate::world::STARTER_SPAWN),
+        _ => crate::world::safe_areas::nearest_arrival(caster_pos_now)
+            .unwrap_or(crate::world::STARTER_SPAWN),
+    };
+    // Every arrival stands on the ground, clear of whatever
+    // stands on it, whatever the bind or the arrival point
+    // was saved with.
+    let dest = terrain.obstacles().place(terrain, dest);
+    let mut movers: Vec<ClientId> = vec![caster_cid];
+    if spell.port_group {
+        if let Some(g) = group_manager.group_of(caster_cid) {
+            for &m in &g.members {
+                if m == caster_cid {
+                    continue;
+                }
+                let eligible = connections.get(&m).is_some_and(|c| {
+                    c.in_world
+                        && c.linkdead_since.is_none()
+                        && c.hp > 0.0
+                        && !c.death_processed
+                        && c.pos.distance_to(caster_pos_now) <= spell.reach()
+                });
+                if eligible {
+                    movers.push(m);
+                }
+            }
+        }
+    }
+    let mover_ids: Vec<EntityId> = movers.iter().map(|m| *m as EntityId).collect();
+    for mob_id in wipe_hate(&mut *enemies, &mover_ids) {
+        handlers::fan_out_entity_target(&mut *server, in_world_recipients_now, mob_id, None);
+    }
+    for bearer in clear_player_dots_from(&mut *connections, &mover_ids) {
+        if let Some(conn) = connections.get(&bearer) {
+            handlers::fan_out_buff_snapshot(&mut *server, in_world_recipients_now, conn);
+        }
+    }
+    for &m in &movers {
+        if let Some(c) = connections.get_mut(&m) {
+            // A mover still in the air lands where they are
+            // first (fall.rs; the fall design's ledger, row
+            // 6): a port is no way out of a fall, and one it
+            // kills is not moved.
+            let ground_here = terrain.ground(c.pos.x, c.pos.z);
+            if let Some(landing) = crate::world::fall::settle(&mut c.vertical, ground_here) {
+                super::movement::land(&mut *server, m, c, landing, now);
+                if c.hp <= 0.0 {
+                    continue;
+                }
+            }
+            c.teleport_to(dest);
+            // The fight is over for the mover: without this
+            // the pet pre-pass (step 4i) re-inherits the
+            // owner's last target for up to 10 s and the
+            // pet walks straight back out of town to it.
+            c.last_attacked_enemy = None;
+            c.last_attacked_at = None;
+            regen::mark_dirty(c);
+        }
+        handlers::send_teleport(&mut *server, m, dest);
+        // The mover's summoned pets come along (user call
+        // D4), set to follow so a parked one does not stand
+        // alone across the zone. Their AOI cell changes
+        // right here, so the players who gain or lose sight
+        // of them are told now rather than never. A CHARMED
+        // mob is not a pet the mover owns: it is released
+        // where it stands and walks home, as when its
+        // charmer logs out. Carrying it would put a camp
+        // mob (a named one, even) inside the safe area to
+        // turn hostile when the charm ends.
+        let pets: Vec<EntityId> = enemies
+            .iter()
+            .filter(|(_, e)| e.owner == Some(m as EntityId) && e.is_alive())
+            .map(|(id, _)| *id)
+            .collect();
+        for pet_id in pets {
+            if enemies
+                .get(&pet_id)
+                .is_some_and(|e| e.charm_expires_at.is_some())
+            {
+                if let Some(pet) = enemies.remove(&pet_id) {
+                    let mob_id = return_charmed_mob(
+                        &mut *server,
+                        &mut *aoi,
+                        &mut *enemies,
+                        in_world_recipients_now,
+                        pet,
+                        None,
+                        now,
+                    );
+                    tracing::info!(
+                        owner = m,
+                        pet_id,
+                        mob_id,
+                        "charm broken by the owner porting away — mob returned"
+                    );
+                }
+                continue;
+            }
+            let (old_cell, new_cell) = {
+                let Some(pet) = enemies.get_mut(&pet_id) else {
+                    continue;
+                };
+                let old_cell = aoi::cell_for(pet.pos.x, pet.pos.z);
+                // 1.5 m east of where its owner arrives, as at
+                // a summon, and walked there from the owner in
+                // the same way: with a wall at the arrival
+                // point's shoulder the pet lands on its
+                // owner's side, never in the wall or beyond.
+                let beside = terrain.obstacles().resolve(
+                    crate::world::obstacles::P2::of(dest),
+                    crate::world::obstacles::P2::new(dest.x + 1.5, dest.z),
+                    crate::world::obstacles::BODY_RADIUS,
+                );
+                pet.pos = terrain.ground_vec(Vec3f {
+                    x: beside.x,
+                    y: dest.y,
+                    z: beside.z,
+                });
+                // last_bcast_pos is left where it was, so the
+                // move fans on the next tick instead of
+                // waiting for the keepalive.
+                pet.target = None;
+                pet.stance = entity::PetStance::Follow;
+                (old_cell, aoi::cell_for(pet.pos.x, pet.pos.z))
+            };
+            if new_cell != old_cell {
+                let (gained, lost) = aoi.update(pet_id, old_cell, new_cell);
+                if let Some(pet) = enemies.get(&pet_id) {
+                    fan_entity_cell_crossing(&mut *server, aoi, connections, pet, &gained, &lost);
+                }
+            }
+        }
+    }
+    tracing::info!(
+        char_id = intent.caster,
+        spell = %spell.name,
+        port = %spell.port,
+        moved = movers.len(),
+        x = dest.x, z = dest.z,
+        "PORT applied"
+    );
 }
